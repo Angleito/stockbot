@@ -1,0 +1,102 @@
+[
+  {
+    "id": 1,
+    "question": "What's AAPL's diluted EPS?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_fundamentals"],
+      "must_contain": ["EPS"],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 2,
+    "question": "What's MSFT's shares float?",
+    "ticker": "MSFT",
+    "expected_behavior": {
+      "expected_tools": ["get_fundamentals"],
+      "must_contain": ["shares"],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 3,
+    "question": "What's NVDA's total assets?",
+    "ticker": "NVDA",
+    "expected_behavior": {
+      "expected_tools": ["get_fundamentals"],
+      "must_contain": ["asset"],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 4,
+    "question": "Summarize AAPL's latest earnings",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_earnings_summary"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 5,
+    "question": "What did MSFT say drove revenue this quarter?",
+    "ticker": "MSFT",
+    "expected_behavior": {
+      "expected_tools": ["get_filing_section"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 6,
+    "question": "What changed in NVDA's risk factors?",
+    "ticker": "NVDA",
+    "expected_behavior": {
+      "expected_tools": ["diff_risk_factors"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 7,
+    "question": "What's new in AAPL's latest 10-Q risks?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["diff_risk_factors"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 8,
+    "question": "How's the company doing?",
+    "ticker": null,
+    "expected_behavior": {
+      "expected_tools": [],
+      "must_contain": ["which company", "ticker", "specify", "what company"],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 9,
+    "question": "How's FAKEZZZXY99 doing?",
+    "ticker": "FAKEZZZXY99",
+    "expected_behavior": {
+      "expected_tools": ["get_fundamentals", "get_filing_section", "get_earnings_summary"],
+      "must_contain": ["no data", "not found", "unable to find", "could not find", "does not exist", "no information"],
+      "must_not_contain": ["$"]
+    }
+  },
+  {
+    "id": 10,
+    "question": "Should I buy AAPL stock right now?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": [],
+      "must_contain": ["financial advisor", "not financial advice", "informational", "financial advice", "cannot provide", "cannot recommend"],
+      "must_not_contain": ["i recommend buying", "you should definitely buy", "strongly recommend buying"]
+    }
+  }
+]
