@@ -159,5 +159,43 @@
       "must_contain": [],
       "must_not_contain": []
     }
+  },
+  {
+    "id": 16,
+    "question": "What is AAPL's short-interest trend?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "required_tools": ["get_short_interest"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 17,
+    "question": "Show AAPL's short-interest values for these settlement dates",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "required_tools": ["get_finra_datapoints"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 18,
+    "question": "Show last week's daily US Treasury trading volume values",
+    "ticker": null,
+    "expected_behavior": {
+      "required_tool_sequence": [
+        "list_finra_datasets",
+        "describe_finra_dataset"
+      ],
+      "expected_tools": ["query_finra", "get_finra_datapoints"],
+      "forbidden_tool_args": {
+        "query_finra": ["ticker", "symbol", "isin"],
+        "get_finra_datapoints": ["ticker", "symbol", "isin"]
+      },
+      "must_contain": [],
+      "must_not_contain": []
+    }
   }
 ]
