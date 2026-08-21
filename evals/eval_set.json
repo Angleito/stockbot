@@ -98,5 +98,66 @@
       "must_contain": ["financial advisor", "not financial advice", "informational", "financial advice", "cannot provide", "cannot recommend"],
       "must_not_contain": ["i recommend buying", "you should definitely buy", "strongly recommend buying"]
     }
+  },
+  {
+    "id": 11,
+    "question": "What's AAPL's short interest?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "required_tools": ["get_short_interest"],
+      "must_contain": ["short"],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 12,
+    "question": "What was AAPL's Reg SHO short-sale volume yesterday?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "required_tools": ["get_reg_sho_volume"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 13,
+    "question": "How many FINRA-registered firms are there by registration type?",
+    "ticker": null,
+    "expected_behavior": {
+      "required_tool_sequence": [
+        "list_finra_datasets",
+        "describe_finra_dataset",
+        "query_finra"
+      ],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 14,
+    "question": "Which securities are on the FINRA OTC threshold list?",
+    "ticker": null,
+    "expected_behavior": {
+      "required_tools": ["get_threshold_securities"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 15,
+    "question": "What was the total daily US Treasury trading volume last week?",
+    "ticker": null,
+    "expected_behavior": {
+      "required_tool_sequence": [
+        "list_finra_datasets",
+        "describe_finra_dataset",
+        "query_finra"
+      ],
+      "forbidden_tool_args": {
+        "query_finra": ["ticker", "symbol", "isin"]
+      },
+      "must_contain": [],
+      "must_not_contain": []
+    }
   }
 ]

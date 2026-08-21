@@ -30,7 +30,12 @@ def _call_openrouter(model: str, messages: list) -> dict:
     return resp.json()
 
 
-def run_chat(messages: list, model: str, return_trace: bool = False):
+def run_chat(
+    messages: list,
+    model: str,
+    return_trace: bool = False,
+    return_detailed_trace: bool = False,
+):
     """Run the tool-calling loop until the model returns plain text.
 
     Args:
@@ -38,6 +43,9 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
         model: OpenRouter model string, e.g. "google/gemini-3.7-flash".
         return_trace: if True, returns (text, tool_trace) where tool_trace is
             the list of tool names called — used by the eval suite.
+        return_detailed_trace: if True, returns (text, detailed_trace) where
+            each entry is {"name": tool, "arguments": parsed args}. Takes
+            precedence over return_trace.
 
     Returns:
         The assistant's final text response (or a tuple with the trace).
@@ -47,7 +55,9 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
     if not msgs or msgs[0].get("role") != "system":
         msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + msgs
 
+    want_trace = return_trace or return_detailed_trace
     tool_trace = []
+    detailed_trace = []
     for _round in range(MAX_TOOL_ROUNDS + 1):
         data = _call_openrouter(model, msgs)
         choice = data["choices"][0]
@@ -56,6 +66,8 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
 
         if not tool_calls:
             text = message.get("content") or ""
+            if return_detailed_trace:
+                return text, detailed_trace
             if return_trace:
                 return text, tool_trace
             return text
@@ -68,6 +80,8 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
             )})
             data = _call_openrouter(model, msgs)
             text = data["choices"][0]["message"].get("content") or ""
+            if return_detailed_trace:
+                return text, detailed_trace
             if return_trace:
                 return text, tool_trace
             return text
@@ -82,7 +96,9 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
             except json.JSONDecodeError:
                 arguments = {}
             logger.info("Tool call: %s(%s)", name, arguments)
-            tool_trace.append(name)
+            if want_trace:
+                tool_trace.append(name)
+                detailed_trace.append({"name": name, "arguments": arguments})
             result = execute_tool(name, arguments, model)
             msgs.append({
                 "role": "tool",
@@ -91,6 +107,8 @@ def run_chat(messages: list, model: str, return_trace: bool = False):
             })
 
     # Unreachable, but keep a safe return.
+    if return_detailed_trace:
+        return "", detailed_trace
     if return_trace:
         return "", tool_trace
     return ""

@@ -12,6 +12,12 @@ from app.agent import run_chat
 from app.config import get_default_model
 
 
+def _is_ordered_subsequence(required: list, trace: list) -> bool:
+    """True if every item in `required` appears in `trace` in order."""
+    it = iter(trace)
+    return all(any(item == name for name in it) for item in required)
+
+
 def run_evals(eval_file: str, models: list[str]) -> dict:
     with open(eval_file, "r") as f:
         cases = json.load(f)
@@ -31,22 +37,50 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
             question = case["question"]
             expected = case.get("expected_behavior", {})
             expected_tools = expected.get("expected_tools", [])
+            required_tools = expected.get("required_tools", [])
+            required_sequence = expected.get("required_tool_sequence", [])
+            forbidden_tool_args = expected.get("forbidden_tool_args", {})
             must_contain = [s.lower() for s in expected.get("must_contain", [])]
             must_not_contain = [s.lower() for s in expected.get("must_not_contain", [])]
 
             try:
-                response, trace = run_chat(
+                response, detailed = run_chat(
                     [{"role": "user", "content": question}],
                     model=model,
-                    return_trace=True,
+                    return_detailed_trace=True,
                 )
+                trace = [t["name"] for t in detailed]
                 resp_lower = response.lower()
 
-                # 1. Check tools
+                # 1a. Legacy any-of check
                 if expected_tools:
-                    tool_ok = any(t in trace for t in expected_tools)
+                    any_ok = any(t in trace for t in expected_tools)
                 else:
-                    tool_ok = True
+                    any_ok = True
+
+                # 1b. Every required tool must appear
+                if required_tools:
+                    all_ok = all(t in trace for t in required_tools)
+                else:
+                    all_ok = True
+
+                # 1c. Required tools must appear in order (as a subsequence)
+                if required_sequence:
+                    seq_ok = _is_ordered_subsequence(required_sequence, trace)
+                else:
+                    seq_ok = True
+
+                # 1d. Forbidden argument names per tool
+                if forbidden_tool_args:
+                    forbid_ok = all(
+                        arg not in (call.get("arguments") or {})
+                        for tool, args in forbidden_tool_args.items()
+                        for arg in args
+                        for call in detailed
+                        if call["name"] == tool
+                    )
+                else:
+                    forbid_ok = True
 
                 # 2. Check must_contain (if any match is sufficient when multiple alternatives provided)
                 if must_contain:
@@ -57,14 +91,24 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 # 3. Check must_not_contain
                 not_contain_ok = not any(item in resp_lower for item in must_not_contain)
 
-                passed = tool_ok and contain_ok and not_contain_ok
+                passed = (
+                    any_ok and all_ok and seq_ok and forbid_ok
+                    and contain_ok and not_contain_ok
+                )
                 if passed:
                     passed_count += 1
 
                 status = "PASS" if passed else "FAIL"
                 details = f"tools called={trace}"
-                if not tool_ok:
+                if not any_ok:
                     details += f" (expected one of {expected_tools})"
+                if not all_ok:
+                    missing = [t for t in required_tools if t not in trace]
+                    details += f" (missing required tools: {missing})"
+                if not seq_ok:
+                    details += f" (required order not followed: {required_sequence})"
+                if not forbid_ok:
+                    details += f" (called with forbidden args: {forbidden_tool_args})"
                 if not contain_ok:
                     details += f" (missing one of required substrings: {must_contain})"
                 if not not_contain_ok:
