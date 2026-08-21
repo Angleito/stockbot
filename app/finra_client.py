@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Optional
 
 import requests
@@ -74,6 +75,14 @@ _WEEKLY_SUMMARY_TYPES = (
     "ATS_W_SMBL_FIRM",
     "ATS_W_VOL_STATS",
 )
+
+# Datasets whose authoritative/displayed date field differs from the date
+# partition field. Values are verified partition fields used to order
+# partition walking; walking is rejected when no verified mapping exists.
+_DATE_PARTITION_MAPPINGS: dict[tuple[str, str], str] = {
+    ("otcmarket", "weeklysummary"): "weekStartDate",
+    ("otcmarket", "weeklysummaryhistoric"): "weekStartDate",
+}
 
 # Corrections applied on top of live catalog/metadata before exposure.
 # Keys are lowercase (group, name).
@@ -205,6 +214,7 @@ _token_expires_at: float = 0.0
 _discovery_lock = threading.Lock()
 _catalog_mem: Optional[list[CatalogEntry]] = None
 _metadata_mem: dict[str, DatasetSpec] = {}
+_partitions_mem: dict[str, list[tuple[str, ...]]] = {}
 
 
 def list_datasets(
@@ -504,6 +514,11 @@ def query_dataset(
         _query_cache_key(spec, payload),
         pagination=pagination,
     )
+    as_of, freshness = _freshness_status(spec, records)
+    stale = _stale_warning(as_of, freshness)
+    warnings = list(analysis["warnings"])
+    if stale:
+        warnings.append(stale)
     return {
         "dataset": spec.name,
         "group": spec.group,
@@ -520,10 +535,13 @@ def query_dataset(
         "coverage": analysis["coverage"],
         "metrics": analysis["metrics"],
         "trends": analysis["trends"],
-        "warnings": analysis["warnings"],
+        "warnings": warnings,
         "briefing": analysis["briefing"],
         "briefing_source": analysis["briefing_source"],
         "analysis_model": analysis["analysis_model"],
+        "as_of_date": as_of,
+        "data_freshness": freshness,
+        "environment": _environment(),
         "returned_count": returned_count,
         "limit": effective_limit,
         "offset": effective_offset,
@@ -561,28 +579,45 @@ def get_finra_datapoints(
     before returning so 'latest five' style requests are stable regardless of
     source ordering.
     """
+    payload: Optional[dict] = None
     try:
         entry = _resolve_dataset(dataset)
         spec = _get_dataset_spec(entry)
         selected = _validate_datapoint_fields(spec, fields)
         _require_datapoint_narrowing(ticker, start_date, end_date, filters)
         sort = _validate_sort(spec, sort_fields, sort_order)
-        payload = _build_payload(
-            spec,
-            entry,
-            ticker,
-            start_date,
-            end_date,
-            _clamp_datapoint_limit(limit),
-            filters,
-            fields=selected,
-            sort_fields=sort,
-        )
-        records, headers = _cached_query(spec, payload)
+        limit = _clamp_datapoint_limit(limit)
+
+        via_partitions = _use_partition_flow(spec, sort, ticker, start_date, end_date, filters)
+        if via_partitions:
+            records, headers, partition_queries, short_result = _datapoints_via_partitions(
+                spec, entry, selected, ticker, start_date, end_date, filters,
+                limit, sort,
+            )
+        else:
+            payload = _build_payload(
+                spec,
+                entry,
+                ticker,
+                start_date,
+                end_date,
+                limit,
+                filters,
+                fields=selected,
+                sort_fields=sort,
+            )
+            records, headers = _cached_query(spec, payload)
+            partition_queries = 0
+            short_result = False
     except ValueError as e:
         return {"error": str(e)}
     except requests.HTTPError as e:
-        return _http_error_result(dataset, e)
+        return _http_error_result(
+            dataset, e,
+            request_purpose="exact datapoints request (get_finra_datapoints)",
+            payload=payload,
+            dataset_id=spec.dataset_id if "spec" in locals() else dataset,
+        )
     except Exception as e:
         logger.exception("FINRA query failed for dataset %s", dataset)
         msg = str(e)
@@ -594,12 +629,31 @@ def get_finra_datapoints(
         what = ticker or dataset
         return {"error": f"No data found for {what}: {spec.name}"}
 
-    effective_limit = int(payload.get("limit", DATAPOINTS_DEFAULT_LIMIT))
-    effective_offset = int(payload.get("offset", 0))
+    effective_limit = limit
+    effective_offset = 0
     # Defensive cap: never surface more rows than the effective limit.
-    reduced = [_select_fields(row, selected) for row in records[:effective_limit]]
-    reduced = _apply_local_sort(reduced, sort)
+    ordered = _apply_local_sort(records, sort) if sort else records
+    reduced = [_select_fields(row, selected) for row in ordered[:effective_limit]]
     pagination = _parse_pagination(headers, effective_offset, effective_limit, len(reduced))
+    if via_partitions:
+        # Across partitions there is no single Record-Total; honesty over
+        # estimates: mark pagination as partition-driven.
+        pagination = {
+            "total_records": None,
+            "may_have_more": (len(reduced) >= effective_limit
+                              and partition_queries > 0
+                              and partition_queries < _MAX_PARTITION_QUERIES),
+            "source": "partitions",
+        }
+    as_of, freshness = _freshness_status(spec, records)
+    stale = _stale_warning(as_of, freshness)
+    warnings = [stale] if stale else []
+    if short_result:
+        warnings.append(
+            f"Complete short result: only {len(reduced)} matching records "
+            f"were found across all relevant FINRA partitions (requested "
+            f"{effective_limit})."
+        )
     result: dict[str, Any] = {
         "dataset": spec.name,
         "group": spec.group,
@@ -614,28 +668,375 @@ def get_finra_datapoints(
         "may_have_more": pagination["may_have_more"],
         "total_records": pagination["total_records"],
         "pagination_source": pagination["source"],
+        "as_of_date": as_of,
+        "data_freshness": freshness,
+        "environment": _environment(),
+        "warnings": warnings,
     }
     if sort:
         result["sort_fields"] = list(sort)
+    if via_partitions:
+        result["sort_source"] = "partitions"
+        result["partition_queries"] = partition_queries
     return result
 
 
-def _http_error_result(dataset: str, exc: requests.HTTPError) -> dict:
+def _http_error_result(
+    dataset: str,
+    exc: requests.HTTPError,
+    request_purpose: str = "",
+    payload: Optional[dict] = None,
+    dataset_id: Optional[str] = None,
+) -> dict:
+    """Structured, credential-free FINRA error result.
+
+    Carries the dataset, the request purpose, the HTTP status, and the
+    sanitized response body so the agent loop and the renderer can tell the
+    main model exactly what failed. The sanitized payload and response
+    metadata are logged at debug level; credentials and Authorization
+    headers are never logged.
+    """
     status = exc.response.status_code if exc.response is not None else None
-    body = exc.response.text[:500] if exc.response is not None else ""
+    raw_body = exc.response.text if exc.response is not None else ""
+    body = _sanitize_finra_body(raw_body)[:500]
     logger.exception("FINRA HTTP error for dataset %s", dataset)
-    if status in (401, 403):
-        return {
-            "error": (
-                f"FINRA returned {status} for dataset '{dataset}'. "
-                "It may not be public or the configured credentials lack "
-                "the required entitlement. Use list_finra_datasets to see "
-                "available datasets, or omit this request."
-            )
-        }
-    return {
-        "error": f"FINRA request failed ({status if status is not None else '?'}): {body}"
+    logger.debug(
+        "FINRA request failed: dataset=%s status=%s purpose=%s "
+        "payload=%s response=%s",
+        dataset,
+        status,
+        request_purpose or "FINRA data request",
+        _sanitize_payload(payload),
+        body,
+    )
+    result: dict[str, Any] = {
+        "dataset": dataset,
+        "dataset_id": dataset_id or dataset,
+        "request_purpose": request_purpose or "FINRA data request",
+        "http_status": status,
+        "finra_response": body,
+        "environment": _environment(),
     }
+    if status in (401, 403):
+        result["error"] = (
+            f"FINRA returned {status} for dataset '{dataset}'. "
+            "It may not be public or the configured credentials lack "
+            "the required entitlement. Use list_finra_datasets to see "
+            "available datasets, or omit this request."
+        )
+        return result
+    result["error"] = (
+        f"FINRA request failed ({status if status is not None else '?'}): {body}"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Partition-aware sorting (FINRA requires EQUAL filters on every partition
+# field before sortFields is accepted; otherwise the API returns HTTP 400).
+# ---------------------------------------------------------------------------
+
+_MAX_PARTITION_QUERIES = 12
+
+
+def _use_partition_flow(
+    spec: DatasetSpec,
+    sort: list[str],
+    ticker: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    filters: Optional[list[dict]],
+) -> bool:
+    """Decide how to honor a sort request.
+
+    Returns True when server-side sortFields cannot be sent and the sort can
+    be resolved by walking dataset partitions: single-field sorts on the
+    dataset's authoritative date field, ordered by a verified date
+    partition. Date ranges are rejected when the authoritative date field is
+    not itself a partition field (the mapped case), because the range could
+    not be narrowed to relevant partitions and would make results
+    budget-dependent. Raises ValueError for sorts that are neither
+    server-side-valid nor resolvable from partitions.
+    """
+    if not sort:
+        return False
+    if not spec.partition_fields:
+        # FINRA allows sortFields when a dataset has no partition fields.
+        return False
+    covered = _partition_fields_with_equal(spec, ticker, start_date, end_date, filters)
+    if all(f in covered for f in spec.partition_fields):
+        return False  # caller already supplies valid partition EQUAL filters
+    if len(sort) != 1:
+        raise ValueError(
+            f"Multi-field sorting requires an exact EQUAL filter on every "
+            f"partition field of '{spec.dataset_id}' ({', '.join(spec.partition_fields)}). "
+            "FINRA rejects sortFields without those filters."
+        )
+    _, name = sort[0][0], sort[0][1:]
+    if name == spec.date_field and _date_partition_field(spec) is not None:
+        if spec.date_field not in spec.partition_fields:
+            start = (start_date or "").strip() or None
+            end = (end_date or "").strip() or None
+            if start and end and start != end:
+                raise ValueError(
+                    f"Date-range sorting is not supported for '{spec.dataset_id}': "
+                    f"the partition date ({_date_partition_field(spec)}) differs "
+                    f"from the requested date field ({spec.date_field}), so the "
+                    "range cannot be narrowed to the relevant partitions without "
+                    "budget-dependent results. A single date does not pre-narrow "
+                    "partitions either; use exact EQUAL filters on every partition "
+                    "field, or drop the sort."
+                )
+        return True
+    raise ValueError(
+        f"Sorting by '{sort[0]}' on '{spec.dataset_id}' requires an exact "
+        f"EQUAL filter on every partition field "
+        f"({', '.join(spec.partition_fields)}). FINRA rejects sortFields "
+        "without those filters, and partition walking is only available "
+        f"for the dataset's authoritative date field "
+        f"{spec.date_field or '(none)'} with a verified date partition. "
+        "Either add the required EQUAL filters or request a date-based "
+        "latest/oldest sort."
+    )
+
+
+def _partition_fields_with_equal(
+    spec: DatasetSpec,
+    ticker: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    filters: Optional[list[dict]],
+) -> set[str]:
+    """Partition fields that already carry an EQUAL filter (explicit or implied)."""
+    covered: set[str] = set()
+    for extra in filters or []:
+        if not isinstance(extra, dict):
+            continue
+        op = str(extra.get("op") or "EQUAL").upper()
+        field = extra.get("field")
+        if op == "EQUAL" and isinstance(field, str) and field.strip():
+            covered.add(field.strip())
+    start = (start_date or "").strip()
+    end = (end_date or "").strip()
+    if spec.date_field and start and end and start == end:
+        covered.add(spec.date_field)
+    elif spec.date_field and start and not end:
+        covered.add(spec.date_field)
+    elif spec.date_field and end and not start:
+        covered.add(spec.date_field)
+    if (ticker or "").strip() and spec.symbol_field:
+        covered.add(spec.symbol_field)
+    return covered
+
+
+def _datapoints_via_partitions(
+    spec: DatasetSpec,
+    entry: CatalogEntry,
+    selected: list[str],
+    ticker: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    filters: Optional[list[dict]],
+    limit: int,
+    sort: list[str],
+) -> tuple[list[dict], dict, int, bool]:
+    """Resolve a date sort by walking available partitions.
+
+    Enumerates the partition tuples FINRA actually published (date
+    partition ordered newest-first for 'desc', oldest-first for 'asc'),
+    querying each tuple with the required EQUAL partition filters plus the
+    caller's narrowing conditions — never with sortFields. Every attempted
+    query counts against the fixed budget, including HTTP failures and
+    no-data responses, so the walk never continues through unlimited
+    failing partitions. Stops as soon as the requested limit is accumulated.
+
+    Returns (records, headers, partition_queries, short_result).
+    short_result is True when every relevant partition was examined and
+    fewer records than the limit exist (complete short result). Raises when
+    the bounded budget cannot establish the requested records.
+    """
+    sign, sort_field = sort[0][0], sort[0][1:]
+    descending = sign == "-"
+    partitions = _get_partitions(spec)
+    pinned = _pinned_partition_filters(spec, ticker, start_date, end_date, filters)
+    tuples = _ordered_partition_tuples(
+        spec, partitions, pinned, spec.date_field, descending
+    )
+
+    start = (start_date or "").strip() or None
+    end = (end_date or "").strip() or None
+    range_field = spec.date_field if (start and end and start != end) else None
+    if range_field and range_field in spec.partition_fields:
+        tuples = [
+            t for t in tuples
+            if t.get(range_field) and _date_in_range(t[range_field], start, end)
+        ]
+
+    accumulated: list[dict] = []
+    queries = 0
+    budget_exhausted = False
+    last_error: Optional[requests.HTTPError] = None
+    for tuple_values in tuples:
+        if len(accumulated) >= limit:
+            break
+        if queries >= _MAX_PARTITION_QUERIES:
+            budget_exhausted = True
+            break
+        queries += 1
+        remaining = limit - len(accumulated)
+        extra = [
+            {"field": f, "op": "EQUAL", "value": v}
+            for f, v in tuple_values.items()
+            if f != range_field
+        ]
+        payload = _build_payload(
+            spec,
+            entry,
+            ticker,
+            start_date,
+            end_date,
+            remaining,
+            list(filters or []) + extra,
+            fields=selected,
+        )
+        try:
+            records, _headers = _cached_query(spec, payload)
+        except requests.HTTPError as e:
+            logger.debug(
+                "Partition query failed (counted): dataset=%s partition=%s "
+                "status=%s payload=%s",
+                spec.dataset_id,
+                tuple_values,
+                e.response.status_code if e.response is not None else "?",
+                _sanitize_payload(payload),
+            )
+            last_error = e
+            continue
+        accumulated.extend(records[:remaining])
+
+    if budget_exhausted:
+        if not accumulated and last_error is not None:
+            raise last_error  # every attempt failed: report the concrete HTTP failure
+        raise ValueError(
+            f"Could not locate {limit} records for '{spec.dataset_id}' within "
+            f"{_MAX_PARTITION_QUERIES} partition queries. Narrow the request "
+            "with a ticker, date range, or filters and retry."
+        )
+    if not accumulated:
+        if last_error is not None:
+            raise last_error
+        what = ticker or spec.dataset_id
+        raise ValueError(f"No data found for {what}: {spec.name}")
+    return accumulated, {}, queries, len(accumulated) < limit
+
+
+def _pinned_partition_filters(
+    spec: DatasetSpec,
+    ticker: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    filters: Optional[list[dict]],
+) -> dict[str, str]:
+    """Partition fields with caller-supplied EQUAL values (fixed during walk)."""
+    pinned: dict[str, str] = {}
+    for extra in filters or []:
+        if not isinstance(extra, dict):
+            continue
+        op = str(extra.get("op") or "EQUAL").upper()
+        field = extra.get("field")
+        if op == "EQUAL" and isinstance(field, str) and field.strip():
+            if field.strip() in spec.partition_fields:
+                pinned[field.strip()] = str(extra.get("value"))
+    start = (start_date or "").strip()
+    end = (end_date or "").strip()
+    if (
+        spec.date_field in spec.partition_fields
+        and start
+        and (not end or start == end)
+    ):
+        pinned[spec.date_field] = start
+    return pinned
+
+
+def _date_in_range(value: str, start: str, end: str) -> bool:
+    norm = _norm_date(value)
+    return norm is not None and start <= norm <= end
+
+
+# ---------------------------------------------------------------------------
+# Freshness + environment
+# ---------------------------------------------------------------------------
+
+STALE_AFTER_DAYS = 90
+
+
+def _environment() -> str:
+    return "mock" if finra_use_mock() else "production"
+
+
+def _freshness_status(
+    spec: DatasetSpec, records: list[dict]
+) -> tuple[Optional[str], str]:
+    """as_of_date from the dataset's authoritative date_field (never derived
+    from unrelated fields) plus a current/stale/unknown label."""
+    if not spec.date_field or not records:
+        return None, "unknown"
+    dates = [
+        d for d in (_norm_date(r.get(spec.date_field)) for r in records) if d
+    ]
+    if not dates:
+        return None, "unknown"
+    as_of = max(dates)
+    try:
+        days = (date.today() - date.fromisoformat(as_of)).days
+    except (TypeError, ValueError):
+        return as_of, "unknown"
+    return as_of, ("stale" if days > STALE_AFTER_DAYS else "current")
+
+
+def _stale_warning(as_of: Optional[str], freshness: str) -> Optional[str]:
+    if freshness != "stale" or not as_of:
+        return None
+    return (
+        f"STALE/HISTORICAL DATA: newest record is {as_of} (over "
+        f"{STALE_AFTER_DAYS} days old); this is historical data, not "
+        "current market data."
+    )
+
+
+def _norm_date(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ].*)?", s):
+        return s[:10]
+    if re.fullmatch(r"\d{8}", s):
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    return None
+
+
+def _sanitize_finra_body(text: str) -> str:
+    """Strip credential-shaped content from a FINRA response body."""
+    if not text:
+        return ""
+    text = re.sub(r"Bearer\s+\S+", "[REDACTED]", text)
+    for key in (
+        "client_id", "client_secret", "authorization", "password",
+        "secret", "access_token", "token",
+    ):
+        text = re.sub(
+            rf'"{key}"\s*:\s*"[^"]*"',
+            f'"{key}": "[REDACTED]"',
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text.strip()
+
+
+def _sanitize_payload(payload: Optional[dict]) -> str:
+    if payload is None:
+        return "{}"
+    return json.dumps(payload, sort_keys=True, default=str)
 
 
 def _validate_datapoint_fields(spec: DatasetSpec, fields: Optional[list[str]]) -> list[str]:
@@ -1117,6 +1518,183 @@ def _fetch_metadata_http(group: str, name: str) -> dict:
     return data
 
 
+def _get_partitions(spec: DatasetSpec) -> list[tuple[str, ...]]:
+    """Cached available partition tuples in FINRA's returned order.
+
+    Returns a list of ordered tuples with one value per partition field in
+    spec.partition_fields order (e.g. ("2026-08-10", "T1")). Raises
+    ValueError when the dataset has no partition fields or FINRA cannot be
+    reached.
+    """
+    if not spec.partition_fields:
+        raise ValueError(
+            f"Dataset '{spec.dataset_id}' has no partition fields."
+        )
+    key = spec.dataset_id.lower()
+    with _discovery_lock:
+        if key in _partitions_mem:
+            return _partitions_mem[key]
+
+    cache_key = f"finra:partitions:v2:{spec.group}/{spec.name}"
+    hit = cache.get(cache_key, ttl=DISCOVERY_TTL_SECONDS)
+    if _is_partition_tuple_cache(hit, len(spec.partition_fields)):
+        parsed = [tuple(str(v) for v in entry) for entry in hit]
+        with _discovery_lock:
+            _partitions_mem[key] = parsed
+        return parsed
+
+    raw = _fetch_partitions_http(spec.group, _dataset_path_name(spec))
+    parsed = _parse_partitions(raw, spec.partition_fields)
+    cache.set(cache_key, [list(t) for t in parsed])
+    with _discovery_lock:
+        _partitions_mem[key] = parsed
+    return parsed
+
+
+def _is_partition_tuple_cache(hit: Any, n_fields: int) -> bool:
+    """Validate a JSON-safe cached partitions payload.
+
+    The SQLite cache serializes tuples as JSON lists, so cached entries
+    arrive as fixed-length lists (tuples come only from in-memory stores).
+    Returns True only for a list of entries that each carry exactly one
+    value per partition field; anything else — e.g. the old flattened
+    {field: [values]} v1 shape — is rejected so the data is refetched.
+    """
+    if not isinstance(hit, list):
+        return False
+    for entry in hit:
+        if not isinstance(entry, (list, tuple)):
+            return False
+        if len(entry) != n_fields:
+            return False
+        if not all(isinstance(v, (str, int, float)) and str(v) for v in entry):
+            return False
+    return True
+
+
+def _fetch_partitions_http(group: str, name: str) -> dict:
+    url = f"{FINRA_API_BASE}/partitions/group/{group}/name/{name}"
+    resp = requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {_access_token()}",
+            "Accept": "application/json",
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError(f"Unexpected partitions response for {group}/{name}")
+    return data
+
+
+def _parse_partitions(
+    raw: dict, partition_fields: tuple[str, ...]
+) -> list[tuple[str, ...]]:
+    """Normalize availablePartitions into ordered partition tuples.
+
+    Each entry carries one value per partition field in field order (FINRA
+    tuple semantics); entry order is preserved. Scalar entries are only
+    meaningful for single-partition datasets and are otherwise dropped —
+    an ambiguous single value cannot be placed safely without inventing
+    combinations FINRA never published.
+    """
+    if not partition_fields:
+        return []
+    items = raw.get("availablePartitions")
+    if not isinstance(items, list):
+        return []
+    out: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    n = len(partition_fields)
+    for item in items:
+        if isinstance(item, dict):
+            values = item.get("partitions")
+            if not isinstance(values, list):
+                continue
+            vals = [str(v) for v in values]
+            if len(vals) != n or not all(vals):
+                continue
+            tup = tuple(vals)
+        elif isinstance(item, (str, int, float)):
+            if n != 1:
+                continue
+            tup = (str(item),)
+        else:
+            continue
+        if tup not in seen:
+            seen.add(tup)
+            out.append(tup)
+    return out
+
+
+def _date_partition_field(spec: DatasetSpec) -> Optional[str]:
+    """The partition field that carries the authoritative date.
+
+    Returns spec.date_field when it is itself a partition field. When the
+    displayed/sort date differs from the partition date (e.g. weeklySummary
+    sorts by summaryStartDate but partitions by weekStartDate), a verified
+    mapping in _DATE_PARTITION_MAPPINGS is required; without one, partition
+    walking is rejected (None).
+    """
+    if spec.date_field and spec.date_field in spec.partition_fields:
+        return spec.date_field
+    mapped = _DATE_PARTITION_MAPPINGS.get(
+        (spec.group.lower(), spec.name.lower())
+    )
+    if mapped and mapped in spec.partition_fields:
+        return mapped
+    return None
+
+
+def _ordered_partition_tuples(
+    spec: DatasetSpec,
+    partitions: list[tuple[str, ...]],
+    pinned: dict[str, str],
+    date_field: Optional[str],
+    descending: bool,
+) -> list[dict[str, str]]:
+    """Order the original FINRA partition tuples by the date partition.
+
+    Only tuples FINRA actually published are used — never a Cartesian
+    product of per-field values. Tuples pinned by the caller (EQUAL filter
+    supplied) are fixed; the date partition drives global ordering
+    (newest-first for descending sorts, oldest-first otherwise); equal
+    dates keep FINRA's returned order.
+    """
+    primary = _date_partition_field(spec)
+    if primary is None or not partitions:
+        return []
+    index = {f: i for i, f in enumerate(spec.partition_fields)}
+    primary_idx = index.get(primary)
+    if primary_idx is None:
+        return []
+
+    def _date_key(entry: tuple[str, ...]) -> tuple:
+        value = entry[primary_idx]
+        norm = _norm_date(value)
+        if norm is None:
+            return (1, value)
+        return (0, norm)
+
+    filtered: list[tuple[tuple, dict[str, str]]] = []
+    for entry in partitions:
+        values = dict(zip(spec.partition_fields, entry))
+        if any(values.get(f) != pinned[f] for f in pinned):
+            continue
+        filtered.append((_date_key(entry), values))
+    filtered.sort(key=lambda pair: pair[0], reverse=descending)
+    return [values for _key, values in filtered]
+
+
+def reset_partitions_cache() -> None:
+    """Test helper — clears the in-memory partitions cache."""
+    global _partitions_mem
+    with _discovery_lock:
+        _partitions_mem = {}
+
+
 def _build_spec_from_metadata(entry: CatalogEntry, raw: dict) -> DatasetSpec:
     fields_raw = raw.get("fields") or raw.get("datasetFields") or []
     fields: list[dict[str, Any]] = []
@@ -1444,6 +2022,12 @@ def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dic
         },
         json=payload,
         timeout=60,
+    )
+    logger.debug(
+        "FINRA data POST: url=%s status=%s payload=%s",
+        url,
+        resp.status_code,
+        _sanitize_payload(payload),
     )
     resp.raise_for_status()
     data = resp.json()

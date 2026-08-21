@@ -116,10 +116,17 @@ def _minimal(result: dict, max_bytes: int) -> str:
 def _render_error(result: dict, max_bytes: int) -> str:
     msg = str(result.get("error") or "Unknown error").strip()
     lines = [f"Error: {msg}"]
-    for key in ("dataset", "dataset_id", "source"):
+    for key in ("dataset", "dataset_id", "source", "request_purpose"):
         value = result.get(key)
         if value:
             lines.append(f"{key}: {value}")
+    if result.get("http_status") is not None:
+        lines.append(f"http_status: {result['http_status']}")
+    if result.get("finra_response"):
+        body = _cell(result["finra_response"])
+        lines.append(f"finra_response: {body}")
+    if result.get("environment"):
+        lines.append(f"environment: {result['environment']}")
     return _truncate_bytes("\n".join(lines), max_bytes, marker="")
 
 
@@ -136,16 +143,25 @@ def _render_datapoints(result: dict, max_bytes: int) -> str:
 
     header = "| " + " | ".join(_table_cell(f) for f in fields) + " |"
     sep = "|" + "|".join("---" for _ in fields) + "|"
+    stale_banner = _datapoints_stale_banner(result)
     footer = _datapoints_footer(result)
     if footer:
         footer = "\n" + footer
-    reserved = _utf8_size(TRUNCATED_MARKER + "\n" + "Omitted rows: 99999\n" + footer) + 32
+    reserved = (
+        _utf8_size(TRUNCATED_MARKER + "\n" + "Omitted rows: 99999\n" + footer)
+        + 32
+    )
+    if stale_banner:
+        reserved += _utf8_size(stale_banner) + 2
 
     if reserved > max_bytes:
         return _minimal(result, max_bytes)
 
     used = _utf8_size(header + "\n" + sep + "\n")
     out = [header, sep]
+    if stale_banner:
+        out.append(stale_banner)
+        used += _utf8_size(stale_banner) + 1
     omitted = 0
     for row in records:
         if not isinstance(row, dict):
@@ -185,7 +201,28 @@ def _datapoints_footer(result: dict) -> str:
     if result.get("next_offset") is not None:
         pag += f", next_offset {result['next_offset']}"
     parts.append("Pagination: " + pag)
+    if result.get("as_of_date"):
+        parts.append(
+            f"As of: {result['as_of_date']} "
+            f"(freshness: {result.get('data_freshness') or 'unknown'})"
+        )
+    if result.get("environment"):
+        parts.append(f"Environment: {result['environment']}")
+    warnings = [str(w) for w in (result.get("warnings") or []) if str(w).strip()]
+    non_stale = [w for w in warnings if "STALE" not in w]
+    if non_stale:
+        parts.append("Warnings: " + "; ".join(non_stale))
     return "\n".join(parts)
+
+
+def _datapoints_stale_banner(result: dict) -> str:
+    if result.get("data_freshness") == "stale" and result.get("as_of_date"):
+        return (
+            f"!! STALE/HISTORICAL DATA !! Newest record is "
+            f"{result['as_of_date']} (over 90 days old); this is historical "
+            "data, NOT current market data."
+        )
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +284,14 @@ def _render_briefing(result: dict, max_bytes: int) -> str:
     pagination = _render_pagination(result)
     if pagination:
         forced.append("Pagination: " + pagination)
+
+    if result.get("as_of_date"):
+        forced.append(
+            f"As of: {result['as_of_date']} "
+            f"(freshness: {result.get('data_freshness') or 'unknown'})"
+        )
+    if result.get("environment"):
+        forced.append(f"Environment: {result['environment']}")
 
     used = _utf8_size("\n".join(forced))
     if used > max_bytes:
