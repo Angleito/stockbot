@@ -325,6 +325,56 @@ def test_list_finra_datasets_group_search(http):
     )
 
 
+def test_catalog_search_token_ranked_weekly_summary(http):
+    """'AAPL OTC weekly trading volume' resolves to weeklySummary first.
+
+    Token-based matching: friendly labels ("trading volume" -> volume,
+    "weekly", "otc") are normalized and entries are ranked by coverage.
+    """
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "list_finra_datasets", {"search": "AAPL OTC weekly trading volume"}, model="test"
+    )
+    assert "error" not in result, result
+    assert result["datasets"], "expected ranked matches"
+    assert result["datasets"][0]["dataset"] == "otcMarket/weeklySummary", (
+        [d["dataset"] for d in result["datasets"]]
+    )
+    assert result["datasets"][0]["supports_ticker"] is True
+
+
+def test_catalog_search_ranked_scores_and_filtering(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "list_finra_datasets", {"search": "OTC weekly volume"}, model="test"
+    )
+    assert "error" not in result, result
+    datasets = [d["dataset"] for d in result["datasets"]]
+    assert "otcMarket/weeklySummary" in datasets
+    assert "otcMarket/weeklySummaryHistoric" in datasets
+    # weeklySummary outranks generic volume matches (name+group+description).
+    assert datasets.index("otcMarket/weeklySummary") < datasets.index(
+        "fixedIncomeMarket/treasuryDailyAggregates"
+    )
+
+    finra_client.reset_discovery_cache()
+    unmatched = execute_tool(
+        "list_finra_datasets", {"search": "zzzz no such topic"}, model="test"
+    )
+    assert unmatched["datasets"] == []
+
+
+def test_catalog_search_phrase_alias_volume(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "list_finra_datasets", {"search": "trading volume"}, model="test"
+    )
+    assert "error" not in result, result
+    assert "otcMarket/weeklySummary" in {
+        d["dataset"] for d in result["datasets"]
+    }
+
+
 # ---------------------------------------------------------------------------
 # Describe
 # ---------------------------------------------------------------------------

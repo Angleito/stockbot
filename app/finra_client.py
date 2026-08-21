@@ -210,23 +210,32 @@ _metadata_mem: dict[str, DatasetSpec] = {}
 def list_datasets(
     group: Optional[str] = None, search: Optional[str] = None
 ) -> dict:
-    """Concise filing-cabinet catalog. Never returns data rows."""
+    """Concise filing-cabinet catalog. Never returns data rows.
+
+    search is token-based and ranked: the phrase is normalized (e.g.
+    "trading volume" -> "volume", OTC/ATS/weekly aliases) and every entry is
+    scored by how many distinct query tokens match its group/name/description.
+    Matched entries are returned best-first; entries with no token match are
+    omitted.
+    """
     try:
         entries = _get_catalog()
     except Exception as e:
         return {"error": _catalog_error_message(e)}
 
     group_filter = (group or "").strip().lower() or None
-    search_filter = (search or "").strip().lower() or None
+    tokens = _search_tokens(search)
 
     datasets = []
     for entry in entries:
         if group_filter and entry.group.lower() != group_filter:
             continue
-        if search_filter:
-            hay = f"{entry.group} {entry.name} {entry.description}".lower()
-            if search_filter not in hay:
+        if tokens:
+            score = _search_score(entry, tokens)
+            if score <= 0:
                 continue
+        else:
+            score = 0
         # Report capabilities only when verified (override corrections or
         # catalog flags). Unknown stays null until describe_finra_dataset
         # fetches real metadata — never guessed from the dataset name.
@@ -252,14 +261,105 @@ def list_datasets(
                 "supports_date": supports_date,
                 "supports_record_offset": entry.supports_record_offset,
                 "access": entry.access,
+                "match_score": score,
             }
         )
+
+    if tokens:
+        datasets.sort(key=lambda d: (-d["match_score"], d["name"]))
+        for d in datasets:
+            d.pop("match_score", None)
 
     return {
         "source": "FINRA Query API catalog",
         "count": len(datasets),
         "datasets": datasets,
     }
+
+
+# Multi-word friendly labels that map onto catalog wording.
+_SEARCH_PHRASE_ALIASES = {
+    "trading volume": "volume",
+    "daily volume": "volume",
+    "trade volume": "volume",
+    "threshold securities": "threshold",
+    "registration type": "registration",
+}
+
+# Single-token synonym expansions (query token -> haystack tokens that count).
+_SEARCH_TOKEN_VARIANTS = {
+    "trading": {"trading", "trade", "traded", "trades"},
+    "volume": {"volume", "vol", "volumes"},
+    "weekly": {"weekly", "week"},
+    "week": {"weekly", "week"},
+    "daily": {"daily", "day"},
+    "day": {"daily", "day"},
+    "monthly": {"monthly", "month"},
+    "month": {"monthly", "month"},
+    "otc": {"otc"},
+    "ats": {"ats"},
+    "interest": {"interest"},
+    "short": {"short"},
+    "aggregates": {"aggregate", "aggregates"},
+    "aggregate": {"aggregate", "aggregates"},
+}
+
+# Tokens that add no topical signal (tickers, fillers, stop words).
+_SEARCH_STOP_TOKENS = {
+    "a", "an", "the", "of", "for", "and", "or", "in", "on", "to", "by",
+    "what", "is", "are", "show", "showme", "me", "values", "data", "list",
+}
+
+
+def _split_words(text: str) -> list[str]:
+    """Lowercase tokenization with camelCase and punctuation boundaries."""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).lower()
+    return re.findall(r"[a-z0-9]+", text)
+
+
+def _search_tokens(search: Optional[str]) -> list[str]:
+    """Normalize a free-text search phrase into ranked match tokens.
+
+    Compound aliases are collapsed first ("trading volume" -> "volume",
+    "short interest" -> "short interest" tokens), then the phrase is split
+    on non-alphanumerics and camelCase boundaries. Unknown tokens (e.g. a
+    ticker like "AAPL") are dropped — they cannot match catalog wording.
+    """
+    text = (search or "").strip().lower()
+    if not text:
+        return []
+    for phrase, alias in _SEARCH_PHRASE_ALIASES.items():
+        text = text.replace(phrase, alias)
+    return [
+        t for t in _split_words(text)
+        if t not in _SEARCH_STOP_TOKENS and len(t) >= 2
+    ]
+
+
+def _search_score(entry: CatalogEntry, tokens: list[str]) -> int:
+    """Number of distinct query tokens with a variant present in the entry.
+
+    Name/group matches count double so a phrase like "OTC weekly trading
+    volume" ranks weeklySummary (weekly in name, OTC in group, volume in
+    description) above generic descriptions.
+    """
+    if not tokens:
+        return 0
+    name = set(_split_words(entry.name))
+    hay = set(_split_words(entry.group)) | name | set(
+        _split_words(entry.description)
+    )
+    score = 0
+    for token in tokens:
+        variants = _SEARCH_TOKEN_VARIANTS.get(token, {token})
+        if not (variants & hay):
+            continue
+        hits = len(variants & hay)
+        if variants & name:
+            score += 2 * hits
+        else:
+            score += hits
+    return score
 
 
 def describe_dataset(dataset_id: str) -> dict:
