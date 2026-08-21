@@ -7,6 +7,7 @@ import requests
 
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .prompts import SYSTEM_PROMPT
+from .tool_render import render_tool_result
 from .tools import TOOLS, execute_tool
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def run_chat(
             msgs.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
-                "content": json.dumps(result)[:100000],
+                "content": render_tool_result(result),
             })
 
     # Unreachable, but keep a safe return.
