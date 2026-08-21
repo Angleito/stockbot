@@ -39,8 +39,8 @@ def _mock_mode(monkeypatch):
 
 
 def _acceptable(result: dict) -> bool:
-    """A smoke query passes when FINRA answered (data or honest no-data)."""
-    if "records" in result:
+    """A smoke query passes when FINRA answered (briefing or honest no-data)."""
+    if "metrics" in result:
         return True
     return str(result.get("error", "")).startswith("No data found")
 

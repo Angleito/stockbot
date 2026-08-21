@@ -1,0 +1,829 @@
+"""Tests for the private FINRA analysis layer.
+
+Offline and deterministic: FINRA HTTP is mocked via the shared fixtures, and
+the secondary analysis model (FINRA_ANALYSIS_MODEL) is always mocked when
+enabled. No live OpenRouter or FINRA calls.
+"""
+
+import json
+from unittest.mock import MagicMock
+
+import pytest
+import requests
+
+from app import finra_analysis
+from app import finra_client
+from app import tools as tools_module
+from app.tools import execute_tool
+
+from tests.test_finra import (
+    FakeCache,
+    _mock_get,
+    _response,
+    _token_response,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolation(monkeypatch):
+    monkeypatch.setenv("FINRA_USE_MOCK", "")
+    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "")
+    finra_client.reset_token_cache()
+    finra_client.reset_discovery_cache()
+    yield
+    finra_client.reset_token_cache()
+    finra_client.reset_discovery_cache()
+
+
+@pytest.fixture(autouse=True)
+def fake_cache(monkeypatch):
+    fc = FakeCache()
+    monkeypatch.setattr(finra_client, "cache", fc)
+    monkeypatch.setattr(finra_analysis, "cache", fc)
+    return fc
+
+
+@pytest.fixture
+def http(monkeypatch):
+    get_mock = MagicMock(side_effect=_mock_get)
+    post_mock = MagicMock()
+    monkeypatch.setattr("app.finra_client.requests.get", get_mock)
+    monkeypatch.setattr("app.finra_client.requests.post", post_mock)
+    monkeypatch.setattr("app.finra_client.get_finra_client_id", lambda: "client")
+    monkeypatch.setattr(
+        "app.finra_client.get_finra_client_secret", lambda: "secret"
+    )
+    return {"get": get_mock, "post": post_mock}
+
+
+@pytest.fixture
+def analysis_model(monkeypatch):
+    """Enable and mock the secondary analysis model's completion call."""
+    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "mock/analysis-model")
+    state = {"calls": [], "error": None, "content": None}
+
+    def _fake_post_completion(model, messages, max_tokens):
+        state["calls"].append(
+            {"model": model, "messages": messages, "max_tokens": max_tokens}
+        )
+        if state["error"] is not None:
+            raise state["error"]
+        if state["content"] is not None:
+            return state["content"]
+        return json.dumps(
+            {
+                "summary": "Short interest declined.",
+                "key_findings": ["Position down 10%"],
+                "caveats": ["Two settlement cycles"],
+                "follow_up_suggestion": "Ask for Reg SHO.",
+            }
+        )
+
+    monkeypatch.setattr("app.finra_analysis._post_completion", _fake_post_completion)
+    return state
+
+
+def _data_body(post_mock):
+    return post_mock.call_args_list[-1].kwargs["json"]
+
+
+def _short_interest_rows(n=3):
+    rows = []
+    for i in range(n):
+        rows.append(
+            {
+                "symbolCode": "AAPL",
+                "issueName": "Apple Inc.",
+                "settlementDate": f"2026-08-{14 - i:02d}",
+                "currentShortPositionQuantity": 100 + i * 50,
+                "previousShortPositionQuantity": 90 + i * 50,
+                "averageDailyVolumeQuantity": 10_000,
+                "daysToCoverQuantity": 1.2 + i * 0.1,
+                "shortInterestChangePercentage": 5.0 + i,
+            }
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Briefings by default: no raw records in tool results
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("query_finra", {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"}),
+        ("get_short_interest", {"ticker": "AAPL"}),
+        ("get_reg_sho_volume", {"ticker": "AAPL"}),
+        ("get_threshold_securities", {"ticker": "AAPL"}),
+    ],
+)
+def test_analysis_tools_never_return_raw_records(http, tool, args):
+    rows = (
+        [{"issueSymbolIdentifier": "AAPL", "tradeDate": "2026-08-14", "issueName": "RawCo Inc."}]
+        if tool == "get_threshold_securities"
+        else [{"symbolCode": "AAPL", "issueName": "RawCo Inc.", "settlementDate": "2026-08-14"}]
+    )
+    http["post"].side_effect = [_token_response(), _response(rows)]
+
+    result = execute_tool(tool, args, model="test")
+    assert "error" not in result, result
+    assert "records" not in result
+    assert "coverage" in result
+    assert "metrics" in result
+    assert "warnings" in result
+    assert result["briefing_source"] == "deterministic_only"
+    serialized = json.dumps(result)
+    assert '"records":' not in serialized
+    assert "RawCo Inc." not in serialized
+
+
+# ---------------------------------------------------------------------------
+# Deterministic summaries
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_summaries(http):
+    http["post"].side_effect = [
+        _token_response(),
+        _response(_short_interest_rows(3)),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    stats = result["metrics"]["fields"]["currentShortPositionQuantity"]
+    assert stats["min"] == 100
+    assert stats["max"] == 200
+    assert stats["mean"] == 150
+    assert stats["median"] == 150
+    assert stats["sum"] == 450
+
+
+def test_latest_vs_prior_change_and_percent(http):
+    http["post"].side_effect = [
+        _token_response(),
+        _response(_short_interest_rows(3)),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    lvp = result["metrics"]["latest_vs_prior"]
+    entry = next(e for e in lvp if e["field"] == "currentShortPositionQuantity")
+    # _short_interest_rows: newest date (08-14) has value 100, prior 150.
+    assert entry["latest"] == 100
+    assert entry["prior"] == 150
+    assert entry["change"] == -50
+    assert entry["change_percent"] == pytest.approx(-33.33, abs=0.01)
+    assert entry["latest_date"] == "2026-08-14"
+    assert entry["prior_date"] == "2026-08-13"
+
+
+def test_date_aware_ordering_and_coverage_dates(http):
+    rows = list(reversed(_short_interest_rows(3)))
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["coverage"]["first_date"] == "2026-08-12"
+    assert result["coverage"]["last_date"] == "2026-08-14"
+    # Latest-vs-prior reflects the newest date even though input was unsorted.
+    entry = next(
+        e for e in result["metrics"]["latest_vs_prior"]
+        if e["field"] == "currentShortPositionQuantity"
+    )
+    assert entry["latest_date"] == "2026-08-14"
+    assert entry["latest"] == 100
+
+
+def test_categorical_breakdown(http):
+    rows = [
+        {"tradeDate": "2026-08-14", "productCategory": "Bills", "totalParAmountTraded": 10},
+        {"tradeDate": "2026-08-14", "productCategory": "Notes", "totalParAmountTraded": 20},
+        {"tradeDate": "2026-08-14", "productCategory": "Notes", "totalParAmountTraded": 30},
+    ]
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {
+            "dataset": "fixedIncomeMarket/treasuryDailyAggregates",
+            "start_date": "2026-08-14",
+            "end_date": "2026-08-14",
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["metrics"]["categorical"]["productCategory"] == {
+        "Notes": 2,
+        "Bills": 1,
+    }
+
+
+def test_missing_value_warnings(http):
+    rows = [
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-14"},
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-13"},
+    ]
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert any("currentShortPositionQuantity" in w and "2/2" in w for w in result["warnings"])
+
+
+def test_partial_coverage_warning(http):
+    rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14"} for _ in range(
+        finra_analysis.ANALYSIS_MAX_RECORDS + 5
+    )]
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["coverage"]["complete"] is False
+    assert result["coverage"]["rows_matched"] == finra_analysis.ANALYSIS_MAX_RECORDS + 5
+    assert result["coverage"]["rows_analyzed"] == finra_analysis.ANALYSIS_MAX_RECORDS
+    assert any("cap" in w for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+
+def test_pagination_header_driven(http):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows, headers={"Record-Total": "17", "Record-Limit": "2"}),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["total_records"] == 17
+    assert result["may_have_more"] is True
+    assert result["pagination_source"] == "finra_header"
+
+
+def test_pagination_estimate_when_header_absent(http):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["total_records"] is None
+    assert result["pagination_source"] == "estimate"
+    assert result["may_have_more"] is True  # full page -> estimate
+
+
+# ---------------------------------------------------------------------------
+# Coverage: page vs full-query completeness
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_query_incomplete_when_total_exceeds_page(http):
+    rows = _short_interest_rows(3)
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows, headers={"Record-Total": "17", "Record-Limit": "3"}),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+            "limit": 3,
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    cov = result["coverage"]
+    assert cov["rows_matched"] == 3
+    assert cov["rows_analyzed"] == 3
+    assert cov["page_complete"] is True          # all page rows analyzed
+    assert cov["query_complete"] is False        # 17 matches, page holds 3
+    assert cov["analysis_complete"] is False     # metrics miss 14 records
+
+
+def test_coverage_complete_single_page(http):
+    rows = _short_interest_rows(3)
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows, headers={"Record-Total": "3"}),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+            "limit": 3,
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    cov = result["coverage"]
+    assert cov["rows_matched"] == 3
+    assert cov["page_complete"] is True
+    assert cov["query_complete"] is True
+    assert cov["analysis_complete"] is True
+
+
+def test_coverage_analysis_incomplete_at_internal_cap(http):
+    rows = [
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-14"}
+        for _ in range(finra_analysis.ANALYSIS_MAX_RECORDS + 5)
+    ]
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows, headers={"Record-Total": str(len(rows))}),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    cov = result["coverage"]
+    # Page is complete (all matches fit on it) but the analysis cap stopped
+    # deterministic metrics short — analysis_complete must be False.
+    assert cov["query_complete"] is True
+    assert cov["page_complete"] is False
+    assert cov["analysis_complete"] is False
+    assert cov["rows_analyzed"] == finra_analysis.ANALYSIS_MAX_RECORDS
+    assert cov["cap"] == finra_analysis.ANALYSIS_MAX_RECORDS
+
+
+def test_coverage_unknown_when_record_total_missing(http):
+    rows = _short_interest_rows(3)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+            "limit": 3,
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    cov = result["coverage"]
+    assert cov["rows_matched"] == 3
+    assert cov["page_complete"] is True
+    # Completeness cannot be proven without Record-Total: explicit nulls.
+    assert cov["query_complete"] is None
+    assert cov["analysis_complete"] is None
+    assert any("estimated" in w.lower() or "Record-Total" in w for w in result["warnings"])
+    assert result["pagination_source"] == "estimate"
+
+
+# ---------------------------------------------------------------------------
+# Secondary analysis model
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_model_receives_deterministic_analysis_only(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "query_finra",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+            "analysis_goal": "Is short interest trending up?",
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["briefing"]["summary"] == "Short interest declined."
+    assert result["briefing_source"] == "analysis_model"
+    assert result["analysis_model"] == "mock/analysis-model"
+
+    call = analysis_model["calls"][0]
+    assert call["model"] == "mock/analysis-model"
+    prompt = call["messages"][-1]["content"]
+    # Deterministic metrics + provenance reach the small model...
+    assert "Deterministic metrics" in prompt
+    assert "consolidatedShortInterest" in prompt
+    assert "Is short interest trending up?" in prompt
+    # ...but never raw record content.
+    assert "Apple Inc." not in prompt
+    assert '"symbolCode"' not in prompt
+    assert '"currentShortPositionQuantity": 100' not in prompt
+
+
+def test_analysis_model_http_error_fallback(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    analysis_model["error"] = requests.HTTPError("500 from analysis model")
+
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["briefing"] is None
+    assert result["briefing_source"] == "deterministic_only"
+    assert result["metrics"]["fields"]["currentShortPositionQuantity"]["max"] == 150
+
+
+def test_analysis_model_timeout_fallback(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    analysis_model["error"] = requests.Timeout("timed out")
+
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["briefing"] is None
+    assert result["briefing_source"] == "deterministic_only"
+
+
+def test_analysis_model_invalid_json_fallback(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    analysis_model["content"] = "not json at all"
+
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["briefing"] is None
+    assert result["briefing_source"] == "deterministic_only"
+
+
+def test_analysis_model_malformed_shape_fallback(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    analysis_model["content"] = '{"summary": "", "other": 1}'
+
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["briefing"] is None
+    assert result["briefing_source"] == "deterministic_only"
+
+
+def test_analysis_cached_by_query_goal_model(http, analysis_model):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    args = {
+        "dataset": "otcMarket/consolidatedShortInterest",
+        "ticker": "AAPL",
+        "analysis_goal": "Trend direction?",
+    }
+    for _ in range(2):
+        result = execute_tool("query_finra", args, model="test")
+        assert "error" not in result, result
+        assert result["briefing_source"] == "analysis_model"
+    assert len(analysis_model["calls"]) == 1  # second call served from cache
+
+    # A different analysis goal bypasses the cache.
+    execute_tool(
+        "query_finra",
+        {**args, "analysis_goal": "Level vs prior cycle?"},
+        model="test",
+    )
+    assert len(analysis_model["calls"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# get_finra_datapoints: exact data on request
+# ---------------------------------------------------------------------------
+
+
+def test_datapoints_missing_fields_rejected(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+    assert "error" in result
+    assert "fields" in result["error"]
+    assert http["post"].call_count == 1  # no data POST
+
+
+def test_datapoints_empty_fields_rejected(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": [],
+            "ticker": "AAPL",
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "fields" in result["error"]
+
+
+def test_datapoints_unbounded_rejected(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "narrowing" in result["error"]
+    assert http["post"].call_count == 1  # no data POST
+
+
+def test_datapoints_unknown_field_rejected(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["notARealField"],
+            "ticker": "AAPL",
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "notARealField" in result["error"]
+    assert "symbolCode" in result["error"]  # known fields listed
+
+
+def test_datapoints_forwards_only_selected_fields(http):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate", "currentShortPositionQuantity"],
+            "ticker": "AAPL",
+            "limit": 2,
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    body = _data_body(http["post"])
+    assert body["fields"] == ["settlementDate", "currentShortPositionQuantity"]
+    assert set(result["records"][0]) == {
+        "settlementDate",
+        "currentShortPositionQuantity",
+    }
+    assert result["returned_count"] == 2
+
+
+def test_datapoints_default_limit_ten_and_max_twenty_five(http):
+    rows = _short_interest_rows(30)
+    http["post"].side_effect = [_token_response(), _response(rows), _response(rows)]
+    default_result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+            "ticker": "AAPL",
+        },
+        model="test",
+    )
+    assert "error" not in default_result, default_result
+    assert _data_body(http["post"])["limit"] == 10
+    assert default_result["returned_count"] == 10
+
+    big_result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+            "ticker": "AAPL",
+            "limit": 999,
+        },
+        model="test",
+    )
+    assert "error" not in big_result, big_result
+    assert _data_body(http["post"])["limit"] == 25
+    assert big_result["returned_count"] == 25
+
+
+def test_datapoints_pagination_metadata(http):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [
+        _token_response(),
+        _response(rows, headers={"Record-Total": "9"}),
+    ]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+            "ticker": "AAPL",
+            "limit": 2,
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["total_records"] == 9
+    assert result["may_have_more"] is True
+    assert result["pagination_source"] == "finra_header"
+    assert result["next_offset"] == 2
+    # Datapoints is the exact-data path: raw selected fields are expected.
+    assert result["records"][0]["settlementDate"] == "2026-08-14"
+
+
+def test_datapoints_sort_fields_in_payload(http):
+    rows = _short_interest_rows(2)
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate", "currentShortPositionQuantity"],
+            "ticker": "AAPL",
+            "limit": 5,
+            "sort_fields": ["-settlementDate"],
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    body = _data_body(http["post"])
+    assert body["sortFields"] == ["-settlementDate"]
+    assert result["sort_fields"] == ["-settlementDate"]
+
+
+def test_datapoints_invalid_sort_field_rejected_before_http(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+            "ticker": "AAPL",
+            "sort_fields": ["-notARealField"],
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "notARealField" in result["error"]
+    assert "settlementDate" in result["error"]  # known fields listed
+    assert http["post"].call_count == 1  # no data POST
+
+
+def test_datapoints_sort_order_requires_date_field(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "finra/industrySnapshotFirmsByRegistrationType",
+            "fields": ["registrationTypeCode"],
+            "filters": [{"field": "registrationTypeCode", "value": "BD"}],
+            "sort_order": "desc",
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "no date field" in result["error"]
+    assert "sort_fields" in result["error"]
+    assert http["post"].call_count == 1  # no data POST
+
+
+def test_datapoints_sort_order_and_sort_fields_conflict(http):
+    http["post"].side_effect = [_token_response()]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate"],
+            "ticker": "AAPL",
+            "sort_fields": ["-settlementDate"],
+            "sort_order": "desc",
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "not both" in result["error"]
+    assert http["post"].call_count == 1
+
+
+def test_datapoints_latest_five_returns_descending_dates(http):
+    # Mock returns rows unordered; the client must deterministically order
+    # newest-first for a 'latest five' style request.
+    rows = [
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 100},
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-10", "currentShortPositionQuantity": 500},
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-01", "currentShortPositionQuantity": 900},
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 700},
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-12", "currentShortPositionQuantity": 300},
+    ]
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": ["settlementDate", "currentShortPositionQuantity"],
+            "ticker": "AAPL",
+            "limit": 5,
+            "sort_order": "desc",
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+    assert _data_body(http["post"])["sortFields"] == ["-settlementDate"]
+    dates = [r["settlementDate"] for r in result["records"]]
+    assert dates == sorted(dates, reverse=True)
+    assert dates[0] == "2026-08-14"
+
+
+def test_datapoints_more_than_ten_fields_rejected(http):
+    http["post"].side_effect = [_token_response()]
+    fields = [
+        "issueSymbolIdentifier", "issueName", "firmCRDNumber", "MPID",
+        "marketParticipantName", "tierIdentifier", "tierDescription",
+        "summaryStartDate", "totalWeeklyTradeCount", "totalWeeklyShareQuantity",
+        "productTypeCode",  # 11th valid field on weeklySummary
+    ]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/weeklySummary",
+            "fields": fields,
+            "ticker": "AAPL",
+        },
+        model="test",
+    )
+    assert "error" in result
+    assert "10" in result["error"]
+    assert http["post"].call_count == 1  # no data POST
+
+
+def test_datapoints_ten_fields_accepted(http):
+    rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14"}]
+    http["post"].side_effect = [_token_response(), _response(rows)]
+    fields = [
+        "symbolCode", "issueName", "settlementDate",
+        "currentShortPositionQuantity", "previousShortPositionQuantity",
+        "averageDailyVolumeQuantity", "daysToCoverQuantity",
+        "shortInterestChangePercentage",
+    ]
+    result = execute_tool(
+        "get_finra_datapoints",
+        {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "fields": fields,
+            "ticker": "AAPL",
+        },
+        model="test",
+    )
+    assert "error" not in result, result
+
+
+# ---------------------------------------------------------------------------
+# Schema / dispatch parity includes the new tool
+# ---------------------------------------------------------------------------
+
+
+def test_finra_schema_dispatch_parity():
+    finra_names = {
+        "get_short_interest",
+        "get_reg_sho_volume",
+        "get_threshold_securities",
+        "list_finra_datasets",
+        "describe_finra_dataset",
+        "get_finra_datapoints",
+        "query_finra",
+    }
+    schema_names = {t["function"]["name"] for t in tools_module.TOOLS}
+    assert finra_names <= schema_names, "FINRA schema missing from TOOLS"
+    assert set(tools_module._FINRA_HANDLERS) == finra_names, (
+        "FINRA dispatch registry out of sync with schemas"
+    )
+    assert all(callable(h) for h in tools_module._FINRA_HANDLERS.values())

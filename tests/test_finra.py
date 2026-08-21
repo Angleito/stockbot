@@ -31,11 +31,12 @@ def _load_metadata(group: str, name: str):
     return json.loads(path.read_text())
 
 
-def _response(payload=None, status: int = 200) -> MagicMock:
+def _response(payload=None, status: int = 200, headers: dict | None = None) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.json.return_value = payload
     resp.text = json.dumps(payload) if payload is not None else ""
+    resp.headers = headers or {}
     if status >= 400:
         resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
     else:
@@ -79,6 +80,8 @@ def _mock_get(url, **_kwargs) -> MagicMock:
 @pytest.fixture(autouse=True)
 def _isolation(monkeypatch):
     monkeypatch.setenv("FINRA_USE_MOCK", "")
+    # Never let the analysis layer reach a live secondary model in offline tests.
+    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "")
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
     yield
@@ -125,6 +128,7 @@ def test_short_interest_payload(http):
     records = [
         {
             "symbolCode": "AAPL",
+            "issueName": "Apple Inc.",
             "settlementDate": "2026-08-14",
             "currentShortPositionQuantity": 100,
             "daysToCoverQuantity": 1.2,
@@ -141,12 +145,29 @@ def test_short_interest_payload(http):
     assert "error" not in result, result
     assert result["dataset"] == "consolidatedShortInterest"
     assert result["group"] == "otcMarket"
-    assert result["records"] == records
+    assert "records" not in result
     assert "FINRA" in result["source"]
     assert result["returned_count"] == 1
     assert result["offset"] == 0
     assert result["next_offset"] == 1
     assert result["may_have_more"] is False
+    # Briefing shape: coverage + deterministic metrics, no raw rows.
+    assert result["coverage"]["rows_matched"] == 1
+    assert result["coverage"]["complete"] is True
+    assert result["coverage"]["first_date"] == "2026-08-14"
+    assert result["metrics"]["fields"]["currentShortPositionQuantity"] == {
+        "min": 100, "max": 100, "mean": 100, "median": 100, "sum": 100
+    }
+    assert result["metrics"]["latest_vs_prior"] == []
+    assert result["briefing"] is None
+    assert result["briefing_source"] == "deterministic_only"
+    assert result["total_records"] is None
+    assert result["pagination_source"] == "estimate"
+    # The main model's tool message must never contain raw records.
+    serialized = json.dumps(result)
+    assert '"records":' not in serialized
+    assert '"symbolCode": "AAPL"' not in serialized
+    assert '"issueName": "Apple Inc."' not in serialized
 
     # posts: one token (catalog auth) + one data query.
     assert http["post"].call_count == 2
@@ -217,6 +238,11 @@ def test_full_catalog_describe_query_flow(http):
         "fieldValue": "2026-08-14",
     } in body["compareFilters"]
     assert queried["returned_count"] == 1
+    assert "records" not in queried
+    assert queried["coverage"]["rows_matched"] == 1
+    assert queried["coverage"]["first_date"] == "2026-08-14"
+    assert queried["coverage"]["last_date"] == "2026-08-14"
+    assert queried["briefing_source"] == "deterministic_only"
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +618,10 @@ def test_ambiguous_bare_name(http):
 def test_industry_snapshot_queries_dataset(http):
     http["post"].side_effect = [
         _token_response(),
-        _response([{"registrationTypeCode": "BD", "firmCount": 10}]),
+        _response([
+            {"registrationTypeCode": "BD", "firmCount": 10},
+            {"registrationTypeCode": "IA", "firmCount": 25},
+        ]),
     ]
     result = execute_tool(
         "query_finra",
@@ -607,7 +636,14 @@ def test_industry_snapshot_queries_dataset(http):
     assert data_url.endswith(
         "/data/group/finra/name/industrySnapshotFirmsByRegistrationType"
     )
-    assert result["records"][0]["firmCount"] == 10
+    assert "records" not in result
+    assert result["metrics"]["fields"]["firmCount"] == {
+        "min": 10, "max": 25, "mean": 17.5, "median": 17.5, "sum": 35
+    }
+    assert result["metrics"]["categorical"]["registrationTypeCode"] == {
+        "IA": 1,
+        "BD": 1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +667,8 @@ def test_pagination_valid_full_page(http):
     assert result["offset"] == 100
     assert result["next_offset"] == 150
     assert result["may_have_more"] is True
+    assert result["total_records"] is None
+    assert result["pagination_source"] == "estimate"
 
 
 def test_pagination_partial_page(http):
@@ -645,6 +683,45 @@ def test_pagination_partial_page(http):
     assert result["returned_count"] == 2
     assert result["next_offset"] == 102
     assert result["may_have_more"] is False
+
+
+def test_pagination_header_driven(http):
+    records = [{"issueSymbolIdentifier": f"S{i}"} for i in range(2)]
+    http["post"].side_effect = [
+        _token_response(),
+        _response(records, headers={
+            "Record-Total": "5",
+            "Record-Offset": "0",
+            "Record-Limit": "2",
+            "Record-Max-Limit": "1000",
+        }),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/weeklySummary", "limit": 2},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["total_records"] == 5
+    assert result["may_have_more"] is True
+    assert result["pagination_source"] == "finra_header"
+
+
+def test_pagination_header_driven_exhausted(http):
+    records = [{"issueSymbolIdentifier": f"S{i}"} for i in range(5)]
+    http["post"].side_effect = [
+        _token_response(),
+        _response(records, headers={"Record-Total": "5"}),
+    ]
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/weeklySummary", "limit": 5, "offset": 0},
+        model="test",
+    )
+    assert "error" not in result, result
+    assert result["total_records"] == 5
+    assert result["may_have_more"] is False
+    assert result["pagination_source"] == "finra_header"
 
 
 @pytest.mark.parametrize("offset", [-1, -100])
@@ -909,6 +986,7 @@ def test_finra_schema_dispatch_parity():
         "get_threshold_securities",
         "list_finra_datasets",
         "describe_finra_dataset",
+        "get_finra_datapoints",
         "query_finra",
     }
     schema_names = {t["function"]["name"] for t in tools_module.TOOLS}
