@@ -14,6 +14,41 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
 
+_UNAVAILABLE_HEADER = (
+    "The requested data is unavailable: one or more tool calls failed or "
+    "returned no data, so the exact values cannot be provided. No values "
+    "are estimated, derived, or substituted."
+)
+
+_UNAVAILABLE_NEXT_STEP = (
+    "Next step: correct the request (dataset, fields, filters, or "
+    "credentials) and retry, or use a different dataset/source. The error "
+    "above states exactly what failed."
+)
+
+
+def _is_failed_result(result) -> bool:
+    """A tool result is a failure when it carries an explicit error."""
+    return isinstance(result, dict) and bool(result.get("error"))
+
+
+def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
+    """Deterministic user-facing response when any tool call failed.
+
+    Built from the rendered error context of each failed tool (name,
+    dataset/source, HTTP status, sanitized FINRA response, environment)
+    plus a next step. The model is never consulted, so nothing can be
+    invented, derived, or substituted to fill the gap.
+    """
+    lines = [_UNAVAILABLE_HEADER, ""]
+    for name, result in failed:
+        lines.append(f"Tool: {name}")
+        for line in render_tool_result(result).splitlines():
+            lines.append("  " + line)
+        lines.append("")
+    lines.append(_UNAVAILABLE_NEXT_STEP)
+    return "\n".join(lines)
+
 
 def _call_openrouter(model: str, messages: list) -> dict:
     resp = requests.post(
@@ -89,6 +124,7 @@ def run_chat(
 
         # Append the assistant message that requested the tools, then results.
         msgs.append(message)
+        failed_tools: list[tuple[str, dict]] = []
         for tc in tool_calls:
             fn = tc["function"]
             name = fn["name"]
@@ -101,11 +137,25 @@ def run_chat(
                 tool_trace.append(name)
                 detailed_trace.append({"name": name, "arguments": arguments})
             result = execute_tool(name, arguments, model)
+            if _is_failed_result(result):
+                failed_tools.append((name, result))
             msgs.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
                 "content": render_tool_result(result),
             })
+        if failed_tools:
+            # Strict failed-tool rule: stop the tool loop before another
+            # model completion can invent, derive, or substitute values.
+            # The deterministic unavailable-data response is returned as-is;
+            # successful sibling results stay in the transcript but never
+            # fill the failed request's gap.
+            response = _unavailable_data_response(failed_tools)
+            if return_detailed_trace:
+                return response, detailed_trace
+            if return_trace:
+                return response, tool_trace
+            return response
 
     # Unreachable, but keep a safe return.
     if return_detailed_trace:
