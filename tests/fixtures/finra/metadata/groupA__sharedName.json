@@ -1,0 +1,12 @@
+{
+  "datasetGroup": "GROUPA",
+  "datasetName": "SHAREDNAME",
+  "partitionFields": [],
+  "fields": [
+    {
+      "name": "id",
+      "type": "String",
+      "description": "Primary identifier"
+    }
+  ]
+}

@@ -6,6 +6,9 @@ from app.agent import run_chat
 from app.config import get_default_model
 from app.tools import get_earnings_summary
 
+# All tests in this module call live SEC EDGAR and/or OpenRouter.
+pytestmark = pytest.mark.integration
+
 
 def test_earnings_retrieval_aapl():
     """Verify earnings retrieval works for AAPL and includes source attribution."""

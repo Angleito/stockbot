@@ -1,0 +1,22 @@
+{
+  "datasetGroup": "FINRA",
+  "datasetName": "INDUSTRYSNAPSHOTFIRMSBYREGISTRATIONTYPE",
+  "partitionFields": [],
+  "fields": [
+    {
+      "name": "registrationTypeCode",
+      "type": "String",
+      "description": "Registration type code (e.g. BD, IA)"
+    },
+    {
+      "name": "registrationTypeDescription",
+      "type": "String",
+      "description": "Registration type description"
+    },
+    {
+      "name": "firmCount",
+      "type": "Long",
+      "description": "Number of firms with the registration type"
+    }
+  ]
+}

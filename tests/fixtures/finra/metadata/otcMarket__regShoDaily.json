@@ -1,0 +1,38 @@
+{
+  "datasetGroup": "OTCMARKET",
+  "datasetName": "REGSHODAILY",
+  "partitionFields": ["tradeReportDate"],
+  "fields": [
+    {
+      "name": "tradeReportDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Date of the trade reports"
+    },
+    {
+      "name": "securitiesInformationProcessorSymbolIdentifier",
+      "type": "String",
+      "description": "SIP symbol identifier"
+    },
+    {
+      "name": "issueName",
+      "type": "String",
+      "description": "Company name associated with the symbol"
+    },
+    {
+      "name": "shortParQuantity",
+      "type": "Long",
+      "description": "Aggregate short par quantity reported"
+    },
+    {
+      "name": "shortExemptParQuantity",
+      "type": "Long",
+      "description": "Aggregate short exempt par quantity reported"
+    },
+    {
+      "name": "totalParQuantity",
+      "type": "Long",
+      "description": "Aggregate total par quantity reported"
+    }
+  ]
+}

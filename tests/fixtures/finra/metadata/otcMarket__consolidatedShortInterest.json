@@ -1,0 +1,48 @@
+{
+  "datasetGroup": "OTCMARKET",
+  "datasetName": "CONSOLIDATEDSHORTINTEREST",
+  "partitionFields": ["settlementDate"],
+  "fields": [
+    {
+      "name": "settlementDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Settlement date for the short interest cycle"
+    },
+    {
+      "name": "symbolCode",
+      "type": "String",
+      "description": "Symbol"
+    },
+    {
+      "name": "issueName",
+      "type": "String",
+      "description": "Company name associated with the symbol"
+    },
+    {
+      "name": "currentShortPositionQuantity",
+      "type": "Long",
+      "description": "Total number of shares sold short as of the current settlement date"
+    },
+    {
+      "name": "previousShortPositionQuantity",
+      "type": "Long",
+      "description": "Total number of shares sold short as of the prior settlement date"
+    },
+    {
+      "name": "averageDailyVolumeQuantity",
+      "type": "Long",
+      "description": "Average daily volume for the settlement cycle"
+    },
+    {
+      "name": "daysToCoverQuantity",
+      "type": "Decimal",
+      "description": "Current short position quantity divided by average daily volume"
+    },
+    {
+      "name": "shortInterestChangePercentage",
+      "type": "Decimal",
+      "description": "Change in short interest from the prior settlement date"
+    }
+  ]
+}

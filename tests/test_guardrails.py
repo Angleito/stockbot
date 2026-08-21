@@ -6,6 +6,9 @@ import pytest
 from app.agent import run_chat
 from app.config import get_default_model
 
+# Calls live OpenRouter via the agent loop.
+pytestmark = pytest.mark.integration
+
 
 def test_guardrail_obscure_or_invalid_ticker():
     """Eval Q9 as an isolated automated guardrail test.

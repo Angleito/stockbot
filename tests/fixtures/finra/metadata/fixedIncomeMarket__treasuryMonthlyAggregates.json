@@ -1,0 +1,28 @@
+{
+  "datasetGroup": "FIXEDINCOMEMARKET",
+  "datasetName": "TREASURYMONTHLYAGGREGATES",
+  "partitionFields": ["beginningOfTheMonthDate"],
+  "fields": [
+    {
+      "name": "beginningOfTheMonthDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "First business day of the month"
+    },
+    {
+      "name": "productCategory",
+      "type": "String",
+      "description": "Treasury product category (Bills, Notes, Bonds, TIPS, FRN)"
+    },
+    {
+      "name": "totalParAmountTraded",
+      "type": "Long",
+      "description": "Total par amount traded in USD"
+    },
+    {
+      "name": "totalTradeCount",
+      "type": "Long",
+      "description": "Total number of trades"
+    }
+  ]
+}

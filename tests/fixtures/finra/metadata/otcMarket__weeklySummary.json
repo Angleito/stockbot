@@ -1,0 +1,92 @@
+{
+  "datasetGroup": "OTCMARKET",
+  "datasetName": "WEEKLYSUMMARY",
+  "partitionFields": ["weekStartDate", "tierIdentifier"],
+  "fields": [
+    {
+      "name": "issueSymbolIdentifier",
+      "type": "String",
+      "description": "Assigned by the NASDAQ listing market and ACT Symbol for Other Exchange Listed (NMS stocks), or by FINRA (OTCE securities)."
+    },
+    {
+      "name": "issueName",
+      "type": "String",
+      "description": "Company name associated with the Symbol"
+    },
+    {
+      "name": "firmCRDNumber",
+      "type": "Number",
+      "description": "Firm CRD Number"
+    },
+    {
+      "name": "MPID",
+      "type": "String",
+      "description": "ATS/OTC identifier"
+    },
+    {
+      "name": "marketParticipantName",
+      "type": "String",
+      "description": "Company name of the ATS/OTC or De Minimis Firm"
+    },
+    {
+      "name": "tierIdentifier",
+      "type": "String",
+      "description": "T1 - S&P 500/Russell 1000; T2 - all other NMS stocks; OTC - Over-the-Counter equity securities"
+    },
+    {
+      "name": "tierDescription",
+      "type": "String",
+      "description": "NMS Tier 1 / NMS Tier 2 / OTCE description"
+    },
+    {
+      "name": "summaryStartDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Report Start Date (Monday)"
+    },
+    {
+      "name": "totalWeeklyTradeCount",
+      "type": "Number",
+      "description": "Aggregate weekly total number of trades reported by each ATS for the Symbol"
+    },
+    {
+      "name": "totalWeeklyShareQuantity",
+      "type": "Number",
+      "description": "Aggregate weekly total number of shares reported by each ATS for the Symbol"
+    },
+    {
+      "name": "productTypeCode",
+      "type": "String",
+      "description": "Product Type"
+    },
+    {
+      "name": "summaryTypeCode",
+      "type": "String",
+      "description": "Report Type Identifier (OTC_W_FIRM, OTC_W_SMBL, OTC_W_SMBL_FIRM, OTC_W_VOL_STATS, ATS_W_FIRM, ATS_W_SMBL, ATS_W_SMBL_FIRM, ATS_W_VOL_STATS)"
+    },
+    {
+      "name": "weekStartDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Partition Key - the first business day of the week (Monday)"
+    },
+    {
+      "name": "lastUpdateDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Most recent date on which total trades is updated"
+    },
+    {
+      "name": "initialPublishedDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "The initial publish date based on the reporting delay"
+    },
+    {
+      "name": "lastReportedDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "The last time a firm sent an update to any underlying data"
+    }
+  ]
+}

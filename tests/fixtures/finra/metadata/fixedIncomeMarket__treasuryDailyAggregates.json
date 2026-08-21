@@ -1,0 +1,33 @@
+{
+  "datasetGroup": "FIXEDINCOMEMARKET",
+  "datasetName": "TREASURYDAILYAGGREGATES",
+  "partitionFields": ["tradeDate"],
+  "fields": [
+    {
+      "name": "tradeDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Trade date"
+    },
+    {
+      "name": "productCategory",
+      "type": "String",
+      "description": "Treasury product category (Bills, Notes, Bonds, TIPS, FRN)"
+    },
+    {
+      "name": "totalParAmountTraded",
+      "type": "Long",
+      "description": "Total par amount traded in USD"
+    },
+    {
+      "name": "totalTradeCount",
+      "type": "Long",
+      "description": "Total number of trades"
+    },
+    {
+      "name": "averageTradeSize",
+      "type": "Long",
+      "description": "Average trade size in USD"
+    }
+  ]
+}

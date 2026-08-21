@@ -1,0 +1,23 @@
+{
+  "datasetGroup": "OTCMARKET",
+  "datasetName": "THRESHOLDLIST",
+  "partitionFields": ["tradeDate"],
+  "fields": [
+    {
+      "name": "tradeDate",
+      "type": "Date",
+      "format": "yyyy-MM-dd",
+      "description": "Trade date of the threshold list publication"
+    },
+    {
+      "name": "issueSymbolIdentifier",
+      "type": "String",
+      "description": "Symbol of the threshold security"
+    },
+    {
+      "name": "issueName",
+      "type": "String",
+      "description": "Company name associated with the symbol"
+    }
+  ]
+}
