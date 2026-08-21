@@ -11,7 +11,7 @@ from .tools import TOOLS, execute_tool
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 8
 
 
 def _call_openrouter(model: str, messages: list) -> dict:

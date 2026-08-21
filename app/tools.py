@@ -6,6 +6,7 @@ import logging
 import requests
 
 from . import edgar_client
+from . import finra_client
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .prompts import READING_PROMPT_TEMPLATE
 
@@ -117,6 +118,182 @@ TOOLS = [
                 "required": ["ticker", "concept"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_short_interest",
+            "description": "Returns FINRA consolidated short interest for a ticker "
+                "(current/previous short position, days to cover, average daily "
+                "volume, percent change). Call for short interest, short float, "
+                "or days-to-cover questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "settlementDate": {
+                        "type": "string",
+                        "description": "Optional settlement date YYYY-MM-DD. "
+                        "Omit to return recent cycles."
+                    }
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_reg_sho_volume",
+            "description": "Returns FINRA daily Reg SHO short-sale volume for a "
+                "ticker (short, short-exempt, and total share quantity by "
+                "reporting facility). Rolling 12 months.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "tradeDate": {
+                        "type": "string",
+                        "description": "Optional trade date YYYY-MM-DD."
+                    }
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_threshold_securities",
+            "description": "Returns FINRA OTC Regulation SHO / Rule 4320 "
+                "threshold securities. Optionally filter by ticker and date.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "tradeDate": {
+                        "type": "string",
+                        "description": "Optional trade date YYYY-MM-DD."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_finra_datasets",
+            "description": "Lists public FINRA Query API datasets (filing cabinet "
+                "catalog): concise entries with canonical id group/name, group, "
+                "description, and ticker/date support. Optional group or search "
+                "filters. Call first when you are unsure which FINRA dataset to use; "
+                "then describe_finra_dataset before query_finra.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group": {
+                        "type": "string",
+                        "description": "Optional dataset group filter "
+                        "(e.g. otcMarket, fixedIncomeMarket, finra)."
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Optional substring match on name/description."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_finra_dataset",
+            "description": "Describes one FINRA dataset: fields with types and "
+                "descriptions, ticker/date fields, documented filter values, and "
+                "supported methods. Call after list_finra_datasets and before "
+                "query_finra when the dataset is unfamiliar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset_id": {
+                        "type": "string",
+                        "description": "Canonical group/name "
+                        "(e.g. otcMarket/consolidatedShortInterest). "
+                        "Legacy bare names are accepted when unambiguous."
+                    }
+                },
+                "required": ["dataset_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_finra",
+            "description": "Queries a FINRA dataset by canonical group/name "
+                "(or legacy bare name). Prefer get_short_interest / "
+                "get_reg_sho_volume / get_threshold_securities for those "
+                "specific questions. For unfamiliar datasets: list_finra_datasets "
+                "→ describe_finra_dataset → query_finra with a bounded limit. "
+                "Successful results include returned_count, offset, next_offset "
+                "and may_have_more for bounded pagination.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {
+                        "type": "string",
+                        "description": "Canonical id group/name "
+                        "(e.g. fixedIncomeMarket/treasuryDailyAggregates). "
+                        "Legacy bare names accepted when unambiguous."
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Issue symbol when the dataset is symbol-level."
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD. Combined with end_date as a range."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max records to return (clamped to 1..1000)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "0-based record offset for pagination "
+                        "(FINRA max 500000). Rejected for datasets whose "
+                        "catalog entry has supportsRecordOffset=false."
+                    },
+                    "filters": {
+                        "type": "array",
+                        "description": "Extra compare filters (field names must "
+                        "exist on the dataset — call describe_finra_dataset first).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": {"type": "string"},
+                                "op": {
+                                    "type": "string",
+                                    "enum": [
+                                        "EQUAL", "GREATER", "LESSER",
+                                        "GTE", "LTE", "NOT_EQUAL", "BEGINS_WITH"
+                                    ]
+                                },
+                                "value": {"type": "string"}
+                            },
+                            "required": ["field", "value"]
+                        }
+                    }
+                },
+                "required": ["dataset"]
+            }
+        }
     }
 ]
 
@@ -169,6 +346,36 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
     return result
 
 
+# FINRA dispatch registry — kept next to the FINRA tool schemas above so the
+# parity test can prove every FINRA schema has an executable dispatcher.
+_FINRA_HANDLERS = {
+    "get_short_interest": lambda args, model: finra_client.get_short_interest(
+        args["ticker"], args.get("settlementDate")
+    ),
+    "get_reg_sho_volume": lambda args, model: finra_client.get_reg_sho_volume(
+        args["ticker"], args.get("tradeDate")
+    ),
+    "get_threshold_securities": lambda args, model: finra_client.get_threshold_securities(
+        args.get("ticker"), args.get("tradeDate")
+    ),
+    "list_finra_datasets": lambda args, model: finra_client.list_datasets(
+        group=args.get("group"), search=args.get("search")
+    ),
+    "describe_finra_dataset": lambda args, model: finra_client.describe_dataset(
+        args.get("dataset_id") or args.get("dataset")
+    ),
+    "query_finra": lambda args, model: finra_client.query_dataset(
+        args["dataset"],
+        ticker=args.get("ticker") or args.get("symbol"),
+        start_date=args.get("start_date"),
+        end_date=args.get("end_date"),
+        limit=args.get("limit"),
+        offset=args.get("offset"),
+        filters=args.get("filters"),
+    ),
+}
+
+
 def execute_tool(name: str, arguments: dict, model: str) -> dict:
     """Dispatch a tool call by name. Always returns a JSON-serializable dict;
     never raises — errors are returned as {"error": ...} so the model can
@@ -194,6 +401,8 @@ def execute_tool(name: str, arguments: dict, model: str) -> dict:
             return get_earnings_summary(arguments["ticker"], model)
         if name == "diff_risk_factors":
             return edgar_client.diff_risk_factors(arguments["ticker"])
+        if name in _FINRA_HANDLERS:
+            return _FINRA_HANDLERS[name](arguments, model)
         return {"error": f"Unknown tool '{name}'"}
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
