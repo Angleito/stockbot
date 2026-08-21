@@ -45,6 +45,13 @@ Rules:
     (3) query_finra with a bounded limit and only documented filter fields.
     For more records, paginate with offset using the returned next_offset /
     may_have_more indicators instead of requesting a huge limit.
+  * query_finra returns an analyzed briefing (provenance, coverage,
+    deterministic metrics, trends, warnings, prose briefing) — never raw
+    records. Answer from the briefing; do not ask for a 'records' list.
+  * Use get_finra_datapoints ONLY when the user explicitly asks to see
+    exact source values (e.g. 'show the last five settlement-date values').
+    It requires a fields list and a narrowing condition (ticker, date, or
+    filter) and returns at most 25 rows.
   * If FINRA data is not public or credentials lack access, say so plainly
     (do not invent figures)."""
 

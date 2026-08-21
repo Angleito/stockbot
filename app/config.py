@@ -47,6 +47,15 @@ def get_default_model() -> str:
     return os.getenv("DEFAULT_MODEL", FALLBACK_MODEL)
 
 
+def get_finra_analysis_model() -> Optional[str]:
+    """Secondary low-cost OpenRouter model used to phrase FINRA briefings.
+
+    Optional: when unset (or blank), FINRA analysis is deterministic-only.
+    """
+    value = (os.getenv("FINRA_ANALYSIS_MODEL") or "").strip()
+    return value or None
+
+
 def get_openrouter_api_key() -> str:
     return _require_env("OPENROUTER_API_KEY")
 

@@ -231,14 +231,111 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_finra_datapoints",
+            "description": "Returns exact source values from a FINRA dataset "
+                "for explicit data requests ONLY (e.g. 'show the last five "
+                "settlement-date values'). Requires a 'fields' list and at "
+                "least one narrowing condition (ticker, date/date range, or "
+                "filters). For 'latest five' / 'last five' / 'most recent' "
+                "requests, add sort_fields [\"-<dateField>\"] or "
+                "sort_order \"desc\" so the newest rows come first. Do NOT "
+                "use for ordinary analysis — query_finra "
+                "and the specific helper tools return analyzed briefings "
+                "instead. Returns at most 25 rows containing only the "
+                "requested fields. Exact source values are guaranteed for "
+                "normal scalar data; oversized text fields are rendered as "
+                "a marked excerpt (table cells are capped at 200 characters "
+                "to keep the tool message compact).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {
+                        "type": "string",
+                        "description": "Canonical id group/name "
+                        "(e.g. otcMarket/consolidatedShortInterest). "
+                        "Legacy bare names accepted when unambiguous."
+                    },
+                    "fields": {
+                        "type": "array",
+                        "description": "Exact field names to return. Call "
+                        "describe_finra_dataset first to see valid fields.",
+                        "items": {"type": "string"},
+                        "minItems": 1
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Issue symbol when the dataset is symbol-level."
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD. Combined with end_date as a range."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD."
+                    },
+                    "filters": {
+                        "type": "array",
+                        "description": "Extra compare filters (field names must "
+                        "exist on the dataset — call describe_finra_dataset first).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": {"type": "string"},
+                                "op": {
+                                    "type": "string",
+                                    "enum": [
+                                        "EQUAL", "GREATER", "LESSER",
+                                        "GTE", "LTE", "NOT_EQUAL", "BEGINS_WITH"
+                                    ]
+                                },
+                                "value": {"type": "string"}
+                            },
+                            "required": ["field", "value"]
+                        }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return (clamped to 1..25; "
+                        "default 10)."
+                    },
+                    "sort_fields": {
+                        "type": "array",
+                        "description": "FINRA sortFields syntax: '+field' "
+                        "ascending, '-field' descending, e.g. "
+                        "[\"-settlementDate\"] returns newest first. Use for "
+                        "'latest five' / 'last five' / 'most recent' data "
+                        "requests. Fields must exist on the dataset.",
+                        "items": {"type": "string"}
+                    },
+                    "sort_order": {
+                        "type": "string",
+                        "enum": ["asc", "desc"],
+                        "description": "Convenience: sort by the dataset's "
+                        "date field ('desc' = newest first, for 'latest "
+                        "five' requests). Rejected when the dataset has no "
+                        "date field — use sort_fields instead."
+                    }
+                },
+                "required": ["dataset", "fields"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_finra",
             "description": "Queries a FINRA dataset by canonical group/name "
-                "(or legacy bare name). Prefer get_short_interest / "
-                "get_reg_sho_volume / get_threshold_securities for those "
+                "(or legacy bare name) and returns an analyzed briefing: "
+                "query provenance, coverage dates, deterministic metrics "
+                "(min/max/mean/median/sum, latest-vs-prior change), derived "
+                "trends, data-quality warnings, and a concise prose briefing. "
+                "Raw source records are NOT returned. Prefer get_short_interest "
+                "/ get_reg_sho_volume / get_threshold_securities for those "
                 "specific questions. For unfamiliar datasets: list_finra_datasets "
                 "→ describe_finra_dataset → query_finra with a bounded limit. "
-                "Successful results include returned_count, offset, next_offset "
-                "and may_have_more for bounded pagination.",
+                "Use get_finra_datapoints only when the user explicitly asks "
+                "to see exact source values.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -289,6 +386,12 @@ TOOLS = [
                             },
                             "required": ["field", "value"]
                         }
+                    },
+                    "analysis_goal": {
+                        "type": "string",
+                        "description": "Optional: what the user needs answered "
+                        "(e.g. 'trend over the last 12 months'). Guides the "
+                        "briefing; deterministic metrics are always computed."
                     }
                 },
                 "required": ["dataset"]
@@ -364,6 +467,17 @@ _FINRA_HANDLERS = {
     "describe_finra_dataset": lambda args, model: finra_client.describe_dataset(
         args.get("dataset_id") or args.get("dataset")
     ),
+    "get_finra_datapoints": lambda args, model: finra_client.get_finra_datapoints(
+        args["dataset"],
+        fields=args.get("fields"),
+        ticker=args.get("ticker") or args.get("symbol"),
+        start_date=args.get("start_date"),
+        end_date=args.get("end_date"),
+        limit=args.get("limit"),
+        filters=args.get("filters"),
+        sort_fields=args.get("sort_fields"),
+        sort_order=args.get("sort_order"),
+    ),
     "query_finra": lambda args, model: finra_client.query_dataset(
         args["dataset"],
         ticker=args.get("ticker") or args.get("symbol"),
@@ -372,6 +486,7 @@ _FINRA_HANDLERS = {
         limit=args.get("limit"),
         offset=args.get("offset"),
         filters=args.get("filters"),
+        analysis_goal=args.get("analysis_goal"),
     ),
 }
 

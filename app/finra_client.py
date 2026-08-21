@@ -23,6 +23,7 @@ from .config import (
     get_finra_client_id,
     get_finra_client_secret,
 )
+from .finra_analysis import analyze_and_brief
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,18 @@ MAX_OFFSET = 500_000
 CACHE_TTL_SECONDS = 3600
 DISCOVERY_TTL_SECONDS = 86400
 TOKEN_SKEW_SECONDS = 60
+
+DATAPOINTS_DEFAULT_LIMIT = 10
+DATAPOINTS_MAX_LIMIT = 25
+DATAPOINTS_MAX_FIELDS = 10
+
+# FINRA record-pagination headers (requests lowercases header names).
+_RECORD_HEADERS = (
+    "record-total",
+    "record-offset",
+    "record-limit",
+    "record-max-limit",
+)
 
 _ALLOWED_COMPARE = {
     "EQUAL",
@@ -350,32 +363,24 @@ def query_dataset(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     filters: Optional[list[dict]] = None,
+    analysis_goal: Optional[str] = None,
 ) -> dict:
+    """Query a FINRA dataset and return an analyzed briefing.
+
+    The main model receives deterministic metrics, trends, warnings, and
+    (when configured) validated prose — never the raw records.
+    """
     try:
         entry = _resolve_dataset(dataset)
         spec = _get_dataset_spec(entry)
         payload = _build_payload(
             spec, entry, ticker, start_date, end_date, limit, filters, offset
         )
-        records = _cached_query(spec, payload)
+        records, headers = _cached_query(spec, payload)
     except ValueError as e:
         return {"error": str(e)}
     except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        body = e.response.text[:500] if e.response is not None else ""
-        logger.exception("FINRA HTTP error for dataset %s", dataset)
-        if status in (401, 403):
-            return {
-                "error": (
-                    f"FINRA returned {status} for dataset '{dataset}'. "
-                    "It may not be public or the configured credentials lack "
-                    "the required entitlement. Use list_finra_datasets to see "
-                    "available datasets, or omit this request."
-                )
-            }
-        return {
-            "error": f"FINRA request failed ({status if status is not None else '?'}): {body}"
-        }
+        return _http_error_result(dataset, e)
     except Exception as e:
         logger.exception("FINRA query failed for dataset %s", dataset)
         msg = str(e)
@@ -390,18 +395,325 @@ def query_dataset(
     effective_limit = int(payload.get("limit", DEFAULT_LIMIT))
     effective_offset = int(payload.get("offset", 0))
     returned_count = len(records)
+    pagination = _parse_pagination(headers, effective_offset, effective_limit, returned_count)
+
+    analysis = analyze_and_brief(
+        spec,
+        records,
+        analysis_goal,
+        _query_cache_key(spec, payload),
+        pagination=pagination,
+    )
     return {
         "dataset": spec.name,
         "group": spec.group,
         "dataset_id": spec.dataset_id,
-        "records": records,
+        "source": f"FINRA Query API {spec.group}/{spec.name}",
+        "query": {
+            "ticker": (ticker or "").strip().upper() or None,
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": effective_limit,
+            "offset": effective_offset,
+            "filters": filters,
+        },
+        "coverage": analysis["coverage"],
+        "metrics": analysis["metrics"],
+        "trends": analysis["trends"],
+        "warnings": analysis["warnings"],
+        "briefing": analysis["briefing"],
+        "briefing_source": analysis["briefing_source"],
+        "analysis_model": analysis["analysis_model"],
         "returned_count": returned_count,
         "limit": effective_limit,
         "offset": effective_offset,
         "next_offset": effective_offset + returned_count,
-        "may_have_more": returned_count >= effective_limit,
-        "source": f"FINRA Query API {spec.group}/{spec.name}",
+        "may_have_more": pagination["may_have_more"],
+        "total_records": pagination["total_records"],
+        "pagination_source": pagination["source"],
     }
+
+
+def get_finra_datapoints(
+    dataset: str,
+    fields: Optional[list[str]] = None,
+    ticker: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: Optional[int] = None,
+    filters: Optional[list[dict]] = None,
+    sort_fields: Optional[list[str]] = None,
+    sort_order: Optional[str] = None,
+) -> dict:
+    """Exact requested fields from FINRA source records (explicit data asks).
+
+    Requires a non-empty, metadata-validated fields list (at most
+    DATAPOINTS_MAX_FIELDS) and at least one narrowing condition (ticker,
+    date/date range, or filter). Returns only the selected fields per row,
+    capped at DATAPOINTS_MAX_LIMIT. Exact values are guaranteed for normal
+    scalar data; oversized text fields may be shown as a marked excerpt by
+    the rendering layer.
+
+    sort_fields uses FINRA sortFields syntax: '+field' ascending, '-field'
+    descending (e.g. ["-settlementDate"] for newest first). sort_order is a
+    convenience that sorts by the dataset's date field when one exists. When
+    exactly one sort field is requested, rows are re-ordered deterministically
+    before returning so 'latest five' style requests are stable regardless of
+    source ordering.
+    """
+    try:
+        entry = _resolve_dataset(dataset)
+        spec = _get_dataset_spec(entry)
+        selected = _validate_datapoint_fields(spec, fields)
+        _require_datapoint_narrowing(ticker, start_date, end_date, filters)
+        sort = _validate_sort(spec, sort_fields, sort_order)
+        payload = _build_payload(
+            spec,
+            entry,
+            ticker,
+            start_date,
+            end_date,
+            _clamp_datapoint_limit(limit),
+            filters,
+            fields=selected,
+            sort_fields=sort,
+        )
+        records, headers = _cached_query(spec, payload)
+    except ValueError as e:
+        return {"error": str(e)}
+    except requests.HTTPError as e:
+        return _http_error_result(dataset, e)
+    except Exception as e:
+        logger.exception("FINRA query failed for dataset %s", dataset)
+        msg = str(e)
+        if "FINRA_CLIENT" in msg or "catalog" in msg.lower():
+            return {"error": _catalog_error_message(e)}
+        return {"error": f"FINRA query failed: {e}"}
+
+    if not records:
+        what = ticker or dataset
+        return {"error": f"No data found for {what}: {spec.name}"}
+
+    effective_limit = int(payload.get("limit", DATAPOINTS_DEFAULT_LIMIT))
+    effective_offset = int(payload.get("offset", 0))
+    # Defensive cap: never surface more rows than the effective limit.
+    reduced = [_select_fields(row, selected) for row in records[:effective_limit]]
+    reduced = _apply_local_sort(reduced, sort)
+    pagination = _parse_pagination(headers, effective_offset, effective_limit, len(reduced))
+    result: dict[str, Any] = {
+        "dataset": spec.name,
+        "group": spec.group,
+        "dataset_id": spec.dataset_id,
+        "source": f"FINRA Query API {spec.group}/{spec.name}",
+        "fields": list(selected),
+        "records": reduced,
+        "returned_count": len(reduced),
+        "limit": effective_limit,
+        "offset": effective_offset,
+        "next_offset": effective_offset + len(reduced),
+        "may_have_more": pagination["may_have_more"],
+        "total_records": pagination["total_records"],
+        "pagination_source": pagination["source"],
+    }
+    if sort:
+        result["sort_fields"] = list(sort)
+    return result
+
+
+def _http_error_result(dataset: str, exc: requests.HTTPError) -> dict:
+    status = exc.response.status_code if exc.response is not None else None
+    body = exc.response.text[:500] if exc.response is not None else ""
+    logger.exception("FINRA HTTP error for dataset %s", dataset)
+    if status in (401, 403):
+        return {
+            "error": (
+                f"FINRA returned {status} for dataset '{dataset}'. "
+                "It may not be public or the configured credentials lack "
+                "the required entitlement. Use list_finra_datasets to see "
+                "available datasets, or omit this request."
+            )
+        }
+    return {
+        "error": f"FINRA request failed ({status if status is not None else '?'}): {body}"
+    }
+
+
+def _validate_datapoint_fields(spec: DatasetSpec, fields: Optional[list[str]]) -> list[str]:
+    if not fields or not isinstance(fields, list):
+        raise ValueError(
+            "get_finra_datapoints requires a non-empty 'fields' list. "
+            "Call describe_finra_dataset first to see available fields."
+        )
+    normalized: list[str] = []
+    for index, f in enumerate(fields):
+        if not isinstance(f, str) or not f.strip():
+            raise ValueError(
+                f"fields #{index} is malformed: a non-empty field name is required."
+            )
+        name = f.strip()
+        if spec.field_names and name not in spec.field_names:
+            known = ", ".join(sorted(spec.field_names)[:30])
+            raise ValueError(
+                f"Dataset '{spec.dataset_id}' has no field '{name}'. "
+                f"Known fields include: {known}"
+            )
+        if name not in normalized:
+            normalized.append(name)
+    if len(normalized) > DATAPOINTS_MAX_FIELDS:
+        raise ValueError(
+            f"get_finra_datapoints accepts at most {DATAPOINTS_MAX_FIELDS} "
+            f"fields, got {len(normalized)}. Select the specific fields you "
+            "need instead."
+        )
+    return normalized
+
+
+def _validate_sort(
+    spec: DatasetSpec,
+    sort_fields: Optional[list[str]],
+    sort_order: Optional[str],
+) -> list[str]:
+    """Normalize FINRA sortFields entries ('+field' / '-field').
+
+    sort_order is a convenience mapping onto the dataset's date field; it is
+    rejected when the dataset has no date field or when sort_fields is also
+    given. Raises ValueError before any data request on invalid input.
+    """
+    if sort_order is not None:
+        if sort_fields:
+            raise ValueError(
+                "Provide either 'sort_fields' or 'sort_order', not both."
+            )
+        order = str(sort_order).strip().lower()
+        if order not in ("asc", "desc"):
+            raise ValueError("sort_order must be 'asc' or 'desc'.")
+        if not spec.date_field:
+            raise ValueError(
+                f"Dataset '{spec.dataset_id}' has no date field, so "
+                "'sort_order' cannot be applied; use 'sort_fields' instead."
+            )
+        return [("-" if order == "desc" else "+") + spec.date_field]
+    if not sort_fields:
+        return []
+    normalized: list[str] = []
+    for index, entry in enumerate(sort_fields):
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"sort_fields #{index} is malformed: expected '+field' "
+                "(ascending) or '-field' (descending)."
+            )
+        raw = entry.strip()
+        sign, name = (raw[0], raw[1:]) if raw[0] in "+-" else ("+", raw)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(
+                f"sort_fields #{index} is malformed: '{raw}' is not a valid "
+                "FINRA sort field. Use '+field' (ascending) or '-field' "
+                "(descending)."
+            )
+        if spec.field_names and name not in spec.field_names:
+            known = ", ".join(sorted(spec.field_names)[:30])
+            raise ValueError(
+                f"Dataset '{spec.dataset_id}' has no sortable field "
+                f"'{name}'. Known fields include: {known}"
+            )
+        normalized.append(sign + name)
+    return normalized
+
+
+def _apply_local_sort(rows: list[dict], sort_fields: list[str]) -> list[dict]:
+    """Deterministic local ordering for a single FINRA sort field.
+
+    Guarantees 'latest five' style requests return the requested order even
+    when the response ordering is not honored. Missing values always sort
+    last. Multi-field sorts rely on FINRA's server-side sortFields ordering.
+    """
+    if len(sort_fields) != 1:
+        return rows
+    sign, name = sort_fields[0][0], sort_fields[0][1:]
+    descending = sign == "-"
+
+    def _sortable(value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        try:
+            return float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return str(value)
+
+    present = [r for r in rows if _sortable(r.get(name)) is not None]
+    missing = [r for r in rows if _sortable(r.get(name)) is None]
+    try:
+        present.sort(key=lambda r: _sortable(r.get(name)), reverse=descending)
+    except TypeError:
+        # Mixed numeric/string values in one column: fall back to string order.
+        present.sort(key=lambda r: str(r.get(name)), reverse=descending)
+    return present + missing
+
+
+def _require_datapoint_narrowing(
+    ticker: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    filters: Optional[list[dict]],
+) -> None:
+    has_ticker = bool((ticker or "").strip())
+    has_date = bool((start_date or "").strip()) or bool((end_date or "").strip())
+    has_filter = bool(filters)
+    if not (has_ticker or has_date or has_filter):
+        raise ValueError(
+            "get_finra_datapoints requires at least one narrowing condition: "
+            "ticker, date/date range, or filters. Unbounded raw-data requests "
+            "are not allowed."
+        )
+
+
+def _clamp_datapoint_limit(limit: Optional[int]) -> int:
+    if limit is None:
+        return DATAPOINTS_DEFAULT_LIMIT
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return DATAPOINTS_DEFAULT_LIMIT
+    return max(1, min(n, DATAPOINTS_MAX_LIMIT))
+
+
+def _select_fields(row: dict, fields: list[str]) -> dict:
+    return {f: row.get(f) for f in fields}
+
+
+def _parse_pagination(headers: dict, offset: int, limit: int, returned_count: int) -> dict:
+    """Header-driven pagination; explicit estimate only when FINRA omits
+    Record-Total. Self-contained metadata: offset/limit/returned_count are
+    included so the analysis layer can prove full-query coverage."""
+    total_raw = headers.get("record-total")
+    total: Optional[int] = None
+    if total_raw is not None:
+        try:
+            total = int(total_raw)
+        except (TypeError, ValueError):
+            total = None
+    base = {
+        "offset": offset,
+        "limit": limit,
+        "returned_count": returned_count,
+    }
+    if total is not None:
+        base.update(
+            {
+                "total_records": total,
+                "may_have_more": (offset + returned_count) < total,
+                "source": "finra_header",
+            }
+        )
+        return base
+    base.update(
+        {
+            "total_records": None,
+            "may_have_more": returned_count >= limit,
+            "source": "estimate",
+        }
+    )
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -853,10 +1165,16 @@ def _build_payload(
     limit: Optional[int],
     filters: Optional[list[dict]],
     offset: Optional[int] = None,
+    fields: Optional[list[str]] = None,
+    sort_fields: Optional[list[str]] = None,
 ) -> dict:
     payload: dict[str, Any] = {"limit": _clamp_limit(limit)}
     if offset is not None:
         payload["offset"] = _validate_offset(entry, offset)
+    if fields:
+        payload["fields"] = list(fields)
+    if sort_fields:
+        payload["sortFields"] = list(sort_fields)
     compare: list[dict] = []
 
     explicit_fields: set[str] = set()
@@ -997,18 +1315,25 @@ def _dataset_path_name(spec: DatasetSpec) -> str:
     return spec.name
 
 
-def _cached_query(spec: DatasetSpec, payload: dict) -> list:
+def _query_cache_key(spec: DatasetSpec, payload: dict) -> str:
     path_name = _dataset_path_name(spec)
-    cache_key = f"finra:{spec.group}:{path_name}:{json.dumps(payload, sort_keys=True)}"
+    return f"finra:{spec.group}:{path_name}:{json.dumps(payload, sort_keys=True)}"
+
+
+def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
+    cache_key = _query_cache_key(spec, payload)
     hit = cache.get(cache_key, ttl=CACHE_TTL_SECONDS)
     if hit is not None:
-        return hit
-    records = _post_query(spec.group, path_name, payload)
-    cache.set(cache_key, records)
-    return records
+        if isinstance(hit, dict) and "records" in hit:
+            return hit["records"], hit.get("headers") or {}
+        # Legacy cached plain list (pre-analysis layer): no headers.
+        return hit, {}
+    records, headers = _post_query(spec.group, _dataset_path_name(spec), payload)
+    cache.set(cache_key, {"records": records, "headers": headers})
+    return records, headers
 
 
-def _post_query(group: str, dataset_name: str, payload: dict) -> list:
+def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dict]:
     url = f"{FINRA_API_BASE}/data/group/{group}/name/{dataset_name}"
     resp = requests.post(
         url,
@@ -1022,6 +1347,15 @@ def _post_query(group: str, dataset_name: str, payload: dict) -> list:
     )
     resp.raise_for_status()
     data = resp.json()
+    headers = {
+        name.lower(): value
+        for name, value in resp.headers.items()
+        if name.lower() in _RECORD_HEADERS
+    }
+    return _extract_records(data), headers
+
+
+def _extract_records(data: Any) -> list:
     if data is None:
         return []
     if isinstance(data, list):
