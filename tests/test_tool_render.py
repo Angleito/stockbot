@@ -302,6 +302,134 @@ def test_error_rendered_as_plaintext_with_next_step(fake_agent):
 
 
 # ---------------------------------------------------------------------------
+# Strict failed-tool rule: after a failing tool the loop stops and the
+# deterministic unavailable-data response is returned — no second model
+# completion can invent, derive, or substitute values
+# ---------------------------------------------------------------------------
+
+
+def test_failed_tool_stops_loop_with_deterministic_response(fake_agent):
+    result = {
+        "error": "FINRA request failed (400): sortFields restricted",
+        "dataset": "consolidatedShortInterest",
+        "dataset_id": "otcMarket/consolidatedShortInterest",
+        "request_purpose": "exact datapoints request (get_finra_datapoints)",
+        "http_status": 400,
+        "finra_response": '{"error": "sortFields restricted"}',
+        "environment": "production",
+    }
+    text, fake, tool_msgs = fake_agent(
+        "get_finra_datapoints", {"dataset": "x", "fields": ["f"]}, result
+    )
+    assert len(fake.calls) == 1  # no second model completion
+    assert len(tool_msgs) == 1
+    # The tool message itself preserves dataset, purpose, status, and body.
+    content = tool_msgs[0]["content"]
+    assert "dataset: consolidatedShortInterest" in content
+    assert "http_status: 400" in content
+    assert "request_purpose: exact datapoints" in content
+    assert "finra_response:" in content
+    # The final answer is the deterministic unavailable-data response built
+    # from the rendered error context, with a next step.
+    assert text.startswith("The requested data is unavailable")
+    assert "Tool: get_finra_datapoints" in text
+    assert "FINRA request failed (400)" in text
+    assert "dataset: consolidatedShortInterest" in text
+    assert "http_status: 400" in text
+    assert "finra_response:" in text
+    assert "Next step" in text
+    assert "estimated, derived, or substituted" in text
+
+
+def test_failed_tool_deterministic_rule_is_general_for_all_tools(fake_agent):
+    """The no-second-model-call rule applies to every failing tool, not just
+    FINRA exact-data requests."""
+    result = {"error": "No data found for ZZZZFAKE99: EDGAR"}
+    text, fake, _tool_msgs = fake_agent(
+        "get_fundamentals", {"ticker": "ZZZZFAKE99", "metric": "eps"}, result
+    )
+    assert len(fake.calls) == 1
+    assert text.startswith("The requested data is unavailable")
+    assert "Tool: get_fundamentals" in text
+    assert "No data found for ZZZZFAKE99" in text
+    assert "Next step" in text
+
+
+class FakeTwoToolRound:
+    """One round requesting two tools; a second call would fail the test."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, model, messages):
+        self.calls.append(messages)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_short_interest",
+                                    "arguments": json.dumps({"ticker": "AAPL"}),
+                                },
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_finra_datapoints",
+                                    "arguments": json.dumps(
+                                        {"dataset": "x", "fields": ["f"]}
+                                    ),
+                                },
+                            },
+                        ],
+                    }
+                }
+            ]
+        }
+
+
+def test_failed_tool_does_not_use_successful_sibling_results(monkeypatch):
+    """Successful sibling tool results from the same round never replace the
+    failed request's missing values; the loop still stops."""
+    from app import agent as agent_module
+
+    fake = FakeTwoToolRound()
+    monkeypatch.setattr(agent_module, "_call_openrouter", fake)
+
+    def _execute(name, args, model):
+        if name == "get_short_interest":
+            return {
+                "dataset": "consolidatedShortInterest",
+                "metrics": {"fields": {"currentShortPositionQuantity": {"min": 100}}},
+            }
+        return {
+            "error": "FINRA request failed (400): nope",
+            "http_status": 400,
+            "finra_response": "{}",
+        }
+
+    monkeypatch.setattr(agent_module, "execute_tool", _execute)
+    text, _trace = run_chat(
+        [{"role": "user", "content": "Test question"}],
+        model="test",
+        return_trace=True,
+    )
+    assert len(fake.calls) == 1  # loop stopped after the failed round
+    assert text.startswith("The requested data is unavailable")
+    assert "Tool: get_finra_datapoints" in text
+    assert "Tool: get_short_interest" not in text  # success is not a failure
+    assert "100" not in text  # the sibling's value never fills the gap
+    assert "Next step" in text
+
+
+# ---------------------------------------------------------------------------
 # Direct renderer unit tests
 # ---------------------------------------------------------------------------
 

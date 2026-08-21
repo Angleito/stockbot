@@ -31,6 +31,13 @@ def _load_metadata(group: str, name: str):
     return json.loads(path.read_text())
 
 
+def _load_partitions(group: str, name: str):
+    path = FIXTURES / "partitions" / f"{group}__{name}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def _response(payload=None, status: int = 200, headers: dict | None = None) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
@@ -74,6 +81,12 @@ def _mock_get(url, **_kwargs) -> MagicMock:
         if meta is None:
             return _response({"error": "not found"}, status=404)
         return _response(meta)
+    if "/partitions/group/" in url:
+        group, name = url.split("/partitions/group/")[1].split("/name/")
+        parts = _load_partitions(group, name)
+        if parts is None:
+            return _response({"error": "not found"}, status=404)
+        return _response(parts)
     raise AssertionError(f"Unexpected GET {url}")
 
 
@@ -84,9 +97,11 @@ def _isolation(monkeypatch):
     monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "")
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
     yield
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
 
 
 @pytest.fixture(autouse=True)

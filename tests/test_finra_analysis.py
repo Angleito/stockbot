@@ -30,9 +30,11 @@ def _isolation(monkeypatch):
     monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "")
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
     yield
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -670,6 +672,9 @@ def test_datapoints_sort_fields_in_payload(http):
             "fields": ["settlementDate", "currentShortPositionQuantity"],
             "ticker": "AAPL",
             "limit": 5,
+            # An EQUAL filter on the only partition field (settlementDate)
+            # makes server-side sortFields valid for FINRA.
+            "filters": [{"field": "settlementDate", "value": "2026-08-14"}],
             "sort_fields": ["-settlementDate"],
         },
         model="test",
@@ -678,6 +683,7 @@ def test_datapoints_sort_fields_in_payload(http):
     body = _data_body(http["post"])
     assert body["sortFields"] == ["-settlementDate"]
     assert result["sort_fields"] == ["-settlementDate"]
+    assert result.get("sort_source") is None  # server-side sort, no partition walk
 
 
 def test_datapoints_invalid_sort_field_rejected_before_http(http):
@@ -734,17 +740,41 @@ def test_datapoints_sort_order_and_sort_fields_conflict(http):
     assert http["post"].call_count == 1
 
 
-def test_datapoints_latest_five_returns_descending_dates(http):
-    # Mock returns rows unordered; the client must deterministically order
-    # newest-first for a 'latest five' style request.
-    rows = [
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 100},
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-10", "currentShortPositionQuantity": 500},
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-01", "currentShortPositionQuantity": 900},
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 700},
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-12", "currentShortPositionQuantity": 300},
+def _data_posts(post_mock):
+    return [
+        c.kwargs["json"]
+        for c in post_mock.call_args_list
+        if "oauth2/access_token" not in (c.args[0] if c.args else c.kwargs.get("url", ""))
     ]
-    http["post"].side_effect = [_token_response(), _response(rows)]
+
+
+def test_datapoints_latest_five_returns_descending_dates(http):
+    # No EQUAL settlementDate filter: FINRA rejects unrestricted sortFields,
+    # so the client must walk partitions newest-first without sortFields.
+    partition_rows = {
+        "2026-08-14": [
+            {"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 100},
+            {"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 200},
+        ],
+        "2026-08-07": [
+            {"symbolCode": "AAPL", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 500},
+            {"symbolCode": "AAPL", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 600},
+            {"symbolCode": "AAPL", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 700},
+        ],
+    }
+
+    def _respond(url, **kw):
+        if "oauth2/access_token" in url:
+            return _token_response()
+        payload = kw["json"]
+        date_filter = next(
+            f["fieldValue"]
+            for f in payload["compareFilters"]
+            if f["fieldName"] == "settlementDate"
+        )
+        return _response(partition_rows[date_filter])
+
+    http["post"].side_effect = _respond
     result = execute_tool(
         "get_finra_datapoints",
         {
@@ -757,10 +787,26 @@ def test_datapoints_latest_five_returns_descending_dates(http):
         model="test",
     )
     assert "error" not in result, result
-    assert _data_body(http["post"])["sortFields"] == ["-settlementDate"]
+    # Two partition queries (08-14 fills 2, 08-07 fills the remaining 3),
+    # then the walk stops — never an unrestricted sortFields payload.
+    posts = _data_posts(http["post"])
+    assert len(posts) == 2
+    assert all("sortFields" not in p for p in posts)
+    assert posts[0]["compareFilters"] == [
+        {"compareType": "EQUAL", "fieldName": "symbolCode", "fieldValue": "AAPL"},
+        {"compareType": "EQUAL", "fieldName": "settlementDate", "fieldValue": "2026-08-14"},
+    ]
+    assert posts[1]["compareFilters"] == [
+        {"compareType": "EQUAL", "fieldName": "symbolCode", "fieldValue": "AAPL"},
+        {"compareType": "EQUAL", "fieldName": "settlementDate", "fieldValue": "2026-08-07"},
+    ]
     dates = [r["settlementDate"] for r in result["records"]]
     assert dates == sorted(dates, reverse=True)
     assert dates[0] == "2026-08-14"
+    assert result["sort_source"] == "partitions"
+    assert result["partition_queries"] == 2
+    assert result["pagination_source"] == "partitions"
+    assert result["data_freshness"] in ("current", "stale")
 
 
 def test_datapoints_more_than_ten_fields_rejected(http):

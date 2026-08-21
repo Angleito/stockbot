@@ -1,0 +1,10 @@
+{
+  "datasetGroup": "otcMarket",
+  "datasetName": "weeklySummary",
+  "partitionFields": ["weekStartDate", "tierIdentifier"],
+  "availablePartitions": [
+    {"partitions": ["2026-08-10", "T1"]},
+    {"partitions": ["2026-08-10", "T2"]},
+    {"partitions": ["2026-08-03", "T1"]}
+  ]
+}

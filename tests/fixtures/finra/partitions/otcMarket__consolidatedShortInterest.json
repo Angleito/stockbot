@@ -1,0 +1,10 @@
+{
+  "datasetGroup": "otcMarket",
+  "datasetName": "consolidatedShortInterest",
+  "partitionFields": ["settlementDate"],
+  "availablePartitions": [
+    {"partitions": ["2026-08-14"]},
+    {"partitions": ["2026-08-07"]},
+    {"partitions": ["2026-08-01"]}
+  ]
+}
