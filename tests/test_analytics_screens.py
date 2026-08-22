@@ -239,3 +239,107 @@ def test_stale_settlement_is_surfaced(data_root):
     stale = screens.materialize_short_interest_screen(stale_date, data_root=data_root)
     assert stale["data_freshness"] == "stale"
     assert stale["as_of_date"] == stale_date
+
+
+# ---------------------------------------------------------------------------
+# Research slice: short-interest change + shares-outstanding change
+# ---------------------------------------------------------------------------
+
+
+def _seed_cycle(data_root, settlement_date, rows, known_at="2026-08-21T12:00:00Z"):
+    datasets = finra_norm.normalize_short_interest_snapshot(
+        rows, settlement_date=settlement_date, known_at=known_at,
+        retrieved_at=known_at, content_hash=f"snapshot-{settlement_date}",
+        source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
+        source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
+    )
+    for name, rows_ in datasets.items():
+        parquet.write_rows(name, rows_, root=data_root / "parquet")
+
+
+def test_change_slice_computes_changes_with_evidence(data_root):
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_cycle(data_root, "2026-08-07", [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
+    ])
+    _seed_cycle(data_root, SETTLEMENT, _default_rows())
+
+    result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+
+    assert result["settlement_current"] == SETTLEMENT
+    assert result["settlement_prior"] == "2026-08-07"
+    assert result["calculation_version"] == screens.SLICE_CALC_VERSION
+    by_ticker = {e["ticker"]: e for e in result["entries"]}
+    assert by_ticker["AAA"]["short_shares_current"] == 20
+    assert by_ticker["AAA"]["short_shares_prior"] == 10
+    assert by_ticker["AAA"]["short_change_pct"] == 100.0
+    assert by_ticker["AAA"]["si_pp_change"] == 10.0  # 20% - 10%
+    assert by_ticker["AAA"]["shares_change_abs"] == 0
+    assert by_ticker["AAA"]["sec_accession_current"] == "a1"
+    assert by_ticker["AAA"]["sec_accession_prior"] == "a1"
+    assert by_ticker["AAA"]["finra_source_url"].startswith("https://api.finra.org")
+    # Sorted by signed short-interest pp change: AAA moved most.
+    assert [e["ticker"] for e in result["entries"]] == ["AAA", "BBB", "CCC"]
+
+
+def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root):
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_cycle(data_root, SETTLEMENT, _default_rows())
+
+    result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+
+    assert result["settlement_prior"] is None
+    entry = result["entries"][0]
+    assert entry["short_shares_prior"] is None
+    assert entry["short_change_pct"] is None
+    assert entry["si_pp_change"] is None
+
+
+def test_change_slice_as_of_regression(data_root):
+    """A later filing cannot alter a slice computed at an earlier as_of."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, {
+        1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
+        2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
+        3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
+    })
+    _seed_cycle(data_root, "2026-08-07", [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
+    ], known_at="2026-08-10T12:00:00Z")
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-10T12:00:00Z")
+
+    early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
+    assert early["entries"][0]["ticker"] == "AAA"
+    assert early["entries"][0]["shares_outstanding_current"] == 100.0
+
+    # A filing known only after 2026-08-14 restates AAA's shares for a
+    # period between the two settlements (end 2026-08-10, filed 2026-08-20).
+    _seed_facts(data_root, {
+        1: [{"end": "2026-08-10", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
+    })
+
+    rerun = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
+    assert rerun["entries"] == early["entries"]
+
+    later = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+    aaa = next(e for e in later["entries"] if e["ticker"] == "AAA")
+    assert aaa["sec_accession_current"] == "a2"
+    assert aaa["shares_outstanding_current"] == 400.0
+    assert aaa["shares_change_abs"] == 300.0
+
+
+def test_change_slice_honors_finra_known_at(data_root):
+    """A snapshot archived after as_of is not knowable at that as_of."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-30T12:00:00Z")
+
+    result = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
+    assert "error" in result
+    assert "knowable" in result["error"]

@@ -23,9 +23,11 @@ from ..storage import duckdb, parquet
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
 SCREEN_CALC_VERSION = "short-interest-leaderboard-v2"
+SLICE_CALC_VERSION = "short-interest-change-slice-v1"
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
 SCREEN_NAME = "short_interest_leaderboard"
+SLICE_NAME = "short_interest_change"
 
 _SHARES_CONCEPT = "EntityCommonStockSharesOutstanding"
 
@@ -298,3 +300,148 @@ def _utc_now() -> str:
     import time
 
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# Research slice: short-interest change + shares-outstanding change
+# ---------------------------------------------------------------------------
+
+
+def _cycle_settlement_dates(as_of: str, data_root: Path) -> list[str]:
+    """Latest two settlement cycles knowable on or before ``as_of``."""
+    clause, param = duckdb.as_of_clause(as_of)
+    rows = duckdb.query(
+        "SELECT DISTINCT settlement_date FROM short_interest "
+        f"WHERE CAST(settlement_date AS DATE) <= CAST(? AS DATE) AND {clause} "
+        "ORDER BY settlement_date DESC LIMIT 2",
+        params=[as_of, param],
+        data_root=data_root,
+    )
+    return [str(row["settlement_date"]) for row in rows]
+
+
+def _cycle_entities(
+    settlement_date: str,
+    ticker_aliases: dict[str, list[str]],
+    facts_by_entity: dict[str, list[dict]],
+    data_root: Path,
+) -> dict[str, dict]:
+    """Eligible entities for one settlement cycle: symbol -> row + fact."""
+    rows = _snapshot_rows(settlement_date, data_root)
+    result: dict[str, dict] = {}
+    for row in rows:
+        symbol = str(row["symbol_code"])
+        short_shares = row.get("short_position")
+        if short_shares is None:
+            continue
+        entity_ids = ticker_aliases.get(symbol)
+        if not entity_ids or len(entity_ids) > 1:
+            continue
+        entity_id = entity_ids[0]
+        fact = _select_fact_for_period(facts_by_entity.get(entity_id) or [], settlement_date)
+        if fact is None:
+            continue
+        result[symbol] = {"row": row, "entity_id": entity_id, "fact": fact}
+    return result
+
+
+def _select_fact_for_period(facts: list[dict], settlement_date: str) -> Optional[dict]:
+    """Latest fact whose period end is on/before the settlement date; facts
+    are pre-sorted newest first and already restricted by known_at <= as_of."""
+    for fact in facts:
+        period_end = str(fact.get("period_end") or "")
+        if not period_end or period_end > settlement_date:
+            continue
+        value = fact.get("value")
+        if value is None or float(value) <= 0:
+            continue
+        return fact
+    return None
+
+
+def short_interest_change_screen(
+    as_of: str,
+    limit: Optional[int] = None,
+    data_root: Optional[Path] = None,
+) -> dict:
+    """Dated research slice: short-interest change + shares-outstanding change
+    between the two most recent settlement cycles knowable on/before as_of.
+
+    Every SEC fact is filtered by ``known_at <= as_of``; a later filing can
+    never alter a slice computed at an earlier ``as_of``.  Missing prior
+    cycles or facts are reported as None, never as zero.
+    """
+    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    limit = _clamp_limit(limit)
+    dates = _cycle_settlement_dates(as_of, data_root)
+    if not dates:
+        return {"error": f"No FINRA short interest cycles knowable on or before {as_of}."}
+    current_date, prior_date = dates[0], dates[1] if len(dates) > 1 else None
+    ticker_aliases = _ticker_alias_map(data_root)
+    facts_by_entity = _facts_by_entity(as_of, data_root)
+    current = _cycle_entities(current_date, ticker_aliases, facts_by_entity, data_root)
+    prior = _cycle_entities(prior_date, ticker_aliases, facts_by_entity, data_root) if prior_date else {}
+    entries: list[dict] = []
+    for symbol, item in sorted(current.items()):
+        row, fact = item["row"], item["fact"]
+        short_current = float(row["short_position"])
+        si_pct_current = 100 * short_current / float(fact["value"])
+        entry: dict = {
+            "ticker": symbol,
+            "issue_name": row.get("issue_name"),
+            "settlement_current": current_date,
+            "settlement_prior": prior_date,
+            "short_shares_current": short_current,
+            "short_interest_percent_current": si_pct_current,
+            "shares_outstanding_current": float(fact["value"]),
+            "sec_shares_as_of_current": str(fact["period_end"]),
+            "sec_filed_at_current": str(fact["filed_at"]),
+            "sec_accession_current": fact.get("accession"),
+            "sec_source_url_current": fact.get("source_url"),
+            "short_shares_prior": None,
+            "short_interest_percent_prior": None,
+            "shares_outstanding_prior": None,
+            "sec_shares_as_of_prior": None,
+            "sec_filed_at_prior": None,
+            "sec_accession_prior": None,
+            "sec_source_url_prior": None,
+            "short_change_abs": None,
+            "short_change_pct": None,
+            "shares_change_abs": None,
+            "shares_change_pct": None,
+            "si_pp_change": None,
+            "finra_source_url": row.get("source_url"),
+        }
+        prior_item = prior.get(symbol)
+        if prior_item is not None:
+            prior_row, prior_fact = prior_item["row"], prior_item["fact"]
+            short_prior = float(prior_row["short_position"])
+            si_pct_prior = 100 * short_prior / float(prior_fact["value"])
+            entry.update({
+                "short_shares_prior": short_prior,
+                "short_interest_percent_prior": si_pct_prior,
+                "shares_outstanding_prior": float(prior_fact["value"]),
+                "sec_shares_as_of_prior": str(prior_fact["period_end"]),
+                "sec_filed_at_prior": str(prior_fact["filed_at"]),
+                "sec_accession_prior": prior_fact.get("accession"),
+                "sec_source_url_prior": prior_fact.get("source_url"),
+                "short_change_abs": short_current - short_prior,
+                "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
+                "shares_change_abs": float(fact["value"]) - float(prior_fact["value"]),
+                "shares_change_pct": 100 * (float(fact["value"]) - float(prior_fact["value"])) / float(prior_fact["value"]),
+                "si_pp_change": si_pct_current - si_pct_prior,
+            })
+        entries.append(entry)
+    entries.sort(key=lambda e: (-(e["si_pp_change"] if e["si_pp_change"] is not None else 0.0), e["ticker"]))
+    for index, entry in enumerate(entries, 1):
+        entry["rank"] = index
+    return {
+        "source": "FINRA consolidated short interest + SEC EDGAR company facts (parquet)",
+        "metric": "cycle-over-cycle short-interest change and shares-outstanding change; short interest is a settlement-date position, not Reg SHO volume",
+        "as_of": as_of,
+        "settlement_current": current_date,
+        "settlement_prior": prior_date,
+        "calculation_version": SLICE_CALC_VERSION,
+        "coverage": {"current_finra_rows": len(current), "eligible_rows": len(entries)},
+        "entries": entries[:limit],
+    }
