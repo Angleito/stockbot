@@ -2113,6 +2113,20 @@ def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
 
 
 def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dict]:
+    _, records, headers = ingestion_post_query(group, dataset_name, payload)
+    return records, headers
+
+
+def ingestion_post_query(
+    group: str, dataset_name: str, payload: dict
+) -> tuple[bytes, list, dict]:
+    """Raw FINRA data-plane POST for the ingestion pipeline.
+
+    Returns (response body bytes, parsed records, captured pagination
+    headers).  It bypasses the chat SQLite cache on purpose: the immutable
+    raw archive is the durable store, and the pipeline decides what to
+    re-fetch via its checkpoints.
+    """
     url = f"{FINRA_API_BASE}/data/group/{group}/name/{dataset_name}"
     resp = requests.post(
         url,
@@ -2139,9 +2153,9 @@ def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dic
     # FINRA can return a successful empty response for a partition with no
     # matching rows. Continue the partition walk instead of parsing it as JSON.
     if not resp.content or not resp.content.strip():
-        return [], headers
+        return resp.content, [], headers
     data = resp.json()
-    return _extract_records(data), headers
+    return resp.content, _extract_records(data), headers
 
 
 def _extract_records(data: Any) -> list:
