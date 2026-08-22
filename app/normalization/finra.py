@@ -46,15 +46,23 @@ def normalize_short_interest_snapshot(
     source_url: str,
     source_record_id: str,
 ) -> dict[str, list[dict]]:
-    """FINRA consolidated short interest rows -> short_interest dataset rows."""
+    """FINRA consolidated short interest rows -> short_interest dataset rows.
+
+    Rows without a symbol are dropped (they have no identity).  Rows WITH a
+    symbol keep ``short_position`` NULL when the quantity is missing, invalid,
+    or negative, so screens can count them as invalid exclusions instead of
+    silently losing them.
+    """
     short_interest: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         symbol = str(row.get("symbolCode") or "").strip().upper()
-        short_position = _to_float(row.get("currentShortPositionQuantity"))
-        if not symbol or short_position is None or short_position < 0:
+        if not symbol:
             continue
+        short_position = _to_float(row.get("currentShortPositionQuantity"))
+        if short_position is not None and short_position < 0:
+            short_position = None
         entity_id = ids.finra_entity_id(symbol)
         short_interest.append({
             "row_id": f"finra:row:{settlement_date}:{symbol}",

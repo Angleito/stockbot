@@ -284,9 +284,11 @@ def test_sec_get_raises_after_rate_limit_retry_exhausted(monkeypatch):
 
 
 def test_tool_is_registered_dispatched_and_rendered(monkeypatch):
+    from app import analytics
+
     schema = next(item for item in TOOLS if item["function"]["name"] == "get_short_interest_leaderboard")
     assert schema["function"]["parameters"]["properties"]["limit"]
-    monkeypatch.setattr("app.short_interest_screen.get_short_interest_leaderboard", lambda limit=None, settlement_date=None: {
+    monkeypatch.setattr("app.analytics.screens.get_short_interest_leaderboard", lambda limit=None, settlement_date=None, as_of=None, data_root=None: {
         "source": "FINRA + SEC", "metric": "shares outstanding", "settlement_date": "2026-08-14",
         "entries": [{"rank": 1, "ticker": "AAA", "short_shares": 5, "shares_outstanding": 10, "short_interest_percent": 50, "sec_shares_as_of": "2026-08-01", "sec_filed_at": "2026-08-02"}],
         "coverage": {"finra_rows": 1, "eligible_rows": 1, "exclusions": {}}, "environment": "mock",

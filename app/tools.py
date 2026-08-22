@@ -5,6 +5,7 @@ import logging
 
 import requests
 
+from . import analytics
 from . import edgar_client
 from . import finra_client
 from . import short_interest_screen
@@ -476,7 +477,7 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS = {
-    "get_short_interest_leaderboard": lambda args, model: short_interest_screen.get_short_interest_leaderboard(
+    "get_short_interest_leaderboard": lambda args, model: analytics.screens.get_short_interest_leaderboard(
         limit=args.get("limit"), settlement_date=args.get("settlement_date")
     ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
