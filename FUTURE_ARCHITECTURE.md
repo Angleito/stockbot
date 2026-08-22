@@ -348,21 +348,28 @@ Complete phases in order. A phase is complete only when its acceptance criteria 
 
 ### Phase 0 - Shared foundations
 
-- [ ] Define stable IDs for entities, securities, documents, chunks, events, and evidence.
+- [x] Define stable IDs for entities, securities, documents, chunks, events, and evidence.
+      (entities/securities/documents done: `sec:cik:…`, `sec:equity:…`, hash-keyed doc IDs;
+      chunk/event/evidence IDs land with their phases)
 - [ ] Add database migrations and repository interfaces.
-- [ ] Implement the immutable raw archive with content hashes.
-- [ ] Add ingestion checkpoints, retry policy, rate limiting, and structured logs.
-- [ ] Add `known_at`, `published_at`, and `effective_at` conventions.
-- [ ] Add parser/extractor/feature version fields.
-- [ ] Establish fixture-based tests that never require live APIs.
+- [x] Implement the immutable raw archive with content hashes.
+      (`app/storage/raw_archive.py`: write-once `data/raw/` payloads + retrieval manifests)
+- [x] Add ingestion checkpoints, retry policy, rate limiting, and structured logs.
+      (`app/ingestion/`: tenacity retry/backoff, SEC pacing, checkpoint dataset keyed by payload hash)
+- [x] Add `known_at`, `published_at`, and `effective_at` conventions.
+      (SEC facts: `known_at` = filed date; FINRA snapshots: `known_at` = first complete-archive time,
+      `published_at` NULL where the source exposes no publication timestamp)
+- [x] Add parser/extractor/feature version fields.
+      (`parser_version` / calculation version on every dataset and screen run)
+- [x] Establish fixture-based tests that never require live APIs.
 - [ ] Add data-quality reports: duplicates, gaps, stale sources, schema drift.
 
 Acceptance criteria:
 
-- Re-running an ingestion job creates no duplicates.
-- Every normalized record can link back to the exact raw response/document.
-- An `as_of` query cannot see records published later.
-- A parser change can be replayed from raw data without downloading again.
+- [x] Re-running an ingestion job creates no duplicates.
+- [x] Every normalized record can link back to the exact raw response/document.
+- [x] An `as_of` query cannot see records published later.
+- [x] A parser change can be replayed from raw data without downloading again.
 
 ### Phase 1 - SEC ingestion and normalization
 
@@ -389,20 +396,22 @@ Acceptance criteria:
 
 ### Phase 2 - FINRA ingestion and short-data analytics
 
-- [ ] Build dataset definitions with explicit schemas, sorting, pagination, freshness, and retention.
-- [ ] Archive every FINRA response and request parameters.
+- [x] Build dataset definitions with explicit schemas, sorting, pagination, freshness, and retention.
+- [x] Archive every FINRA response and request parameters.
 - [ ] Backfill consolidated short-interest history.
-- [ ] Ingest Reg SHO/short-sale volume separately from short interest.
+      (pipeline exists and can backfill any cycle; a full history backfill is an operational run)
+- [x] Ingest Reg SHO/short-sale volume separately from short interest.
 - [ ] Ingest threshold-list membership and relevant OTC/ATS activity.
-- [ ] Store settlement date, reporting/publication date, and `known_at` separately.
+- [x] Store settlement date, reporting/publication date, and `known_at` separately.
 - [ ] Normalize symbols through security history.
 - [ ] Add completeness checks for expected reporting cycles and facilities.
-- [ ] Add a data dictionary warning that short-sale volume is not short interest.
+- [x] Add a data dictionary warning that short-sale volume is not short interest.
 
 Derived features:
 
 - [ ] Short interest as percent of defensible float.
-- [ ] Cycle-over-cycle and multi-cycle short-interest change.
+      (deliberately deferred; the interim product ranks by SEC-reported shares outstanding only)
+- [x] Cycle-over-cycle and multi-cycle short-interest change.
 - [ ] Days-to-cover trend.
 - [ ] Industry and market-cap peer percentiles.
 - [ ] Short interest versus price, volume, and volatility divergence.
@@ -411,11 +420,11 @@ Derived features:
 
 Acceptance criteria:
 
-- Latest and historical cycles are explicitly sorted and reproducible.
-- Publication lag is respected by historical queries.
-- Missing cycles/facilities are visible rather than treated as zeros.
-- FINRA unit tests use frozen fixtures and cover pagination, errors, and schema changes.
-- A `screen_short_setups` query can rank a universe without invoking an LLM.
+- [x] Latest and historical cycles are explicitly sorted and reproducible.
+- [x] Publication lag is respected by historical queries.
+- [x] Missing cycles/facilities are visible rather than treated as zeros.
+- [x] FINRA unit tests use frozen fixtures and cover pagination, errors, and schema changes.
+- [x] A `screen_short_setups` query can rank a universe without invoking an LLM.
 
 ### Phase 3 - Market and reference data
 
