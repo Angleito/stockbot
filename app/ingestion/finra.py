@@ -2,12 +2,16 @@
 
 A settlement-date snapshot is fetched page by page, every page is archived
 raw, the complete snapshot is normalized as one unit, and the cycle is
-checkpointed.  FINRA cycles are immutable, so a completed checkpoint means
-the cycle is done: reruns skip it entirely.
+checkpointed.  FINRA can correct published data, so a completed cycle is
+re-checked after ``FINRA_REFRESH_TTL_SECONDS``: a corrected payload (new
+content hash) archives as a new raw revision and normalizes as a new source
+version with a new ``known_at``.  Identical payloads remain no-ops, so
+reruns never duplicate normalized facts.
 
 ``known_at`` for a snapshot is the time the complete snapshot was first
 archived (FINRA does not expose per-row publication timestamps); this is
-recorded on every row and enforced by the DuckDB as-of layer.
+recorded on every row and enforced by the DuckDB as-of layer, which picks
+the newest version known at the requested as-of.
 """
 
 from __future__ import annotations
@@ -30,6 +34,8 @@ SHORT_INTEREST_PIPELINE = "finra_short_interest"
 REG_SHO_PIPELINE = "finra_reg_sho"
 SHORT_INTEREST_DATASET = "otcMarket/consolidatedShortInterest"
 REG_SHO_DATASET = "otcMarket/regShoDaily"
+# Re-check a completed cycle after this long to discover corrected payloads.
+FINRA_REFRESH_TTL_SECONDS = 24 * 3600
 
 _SNAPSHOT_FIELDS = (
     "symbolCode",
@@ -57,9 +63,14 @@ def _resolve_short_interest_spec():
     return entry, spec
 
 
-def fetch_snapshot_pages(settlement_date: str, pacing: Optional[Pacing] = None) -> tuple[list[dict], list[dict]]:
+def fetch_snapshot_pages(
+    settlement_date: str,
+    pacing: Optional[Pacing] = None,
+    archive_root: Optional[Path] = None,
+) -> tuple[list[dict], list[Any]]:
     """Page one exact settlement-date partition, returning (all_rows,
-    page_archive_records).  Every page is archived raw before parsing."""
+    page_archive_records).  Every page is archived raw — under
+    ``archive_root`` when given — before parsing."""
     entry, spec = _resolve_short_interest_spec()
     fields = list(_SNAPSHOT_FIELDS)
     if spec.field_names and not set(fields) <= spec.field_names:
@@ -88,6 +99,7 @@ def fetch_snapshot_pages(settlement_date: str, pacing: Optional[Pacing] = None) 
             content,
             url=url,
             metadata={"payload": payload, "headers": headers},
+            root=archive_root,
         )
         page_records.append(record)
         raw_total = headers.get("record-total")
@@ -122,13 +134,18 @@ def ingest_short_interest_snapshot(
     pacing: Optional[Pacing] = None,
 ) -> dict:
     """Fetch, archive, normalize, and checkpoint one FINRA short-interest
-    settlement cycle.  Reruns are no-ops."""
+    settlement cycle.  Identical reruns within the refresh TTL are no-ops;
+    corrected payloads are ingested as new source versions."""
     archive_root = archive_root or data_root / "raw"
     checkpointer = Checkpointer(data_root)
-    if checkpointer.is_complete_for_key(SHORT_INTEREST_PIPELINE, "finra", settlement_date):
+    if checkpointer.is_fresh_for_key(
+        SHORT_INTEREST_PIPELINE, "finra", settlement_date, FINRA_REFRESH_TTL_SECONDS
+    ):
         return summarize("complete", skipped=1, written=0, total=1)
     started_at = utc_now()
-    rows, _page_records = fetch_snapshot_pages(settlement_date, pacing=pacing)
+    rows, _page_records = fetch_snapshot_pages(
+        settlement_date, pacing=pacing, archive_root=archive_root
+    )
     snapshot_hash = _snapshot_hash(rows)
     entry, spec = _resolve_short_interest_spec()
     path_name = finra_client._dataset_path_name(spec)
@@ -159,10 +176,14 @@ def ingest_reg_sho_snapshot(
     archive_root: Optional[Path] = None,
     pacing: Optional[Pacing] = None,
 ) -> dict:
-    """Fetch, archive, normalize, and checkpoint one Reg SHO trade date."""
+    """Fetch, archive, normalize, and checkpoint one Reg SHO trade date.
+    Identical reruns within the refresh TTL are no-ops; corrected payloads
+    are ingested as new source versions."""
     archive_root = archive_root or data_root / "raw"
     checkpointer = Checkpointer(data_root)
-    if checkpointer.is_complete_for_key(REG_SHO_PIPELINE, "finra", trade_date):
+    if checkpointer.is_fresh_for_key(
+        REG_SHO_PIPELINE, "finra", trade_date, FINRA_REFRESH_TTL_SECONDS
+    ):
         return summarize("complete", skipped=1, written=0, total=1)
     started_at = utc_now()
     entry = finra_client._resolve_dataset(REG_SHO_DATASET)

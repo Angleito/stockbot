@@ -91,7 +91,20 @@ class Pacing:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """ISO-8601 UTC timestamp with microsecond precision so rapid reruns
+    receive distinct known_at/checkpoint timestamps."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_iso_utc(value: str) -> Optional[float]:
+    """Unix timestamp for ISO-8601 UTC strings with or without fractional
+    seconds; None when unparseable."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 class Checkpointer:
@@ -130,22 +143,12 @@ class Checkpointer:
                 return True
         return False
 
-    def is_complete_for_key(self, pipeline: str, source: str, key: str) -> Optional[str]:
-        """Payload hash of a complete checkpoint for this key, or None."""
-        for row in self._rows():
-            if (
-                row.get("pipeline") == pipeline
-                and row.get("source") == source
-                and row.get("key") == key
-                and row.get("status") == "complete"
-            ):
-                return row.get("payload_hash")
-        return None
-
     def is_fresh_for_key(self, pipeline: str, source: str, key: str, ttl_seconds: float) -> Optional[str]:
-        """Payload hash of a complete checkpoint for this key finished within
-        ``ttl_seconds``, or None."""
+        """Payload hash of the NEWEST complete checkpoint for this key whose
+        ``finished_at`` is within ``ttl_seconds``, or None."""
         now = time.time()
+        newest_hash: Optional[str] = None
+        newest_finished = ""
         for row in self._rows():
             if (
                 row.get("pipeline") != pipeline
@@ -155,13 +158,13 @@ class Checkpointer:
             ):
                 continue
             finished = row.get("finished_at") or ""
-            try:
-                finished_ts = datetime.strptime(finished, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-            except ValueError:
+            finished_ts = _parse_iso_utc(finished)
+            if finished_ts is None:
                 continue
-            if now - finished_ts <= ttl_seconds:
-                return row.get("payload_hash")
-        return None
+            if now - finished_ts <= ttl_seconds and finished > newest_finished:
+                newest_finished = finished
+                newest_hash = row.get("payload_hash")
+        return newest_hash
 
     def complete(
         self,

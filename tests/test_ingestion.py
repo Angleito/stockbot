@@ -242,12 +242,64 @@ def test_finra_snapshot_failure_leaves_no_checkpoint(data_root, finra_fakes, mon
 def test_finra_rerun_creates_no_duplicate_normalized_facts(data_root, finra_fakes):
     """Acceptance: one ingestion run can be rerun without duplicates."""
     finra.ingest_short_interest_snapshot("2026-08-14", data_root)
-    sec.ingest_company_tickers(data_root)
-    # Normalize the same snapshot data through the SEC facts path too.
     summary = finra.ingest_short_interest_snapshot("2026-08-14", data_root)
     assert summary["payloads_skipped"] == 1
     rows = parquet.read_table("short_interest", root=data_root / "parquet").to_pylist()
     assert len(rows) == 3
+
+
+def test_finra_corrected_snapshot_is_ingested_as_new_version(data_root, finra_fakes, monkeypatch):
+    """A corrected payload after the refresh TTL becomes a new source version:
+    new rows (distinct row IDs, new known_at) and a new checkpoint, while the
+    original version remains point-in-time valid."""
+    monkeypatch.setattr(finra, "FINRA_REFRESH_TTL_SECONDS", 0)
+    finra.ingest_short_interest_snapshot("2026-08-14", data_root)
+    corrected = [
+        {**row, "currentShortPositionQuantity": 25} if row["symbolCode"] == "AAA" else row
+        for row in _finra_short_interest_rows()
+    ]
+    monkeypatch.setattr(
+        finra_client, "ingestion_post_query",
+        lambda _g, _n, _p: (json.dumps({"data": corrected}).encode(), corrected, {"record-total": "3"}),
+    )
+    finra.ingest_short_interest_snapshot("2026-08-14", data_root)
+
+    rows = parquet.read_table("short_interest", root=data_root / "parquet").to_pylist()
+    assert len(rows) == 6
+    aaa_versions = sorted(
+        (r for r in rows if r["symbol_code"] == "AAA"),
+        key=lambda r: r["known_at"],
+    )
+    assert {r["short_position"] for r in aaa_versions} == {20.0, 25.0}
+    assert len({r["row_id"] for r in aaa_versions}) == 2
+    assert aaa_versions[0]["known_at"] != aaa_versions[1]["known_at"]
+    checkpoints = parquet.read_table("ingestion_checkpoints", root=data_root / "parquet").to_pylist()
+    assert len(checkpoints) == 2
+
+
+def test_finra_identical_payload_after_ttl_still_deduplicates(data_root, finra_fakes, monkeypatch):
+    """Even after the refresh TTL forces a refetch, an identical payload is
+    normalized only once (no duplicate facts, no second checkpoint)."""
+    monkeypatch.setattr(finra, "FINRA_REFRESH_TTL_SECONDS", 0)
+    finra.ingest_short_interest_snapshot("2026-08-14", data_root)
+    finra.ingest_short_interest_snapshot("2026-08-14", data_root)
+
+    rows = parquet.read_table("short_interest", root=data_root / "parquet").to_pylist()
+    assert len(rows) == 3
+    checkpoints = parquet.read_table("ingestion_checkpoints", root=data_root / "parquet").to_pylist()
+    assert len(checkpoints) == 1
+
+
+def test_finra_pages_archived_under_custom_data_root(data_root, finra_fakes):
+    """Page archives must live under the pipeline's data root, keeping raw
+    provenance and normalized data together."""
+    finra.ingest_short_interest_snapshot("2026-08-14", data_root)
+    page_files = list((data_root / "raw" / "finra" / "data_page").rglob("*.json"))
+    assert page_files, "expected archived FINRA page payloads under the data root"
+    assert any(p.suffix == ".json" for p in page_files)
+    assert all("consolidatedShortInterest" in str(p) or p.suffix == ".json" for p in page_files)
+    manifests = list((data_root / "raw" / "finra" / "data_page").rglob("*.manifest.json"))
+    assert manifests
 
 
 # ---------------------------------------------------------------------------

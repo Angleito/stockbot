@@ -64,8 +64,11 @@ def normalize_short_interest_snapshot(
         if short_position is not None and short_position < 0:
             short_position = None
         entity_id = ids.finra_entity_id(symbol)
+        # The row ID includes the snapshot content hash so a corrected source
+        # payload becomes a NEW source version (new known_at) instead of
+        # colliding with the original row in the dedupe.
         short_interest.append({
-            "row_id": f"finra:row:{settlement_date}:{symbol}",
+            "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
             "entity_id": entity_id,
             "security_id": None,
             "symbol_code": symbol,
@@ -117,7 +120,7 @@ def normalize_short_sale_volume(
         if not symbol or not trade_date:
             continue
         short_sale_volume.append({
-            "row_id": f"finra:regsho:{trade_date}:{symbol}",
+            "row_id": f"finra:regsho:{trade_date}:{symbol}:{content_hash[:12]}",
             "entity_id": ids.finra_entity_id(symbol),
             "security_id": None,
             "symbol_code": symbol,
