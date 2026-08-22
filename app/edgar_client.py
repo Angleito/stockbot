@@ -38,9 +38,15 @@ def _cached_or_fetch(key: str, fetch):
 def get_fundamentals(ticker: str, metric: str) -> dict:
     """Return a specific fundamental for ticker.
 
-    metric: 'eps' | 'balance_sheet' | 'shares_float' | 'overview'
+    metric: 'eps' | 'balance_sheet' | 'shares_outstanding' | 'overview'
+
+    'shares_float' is accepted as a deprecated alias for
+    'shares_outstanding': it returns SEC-reported shares outstanding, not
+    public float, and the response says so explicitly.
     """
     _ensure_init()
+    if metric == "shares_float":
+        metric = "shares_outstanding"
     key = f"fundamentals:{ticker}:{metric}"
     return _cached_or_fetch(key, lambda: _fetch_fundamentals(ticker, metric))
 
@@ -55,7 +61,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 "cik": company.cik,
                 "industry": getattr(company, "sic_description", None),
             }
-        if metric == "shares_float":
+        if metric == "shares_outstanding":
             facts = company.get_facts()
             df = facts.to_dataframe()
             shares = df[df["concept"].isin(
@@ -69,6 +75,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 "shares_outstanding": float(latest["value"]),
                 "as_of": str(latest["period_end"]),
                 "source": "SEC EDGAR company facts",
+                "note": "SEC-reported shares outstanding, not public float",
             }
         if metric == "eps":
             facts = company.get_facts()

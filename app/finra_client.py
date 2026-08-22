@@ -167,6 +167,19 @@ DATASET_NAMES = (
     "industrySnapshotFirmsByRegistrationType",
 )
 
+# FINRA's live catalog may return path segments in all caps even though the
+# documented data, metadata, and partitions endpoints use camelCase. Keep a
+# conservative registry for known paths; unknown values remain unchanged.
+_CANONICAL_GROUP_NAMES = {
+    "adf": "adf",
+    "finra": "finra",
+    "firm": "firm",
+    "fixedincomemarket": "fixedIncomeMarket",
+    "otcmarket": "otcMarket",
+    "registration": "registration",
+}
+_CANONICAL_DATASET_NAMES = {name.casefold(): name for name in DATASET_NAMES}
+
 
 @dataclass(frozen=True)
 class CatalogEntry:
@@ -212,9 +225,9 @@ _cached_token: Optional[str] = None
 _token_expires_at: float = 0.0
 
 _discovery_lock = threading.Lock()
-_catalog_mem: Optional[list[CatalogEntry]] = None
-_metadata_mem: dict[str, DatasetSpec] = {}
-_partitions_mem: dict[str, list[tuple[str, ...]]] = {}
+_catalog_mem: dict[str, list[CatalogEntry]] = {}
+_metadata_mem: dict[tuple[str, str], DatasetSpec] = {}
+_partitions_mem: dict[tuple[str, str], list[tuple[str, ...]]] = {}
 
 
 def list_datasets(
@@ -434,13 +447,19 @@ def describe_dataset(dataset_id: str) -> dict:
 
 
 def get_short_interest(ticker: str, settlement_date: Optional[str] = None) -> dict:
-    return query_dataset(
+    result = query_dataset(
         "otcMarket/consolidatedShortInterest",
         ticker=ticker,
         start_date=settlement_date,
         end_date=settlement_date,
-        limit=50,
+        # Recent settlement cycles are sufficient for the briefing and keep
+        # stale-data recovery within the bounded partition-query budget.
+        limit=5,
+        prefer_latest=settlement_date is None,
     )
+    if settlement_date is None and result.get("data_freshness") == "stale":
+        return _stale_short_interest_error(ticker, result.get("as_of_date"))
+    return result
 
 
 def get_reg_sho_volume(ticker: str, trade_date: Optional[str] = None) -> dict:
@@ -474,6 +493,7 @@ def query_dataset(
     offset: Optional[int] = None,
     filters: Optional[list[dict]] = None,
     analysis_goal: Optional[str] = None,
+    prefer_latest: bool = False,
 ) -> dict:
     """Query a FINRA dataset and return an analyzed briefing.
 
@@ -507,6 +527,50 @@ def query_dataset(
     returned_count = len(records)
     pagination = _parse_pagination(headers, effective_offset, effective_limit, returned_count)
 
+    as_of, freshness = _freshness_status(spec, records)
+    if (
+        prefer_latest
+        and freshness == "stale"
+        and spec.date_field
+        and spec.partition_fields
+        and not start_date
+        and not end_date
+        and not filters
+        and effective_offset == 0
+    ):
+        selected = [f["name"] for f in spec.fields if f.get("name")]
+        try:
+            records, headers, partition_queries, _short_result = _datapoints_via_partitions(
+                spec,
+                entry,
+                selected,
+                ticker,
+                None,
+                None,
+                None,
+                effective_limit,
+                [f"-{spec.date_field}"],
+            )
+        except requests.HTTPError as e:
+            return _http_error_result(dataset, e)
+        except ValueError as e:
+            return {"error": str(e)}
+        returned_count = len(records)
+        pagination = _parse_pagination(
+            headers, effective_offset, effective_limit, returned_count
+        )
+        pagination.update(
+            {
+                "total_records": None,
+                "may_have_more": (
+                    returned_count >= effective_limit
+                    and partition_queries < _MAX_PARTITION_QUERIES
+                ),
+                "source": "partitions",
+            }
+        )
+        as_of, freshness = _freshness_status(spec, records)
+
     analysis = analyze_and_brief(
         spec,
         records,
@@ -514,7 +578,6 @@ def query_dataset(
         _query_cache_key(spec, payload),
         pagination=pagination,
     )
-    as_of, freshness = _freshness_status(spec, records)
     stale = _stale_warning(as_of, freshness)
     warnings = list(analysis["warnings"])
     if stale:
@@ -646,6 +709,12 @@ def get_finra_datapoints(
             "source": "partitions",
         }
     as_of, freshness = _freshness_status(spec, records)
+    if (
+        spec.name.casefold() == "consolidatedshortinterest"
+        and sort
+        and freshness == "stale"
+    ):
+        return _stale_short_interest_error(ticker or dataset, as_of)
     stale = _stale_warning(as_of, freshness)
     warnings = [stale] if stale else []
     if short_result:
@@ -974,6 +1043,17 @@ def _environment() -> str:
     return "mock" if finra_use_mock() else "production"
 
 
+def _stale_short_interest_error(subject: str, as_of: Optional[str]) -> dict:
+    dated = f" (newest available date: {as_of})" if as_of else ""
+    return {
+        "error": (
+            f"Current FINRA short interest is unavailable for {subject}{dated}. "
+            "FINRA returned only stale historical data, so it cannot answer a "
+            "latest short-interest request."
+        )
+    }
+
+
 def _freshness_status(
     spec: DatasetSpec, records: list[dict]
 ) -> tuple[Optional[str], str]:
@@ -1234,17 +1314,17 @@ def _catalog_error_message(exc: BaseException) -> str:
 
 
 def _get_catalog() -> list[CatalogEntry]:
-    global _catalog_mem
+    environment = _environment()
     with _discovery_lock:
-        if _catalog_mem is not None:
-            return _catalog_mem
+        if environment in _catalog_mem:
+            return _catalog_mem[environment]
 
-    cache_key = "finra:catalog:v1"
+    cache_key = f"finra:v2:{environment}:catalog"
     hit = cache.get(cache_key, ttl=DISCOVERY_TTL_SECONDS)
     if isinstance(hit, list) and hit:
         entries = [_entry_from_dict(d) for d in hit]
         with _discovery_lock:
-            _catalog_mem = entries
+            _catalog_mem[environment] = entries
         return entries
 
     raw = _fetch_catalog_http()
@@ -1264,7 +1344,7 @@ def _get_catalog() -> list[CatalogEntry]:
     ]
     cache.set(cache_key, [_entry_to_dict(e) for e in entries])
     with _discovery_lock:
-        _catalog_mem = entries
+        _catalog_mem[environment] = entries
     return entries
 
 
@@ -1308,9 +1388,8 @@ def _normalize_catalog_item(item: dict) -> Optional[CatalogEntry]:
     name = str(name).strip()
     if not group or not name:
         return None
-    # Prefer camelCase path segments when the catalog returns shouting-case.
-    group = _prefer_camel(group)
-    name = _prefer_camel(name)
+    group = _canonical_group_name(group)
+    name = _canonical_dataset_name(name)
     description = (
         str(item.get("description") or "").strip()
         or f"{group}/{name}"
@@ -1375,9 +1454,28 @@ def _parse_optional_bool(*values: Any) -> Optional[bool]:
     return None
 
 
-def _prefer_camel(value: str) -> str:
-    """If value is ALLCAPS/closed-up, keep as-is; otherwise return stripped."""
-    return value.strip()
+def _canonical_group_name(value: str) -> str:
+    """Return documented casing for a known FINRA dataset group."""
+    stripped = value.strip()
+    return _CANONICAL_GROUP_NAMES.get(stripped.casefold(), stripped)
+
+
+def _canonical_dataset_name(value: str) -> str:
+    """Return documented casing for a known FINRA dataset name.
+
+    Catalog entries include test datasets with a Mock suffix. Preserve that
+    suffix after normalizing the corresponding base name.
+    """
+    stripped = value.strip()
+    folded = stripped.casefold()
+    canonical = _CANONICAL_DATASET_NAMES.get(folded)
+    if canonical:
+        return canonical
+    if folded.endswith("mock"):
+        base = _CANONICAL_DATASET_NAMES.get(folded[:-4])
+        if base:
+            return base + "Mock"
+    return stripped
 
 
 def _entry_to_dict(e: CatalogEntry) -> dict:
@@ -1466,12 +1564,12 @@ def _resolve_dataset(dataset_id: str) -> CatalogEntry:
 
 
 def _get_dataset_spec(entry: CatalogEntry) -> DatasetSpec:
-    key = entry.dataset_id.lower()
+    key = (_environment(), entry.dataset_id.lower())
     with _discovery_lock:
         if key in _metadata_mem:
             return _metadata_mem[key]
 
-    cache_key = f"finra:metadata:v1:{entry.group}/{entry.name}"
+    cache_key = f"finra:v2:{_environment()}:metadata:{entry.group}/{entry.name}"
     hit = cache.get(cache_key, ttl=DISCOVERY_TTL_SECONDS)
     if isinstance(hit, dict) and hit.get("fields") is not None:
         spec = _spec_from_cached(entry, hit)
@@ -1530,12 +1628,12 @@ def _get_partitions(spec: DatasetSpec) -> list[tuple[str, ...]]:
         raise ValueError(
             f"Dataset '{spec.dataset_id}' has no partition fields."
         )
-    key = spec.dataset_id.lower()
+    key = (_environment(), spec.dataset_id.lower())
     with _discovery_lock:
         if key in _partitions_mem:
             return _partitions_mem[key]
 
-    cache_key = f"finra:partitions:v2:{spec.group}/{spec.name}"
+    cache_key = f"finra:v3:{_environment()}:partitions:{spec.group}/{spec.name}"
     hit = cache.get(cache_key, ttl=DISCOVERY_TTL_SECONDS)
     if _is_partition_tuple_cache(hit, len(spec.partition_fields)):
         parsed = [tuple(str(v) for v in entry) for entry in hit]
@@ -1995,7 +2093,10 @@ def _dataset_path_name(spec: DatasetSpec) -> str:
 
 def _query_cache_key(spec: DatasetSpec, payload: dict) -> str:
     path_name = _dataset_path_name(spec)
-    return f"finra:{spec.group}:{path_name}:{json.dumps(payload, sort_keys=True)}"
+    return (
+        f"finra:v2:{_environment()}:query:{spec.group}:{path_name}:"
+        f"{json.dumps(payload, sort_keys=True)}"
+    )
 
 
 def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
@@ -2030,12 +2131,16 @@ def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dic
         _sanitize_payload(payload),
     )
     resp.raise_for_status()
-    data = resp.json()
     headers = {
         name.lower(): value
         for name, value in resp.headers.items()
         if name.lower() in _RECORD_HEADERS
     }
+    # FINRA can return a successful empty response for a partition with no
+    # matching rows. Continue the partition walk instead of parsing it as JSON.
+    if not resp.content or not resp.content.strip():
+        return [], headers
+    data = resp.json()
     return _extract_records(data), headers
 
 
@@ -2076,7 +2181,7 @@ def reset_discovery_cache() -> None:
     """Test helper — clears in-memory catalog/metadata caches."""
     global _catalog_mem, _metadata_mem
     with _discovery_lock:
-        _catalog_mem = None
+        _catalog_mem = {}
         _metadata_mem = {}
 
 

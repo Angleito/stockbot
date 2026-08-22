@@ -6,6 +6,7 @@ opt-in via tests/test_finra_smoke.py (pytest -m finra_smoke).
 """
 
 import json
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -199,6 +200,29 @@ def test_short_interest_payload(http):
             "fieldValue": "2026-08-14",
         },
     ]
+
+
+def test_latest_short_interest_rejects_stale_production_data(http, monkeypatch):
+    stale_date = (date.today() - timedelta(days=finra_client.STALE_AFTER_DAYS + 1)).isoformat()
+    http["post"].side_effect = [
+        _token_response(),
+        _response([{
+            "symbolCode": "AAPL",
+            "settlementDate": stale_date,
+            "currentShortPositionQuantity": 100,
+        }]),
+    ]
+    monkeypatch.setattr(
+        finra_client,
+        "_datapoints_via_partitions",
+        lambda *_args: ([{"settlementDate": stale_date}], {}, 1, False),
+    )
+
+    result = execute_tool("get_short_interest", {"ticker": "AAPL"}, model="test")
+
+    assert "error" in result
+    assert "Current FINRA short interest is unavailable" in result["error"]
+    assert stale_date in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +954,72 @@ def test_catalog_metadata_data_urls_and_auth(http):
     assert "compareFilters" in data_call.kwargs["json"]
 
 
+def test_uppercase_catalog_paths_are_normalized_before_requests(http):
+    """Live FINRA catalog values may be uppercase; endpoint paths are not."""
+    catalog = _load_catalog()
+    catalog["datasets"][0]["group"] = "OTCMARKET"
+    catalog["datasets"][0]["name"] = "CONSOLIDATEDSHORTINTEREST"
+
+    def _get(url, **kwargs):
+        if url.rstrip("/").endswith("/datasets"):
+            return _response(catalog)
+        return _mock_get(url, **kwargs)
+
+    http["get"].side_effect = _get
+    http["post"].side_effect = [
+        _token_response(),
+        _response([{"symbolCode": "AAPL", "settlementDate": "2026-08-14"}]),
+    ]
+
+    result = execute_tool(
+        "query_finra",
+        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
+        model="test",
+    )
+
+    assert "error" not in result, result
+    assert result["dataset_id"] == "otcMarket/consolidatedShortInterest"
+    metadata_url = http["get"].call_args_list[1].args[0]
+    data_url = http["post"].call_args_list[1].args[0]
+    assert metadata_url.endswith(
+        "/metadata/group/otcMarket/name/consolidatedShortInterest"
+    )
+    assert data_url.endswith(
+        "/data/group/otcMarket/name/consolidatedShortInterest"
+    )
+
+
+def test_query_cache_isolated_by_finra_environment(http, fake_cache, monkeypatch):
+    spec = finra_client.DatasetSpec(
+        group="otcMarket", name="consolidatedShortInterest", description=""
+    )
+    payload = {"limit": 1}
+    http["post"].side_effect = [
+        _token_response(),
+        _response([{"symbolCode": "AAPL"}]),
+        _response([{"symbolCode": "AAPL"}]),
+    ]
+
+    production_key = finra_client._query_cache_key(spec, payload)
+    finra_client._cached_query(spec, payload)
+    monkeypatch.setenv("FINRA_USE_MOCK", "true")
+    mock_key = finra_client._query_cache_key(spec, payload)
+    finra_client._cached_query(spec, payload)
+
+    assert production_key != mock_key
+    assert production_key in fake_cache.store
+    assert mock_key in fake_cache.store
+    data_urls = [
+        call.args[0]
+        for call in http["post"].call_args_list
+        if "oauth2/access_token" not in call.args[0]
+    ]
+    assert data_urls == [
+        f"{FINRA_API_BASE}/data/group/otcMarket/name/consolidatedShortInterest",
+        f"{FINRA_API_BASE}/data/group/otcMarket/name/consolidatedShortInterestMock",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # HTTP failure modes
 # ---------------------------------------------------------------------------
@@ -1047,6 +1137,7 @@ def test_missing_credentials(monkeypatch):
 def test_finra_schema_dispatch_parity():
     finra_names = {
         "get_short_interest",
+        "get_short_interest_leaderboard",
         "get_reg_sho_volume",
         "get_threshold_securities",
         "list_finra_datasets",

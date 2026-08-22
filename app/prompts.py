@@ -23,8 +23,8 @@ Rules:
   JSON). Treat each line as tool evidence; cite the tool and its source
   when you use it.
 - If the user does not specify a ticker, ask which company they mean
-  instead of guessing one (threshold-list and market-wide FINRA queries
-  that do not need a ticker are allowed).
+  instead of guessing one, except for threshold-list and market-wide FINRA
+  queries that do not need a ticker (including the short-interest leaderboard).
 - CONTEXT AWARENESS: When the user asks a follow-up question about a metric
   (e.g., "what is undiluted?", "what's revenue?") without naming a company,
   check recent conversation history. If a company ticker was mentioned in
@@ -43,6 +43,14 @@ Rules:
   * Proxy/executive compensation: Use get_filing_section with form_type="DEF 14A"
   * Business description/risk factors: Use get_filing_section with 10-K or 10-Q
   * Short interest / days to cover: Use get_short_interest
+  * "Highest short interest", "most shorted stock", or short interest as a
+    percent of total shares: Use get_short_interest_leaderboard. It ranks
+    FINRA short shares divided by SEC-reported shares outstanding for
+    tickers that map 1:1 to an SEC CIK with a shares-outstanding fact known
+    on or before the settlement date; unclassified or non-equity instruments
+    are excluded and counted. This is not a screen of all US common stocks;
+    clearly distinguish it from percent of public float and from real-time
+    data.
   * Daily short-sale volume (Reg SHO): Use get_reg_sho_volume
   * Threshold securities list: Use get_threshold_securities
   * Unfamiliar public FINRA data (ATS/OTC weekly volume, TRACE treasury

@@ -36,10 +36,23 @@ pytestmark = [
 ]
 
 
+class _NoCache:
+    """Ensure production smoke tests exercise FINRA, never SQLite history."""
+
+    @staticmethod
+    def get(_key, ttl=None):
+        return None
+
+    @staticmethod
+    def set(_key, _value):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _production_mode(monkeypatch):
     # Never force mock mode: this suite must exercise the production API.
     monkeypatch.delenv("FINRA_USE_MOCK", raising=False)
+    monkeypatch.setattr(finra_client, "cache", _NoCache())
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
     finra_client.reset_partitions_cache()
@@ -81,6 +94,7 @@ def test_prod_smoke_latest_five_short_interest_no_400():
     row_fields = set(result["records"][0])
     assert {"settlementDate", "daysToCoverQuantity", "averageDailyVolumeQuantity"} <= row_fields
     assert result["environment"] == "production"
+    assert result["data_freshness"] == "current", result
 
 
 def test_prod_smoke_tuple_safe_partition_retrieval():
@@ -103,19 +117,12 @@ def test_prod_smoke_tuple_safe_partition_retrieval():
 
 
 def test_prod_smoke_truthful_freshness_labeling():
-    """Freshness must be truthful: stale data is surfaced, never silently
-    labeled current."""
-    result = finra_client.query_dataset(
-        "otcMarket/consolidatedShortInterest", ticker="AAPL", limit=5
-    )
+    """The chatbot's latest-short-interest path must return current data."""
+    result = finra_client.get_short_interest("AAPL")
     assert "error" not in result, result
     assert result["as_of_date"] is not None
-    assert result["data_freshness"] in ("current", "stale")
+    assert result["data_freshness"] == "current", result
     assert result["environment"] == "production"
     rendered = render_tool_result(result)
-    if result["data_freshness"] == "stale":
-        assert any("STALE" in w for w in result["warnings"])
-        assert "STALE" in rendered
-    else:
-        assert not any("STALE" in w for w in result["warnings"])
-        assert "STALE" not in rendered
+    assert not any("STALE" in w for w in result["warnings"])
+    assert "STALE" not in rendered

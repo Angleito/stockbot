@@ -30,7 +30,9 @@ def render_tool_result(
         result = {"result": result}
     if "error" in result:
         return _render_error(result, max_bytes)
-    if "records" in result and "fields" in result:
+    if "entries" in result and "settlement_date" in result:
+        text = _render_short_interest_leaderboard(result, max_bytes)
+    elif "records" in result and "fields" in result:
         text = _render_datapoints(result, max_bytes)
     elif "coverage" in result and "metrics" in result:
         text = _render_briefing(result, max_bytes)
@@ -41,6 +43,37 @@ def render_tool_result(
     if _utf8_size(text) <= max_bytes:
         return text
     return _minimal(result, max_bytes)
+
+
+def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:
+    fields = ("rank", "ticker", "short_interest_percent", "short_shares", "shares_outstanding", "sec_shares_as_of", "sec_filed_at")
+    labels = ("Rank", "Ticker", "Short %", "Short shares", "Shares outstanding", "SEC shares as of", "SEC filed")
+    lines = [
+        "Short interest leaderboard — FINRA settlement " + str(result["settlement_date"]),
+        "| " + " | ".join(labels) + " |",
+        "|" + "|".join("---" for _ in fields) + "|",
+    ]
+    stale_banner = _datapoints_stale_banner(result)
+    if stale_banner:
+        lines.append(stale_banner)
+    for entry in result.get("entries") or []:
+        values = []
+        for field in fields:
+            value = entry.get(field, "")
+            if field == "short_interest_percent" and value != "":
+                value = f"{float(value):.2f}%"
+            elif field in ("short_shares", "shares_outstanding") and value != "":
+                value = f"{float(value):,.0f}"
+            values.append(_table_cell(value))
+        lines.append("| " + " | ".join(values) + " |")
+    coverage = result.get("coverage") or {}
+    lines.append("Source: " + str(result.get("source", "FINRA + SEC EDGAR")))
+    lines.append("Metric: " + str(result.get("metric", "")))
+    lines.append("Coverage: " + f"{coverage.get('eligible_rows', 0)} eligible of {coverage.get('finra_rows', 0)} FINRA rows; exclusions {coverage.get('exclusions', {})}")
+    if result.get("as_of_date"):
+        lines.append("As of: " + str(result["as_of_date"]) + " (freshness: " + str(result.get("data_freshness") or "unknown") + ")")
+    lines.append("Environment: " + str(result.get("environment", "unknown")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
 
 
 def _utf8_size(text: str) -> int:

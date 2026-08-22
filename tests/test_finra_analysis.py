@@ -860,6 +860,7 @@ def test_datapoints_ten_fields_accepted(http):
 def test_finra_schema_dispatch_parity():
     finra_names = {
         "get_short_interest",
+        "get_short_interest_leaderboard",
         "get_reg_sho_volume",
         "get_threshold_securities",
         "list_finra_datasets",

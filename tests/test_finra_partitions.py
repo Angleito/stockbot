@@ -585,7 +585,7 @@ def test_partition_cache_old_flattened_shape_ignored(http, fake_cache):
         return _response(rows[value])
 
     http["post"].side_effect = _respond
-    cache_key = "finra:partitions:v2:otcMarket/consolidatedShortInterest"
+    cache_key = "finra:v3:production:partitions:otcMarket/consolidatedShortInterest"
     fake_cache.store[cache_key] = {"settlementDate": ["2026-08-14"]}
     args = {
         "dataset": "otcMarket/consolidatedShortInterest",
@@ -605,7 +605,7 @@ def test_partition_cache_old_flattened_shape_ignored(http, fake_cache):
     ]
     assert len(_partitions_get_calls(http["get"])) == 1
     assert finra_client._partitions_mem[
-        "otcmarket/consolidatedshortinterest"
+        ("production", "otcmarket/consolidatedshortinterest")
     ] == [("2026-08-14",), ("2026-08-07",), ("2026-08-01",)]
 
 

@@ -7,6 +7,7 @@ import requests
 
 from . import edgar_client
 from . import finra_client
+from . import short_interest_screen
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .prompts import READING_PROMPT_TEMPLATE
 
@@ -18,14 +19,16 @@ TOOLS = [
         "function": {
             "name": "get_fundamentals",
             "description": "Returns a specific numeric fundamental (EPS, "
-                "balance sheet line item, shares float) for a ticker. Call "
-                "this for any request for a specific numeric metric.",
+                "balance sheet line item, shares outstanding) for a ticker. "
+                "Note: shares_outstanding is SEC-reported shares outstanding, "
+                "not public float. Call this for any request for a specific "
+                "numeric metric.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "metric": {"type": "string", "enum": [
-                        "eps", "balance_sheet", "shares_float", "overview"
+                        "eps", "balance_sheet", "shares_outstanding", "overview"
                     ]}
                 },
                 "required": ["ticker", "metric"]
@@ -138,6 +141,21 @@ TOOLS = [
                     }
                 },
                 "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_short_interest_leaderboard",
+            "description": "Returns the FINRA short-interest leaderboard: short interest as a percentage of SEC-reported shares outstanding for tickers that map 1:1 to an SEC CIK with an EntityCommonStockSharesOutstanding fact known on or before the settlement date. Excludes symbols that cannot be mapped to a single SEC entity, lack a shares-outstanding fact (unclassified or non-equity instruments), or have invalid short-interest quantities; every exclusion is counted and returned in coverage. Use for questions such as 'which stock has the highest short interest', 'most shorted stock', or 'short interest as a percent of total shares'. This is a deterministic, complete FINRA settlement-date screen; it is NOT percent of public float and is not real-time short interest.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Number of ranked stocks to return; default 10, maximum 25."},
+                    "settlement_date": {"type": "string", "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle."}
+                },
+                "required": []
             }
         }
     },
@@ -458,6 +476,9 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS = {
+    "get_short_interest_leaderboard": lambda args, model: short_interest_screen.get_short_interest_leaderboard(
+        limit=args.get("limit"), settlement_date=args.get("settlement_date")
+    ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
         args["ticker"], args.get("settlementDate")
     ),
