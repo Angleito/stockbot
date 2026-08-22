@@ -17,6 +17,8 @@ from app.normalization import finra as finra_norm
 from app.normalization import sec as sec_norm
 from app.storage import parquet
 
+from datetime import date
+
 SETTLEMENT = "2026-08-14"
 
 
@@ -25,25 +27,25 @@ def data_root(tmp_path):
     return tmp_path / "data"
 
 
-def _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC")):
+def _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"), retrieved_at="2026-08-10T12:00:00Z", cik_start=1):
     payload = {
         str(i): {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}
-        for i, (ticker, cik) in enumerate(zip(tickers, range(1, len(tickers) + 1)), start=0)
+        for i, (ticker, cik) in enumerate(zip(tickers, range(cik_start, cik_start + len(tickers))), start=0)
     }
     datasets = sec_norm.normalize_company_tickers(
-        payload, retrieved_at="2026-08-21T12:00:00Z", content_hash="tickers-hash",
+        payload, retrieved_at=retrieved_at, content_hash="tickers-hash",
     )
     for name, rows in datasets.items():
         parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_facts(data_root, facts_by_cik):
+def _seed_facts(data_root, facts_by_cik, retrieved_at="2026-08-10T12:00:00Z"):
     for cik, facts in facts_by_cik.items():
         payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
             "EntityCommonStockSharesOutstanding": {"units": {"shares": facts}},
         }}}
         datasets = sec_norm.normalize_company_facts(
-            payload, retrieved_at="2026-08-21T12:00:00Z", content_hash=f"facts-{cik}",
+            payload, retrieved_at=retrieved_at, content_hash=f"facts-{cik}",
             source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
             source_record_id=f"cik{cik:010d}",
         )
@@ -51,10 +53,10 @@ def _seed_facts(data_root, facts_by_cik):
             parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_short_interest(data_root, rows, known_at="2026-08-21T12:00:00Z"):
+def _seed_short_interest(data_root, rows, known_at="2026-08-10T12:00:00Z", content_hash="snapshot-hash"):
     datasets = finra_norm.normalize_short_interest_snapshot(
         rows, settlement_date=SETTLEMENT, known_at=known_at,
-        retrieved_at=known_at, content_hash="snapshot-hash",
+        retrieved_at=known_at, content_hash=content_hash,
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
     )
@@ -99,10 +101,12 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root):
     assert result["coverage"] == {
         "finra_rows": 3, "eligible_rows": 3,
         "exclusions": {"unmapped_symbol": 0, "ambiguous_ticker_mapping": 0,
-                       "not_classified_common_equity": 0, "invalid_short_interest": 0},
+                       "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
+                       "invalid_short_interest": 0},
     }
     assert result["calculation_version"] == screens.SCREEN_CALC_VERSION
-    assert result["as_of_date"] == SETTLEMENT
+    # Default as_of is the live horizon (today), not the settlement date.
+    assert result["as_of_date"] == date.today().isoformat()
     assert result["source_records"]
     assert result["entries"][0]["sec_accession"] == "c1"
     assert result["entries"][0]["sec_source_url"].endswith("CIK0000000003.json")
@@ -184,7 +188,7 @@ def test_fact_with_period_after_settlement_is_never_used(data_root):
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
 
-    assert result["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    assert result["coverage"]["exclusions"]["missing_shares_outstanding"] == 1
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
 
 
@@ -218,6 +222,7 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root):
         "unmapped_symbol": 1,            # DDD
         "ambiguous_ticker_mapping": 1,   # EEE
         "not_classified_common_equity": 0,
+        "missing_shares_outstanding": 0,
         "invalid_short_interest": 1,     # FFF
     }
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
@@ -236,9 +241,103 @@ def test_stale_settlement_is_surfaced(data_root):
     for name, rows_ in datasets.items():
         parquet.write_rows(name, rows_, root=data_root / "parquet")
 
-    stale = screens.materialize_short_interest_screen(stale_date, data_root=data_root)
+    stale = screens.materialize_short_interest_screen(stale_date, as_of="2025-01-20", data_root=data_root)
     assert stale["data_freshness"] == "stale"
-    assert stale["as_of_date"] == stale_date
+    assert stale["as_of_date"] == "2025-01-20"
+
+
+# ---------------------------------------------------------------------------
+# Point-in-time enforcement (P0): FINRA rows, aliases, and classifications
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_not_knowable_at_as_of_is_rejected(data_root):
+    """A snapshot archived after as_of is invisible to that as_of."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-30T12:00:00Z")
+
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+
+    assert "error" in result
+    assert "knowable on or before 2026-08-14" in result["error"]
+
+
+def test_ticker_alias_acquired_after_as_of_is_unusable(data_root):
+    """A ticker mapping acquired after as_of cannot be used by an earlier
+    screen: CCC is unmapped at 2026-08-14 and mapped at 2026-08-21."""
+    _seed_tickers(data_root, tickers=("AAA", "BBB"), retrieved_at="2026-08-10T12:00:00Z")
+    _seed_tickers(data_root, tickers=("CCC",), retrieved_at="2026-08-20T12:00:00Z", cik_start=3)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows())
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert early["coverage"]["exclusions"]["unmapped_symbol"] == 1
+    assert [e["ticker"] for e in early["entries"]] == ["AAA", "BBB"]
+
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
+    assert later["coverage"]["exclusions"]["unmapped_symbol"] == 0
+    assert [e["ticker"] for e in later["entries"]] == ["CCC", "AAA", "BBB"]
+
+
+def test_corrected_snapshot_versions_selected_by_as_of(data_root):
+    """A corrected snapshot is a new source version: the earlier as-of uses
+    the original values, the later as-of uses the correction."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    corrected = [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+    ]
+    _seed_short_interest(data_root, corrected, known_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in early["entries"]] == ["CCC", "AAA", "BBB"]
+    assert early["entries"][1]["short_shares"] == 20  # original version
+
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
+    assert later["entries"][1]["short_shares"] == 25  # corrected version
+    assert later["coverage"]["finra_rows"] == 3  # one version per symbol, not both
+
+
+def test_security_classification_is_consulted(data_root):
+    """Eligibility comes from the securities classification, not a
+    fact-presence proxy: reclassifying ETF (unknown type) excludes it even
+    though a shares-outstanding fact exists."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "ETF"))
+    _seed_facts(data_root, {
+        **{cik: facts for cik, facts in _default_facts().items()},
+        4: [{"end": "2026-08-01", "val": 50, "accn": "e1", "filed": "2026-08-02"}],
+    })
+    rows = _default_rows() + [
+        {"symbolCode": "ETF", "issueName": "Index Fund", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+    ]
+    _seed_short_interest(data_root, rows)
+    # A later classification row reclassifies the ETF as not common equity.
+    reclassified = {
+        "security_id": "sec:equity:0000000004", "entity_id": "sec:cik:0000000004",
+        "security_type": "unknown", "ticker": None, "exchange": None,
+        "source": "provider-test", "known_at": "2026-08-25T12:00:00Z",
+        "retrieved_at": "2026-08-25T12:00:00Z", "content_hash": "x", "parser_version": "t",
+    }
+    directory = data_root / "parquet" / "securities" / "partition=none"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.Table.from_pylist([reclassified], schema=parquet.dataset("securities").schema),
+        str(directory / "part-reclassified.parquet"),
+    )
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
+    assert "ETF" in [e["ticker"] for e in early["entries"]]
+
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
+    assert later["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    assert "ETF" not in [e["ticker"] for e in later["entries"]]
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +345,7 @@ def test_stale_settlement_is_surfaced(data_root):
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(data_root, settlement_date, rows, known_at="2026-08-21T12:00:00Z"):
+def _seed_cycle(data_root, settlement_date, rows, known_at="2026-08-10T12:00:00Z"):
     datasets = finra_norm.normalize_short_interest_snapshot(
         rows, settlement_date=settlement_date, known_at=known_at,
         retrieved_at=known_at, content_hash=f"snapshot-{settlement_date}",

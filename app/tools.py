@@ -149,12 +149,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_short_interest_leaderboard",
-            "description": "Returns the FINRA short-interest leaderboard: short interest as a percentage of SEC-reported shares outstanding for tickers that map 1:1 to an SEC CIK with an EntityCommonStockSharesOutstanding fact known on or before the settlement date. Excludes symbols that cannot be mapped to a single SEC entity, lack a shares-outstanding fact (unclassified or non-equity instruments), or have invalid short-interest quantities; every exclusion is counted and returned in coverage. Use for questions such as 'which stock has the highest short interest', 'most shorted stock', or 'short interest as a percent of total shares'. This is a deterministic, complete FINRA settlement-date screen; it is NOT percent of public float and is not real-time short interest.",
+            "description": "Returns the FINRA short-interest leaderboard: short interest as a percentage of SEC-reported shares outstanding for tickers that map 1:1 to an SEC CIK whose security is classified as common equity and that has a shares-outstanding fact knowable on or before the as-of date (default: today). Excludes symbols that cannot be mapped to a single SEC entity, are not classified as common equity (funds, ETFs, preferred issues), lack a usable shares-outstanding fact, or have invalid short-interest quantities; every exclusion is counted and returned in coverage. Use for questions such as 'which stock has the highest short interest', 'most shorted stock', or 'short interest as a percent of total shares'. This is a deterministic, complete FINRA settlement-date screen; it is NOT percent of public float and is not real-time short interest.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "Number of ranked stocks to return; default 10, maximum 25."},
-                    "settlement_date": {"type": "string", "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle."}
+                    "settlement_date": {"type": "string", "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle."},
+                    "as_of": {"type": "string", "description": "Optional knowledge horizon (YYYY-MM-DD). Only data knowable on or before this date is used. Defaults to today; pass an explicit date for a historical screen."}
                 },
                 "required": []
             }
@@ -478,7 +479,7 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS = {
     "get_short_interest_leaderboard": lambda args, model: analytics.screens.get_short_interest_leaderboard(
-        limit=args.get("limit"), settlement_date=args.get("settlement_date")
+        limit=args.get("limit"), settlement_date=args.get("settlement_date"), as_of=args.get("as_of")
     ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
         args["ticker"], args.get("settlementDate")
