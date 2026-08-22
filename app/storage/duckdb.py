@@ -60,18 +60,25 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
     parquet_root.mkdir(parents=True, exist_ok=True)
     for name in parquet.dataset_names():
         directory = parquet_root / name
-        files = list(directory.rglob("*.parquet")) if directory.exists() else []
-        if not files:
-            # DuckDB errors on read_parquet over an empty glob; materialize an
-            # empty file with the dataset schema so every dataset is queryable
-            # before its first ingestion run.
-            empty_dir = directory / "__empty__"
+        empty_dir = directory / "__empty__"
+        files = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
+        real_files = [p for p in files if empty_dir not in p.parents]
+        if real_files:
+            # DuckDB errors when a hive-partitioned scan sees a file without
+            # the partition column; the placeholder must not be scanned once
+            # real files exist.
+            if empty_dir.exists():
+                import shutil
+
+                shutil.rmtree(empty_dir)
+            glob_path = directory / "**" / "*.parquet"
+        else:
             empty_dir.mkdir(parents=True, exist_ok=True)
             pq.write_table(parquet.dataset(name).schema.empty_table(), str(empty_dir / "part-empty.parquet"))
+            glob_path = empty_dir / "*.parquet"
         conn.execute(
             f"CREATE OR REPLACE VIEW {name} AS "
-            f"SELECT * FROM read_parquet('{directory / '**' / '*.parquet'}', "
-            f"hive_partitioning = true)"
+            f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning = true)"
         )
 
 
