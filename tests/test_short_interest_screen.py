@@ -1,6 +1,7 @@
 import sqlite3
 
 import pytest
+import requests
 
 from app import agent
 from app import finra_client, short_interest_screen as screen
@@ -77,6 +78,123 @@ def test_sec_failure_does_not_publish_partial_screen(isolated_store, monkeypatch
         assert conn.execute("SELECT count(*) FROM leaderboard_run").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_sec_404_is_excluded_and_leaderboard_publishes(isolated_store, monkeypatch):
+    monkeypatch.setattr(screen, "_fetch_finra_snapshot", lambda d: _rows())
+    monkeypatch.setattr(screen, "_fetch_sec_tickers", lambda: _ticker_map(AAA=1, BBB=2, CCC=3))
+    monkeypatch.setattr(screen, "_fetch_sec_facts", lambda cik: None if cik == 2 else _facts(cik))
+
+    result = screen.refresh_short_interest_leaderboard("2026-08-14")
+
+    assert result["coverage"]["finra_rows"] == 3
+    assert result["coverage"]["eligible_rows"] == 2
+    assert result["coverage"]["exclusions"]["no_sec_companyfacts"] == 1
+    assert result["coverage"]["exclusions"]["not_classified_common_equity"] == 0
+    assert [entry["ticker"] for entry in result["entries"]] == ["CCC", "AAA"]
+    conn = sqlite3.connect(screen.DB_PATH)
+    try:
+        assert conn.execute("SELECT count(*) FROM leaderboard_run").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_sec_adapter_classifies_404_only(monkeypatch):
+    def _sec_get_with(status):
+        def _get(url):
+            response = requests.Response()
+            response.status_code = status
+            response.url = url
+            if status >= 400:
+                raise requests.HTTPError(response=response)
+            return response
+
+        return _get
+
+    monkeypatch.setattr(screen, "_sec_get", _sec_get_with(404))
+    assert screen._fetch_sec_facts(1) is None
+
+    for status in (401, 403, 429, 500, 503):
+        monkeypatch.setattr(screen, "_sec_get", _sec_get_with(status))
+        with pytest.raises(requests.HTTPError):
+            screen._fetch_sec_facts(1)
+
+    class _InvalidBody:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not JSON")
+
+    monkeypatch.setattr(screen, "_sec_get", lambda url: _InvalidBody())
+    with pytest.raises(ValueError, match="not JSON"):
+        screen._fetch_sec_facts(1)
+
+
+@pytest.mark.parametrize("failure", [
+    pytest.param(requests.HTTPError("HTTP 429"), id="429"),
+    pytest.param(requests.HTTPError("HTTP 500"), id="500"),
+    pytest.param(requests.ConnectionError("network down"), id="network"),
+])
+def test_sec_service_failures_still_block_publish(isolated_store, monkeypatch, failure):
+    monkeypatch.setattr(screen, "_fetch_finra_snapshot", lambda d: _rows())
+    monkeypatch.setattr(screen, "_fetch_sec_tickers", lambda: _ticker_map(AAA=1, BBB=2, CCC=3))
+
+    def fail_on_beta(cik):
+        if cik == 2:
+            raise failure
+        return _facts(cik)
+
+    monkeypatch.setattr(screen, "_fetch_sec_facts", fail_on_beta)
+    with pytest.raises((requests.HTTPError, requests.ConnectionError)):
+        screen.refresh_short_interest_leaderboard("2026-08-14")
+    conn = sqlite3.connect(screen.DB_PATH)
+    try:
+        assert conn.execute("SELECT count(*) FROM leaderboard_run").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_cached_sec_facts_survive_later_failure_and_are_reused_on_retry(isolated_store, monkeypatch):
+    monkeypatch.setattr(screen, "_fetch_finra_snapshot", lambda d: _rows())
+    monkeypatch.setattr(screen, "_fetch_sec_tickers", lambda: _ticker_map(AAA=1, BBB=2, CCC=3))
+    calls = []
+
+    def facts(cik):
+        calls.append(cik)
+        if cik == 2:
+            raise RuntimeError("SEC down")
+        return _facts(cik)
+
+    monkeypatch.setattr(screen, "_fetch_sec_facts", facts)
+    with pytest.raises(RuntimeError, match="SEC down"):
+        screen.refresh_short_interest_leaderboard("2026-08-14")
+    conn = sqlite3.connect(screen.DB_PATH)
+    try:
+        stored = [row[0] for row in conn.execute("SELECT cik FROM sec_shares_fact")]
+        assert stored == [1]
+    finally:
+        conn.close()
+
+    calls.clear()
+
+    def record(cik):
+        calls.append(cik)
+        return _facts(cik)
+
+    monkeypatch.setattr(screen, "_fetch_sec_facts", record)
+    result = screen.refresh_short_interest_leaderboard("2026-08-14")
+    assert calls == [2, 3]
+    assert result["coverage"]["eligible_rows"] == 3
+
+
+def test_coverage_render_shows_no_sec_companyfacts(isolated_store, monkeypatch):
+    monkeypatch.setattr(screen, "_fetch_finra_snapshot", lambda d: _rows())
+    monkeypatch.setattr(screen, "_fetch_sec_tickers", lambda: _ticker_map(AAA=1, BBB=2, CCC=3))
+    monkeypatch.setattr(screen, "_fetch_sec_facts", lambda cik: None if cik == 2 else _facts(cik))
+
+    result = screen.refresh_short_interest_leaderboard("2026-08-14")
+
+    assert "no_sec_companyfacts" in render_tool_result(result)
 
 
 def test_finra_snapshot_pages_with_exact_date_filter(monkeypatch):

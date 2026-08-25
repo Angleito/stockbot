@@ -74,7 +74,27 @@ class SecConnector(Connector):
 
     def fetch_company_facts(self, cik: int) -> FetchResult:
         url = SEC_FACTS_URL.format(cik=cik)
-        response = self._get_with_retry(url)
+        try:
+            response = self._get_with_retry(url)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                # SEC has no company-facts resource for this CIK (foreign
+                # private issuers, funds, some shells).  Explicit no-facts
+                # result, not an error: the caller records it as a negative
+                # instead of aborting the whole batch.
+                return FetchResult(
+                    key=f"cik{cik:010d}",
+                    payload=b"",
+                    url=url,
+                    kind="companyfacts",
+                    metadata={
+                        "retrieved_at": utc_now(),
+                        "cik": cik,
+                        "status": 404,
+                        "no_companyfacts": True,
+                    },
+                )
+            raise
         return FetchResult(
             key=f"cik{cik:010d}",
             payload=response.content,
@@ -140,6 +160,18 @@ def ingest_company_facts(
     if checkpointer.is_fresh_for_key(FACTS_PIPELINE, "sec", key, FACTS_TTL_SECONDS):
         return summarize("complete", skipped=1, written=0, total=1)
     result = connector.fetch_company_facts(cik)
+    if result.metadata.get("no_companyfacts"):
+        # SEC reports no company-facts resource for this CIK.  Record the
+        # negative as a complete checkpoint (empty payload hash) so reruns
+        # within the TTL skip it without re-probing SEC; nothing is archived
+        # or normalized for a CIK that has no facts.
+        checkpointer.complete(
+            FACTS_PIPELINE, "sec", key, raw_archive.content_hash(result.payload),
+            record_count=0, started_at=started_at,
+        )
+        summary = summarize("complete", skipped=0, written=0, total=1)
+        summary["no_companyfacts"] = True
+        return summary
     record = raw_archive.archive(
         "sec", "companyfacts", key, result.payload,
         url=result.url, retrieved_at=result.metadata.get("retrieved_at"),
@@ -194,6 +226,7 @@ def ingest_shares_facts_for_tickers(
         "ciks_requested": len(ciks),
         "ciks_skipped": sum(1 for r in results if r["payloads_skipped"]),
         "ciks_written": sum(1 for r in results if r["payloads_written"]),
+        "ciks_no_companyfacts": sum(1 for r in results if r.get("no_companyfacts")),
         "summary": results,
     }
 

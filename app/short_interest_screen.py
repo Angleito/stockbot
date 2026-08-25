@@ -8,11 +8,16 @@ SEC fetches are throttled to stay under SEC's request limit, and previously
 retrieved shares-outstanding facts are reused for up to SEC_FACTS_TTL_SECONDS,
 so re-refreshes only crawl new or expired CIKs.  A reused fact is still
 filtered point-in-time against the requested settlement date.
+
+A CIK with no SEC company-facts resource (HTTP 404) is counted as a
+``no_sec_companyfacts`` exclusion, not a failure; any other SEC service
+error still aborts the refresh before publication.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -26,10 +31,12 @@ import requests
 from . import cache
 from . import finra_client
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = os.path.join(Path(__file__).resolve().parent.parent, "data", "short_interest_screen.db")
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
-PARSER_VERSION = "short-interest-screen-v2"
+PARSER_VERSION = "short-interest-screen-v3"
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
 # SEC limits automated requests to roughly 10/second; stay well below it.
@@ -220,9 +227,21 @@ def _fetch_sec_tickers() -> TickerMap:
     return result
 
 
-def _fetch_sec_facts(cik: int) -> tuple[list[dict], dict]:
+def _fetch_sec_facts(cik: int) -> Optional[tuple[list[dict], dict]]:
+    """SEC company facts for one CIK, or None when SEC reports no facts.
+
+    Only a 404 Not Found from the companyfacts endpoint means "this CIK has
+    no SEC company facts".  Every other status (401/403/429 after retry,
+    5xx), an invalid response, or a network error still raises so the caller
+    treats it as a refresh-blocking failure instead of a no-facts exclusion.
+    """
     url = SEC_FACTS_URL.format(cik=cik)
-    response = _sec_get(url)
+    try:
+        response = _sec_get(url)
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return None
+        raise
     raw = response.json()
     units = (((raw.get("facts") or {}).get("dei") or {}).get("EntityCommonStockSharesOutstanding") or {}).get("units") or {}
     facts = units.get("shares") or []
@@ -273,10 +292,14 @@ def refresh_short_interest_leaderboard(settlement_date: Optional[str] = None) ->
         "unmapped_symbol": 0,
         "ambiguous_ticker_mapping": 0,
         "not_classified_common_equity": 0,
+        "no_sec_companyfacts": 0,
         "invalid_short_interest": 0,
     }
     candidates: list[dict] = []
     selected_by_cik: dict[int, Optional[dict]] = {}
+    # CIKs for which SEC explicitly has no company-facts resource (HTTP 404);
+    # distinct from a CIK whose facts exist but have no usable shares fact.
+    no_sec_facts_ciks: set[int] = set()
     conn = _conn()
     try:
         # Preserve the complete source snapshot even when a later SEC request
@@ -308,11 +331,25 @@ def refresh_short_interest_leaderboard(settlement_date: Optional[str] = None) ->
             if cik is None:
                 exclusions["unmapped_symbol"] += 1
                 continue
+            if cik in no_sec_facts_ciks:
+                # SEC has no company-facts resource for this CIK; every row
+                # mapping to it is excluded the same way.
+                exclusions["no_sec_companyfacts"] += 1
+                continue
             if cik not in selected_by_cik:
                 fact = _cached_shares_fact(conn, cik, settlement_date)
                 if fact is None:
-                    facts = _fetch_sec_facts(cik)[0]  # failures abort; no partial publish
-                    fact = _select_fact(facts, settlement_date)
+                    fetched = _fetch_sec_facts(cik)
+                    if fetched is None:
+                        no_sec_facts_ciks.add(cik)
+                        selected_by_cik[cik] = None
+                        logger.warning(
+                            "No SEC company facts for mapped symbol %s (CIK %010d)",
+                            ticker, cik,
+                        )
+                        exclusions["no_sec_companyfacts"] += 1
+                        continue
+                    fact = _select_fact(fetched[0], settlement_date)
                     if fact is not None:
                         shares = float(fact["val"])
                         source_url = SEC_FACTS_URL.format(cik=cik)
@@ -320,6 +357,10 @@ def refresh_short_interest_leaderboard(settlement_date: Optional[str] = None) ->
                             "INSERT OR REPLACE INTO sec_shares_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (cik, ticker, shares, str(fact["end"]), str(fact["filed"]), fact.get("accn"), source_url, time.time(), PARSER_VERSION),
                         )
+                        # Commit each valid fact as it is retrieved so a later
+                        # blocking failure cannot roll it back; a retry then
+                        # reuses it instead of restarting every SEC request.
+                        conn.commit()
                 selected_by_cik[cik] = fact
             fact = selected_by_cik[cik]
             if fact is None:

@@ -365,3 +365,95 @@ def test_sec_connector_gives_up_after_retries(monkeypatch):
 
     with pytest.raises(requests.HTTPError):
         connector._get_with_retry("https://example.test/x")
+
+
+def _no_facts_result(cik):
+    return sec.FetchResult(
+        key=f"cik{cik:010d}",
+        payload=b"",
+        url=sec.SEC_FACTS_URL.format(cik=cik),
+        kind="companyfacts",
+        metadata={
+            "retrieved_at": "2026-08-21T12:00:00Z",
+            "cik": cik,
+            "status": 404,
+            "no_companyfacts": True,
+        },
+    )
+
+
+def test_sec_connector_404_is_explicit_no_facts_result(monkeypatch):
+    import requests
+
+    def _fake_get(url, headers=None, timeout=None):
+        response = requests.Response()
+        response.status_code = 404
+        response.url = url
+        raise requests.HTTPError(response=response)
+
+    connector = sec.SecConnector()
+    monkeypatch.setattr(connector.pacing, "wait", lambda: None)
+    monkeypatch.setattr("app.ingestion.sec.requests.get", _fake_get)
+    monkeypatch.setattr(sec.retry_policy, "sleep", lambda _s: None)
+
+    result = connector.fetch_company_facts(123)
+    assert result.metadata["no_companyfacts"] is True
+    assert result.metadata["status"] == 404
+    assert result.payload == b""
+
+    def _fake_500(url, headers=None, timeout=None):
+        response = requests.Response()
+        response.status_code = 500
+        response.url = url
+        raise requests.HTTPError(response=response)
+
+    monkeypatch.setattr("app.ingestion.sec.requests.get", _fake_500)
+    with pytest.raises(requests.HTTPError):
+        connector.fetch_company_facts(123)
+
+
+def test_ingest_company_facts_404_checkpoints_negative_and_rerun_skips(data_root, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sec.SecConnector, "fetch_company_facts",
+        lambda self, cik: calls.append(cik) or _no_facts_result(cik),
+    )
+
+    summary = sec.ingest_company_facts(2, data_root)
+    assert summary["no_companyfacts"] is True
+    assert summary["payloads_written"] == 0
+
+    assert parquet.count_rows("financial_facts", root=data_root / "parquet") == 0
+    assert parquet.count_rows("documents", root=data_root / "parquet") == 0
+    assert parquet.count_rows("securities", root=data_root / "parquet") == 0
+    checkpoints = parquet.read_table("ingestion_checkpoints", root=data_root / "parquet").to_pylist()
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["status"] == "complete"
+    assert checkpoints[0]["record_count"] == 0
+
+    sec.ingest_company_facts(2, data_root)
+    assert len(calls) == 1
+
+
+def test_ingest_shares_facts_continues_past_404_and_reports_negatives(data_root, monkeypatch):
+    monkeypatch.setattr(
+        sec.SecConnector, "fetch_tickers",
+        lambda self: _fetch_result("company_tickers", _tickers_payload(), sec.SEC_TICKERS_URL),
+    )
+    sec.ingest_company_tickers(data_root)
+
+    def _fetch(self, cik):
+        if cik == 2:
+            return _no_facts_result(cik)
+        return _fetch_result(f"cik{cik:010d}", _facts_payload(cik=cik), sec.SEC_FACTS_URL.format(cik=cik))
+
+    monkeypatch.setattr(sec.SecConnector, "fetch_company_facts", _fetch)
+
+    summary = sec.ingest_shares_facts_for_tickers(["AAA", "BBB"], data_root)
+
+    assert summary["ciks_requested"] == 2
+    assert summary["ciks_written"] == 1
+    assert summary["ciks_no_companyfacts"] == 1
+    facts = parquet.read_table("financial_facts", root=data_root / "parquet").to_pylist()
+    assert len(facts) == 1
+    assert facts[0]["entity_id"] == "sec:cik:0000000001"
