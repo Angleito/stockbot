@@ -3,7 +3,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 PYTEST := $(VENV)/bin/pytest
 
-.PHONY: setup test test-collect smoke smoke-mock smoke-prod clean-env verify
+.PHONY: setup test typecheck test-collect smoke smoke-mock smoke-prod clean-env verify
 
 ## Create a fresh virtualenv and install the pinned dependencies.
 setup:
@@ -14,6 +14,10 @@ setup:
 ## Run the offline unit suite (no network, no credentials required).
 test:
 	$(PYTEST)
+
+## Run the checked-in Pyrefly configuration.
+typecheck:
+	$(VENV)/bin/pyrefly check
 
 ## Verify test collection only (fast env sanity check).
 test-collect:
@@ -31,7 +35,7 @@ smoke-prod:
 smoke: smoke-mock smoke-prod
 
 ## Reproducibility check: fresh environment installs and passes the unit suite.
-verify: clean-env setup test
+verify: clean-env setup test typecheck
 
 clean-env:
 	rm -rf $(VENV)
