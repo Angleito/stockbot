@@ -1,0 +1,9 @@
+{
+  "tools": [
+    {"name": "get_equity_quotes", "description": "Real-time equity quotes"},
+    {"name": "get_option_chains", "description": "Load option chains"},
+    {"name": "get_option_instruments", "description": "Load option contracts"},
+    {"name": "get_option_quotes", "description": "Real-time option quotes"},
+    {"name": "place_option_order", "description": "Not permitted by Stockbot"}
+  ]
+}

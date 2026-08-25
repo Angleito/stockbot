@@ -30,7 +30,15 @@ def render_tool_result(
         result = {"result": result}
     if "error" in result:
         return _render_error(result, max_bytes)
-    if "entries" in result and "settlement_date" in result:
+    if result.get("result_type") == "market_snapshot":
+        text = _render_market_snapshot(result, max_bytes)
+    elif result.get("result_type") == "option_chain":
+        text = _render_option_chain(result, max_bytes)
+    elif result.get("result_type") == "option_analysis":
+        text = _render_option_analysis(result, max_bytes)
+    elif result.get("result_type") == "option_comparison":
+        text = _render_option_comparison(result, max_bytes)
+    elif "entries" in result and "settlement_date" in result:
         text = _render_short_interest_leaderboard(result, max_bytes)
     elif "records" in result and "fields" in result:
         text = _render_datapoints(result, max_bytes)
@@ -43,6 +51,73 @@ def render_tool_result(
     if _utf8_size(text) <= max_bytes:
         return text
     return _minimal(result, max_bytes)
+
+
+def _render_market_snapshot(result: dict, max_bytes: int) -> str:
+    lines = [
+        f"{result.get('ticker', '?')} market snapshot",
+        f"Last: {_cell(result.get('last')) or 'unavailable'}",
+        f"Bid: {_cell(result.get('bid')) or 'unavailable'}",
+        f"Ask: {_cell(result.get('ask')) or 'unavailable'}",
+        f"Retrieved: {_cell(result.get('retrieved_at')) or 'unavailable'}",
+        f"Source: {_cell(result.get('source')) or 'robinhood_mcp'}",
+    ]
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _render_option_chain(result: dict, max_bytes: int) -> str:
+    fields = ("expiration", "dte", "strike", "bid", "ask", "mark", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega")
+    labels = ("Expiration", "DTE", "Strike", "Bid", "Ask", "Mark", "Mid", "Spread", "IV", "Delta", "Gamma", "Theta", "Vega")
+    lines = [
+        f"{result.get('ticker', '?')} {str(result.get('option_type', '')).upper()} OPTIONS",
+        "| " + " | ".join(labels) + " |",
+        "|" + "|".join("---" for _ in fields) + "|",
+    ]
+    for row in result.get("contracts") or []:
+        if not isinstance(row, dict):
+            continue
+        values = []
+        for field in fields:
+            value = row.get(field)
+            if field == "mid" and value is None:
+                bid, ask = row.get("bid"), row.get("ask")
+                value = (float(bid) + float(ask)) / 2 if bid is not None and ask is not None else None
+            if field == "spread" and value is None:
+                bid, ask = row.get("bid"), row.get("ask")
+                value = float(ask) - float(bid) if bid is not None and ask is not None else None
+            values.append(_table_cell(value if value is not None else "unavailable"))
+        lines.append("| " + " | ".join(values) + " |")
+    lines.append(f"Returned: {result.get('returned', 0)} of {result.get('matched', 0)} matched")
+    lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _render_option_analysis(result: dict, max_bytes: int) -> str:
+    fields = ("ticker", "expiration", "dte", "strike", "bid", "ask", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega", "target_price", "target_pnl", "target_return_pct")
+    lines = ["Option contract analysis"]
+    for field in fields:
+        value = result.get(field)
+        if value is not None:
+            lines.append(f"{field}: {_cell(value)}")
+    lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _render_option_comparison(result: dict, max_bytes: int) -> str:
+    lines = [
+        f"{result.get('ticker', '?')} option comparison",
+        "| Contract | Expiration | Strike | Mid | Spread % | IV | Delta | Theta | Vega | Target P/L |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in result.get("contracts") or []:
+        if not isinstance(row, dict):
+            continue
+        lines.append("| " + " | ".join(_table_cell(row.get(field, "unavailable")) for field in (
+            "contract_id", "expiration", "strike", "mid", "spread_pct", "implied_volatility", "delta", "theta", "vega", "target_pnl"
+        )) + " |")
+    lines.append(f"Returned: {result.get('returned', 0)} of {result.get('matched', 0)} matched; ranking: {result.get('ranking', 'unknown')}")
+    lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
 
 
 def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:

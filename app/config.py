@@ -1,6 +1,7 @@
 """Configuration: loads .env, fails fast on missing keys, configures edgartools."""
 
 import os
+from typing import Optional
 
 from dotenv import load_dotenv
 from edgar import set_identity
@@ -70,3 +71,21 @@ def get_finra_client_secret() -> str:
 
 def finra_use_mock() -> bool:
     return os.getenv("FINRA_USE_MOCK", "").strip().lower() in ("1", "true", "yes")
+
+
+def get_robinhood_mcp_url() -> str:
+    return os.getenv(
+        "ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"
+    )
+
+
+def robinhood_enabled() -> bool:
+    return os.getenv("ROBINHOOD_ENABLED", "false").strip().lower() in (
+        "1", "true", "yes"
+    )
+
+
+def robinhood_allow_trading() -> bool:
+    return os.getenv("ROBINHOOD_ALLOW_TRADING", "false").strip().lower() in (
+        "1", "true", "yes"
+    )

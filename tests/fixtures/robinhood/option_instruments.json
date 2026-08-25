@@ -1,0 +1,4 @@
+{"instruments": [
+  {"id": "wing-put-80", "symbol": "WING", "expiration_date": "2027-01-15", "strike_price": "80", "type": "put"},
+  {"id": "wing-put-100", "symbol": "WING", "expiration_date": "2027-01-15", "strike_price": "100", "type": "put"}
+]}

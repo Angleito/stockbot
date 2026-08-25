@@ -1,0 +1,4 @@
+{"quotes": [
+  {"instrument_id": "wing-put-80", "bid": "2.00", "ask": "2.40", "mark": "2.20", "implied_volatility": "0.55", "delta": "-0.12", "gamma": "0.01", "theta": "-0.02", "vega": "0.10", "volume": 10, "open_interest": 100},
+  {"instrument_id": "wing-put-100", "bid": "7.00", "ask": "7.60", "mark": "7.30", "implied_volatility": "0.48", "delta": "-0.30", "gamma": "0.02", "theta": "-0.04", "vega": "0.15", "volume": 20, "open_interest": 200}
+]}
