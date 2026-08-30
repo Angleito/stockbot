@@ -1,3 +1,4 @@
+PYTHON := python3.14
 VENV := venv
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
@@ -7,7 +8,7 @@ PYTEST := $(VENV)/bin/pytest
 
 ## Create a fresh virtualenv and install the pinned dependencies.
 setup:
-	python3 -m venv $(VENV)
+	$(PYTHON) -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) install -r requirements.txt
 

@@ -2,5 +2,5 @@ project-includes = ["app", "scripts", "tests"]
 project-excludes = ["venv", "data"]
 search-path = ["."]
 python-platform = "linux"
-python-version = "3.10"
+python-version = "3.14"
 preset = "basic"

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Authenticate against the configured Robinhood MCP OAuth server."""
 import argparse
 import sys

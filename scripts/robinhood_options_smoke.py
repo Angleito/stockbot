@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """List Robinhood MCP tools, then optionally invoke a read-only tool."""
 import argparse
 import os
