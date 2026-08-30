@@ -25,16 +25,13 @@ load_dotenv()
 
 
 def _require_env(name: str) -> str:
-    value = os.getenv(name)
-    if (
-        not value
-        or value.startswith("YourName")
-        or value.startswith("sk-or-...")
-        or value.startswith("your_finra_")
-    ):
+    value = (os.getenv(name) or "").strip()
+    placeholders = ("Your Name", "YourName", "sk-or-...", "your_finra_")
+    if not value or value.startswith(placeholders):
         raise ValueError(
             f"{name} is not properly set in your environment or .env file. "
-            "Phase 1 requires it to run. See .env.example."
+            "See .env.example and configure this value before using the "
+            "integration that requires it."
         )
     return value
 

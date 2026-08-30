@@ -18,7 +18,7 @@ Stockbot keeps raw source data and normalized analytical data separate, preserve
 
 ## Requirements
 
-- Python 3.12+ (the pinned dependencies are tested locally)
+- Python 3.10+ (the Pyrefly target; currently verified with Python 3.14)
 - An SEC EDGAR identity for SEC requests
 - An OpenRouter API key for chat or LLM-generated summaries
 
