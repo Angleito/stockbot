@@ -21,10 +21,43 @@ from typing import Any
 
 
 DEFAULT_TOKEN_PATH = Path.home() / ".stockbot" / "robinhood" / "oauth.json"
+ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading"
 
 
 class OAuthStoreError(RuntimeError):
     """Raised when the persisted OAuth state cannot be read or written."""
+
+
+def server_origin(server_url: str) -> str:
+    """Return a canonical HTTPS origin suitable for OAuth-state binding."""
+    try:
+        parsed = urllib.parse.urlsplit(server_url)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise OAuthStoreError("Robinhood MCP URL is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OAuthStoreError("Robinhood MCP URL must be an HTTPS URL without credentials, query, or fragment")
+    host = parsed.hostname.lower().rstrip(".")
+    if port is None or port == 443:
+        return f"https://{host}"
+    return f"https://{host}:{port}"
+
+
+def validate_robinhood_server_url(server_url: str) -> str:
+    """Allow OAuth only for the canonical production Robinhood MCP endpoint."""
+    server_origin(server_url)
+    if server_url != ROBINHOOD_MCP_URL:
+        raise OAuthStoreError(
+            f"Robinhood MCP URL must be {ROBINHOOD_MCP_URL}"
+        )
+    return server_url
 
 
 @dataclass
@@ -32,6 +65,13 @@ class OAuthConfig:
     server_url: str
     redirect_uri: str = "http://127.0.0.1:8765/callback"
     scopes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.server_url = validate_robinhood_server_url(self.server_url)
+
+    @property
+    def server_origin(self) -> str:
+        return server_origin(self.server_url)
 
 
 def parse_callback_url(callback_url: str) -> Any:
@@ -148,6 +188,20 @@ def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def load_tokens_for_origin(
+    origin: str, path: Path = DEFAULT_TOKEN_PATH
+) -> dict[str, Any] | None:
+    """Load state only when it was issued for exactly this MCP origin.
+
+    Legacy unbound files are intentionally treated as unusable so a user must
+    complete OAuth again rather than potentially presenting a token elsewhere.
+    """
+    state = load_tokens(path)
+    if not state or state.get("server_origin") != origin:
+        return None
+    return state
+
+
 def save_tokens(tokens: dict[str, Any], path: Path = DEFAULT_TOKEN_PATH) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -181,24 +235,31 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
     except ImportError as exc:
         raise RuntimeError("Robinhood MCP support requires the optional 'mcp' package") from exc
 
+    origin = config.server_origin
+
+    def state_for_origin() -> dict[str, Any]:
+        # Do not preserve token/client metadata from a different (or legacy,
+        # unbound) server when the SDK writes a fresh authorization state.
+        return load_tokens_for_origin(origin, path) or {"server_origin": origin}
+
     class Storage:
         async def get_tokens(self):
-            state = load_tokens(path) or {}
+            state = load_tokens_for_origin(origin, path) or {}
             tokens = state.get("tokens")
             return OAuthToken.model_validate(tokens) if tokens else None
 
         async def set_tokens(self, tokens):
-            state = load_tokens(path) or {}
+            state = state_for_origin()
             state["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
             save_tokens(state, path)
 
         async def get_client_info(self):
-            state = load_tokens(path) or {}
+            state = load_tokens_for_origin(origin, path) or {}
             info = state.get("client_info")
             return OAuthClientInformationFull.model_validate(info) if info else None
 
         async def set_client_info(self, client_info):
-            state = load_tokens(path) or {}
+            state = state_for_origin()
             state["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
             save_tokens(state, path)
 

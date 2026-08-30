@@ -1152,6 +1152,13 @@ _FINRA_HANDLERS = {
     ),
 }
 
+# These tools expose the authenticated brokerage account or saved account
+# configuration. HTTP callers require an explicit portfolio authorization;
+# they are never made available merely because Robinhood is enabled.
+PORTFOLIO_AUTHORIZED_TOOLS: frozenset[str] = frozenset({
+    "get_portfolio_snapshot", "get_scans", "run_scan",
+})
+
 _ROBINHOOD_HANDLERS = {
     "get_market_snapshot": lambda args, model: get_market_snapshot(args["ticker"]),
     "get_option_chain": lambda args, model: get_option_chain(

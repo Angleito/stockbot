@@ -47,10 +47,19 @@ venv/bin/python cli.py --model provider/model-name
 ## Running the API
 
 ```bash
-venv/bin/uvicorn app.main:app --reload
+# Configure API_AUTH_TOKENS in .env first, then keep the development server local.
+venv/bin/uvicorn app.main:app --host 127.0.0.1 --reload
 ```
 
-The API exposes `POST /chat` and `GET /health` locally.
+The API exposes authenticated `POST /chat` and `GET /health` locally. Chat
+clients must send `Authorization: Bearer <configured-secret>`. The server
+accepts only `user` messages (never client `assistant`, `system`, or `tool`
+messages), enforces configured model/request/rate/concurrency limits, and only
+exposes Robinhood portfolio tools to users in `API_PORTFOLIO_USERS`.
+
+Do not expose this development server publicly. A hosted deployment needs a
+shared rate-limit/quota store, managed identity/secrets, TLS at a reverse proxy,
+and operational monitoring; the in-memory limits are intentionally per-process.
 
 ## Running tests
 
@@ -66,7 +75,7 @@ The default suite is offline. FINRA and Robinhood smoke tests are opt-in Make ta
 
 ## Optional Robinhood integration
 
-Set `ROBINHOOD_ENABLED=true` and complete the local OAuth login flow before using the integration. Stockbot only permits explicitly allowlisted read operations and blocks unknown operations. It blocks order placement, order cancellation/replacement, option exercise, withdrawals, deposits, and transfers. It does not support trading or modifying saved scanners.
+Set `ROBINHOOD_ENABLED=true` and complete the local OAuth login flow before using the integration. OAuth and MCP transport are pinned to `https://agent.robinhood.com/mcp/trading`; persisted tokens/client registration are bound to that HTTPS origin. Stockbot only permits explicitly allowlisted read operations and blocks unknown operations. It blocks order placement, order cancellation/replacement, option exercise, withdrawals, deposits, and transfers. It does not support trading or modifying saved scanners.
 
 ## Data storage
 

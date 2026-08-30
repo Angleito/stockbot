@@ -6,7 +6,12 @@ import asyncio
 from typing import Any, Callable
 
 from .auth import DEFAULT_TOKEN_PATH, OAuthConfig, build_oauth_provider
-from .capabilities import is_blocked, permitted_tools
+from .capabilities import (
+    ACCOUNT_READ_TOOLS,
+    MARKET_READ_TOOLS,
+    is_blocked,
+    permitted_tools,
+)
 
 
 class RobinhoodDependencyError(RuntimeError):
@@ -49,8 +54,19 @@ class RobinhoodClient:
                  allowed_tools: set[str] | None = None,
                  transport_factory: Callable[..., Any] | None = None):
         if allowed_tools is not None:
-            market_tools = frozenset(allowed_tools)
-            account_tools = frozenset()
+            # Legacy generic configuration still cannot add capabilities:
+            # classify it against the canonical registry before construction.
+            configured = frozenset(allowed_tools)
+            unknown = configured - MARKET_READ_TOOLS - ACCOUNT_READ_TOOLS
+            if unknown:
+                names = ", ".join(sorted(unknown))
+                raise ValueError(f"Unknown read-only tool configuration: {names}")
+            market_tools = configured & MARKET_READ_TOOLS
+            account_tools = configured & ACCOUNT_READ_TOOLS
+        if oauth is not None and server_url != oauth.server_url:
+            raise ValueError(
+                "Robinhood MCP transport URL must match the OAuth server URL"
+            )
         self.server_url = server_url
         self.oauth = oauth
         self.token_path = token_path
@@ -154,7 +170,7 @@ class _HttpSessionContext:
 
     async def __aenter__(self):
         self.http_client = self.httpx_module.AsyncClient(
-            auth=self.auth, follow_redirects=True
+            auth=self.auth, follow_redirects=False
         )
         await self.http_client.__aenter__()
         self.transport_context = self.transport_factory(

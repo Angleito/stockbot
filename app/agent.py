@@ -2,10 +2,15 @@
 
 import json
 import logging
+from contextvars import ContextVar
 
 import requests
 
-from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
+from .config import (
+    OPENROUTER_BASE_URL,
+    get_openrouter_api_key,
+    get_openrouter_timeout_seconds,
+)
 from .prompts import SYSTEM_PROMPT
 from .tool_render import render_tool_result
 from .tools import TOOLS, execute_tool
@@ -13,6 +18,10 @@ from .tools import TOOLS, execute_tool
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
+
+# Per-run context avoids mutating the module-level tool schema when concurrent
+# HTTP requests have different authorization scopes.
+_openrouter_tools: ContextVar[list] = ContextVar("openrouter_tools", default=TOOLS)
 
 _UNAVAILABLE_HEADER = (
     "The requested data is unavailable: one or more tool calls failed or "
@@ -57,8 +66,8 @@ def _call_openrouter(model: str, messages: list) -> dict:
             "Authorization": f"Bearer {get_openrouter_api_key()}",
             "Content-Type": "application/json",
         },
-        json={"model": model, "messages": messages, "tools": TOOLS},
-        timeout=180,
+        json={"model": model, "messages": messages, "tools": _openrouter_tools.get()},
+        timeout=get_openrouter_timeout_seconds(),
     )
     if resp.status_code >= 400:
         logger.error("OpenRouter error (%s): %s", resp.status_code, resp.text)
@@ -71,6 +80,7 @@ def run_chat(
     model: str,
     return_trace: bool = False,
     return_detailed_trace: bool = False,
+    allowed_tool_names: frozenset[str] | None = None,
 ):
     """Run the tool-calling loop until the model returns plain text.
 
@@ -82,14 +92,24 @@ def run_chat(
         return_detailed_trace: if True, returns (text, detailed_trace) where
             each entry is {"name": tool, "arguments": parsed args}. Takes
             precedence over return_trace.
+        allowed_tool_names: optional per-request capability boundary. Tools not
+            in this set are neither advertised to nor executed for the model.
 
     Returns:
         The assistant's final text response (or a tuple with the trace).
     """
-    # Prepend the system prompt if not already present.
-    msgs = list(messages)
-    if not msgs or msgs[0].get("role") != "system":
-        msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + msgs
+    # The Stockbot policy is always the highest-priority message. HTTP callers
+    # are additionally restricted to user/assistant history at the boundary.
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + list(messages)
+    permitted_tool_names = (
+        frozenset(tool["function"]["name"] for tool in TOOLS)
+        if allowed_tool_names is None
+        else frozenset(allowed_tool_names)
+    )
+    available_tools = [
+        tool for tool in TOOLS if tool["function"]["name"] in permitted_tool_names
+    ]
+    _openrouter_tools.set(available_tools)
 
     want_trace = return_trace or return_detailed_trace
     tool_trace = []
@@ -136,7 +156,13 @@ def run_chat(
             if want_trace:
                 tool_trace.append(name)
                 detailed_trace.append({"name": name, "arguments": arguments})
-            result = execute_tool(name, arguments, model)
+            if name not in permitted_tool_names:
+                # A model must not be able to invoke a tool that was omitted
+                # from its schema (for example, a portfolio tool for a user
+                # without that authorization).
+                result = {"error": f"Tool is not permitted: {name}"}
+            else:
+                result = execute_tool(name, arguments, model)
             if _is_failed_result(result):
                 failed_tools.append((name, result))
             msgs.append({
