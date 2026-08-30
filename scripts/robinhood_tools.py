@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.14
+#!/usr/bin/env python3
 """Discover and classify Robinhood MCP tools without invoking any of them.
 
 Workflow:

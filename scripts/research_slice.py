@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.14
+#!/usr/bin/env python3
 """Reproducible research slice: short-interest change + shares-outstanding
 change between the two most recent FINRA settlement cycles knowable on or
 before --as-of.
