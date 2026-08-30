@@ -3,7 +3,8 @@
 import pytest
 
 from app.agent import run_chat
-from app.config import get_default_model
+from app.config import get_default_model, get_local_chat_policy
+from app.policy import LOCAL_CONTEXT
 from app.tools import get_earnings_summary
 
 # All tests in this module call live SEC EDGAR and/or OpenRouter.
@@ -53,7 +54,10 @@ def test_agent_earnings_query_nvda():
         {"role": "user", "content": "What are NVDA's latest earnings?"}
     ]
     model = get_default_model()
-    response, trace = run_chat(messages, model=model, return_trace=True)
+    response, trace = run_chat(
+        messages, model=model, context=LOCAL_CONTEXT,
+        policy=get_local_chat_policy(), return_trace=True,
+    )
 
     assert response, "Agent returned empty response"
     # Should have called earnings summary tool
@@ -71,7 +75,10 @@ def test_context_awareness_eps():
         {"role": "user", "content": "What is AAPL's latest EPS?"}
     ]
     model = get_default_model()
-    response1, trace1 = run_chat(messages, model=model, return_trace=True)
+    response1, trace1 = run_chat(
+        messages, model=model, context=LOCAL_CONTEXT,
+        policy=get_local_chat_policy(), return_trace=True,
+    )
 
     assert response1, "First response was empty"
     assert "get_fundamentals" in trace1, "First query should call get_fundamentals"
@@ -80,7 +87,10 @@ def test_context_awareness_eps():
     messages.append({"role": "assistant", "content": response1})
     messages.append({"role": "user", "content": "what is undiluted?"})
     
-    response2, trace2 = run_chat(messages, model=model, return_trace=True)
+    response2, trace2 = run_chat(
+        messages, model=model, context=LOCAL_CONTEXT,
+        policy=get_local_chat_policy(), return_trace=True,
+    )
     
     assert response2, "Follow-up response was empty"
     # Should recognize AAPL context and explain undiluted EPS

@@ -4,7 +4,8 @@ import re
 import pytest
 
 from app.agent import run_chat
-from app.config import get_default_model
+from app.config import get_default_model, get_local_chat_policy
+from app.policy import LOCAL_CONTEXT
 
 # Calls live OpenRouter via the agent loop.
 pytestmark = pytest.mark.integration
@@ -25,7 +26,10 @@ def test_guardrail_obscure_or_invalid_ticker():
         }
     ]
     model = get_default_model()
-    response, trace = run_chat(messages, model=model, return_trace=True)
+    response, trace = run_chat(
+        messages, model=model, context=LOCAL_CONTEXT,
+        policy=get_local_chat_policy(), return_trace=True,
+    )
 
     assert response, "Agent returned an empty response."
     lower_resp = response.lower()

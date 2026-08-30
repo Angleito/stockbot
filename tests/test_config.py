@@ -3,6 +3,7 @@
 import pytest
 
 from app import config
+from app.robinhood.auth import OAuthStoreError
 
 
 @pytest.mark.parametrize(
@@ -20,3 +21,34 @@ def test_require_env_strips_and_returns_configured_value(monkeypatch):
     monkeypatch.setenv("TEST_SETTING", "  configured-value  ")
 
     assert config._require_env("TEST_SETTING") == "configured-value"
+
+
+def test_local_chat_policy_reads_server_controls(monkeypatch):
+    monkeypatch.setenv("DEFAULT_MODEL", "provider/default")
+    monkeypatch.setenv("CHAT_ALLOWED_MODELS", "provider/secondary")
+    monkeypatch.setenv("CHAT_MAX_MESSAGES", "3")
+    monkeypatch.setenv("CHAT_MAX_CONTENT_CHARS", "40")
+    monkeypatch.setenv("OPENROUTER_TIMEOUT_SECONDS", "2.5")
+
+    policy = config.get_local_chat_policy()
+
+    assert policy.allowed_models == {"provider/default", "provider/secondary"}
+    assert policy.max_messages == 3
+    assert policy.max_message_chars == 40
+    assert policy.upstream_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://agent.robinhood.com/mcp/trading",
+        "https://agent.robinhood.com:8443/mcp/trading",
+        "https://agent.robinhood.com/other",
+        "https://user@agent.robinhood.com/mcp/trading",
+        "https://agent.robinhood.com/mcp/trading?x=1",
+    ),
+)
+def test_robinhood_endpoint_is_pinned(monkeypatch, url):
+    monkeypatch.setenv("ROBINHOOD_MCP_URL", url)
+    with pytest.raises(OAuthStoreError, match="Robinhood MCP URL"):
+        config.get_robinhood_mcp_url()

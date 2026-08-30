@@ -5,8 +5,17 @@ import requests
 
 from app import agent
 from app import finra_client, short_interest_screen as screen
+from app.policy import ChatPolicy, LOCAL_CONTEXT
 from app.tool_render import render_tool_result
 from app.tools import TOOLS, execute_tool
+
+
+TEST_POLICY = ChatPolicy(
+    allowed_models=frozenset({"test"}),
+    max_messages=20,
+    max_message_chars=12_000,
+    upstream_timeout_seconds=1,
+)
 
 
 @pytest.fixture
@@ -422,7 +431,10 @@ def test_agent_highest_short_interest_routes_to_leaderboard(monkeypatch):
         {"choices": [{"message": {"role": "assistant", "content": "The screen is complete."}}]},
     ])
     monkeypatch.setattr(agent, "_call_openrouter", lambda *_args: next(responses))
-    monkeypatch.setattr(agent, "execute_tool", lambda name, args, model: {"settlement_date": "2026-08-14", "entries": [], "coverage": {}, "source": "test"})
-    text, trace = agent.run_chat([{"role": "user", "content": "What stock has the highest short interest as a percent of total shares?"}], "test", return_trace=True)
+    monkeypatch.setattr(agent, "execute_tool", lambda name, args, model, **kwargs: {"settlement_date": "2026-08-14", "entries": [], "coverage": {}, "source": "test"})
+    text, trace = agent.run_chat(
+        [{"role": "user", "content": "What stock has the highest short interest as a percent of total shares?"}],
+        "test", context=LOCAL_CONTEXT, policy=TEST_POLICY, return_trace=True,
+    )
     assert text == "The screen is complete."
     assert trace == ["get_short_interest_leaderboard"]

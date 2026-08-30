@@ -63,10 +63,12 @@ def _configured_subset(
     supplied: frozenset[str] | None,
     canonical: frozenset[str],
     capability: RobinhoodCapability,
+    *,
+    default: frozenset[str],
 ) -> frozenset[str]:
     """Validate an optional configuration can only reduce a capability."""
     if supplied is None:
-        return canonical
+        return default
     configured = frozenset(supplied)
     invalid = configured - canonical
     if invalid:
@@ -84,8 +86,18 @@ def allowed_read_tools(
     Configuration never becomes an allowlist of its own: every supplied name
     is verified against the appropriate canonical capability set.
     """
-    market_set = _configured_subset(market, MARKET_READ_TOOLS, RobinhoodCapability.MARKET_READ)
-    account_set = _configured_subset(account, ACCOUNT_READ_TOOLS, RobinhoodCapability.ACCOUNT_READ)
+    market_set = _configured_subset(
+        market,
+        MARKET_READ_TOOLS,
+        RobinhoodCapability.MARKET_READ,
+        default=MARKET_READ_TOOLS,
+    )
+    account_set = _configured_subset(
+        account,
+        ACCOUNT_READ_TOOLS,
+        RobinhoodCapability.ACCOUNT_READ,
+        default=frozenset(),
+    )
     return market_set | account_set
 
 

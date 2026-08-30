@@ -3,8 +3,8 @@
 Run with:
     RUN_ROBINHOOD_SMOKE=1 venv/bin/pytest -m robinhood_smoke -q
 
-Requires prior OAuth state (scripts/robinhood_login.py) and optionally
-ROBINHOOD_MCP_URL.  Skipped automatically unless RUN_ROBINHOOD_SMOKE=1.
+Requires prior OAuth state (scripts/robinhood_login.py). Skipped automatically
+unless RUN_ROBINHOOD_SMOKE=1.
 
 Verifies the production agent contract end-to-end: tool discovery is
 reachable, every discovered read tool is covered by the allowlist (drift
@@ -57,7 +57,10 @@ def _masked(account_ids):
 def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path):
     data_root = tmp_path / "data"
     client = RobinhoodClient(
-        get_robinhood_mcp_url(), oauth=OAuthConfig(get_robinhood_mcp_url())
+        get_robinhood_mcp_url(),
+        oauth=OAuthConfig(get_robinhood_mcp_url()),
+        market_tools=capabilities.MARKET_READ_TOOLS,
+        account_tools=capabilities.ACCOUNT_READ_TOOLS,
     )
 
     tools = client.list_tools()

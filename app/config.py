@@ -6,6 +6,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from edgar import set_identity
 
+from .policy import ChatPolicy
+
 # Default fallback only when the env var is unset. Keep env/CLI overrides
 # authoritative; this value must be valid on the target OpenRouter account.
 FALLBACK_MODEL = "google/gemini-2.5-flash"
@@ -88,36 +90,6 @@ def get_allowed_chat_models() -> frozenset[str]:
     return frozenset({get_default_model(), *(item.strip() for item in configured if item.strip())})
 
 
-def get_api_tokens() -> dict[str, str]:
-    """Return configured API principals from ``API_AUTH_TOKENS``.
-
-    The format is ``user=secret,user2=secret2``.  A malformed setting is
-    rejected rather than accidentally creating an anonymous API.  The legacy
-    single-token setting is supported only as the ``local`` principal.
-    """
-    raw = (os.getenv("API_AUTH_TOKENS") or "").strip()
-    if not raw:
-        legacy = (os.getenv("API_AUTH_TOKEN") or "").strip()
-        return {"local": legacy} if legacy else {}
-    tokens: dict[str, str] = {}
-    for entry in raw.split(","):
-        user, separator, token = entry.strip().partition("=")
-        if not separator or not user or not token or user in tokens:
-            raise ValueError(
-                "API_AUTH_TOKENS must be comma-separated user=secret entries"
-            )
-        tokens[user] = token
-    return tokens
-
-
-def get_portfolio_api_users() -> frozenset[str]:
-    """Users explicitly allowed to expose Robinhood portfolio data via chat."""
-    return frozenset(
-        user.strip() for user in (os.getenv("API_PORTFOLIO_USERS") or "").split(",")
-        if user.strip()
-    )
-
-
 def get_chat_max_messages() -> int:
     return _positive_int_env("CHAT_MAX_MESSAGES", 20)
 
@@ -126,25 +98,19 @@ def get_chat_max_content_chars() -> int:
     return _positive_int_env("CHAT_MAX_CONTENT_CHARS", 12_000)
 
 
-def get_chat_max_request_bytes() -> int:
-    return _positive_int_env("CHAT_MAX_REQUEST_BYTES", 64_000)
-
-
-def get_chat_concurrency_limit() -> int:
-    return _positive_int_env("CHAT_CONCURRENCY_LIMIT", 4)
-
-
-def get_chat_rate_limit_requests() -> int:
-    return _positive_int_env("CHAT_RATE_LIMIT_REQUESTS", 20)
-
-
-def get_chat_rate_limit_window_seconds() -> float:
-    return _positive_float_env("CHAT_RATE_LIMIT_WINDOW_SECONDS", 60.0)
-
-
 def get_openrouter_timeout_seconds() -> float:
     """Per-upstream-request timeout; bounds each model completion."""
     return _positive_float_env("OPENROUTER_TIMEOUT_SECONDS", 60.0)
+
+
+def get_local_chat_policy() -> ChatPolicy:
+    """Build the single-principal runtime chat policy from local config."""
+    return ChatPolicy(
+        allowed_models=get_allowed_chat_models(),
+        max_messages=get_chat_max_messages(),
+        max_message_chars=get_chat_max_content_chars(),
+        upstream_timeout_seconds=get_openrouter_timeout_seconds(),
+    )
 
 
 def get_finra_analysis_model() -> Optional[str]:

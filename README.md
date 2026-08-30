@@ -47,19 +47,20 @@ venv/bin/python cli.py --model provider/model-name
 ## Running the API
 
 ```bash
-# Configure API_AUTH_TOKENS in .env first, then keep the development server local.
+# Keep the development server local.
 venv/bin/uvicorn app.main:app --host 127.0.0.1 --reload
 ```
 
-The API exposes authenticated `POST /chat` and `GET /health` locally. Chat
-clients must send `Authorization: Bearer <configured-secret>`. The server
-accepts only `user` messages (never client `assistant`, `system`, or `tool`
-messages), enforces configured model/request/rate/concurrency limits, and only
-exposes Robinhood portfolio tools to users in `API_PORTFOLIO_USERS`.
+The API exposes local `POST /chat` and `GET /health`. Chat accepts only
+`user` and `assistant` conversation history, never client `system`, `tool`,
+tool-call, or arbitrary metadata. The server independently injects Stockbot's
+system policy, enforces configured model and message bounds, and exposes tools
+from the local principal's capabilities. Today that principal has research and
+portfolio-read access.
 
-Do not expose this development server publicly. A hosted deployment needs a
-shared rate-limit/quota store, managed identity/secrets, TLS at a reverse proxy,
-and operational monitoring; the in-memory limits are intentionally per-process.
+Do not expose this development server publicly. A hosted deployment must
+replace the local context dependency with managed identity and organization
+context, then retain the same capability policy, TLS, and operational controls.
 
 ## Running tests
 
