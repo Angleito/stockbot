@@ -3,6 +3,7 @@
 import json
 
 import pytest
+import pyarrow as pa
 
 from app.storage import duckdb, ids, parquet, raw_archive
 
@@ -122,6 +123,161 @@ def test_parquet_rerun_is_deterministic_no_duplicates(data_root):
 def test_parquet_unknown_dataset_rejected(data_root):
     with pytest.raises(ValueError, match="Unknown parquet dataset"):
         parquet.write_rows("nope", [{}], root=data_root / "parquet")
+
+
+# ---------------------------------------------------------------------------
+# Portfolio snapshot / position datasets
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_row(snapshot_id="snap-001", broker="robinhood",
+                  created_at="2026-08-25T12:00:00Z", cash=1234.5,
+                  invested_value=23456.78, total_value=24691.28,
+                  account_count=2, position_count=5, priced_position_count=4,
+                  unresolved_position_count=1, source="robinhood-api",
+                  parser_version="portfolio-parser-v1",
+                  calculation_version="portfolio-calc-v1"):
+    return {
+        "snapshot_id": snapshot_id,
+        "broker": broker,
+        "created_at": created_at,
+        "cash": cash,
+        "invested_value": invested_value,
+        "total_value": total_value,
+        "account_count": account_count,
+        "position_count": position_count,
+        "priced_position_count": priced_position_count,
+        "unresolved_position_count": unresolved_position_count,
+        "source": source,
+        "parser_version": parser_version,
+        "calculation_version": calculation_version,
+    }
+
+
+def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc-001",
+                  security_id="sec:cik:0000320193", entity_id="sec:cik:0000320193",
+                  ticker="AAPL", quantity=10.0, average_cost=150.25, market_price=160.0,
+                  price_type="last_trade", market_value=1600.0, unrealized_gain=97.5,
+                  unrealized_gain_pct=0.0649, portfolio_weight=0.0648,
+                  source="robinhood-api", quote_retrieved_at="2026-08-25T12:00:00Z"):
+    return {
+        "snapshot_id": snapshot_id,
+        "position_id": position_id,
+        "account_id": account_id,
+        "security_id": security_id,
+        "entity_id": entity_id,
+        "ticker": ticker,
+        "quantity": quantity,
+        "average_cost": average_cost,
+        "market_price": market_price,
+        "price_type": price_type,
+        "market_value": market_value,
+        "unrealized_gain": unrealized_gain,
+        "unrealized_gain_pct": unrealized_gain_pct,
+        "portfolio_weight": portfolio_weight,
+        "source": source,
+        "quote_retrieved_at": quote_retrieved_at,
+    }
+
+
+def test_portfolio_snapshot_roundtrip(data_root):
+    row = _snapshot_row()
+    assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 1
+    table = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
+    assert table.num_rows == 1
+    assert table.column("snapshot_id").to_pylist() == ["snap-001"]
+    assert table.column("total_value").to_pylist() == [24691.28]
+    assert table.column("created_at").to_pylist() == ["2026-08-25T12:00:00Z"]
+
+
+def test_portfolio_position_roundtrip(data_root):
+    row = _position_row()
+    assert parquet.write_rows("portfolio_positions", [row], root=data_root / "parquet") == 1
+    table = parquet.read_table("portfolio_positions", root=data_root / "parquet")
+    assert table.num_rows == 1
+    assert table.column("position_id").to_pylist() == ["pos-001"]
+    assert table.column("ticker").to_pylist() == ["AAPL"]
+    assert table.column("market_price").to_pylist() == [160.0]
+
+
+def test_portfolio_snapshot_immutability(data_root):
+    row = _snapshot_row()
+    assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 1
+    assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 0
+    assert parquet.count_rows("portfolio_snapshots", root=data_root / "parquet") == 1
+    second = _snapshot_row(snapshot_id="snap-002")
+    assert parquet.write_rows("portfolio_snapshots", [second], root=data_root / "parquet") == 1
+    table = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
+    assert set(table.column("snapshot_id").to_pylist()) == {"snap-001", "snap-002"}
+
+
+def test_portfolio_positions_link_to_snapshot(data_root):
+    parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet")
+    positions = [
+        _position_row(snapshot_id="snap-001", position_id="pos-001", ticker="AAPL"),
+        _position_row(snapshot_id="snap-001", position_id="pos-002", ticker="MSFT"),
+        _position_row(snapshot_id="snap-002", position_id="pos-003", ticker="TSLA"),
+    ]
+    assert parquet.write_rows("portfolio_positions", positions, root=data_root / "parquet") == 3
+    rows = duckdb.query(
+        "SELECT position_id, ticker FROM portfolio_positions WHERE snapshot_id = ?",
+        ["snap-001"],
+        data_root=data_root,
+    )
+    assert rows == [
+        {"position_id": "pos-001", "ticker": "AAPL"},
+        {"position_id": "pos-002", "ticker": "MSFT"},
+    ]
+
+
+def test_portfolio_datasets_are_unpartitioned(data_root):
+    assert parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet") == 1
+    assert parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet") == 1
+    snap_dir = data_root / "parquet" / "portfolio_snapshots" / "partition=none"
+    pos_dir = data_root / "parquet" / "portfolio_positions" / "partition=none"
+    assert snap_dir.is_dir() and list(snap_dir.glob("*.parquet"))
+    assert pos_dir.is_dir() and list(pos_dir.glob("*.parquet"))
+    assert parquet.read_table("portfolio_snapshots", root=data_root / "parquet").num_rows == 1
+    assert parquet.read_table("portfolio_positions", root=data_root / "parquet").num_rows == 1
+
+
+def test_portfolio_columns_are_typed(data_root):
+    parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet")
+    parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet")
+    snap = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
+    assert snap.schema.field("snapshot_id").type == pa.string()
+    assert snap.schema.field("cash").type == pa.float64()
+    assert snap.schema.field("total_value").type == pa.float64()
+    assert snap.schema.field("account_count").type == pa.int64()
+    assert snap.schema.field("position_count").type == pa.int64()
+    assert snap.column("account_count").to_pylist() == [2]
+    assert snap.column("cash").to_pylist() == [1234.5]
+    assert snap.column("broker").to_pylist() == ["robinhood"]
+    pos = parquet.read_table("portfolio_positions", root=data_root / "parquet")
+    assert pos.schema.field("position_id").type == pa.string()
+    assert pos.schema.field("quantity").type == pa.float64()
+    assert pos.schema.field("market_price").type == pa.float64()
+    assert pos.schema.field("unrealized_gain").type == pa.float64()
+    assert pos.column("quantity").to_pylist() == [10.0]
+    assert pos.column("ticker").to_pylist() == ["AAPL"]
+    assert pos.column("price_type").to_pylist() == ["last_trade"]
+
+
+def test_portfolio_schemas_have_no_oauth_columns():
+    forbidden = ("token", "oauth", "secret", "access", "refresh", "authorization")
+    for name in ("portfolio_snapshots", "portfolio_positions"):
+        ds = parquet.DATASETS[name]
+        for field in ds.schema:
+            assert not any(part in field.name.lower() for part in forbidden), (
+                f"{name}.{field.name} is a forbidden OAuth column"
+            )
+
+
+def test_portfolio_empty_read_returns_empty_table(data_root):
+    for name in ("portfolio_snapshots", "portfolio_positions"):
+        table = parquet.read_table(name, root=data_root / "parquet")
+        assert table.num_rows == 0
+        assert table.schema == parquet.DATASETS[name].schema
 
 
 # ---------------------------------------------------------------------------

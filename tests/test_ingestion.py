@@ -16,7 +16,7 @@ import pytest
 
 from app import finra_client
 from app.ingestion import base, finra, sec
-from app.storage import parquet
+from app.storage import ids, parquet
 
 # ---------------------------------------------------------------------------
 # Shared fixture helpers
@@ -43,6 +43,38 @@ def _facts_payload(cik=1, value=100, end="2026-08-01", filed="2026-08-02", acces
             {"end": end, "val": value, "accn": accession, "fy": 2026, "fp": "Q3",
              "form": "10-Q", "filed": filed, "frame": "CY2026Q3I"}
         ]}}}},
+    }).encode()
+
+
+def _canonical_facts_payload(cik=1):
+    """Companyfacts payload: shares concept plus all four canonical concepts."""
+    return json.dumps({
+        "cik": cik,
+        "entityName": "Alpha Corp",
+        "facts": {
+            "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+                {"end": "2026-08-01", "val": 100, "accn": "0000000001-26-000001", "fy": 2026,
+                 "fp": "Q3", "form": "10-Q", "filed": "2026-08-02", "frame": "CY2026Q3I"}
+            ]}}},
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+                    {"start": "2026-01-01", "end": "2026-06-30", "val": 5000000, "accn": "0000000001-26-000001",
+                     "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2026-08-02", "frame": "CY2026Q2"}
+                ]}},
+                "NetIncomeLoss": {"units": {"USD": [
+                    {"start": "2026-01-01", "end": "2026-06-30", "val": 750000, "accn": "0000000001-26-000001",
+                     "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2026-08-02", "frame": "CY2026Q2"}
+                ]}},
+                "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [
+                    {"end": "2026-06-30", "val": 2000000, "accn": "0000000001-26-000001",
+                     "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2026-08-02", "frame": "CY2026Q2I"}
+                ]}},
+                "LongTermDebtCurrentAndNoncurrent": {"units": {"USD": [
+                    {"end": "2026-06-30", "val": 3000000, "accn": "0000000001-26-000001",
+                     "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2026-08-02", "frame": "CY2026Q2I"}
+                ]}},
+            },
+        },
     }).encode()
 
 
@@ -139,6 +171,132 @@ def test_sec_facts_older_checkpoint_is_refetched(data_root, monkeypatch):
         pq.write_table(table, path)
     sec.ingest_company_facts(1, data_root)
     assert len(calls) == 2
+
+
+def test_sec_facts_canonical_concepts_are_normalized(data_root, monkeypatch):
+    payload = _canonical_facts_payload()
+    monkeypatch.setattr(sec.SecConnector, "fetch_company_facts", lambda self, cik: _fetch_result(f"cik{cik:010d}", payload, sec.SEC_FACTS_URL.format(cik=cik)))
+
+    sec.ingest_company_facts(1, data_root)
+
+    facts = parquet.read_table("financial_facts", root=data_root / "parquet").to_pylist()
+    by_concept = {f["concept"]: f for f in facts}
+    assert set(by_concept) == {
+        "EntityCommonStockSharesOutstanding", "Revenue", "NetIncomeLoss",
+        "CashAndCashEquivalents", "LongTermDebt",
+    }
+
+    revenue = by_concept["Revenue"]
+    assert revenue["original_concept"] == "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+    assert revenue["value"] == 5000000.0
+    assert revenue["unit"] == "USD"
+    assert revenue["duration_type"] == "duration"
+    assert revenue["period_end"] == "2026-06-30"
+    assert revenue["fact_id"] == ids.sec_fact_id(1, revenue["accession"], "Revenue", revenue["period_end"], revenue["value"])
+
+    net_income = by_concept["NetIncomeLoss"]
+    assert net_income["original_concept"] == "us-gaap:NetIncomeLoss"
+    assert net_income["value"] == 750000.0
+    assert net_income["duration_type"] == "duration"
+    assert net_income["fact_id"] == ids.sec_fact_id(1, net_income["accession"], "NetIncomeLoss", net_income["period_end"], net_income["value"])
+
+    cash = by_concept["CashAndCashEquivalents"]
+    assert cash["original_concept"] == "us-gaap:CashAndCashEquivalentsAtCarryingValue"
+    assert cash["value"] == 2000000.0
+    assert cash["duration_type"] == "instant"
+    assert cash["fact_id"] == ids.sec_fact_id(1, cash["accession"], "CashAndCashEquivalents", cash["period_end"], cash["value"])
+
+    debt = by_concept["LongTermDebt"]
+    assert debt["original_concept"] == "us-gaap:LongTermDebtCurrentAndNoncurrent"
+    assert debt["value"] == 3000000.0
+    assert debt["duration_type"] == "instant"
+    assert debt["fact_id"] == ids.sec_fact_id(1, debt["accession"], "LongTermDebt", debt["period_end"], debt["value"])
+
+    assert all(f["parser_version"] == "sec-companyfacts-v2" for f in facts)
+
+
+def test_sec_facts_canonical_alias_fallback_and_nonmatching_ignored(data_root, monkeypatch):
+    payload = json.dumps({
+        "cik": 1,
+        "entityName": "Alpha Corp",
+        "facts": {"us-gaap": {
+            "Revenues": {"units": {"USD": [
+                {"end": "2026-08-01", "val": 1000, "accn": "0000000001-26-000002",
+                 "filed": "2026-08-02", "frame": "CY2026Q3"}
+            ]}},
+            "Assets": {"units": {"USD": [
+                {"end": "2026-08-01", "val": 999, "accn": "0000000001-26-000002",
+                 "filed": "2026-08-02", "frame": "CY2026Q3"}
+            ]}},
+        }},
+    }).encode()
+    monkeypatch.setattr(sec.SecConnector, "fetch_company_facts", lambda self, cik: _fetch_result(f"cik{cik:010d}", payload, sec.SEC_FACTS_URL.format(cik=cik)))
+
+    sec.ingest_company_facts(1, data_root)
+
+    facts = parquet.read_table("financial_facts", root=data_root / "parquet").to_pylist()
+    assert len(facts) == 1
+    assert facts[0]["concept"] == "Revenue"
+    assert facts[0]["original_concept"] == "us-gaap:Revenues"
+    assert facts[0]["value"] == 1000.0
+
+
+def test_sec_facts_canonical_concept_ignores_non_usd_units(data_root, monkeypatch):
+    payload = json.dumps({
+        "cik": 1,
+        "entityName": "Alpha Corp",
+        "facts": {"us-gaap": {
+            "Revenues": {"units": {"USD": [
+                {"end": "2026-08-01", "val": 1000, "accn": "0000000001-26-000003", "filed": "2026-08-02"}
+            ], "shares": [
+                {"end": "2026-08-01", "val": 5, "accn": "0000000001-26-000003", "filed": "2026-08-02"}
+            ]}},
+        }},
+    }).encode()
+    monkeypatch.setattr(sec.SecConnector, "fetch_company_facts", lambda self, cik: _fetch_result(f"cik{cik:010d}", payload, sec.SEC_FACTS_URL.format(cik=cik)))
+
+    sec.ingest_company_facts(1, data_root)
+
+    facts = parquet.read_table("financial_facts", root=data_root / "parquet").to_pylist()
+    assert len(facts) == 1
+    assert facts[0]["value"] == 1000.0
+
+
+def test_sec_shares_fact_row_shape_regression(data_root, monkeypatch):
+    monkeypatch.setattr(sec.SecConnector, "fetch_company_facts", lambda self, cik: _fetch_result(f"cik{cik:010d}", _facts_payload(), sec.SEC_FACTS_URL.format(cik=cik)))
+
+    sec.ingest_company_facts(1, data_root)
+
+    fact = parquet.read_table("financial_facts", root=data_root / "parquet").to_pylist()[0]
+    assert fact["concept"] == "EntityCommonStockSharesOutstanding"
+    assert fact["original_concept"] == "dei:EntityCommonStockSharesOutstanding"
+    assert fact["unit"] == "shares"
+    assert fact["value"] == 100.0
+    assert fact["duration_type"] == "instant"
+    assert fact["period_end"] == "2026-08-01"
+    assert fact["known_at"] == "2026-08-02"
+    assert fact["frame"] == "CY2026Q3I"
+    assert fact["parser_version"] == "sec-companyfacts-v2"
+    assert fact["fact_id"] == ids.sec_fact_id(1, fact["accession"], "EntityCommonStockSharesOutstanding", fact["period_end"], fact["value"])
+
+
+def test_sec_normalize_company_facts_shape_and_securities_classification():
+    from app.normalization import sec as sec_norm
+
+    out = sec_norm.normalize_company_facts(
+        json.loads(_canonical_facts_payload()),
+        retrieved_at="2026-08-21T12:00:00Z",
+        content_hash="hash",
+        source_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000000001.json",
+        source_record_id="cik0000000001",
+    )
+    assert set(out) == {"documents", "financial_facts", "securities"}
+    assert len(out["financial_facts"]) == 5
+    assert out["securities"][0]["security_type"] == "equity-common"
+    assert out["securities"][0]["security_id"] == "sec:equity:0000000001"
+    assert out["documents"][0]["parser_version"] == "sec-companyfacts-v2"
+    assert out["securities"][0]["parser_version"] == "sec-companyfacts-v2"
+    assert all(f["parser_version"] == "sec-companyfacts-v2" for f in out["financial_facts"])
 
 
 # ---------------------------------------------------------------------------

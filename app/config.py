@@ -16,6 +16,11 @@ FINRA_TOKEN_URL = (
 )
 FINRA_API_BASE = "https://api.finra.org"
 
+# Analyst consensus (unofficial Yahoo endpoint) + index-weight data sources.
+YAHOO_QUERY_BASE = "https://query2.finance.yahoo.com"
+YAHOO_CRUMB_URL = "https://fc.yahoo.com"
+SLICKCHARTS_SP500_URL = "https://www.slickcharts.com/sp500"
+
 load_dotenv()
 
 
@@ -81,11 +86,5 @@ def get_robinhood_mcp_url() -> str:
 
 def robinhood_enabled() -> bool:
     return os.getenv("ROBINHOOD_ENABLED", "false").strip().lower() in (
-        "1", "true", "yes"
-    )
-
-
-def robinhood_allow_trading() -> bool:
-    return os.getenv("ROBINHOOD_ALLOW_TRADING", "false").strip().lower() in (
         "1", "true", "yes"
     )

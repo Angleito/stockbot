@@ -7,7 +7,7 @@ from app.config import get_default_model
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SEC filing research chatbot")
+    parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     parser.add_argument(
         "--model",
         default=get_default_model(),
@@ -15,7 +15,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print(f"SEC research assistant — model: {args.model}")
+    print(f"Stockbot — AI investment research assistant — model: {args.model}")
     print("Type your question (Ctrl-D or 'quit' to exit).\n")
 
     messages: list = []

@@ -1,0 +1,38 @@
+{
+  "structured_content": {
+    "data": {
+      "filter_specs": [
+        {
+          "filter_type": "FILTER_TYPE_INSTRUMENT_TYPE",
+          "display_name": "Asset type",
+          "filter_group": "FUNDAMENTAL",
+          "value_type": "STRING",
+          "unit_type": "PLAIN",
+          "supported_predicates": ["=", "ANY_OF"],
+          "options": ["STOCK", "ETF", "CRYPTO", "FUTURE"]
+        },
+        {
+          "filter_type": "FILTER_TYPE_RSI",
+          "display_name": "RSI",
+          "filter_group": "TECHNICAL",
+          "value_type": "DECIMAL",
+          "unit_type": "PLAIN",
+          "supported_predicates": [">", "<", "=", "BETWEEN"],
+          "interval_supported": true,
+          "length_supported": true
+        },
+        {
+          "filter_type": "FILTER_TYPE_VOLUME",
+          "display_name": "Volume",
+          "filter_group": "TECHNICAL",
+          "value_type": "INTEGER",
+          "unit_type": "PLAIN",
+          "supported_predicates": [">", "<", "=", "BETWEEN"],
+          "interval_supported": true,
+          "length_supported": false
+        }
+      ]
+    },
+    "guide": "Use these filter types when constructing scan filters; do not guess names."
+  }
+}

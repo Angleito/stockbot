@@ -53,6 +53,12 @@ def test_mutating_tools_are_rejected_before_network():
         client.call_tool("get_option_positions", {})
 
 
+def test_deprecated_allowed_tools_alias_restricts_account_reads():
+    client = RobinhoodClient("https://example.test", allowed_tools={"get_equity_quotes"})
+    with pytest.raises(RobinhoodToolError):
+        client.call_tool("get_accounts", {})
+
+
 def test_mcp_v2_transport_adapter_lists_and_calls_tools():
     server = MCPServer("fixture")
 

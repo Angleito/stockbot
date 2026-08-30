@@ -1,11 +1,11 @@
 """SEC normalizers: company tickers and XBRL company facts.
 
-Scope limit (documented in FUTURE_ARCHITECTURE.md): the companyfacts
-normalizer currently extracts the common-share-class signal used by the
-short-interest screen — ``dei:EntityCommonStockSharesOutstanding`` — and
-classifies the security as equity-common when such a fact exists.  The full
-payload is archived so a complete XBRL parse can be replayed from raw data
-without re-downloading.
+The companyfacts normalizer extracts the common-share-class signal used by
+the short-interest screen — ``dei:EntityCommonStockSharesOutstanding`` — plus
+canonical financial metrics (revenue, net income, cash, long-term debt) that
+later research layers query.  Each canonical metric maps several provider
+XBRL tags onto one stable concept name.  The full payload is archived so a
+complete XBRL parse can be replayed from raw data without re-downloading.
 """
 
 from __future__ import annotations
@@ -15,10 +15,17 @@ from typing import Any, Optional
 from ..storage import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
-COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v1"
+COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v2"
 
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
 _ORIGINAL_CONCEPT = "dei:EntityCommonStockSharesOutstanding"
+
+CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
+    "Revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    "NetIncomeLoss": ("NetIncomeLoss",),
+    "CashAndCashEquivalents": ("CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations"),
+    "LongTermDebt": ("LongTermDebtCurrentAndNoncurrent", "LongTermDebtNoncurrent", "LongTermDebt"),
+}
 
 
 def normalize_company_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict]]:
@@ -71,6 +78,33 @@ def _extract_shares_facts(raw: Any) -> list[dict]:
     return [fact for fact in facts if isinstance(fact, dict)]
 
 
+def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+    """(canonical concept, original_concept, unit, fact) for canonical metric facts."""
+    entries: list[tuple[str, str, str, dict]] = []
+    namespaces = raw.get("facts") or {}
+    if not isinstance(namespaces, dict):
+        return entries
+    for namespace, concepts in namespaces.items():
+        if not isinstance(concepts, dict):
+            continue
+        for tag, payload in concepts.items():
+            canonical = next((name for name, aliases in CANONICAL_CONCEPTS.items() if tag in aliases), None)
+            if canonical is None:
+                continue
+            units = (payload or {}).get("units") or {}
+            for fact in units.get("USD") or []:
+                if isinstance(fact, dict):
+                    entries.append((canonical, f"{namespace}:{tag}", "USD", fact))
+    return entries
+
+
+def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+    """(concept, original_concept, unit, fact) for every extracted fact."""
+    entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
+    entries.extend(_extract_canonical_facts(raw))
+    return entries
+
+
 def normalize_company_facts(
     raw: Any,
     *,
@@ -86,7 +120,7 @@ def normalize_company_facts(
         cik = 0
     entity_id = ids.sec_entity_id(cik)
     security_id = ids.sec_security_id(cik)
-    facts = _extract_shares_facts(raw)
+    extracted_facts = _extract_facts(raw)
     documents = [{
         "doc_id": ids.sec_doc_id("companyfacts", source_record_id, content_hash),
         "source": "sec",
@@ -102,7 +136,7 @@ def normalize_company_facts(
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
     financial_facts: list[dict] = []
-    for fact in facts:
+    for concept, original_concept, unit, fact in extracted_facts:
         period_end = str(fact.get("end") or "")
         filed_at = str(fact.get("filed") or "")
         accession = str(fact.get("accn") or "")
@@ -114,13 +148,13 @@ def normalize_company_facts(
             continue
         duration_type = "duration" if fact.get("start") else "instant"
         financial_facts.append({
-            "fact_id": ids.sec_fact_id(cik, accession, SHARES_OUTSTANDING_CONCEPT, period_end, value),
+            "fact_id": ids.sec_fact_id(cik, accession, concept, period_end, value),
             "entity_id": entity_id,
             "security_id": security_id,
-            "concept": SHARES_OUTSTANDING_CONCEPT,
-            "original_concept": _ORIGINAL_CONCEPT,
+            "concept": concept,
+            "original_concept": original_concept,
             "value": value,
-            "unit": "shares",
+            "unit": unit,
             "duration_type": duration_type,
             "period_end": period_end,
             "filed_at": filed_at,

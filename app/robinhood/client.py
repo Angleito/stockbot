@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any, Callable
 
 from .auth import DEFAULT_TOKEN_PATH, OAuthConfig, build_oauth_provider
+from .capabilities import is_blocked, permitted_tools
 
 
 class RobinhoodDependencyError(RuntimeError):
@@ -15,10 +15,6 @@ class RobinhoodDependencyError(RuntimeError):
 
 class RobinhoodToolError(RuntimeError):
     pass
-
-
-_MUTATING = re.compile(r"(?:order|account|trade|cancel|submit|place|create|delete|modify|withdraw|deposit)", re.I)
-_ACCOUNT = re.compile(r"(?:portfolio|position|pnl|tax|watchlist|transaction|balance|buying)", re.I)
 
 
 def normalize_result(result: Any) -> Any:
@@ -47,12 +43,23 @@ def normalize_tools(result: Any) -> list[dict[str, Any]]:
 
 class RobinhoodClient:
     def __init__(self, server_url: str, *, oauth: OAuthConfig | None = None,
-                 token_path=DEFAULT_TOKEN_PATH, allowed_tools: set[str] | None = None,
+                 token_path=DEFAULT_TOKEN_PATH,
+                 market_tools: frozenset[str] | None = None,
+                 account_tools: frozenset[str] | None = None,
+                 allowed_tools: set[str] | None = None,
                  transport_factory: Callable[..., Any] | None = None):
+        if allowed_tools is not None:
+            market_tools = frozenset(allowed_tools)
+            account_tools = frozenset()
         self.server_url = server_url
         self.oauth = oauth
         self.token_path = token_path
+        self.market_tools = market_tools
+        self.account_tools = account_tools
         self.allowed_tools = allowed_tools
+        self.permitted_tools = permitted_tools(
+            market=market_tools, account=account_tools
+        )
         self.transport_factory = transport_factory
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -69,9 +76,9 @@ class RobinhoodClient:
         return self._run(self._run_readonly(calls))
 
     def _check_tool(self, name: str) -> None:
-        if not isinstance(name, str) or not name or _MUTATING.search(name) or _ACCOUNT.search(name):
+        if not isinstance(name, str) or not name or is_blocked(name):
             raise RobinhoodToolError(f"Tool is not permitted (read-only policy): {name!r}")
-        if self.allowed_tools is not None and name not in self.allowed_tools:
+        if name not in self.permitted_tools:
             raise RobinhoodToolError(f"Tool is not in the configured allowlist: {name}")
 
     def _run(self, coroutine):

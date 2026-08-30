@@ -3,7 +3,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 PYTEST := $(VENV)/bin/pytest
 
-.PHONY: setup test typecheck test-collect smoke smoke-mock smoke-prod clean-env verify
+.PHONY: setup test typecheck test-collect smoke smoke-mock smoke-prod smoke-robinhood clean-env verify
 
 ## Create a fresh virtualenv and install the pinned dependencies.
 setup:
@@ -30,6 +30,10 @@ smoke-mock:
 ## Opt-in live FINRA production smoke suite (requires FINRA credentials).
 smoke-prod:
 	RUN_FINRA_PRODUCTION_SMOKE=1 $(PYTEST) -m finra_production_smoke -q
+
+## Opt-in live Robinhood MCP smoke suite (requires OAuth state; run make login first).
+smoke-robinhood:
+	RUN_ROBINHOOD_SMOKE=1 $(PYTEST) -m robinhood_smoke -q
 
 ## Run both opt-in smoke suites.
 smoke: smoke-mock smoke-prod

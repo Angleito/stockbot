@@ -4,20 +4,29 @@ import json
 import logging
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import requests
 
 from . import analytics
+from . import analyst_client
 from . import edgar_client
 from . import finra_client
+from . import obligations
 from . import short_interest_screen
+from . import valuation
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .config import get_robinhood_mcp_url, robinhood_enabled
 from .analytics.options import analyze_option, compare_options
+from .analytics.portfolio import largest_positions, portfolio_concentration
 from .prompts import READING_PROMPT_TEMPLATE
 from .robinhood import RobinhoodClient
+from .robinhood import capabilities
 from .robinhood.auth import OAuthConfig
 from .robinhood.options import OptionQuote, normalize_option_quote
+from .robinhood.portfolio import RobinhoodPortfolioProvider
+from .services.portfolio_research import enrich_portfolio_research
+from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +213,91 @@ TOOLS = [
                     }
                 },
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_analyst_estimates",
+            "description": "Returns sell-side consensus estimates for a ticker "
+                "from Yahoo Finance: latest quote, analyst 12-month price "
+                "targets (mean/median/high/low) and recommendation rating, "
+                "forward EPS and revenue estimates per period (current quarter, "
+                "next quarter, current fiscal year, next fiscal year) with "
+                "growth rates, plus EPS estimate-revision trend (7/30/60 days "
+                "ago). Call for analyst estimates, price targets, consensus "
+                "expectations, forward growth, or valuation-vs-consensus "
+                "questions. Consensus moves daily; the response includes the "
+                "as-of timestamp.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sp500_weight",
+            "description": "Returns a company's current weight in the S&P 500 "
+                "index (rank, weight as percent of index market cap) from the "
+                "Slickcharts constituent list. Call for 'what percent of the "
+                "S&P 500 is [ticker]' or index-weight questions. To estimate "
+                "total S&P 500 market cap, divide market_cap from "
+                "get_analyst_estimates by weight_pct/100.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_obligations",
+            "description": "Returns quantified contractual obligations and "
+                "commitments disclosed in the latest 10-Q/10-K notes: "
+                "manufacturing/supply/capacity commitments, cloud service "
+                "agreements, vendor commitments, operating leases, and "
+                "facility lease guarantees, each with the amount, the "
+                "filing's own certainty language (contractual = "
+                "non-cancelable/firm; contingent = cancellable, reducible, "
+                "terminable, or default-triggered), payment horizon, and "
+                "source excerpt. Call for purchase obligations, supply "
+                "commitments, cloud commitments, lease obligations, "
+                "guarantees, or any 'what is the company obligated to pay "
+                "in the future' question. Contingent items are NOT counted "
+                "in adjusted EPS.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_valuation_metrics",
+            "description": "Returns valuation metrics anchored to the live "
+                "price as of the query: trailing P/E (SEC GAAP TTM EPS), "
+                "consensus forward P/E (Yahoo), plus three clearly separated "
+                "EPS figures: consensus forward EPS; adjusted forward EPS "
+                "(consensus minus only contractual obligations — "
+                "non-cancelable/firm per the 10-Q/10-K notes — annualized "
+                "per share); and a stress-scenario forward EPS (also "
+                "subtracting contingent obligations: cancellable, reducible, "
+                "terminable, or default-triggered). The per-share obligation "
+                "drag is shown explicitly. Use for 'is the stock cheap', "
+                "P/E, forward earnings, or obligation-adjusted valuation "
+                "questions. Never present the stress scenario as 'adjusted'.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"]
             }
         }
     },
@@ -502,6 +596,51 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_portfolio_snapshot",
+            "description": "Returns the user's current Robinhood portfolio with deterministic valuation, weights, cash, concentration, and available SEC/FINRA research context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "refresh": {"type": "boolean", "description": "If true, refresh account and quote data from Robinhood before returning the snapshot."}
+                },
+                "required": []
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_scanner_filter_specs",
+            "description": "Lists every valid Robinhood scanner filter type and usage (read-only catalog).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_scans",
+            "description": "Lists the user's saved Robinhood scanners (screeners): id, title, active filters, configured columns, sort order, and whether the scan is Cortex-managed (read-only).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_scan",
+            "description": "Executes a saved Robinhood scanner and returns live, real-time market results (bounded to limit rows). Requires a scan_id from get_scans.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scan_id": {"type": "string", "description": "The scan identifier to execute."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Maximum result rows to return (default 20)."},
+                },
+                "required": ["scan_id"],
+            },
+        },
+    },
 ]
 
 
@@ -553,16 +692,6 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
     return result
 
 
-_ROBINHOOD_PROVIDER_TOOLS = {
-    "get_equity_quotes",
-    "get_equity_fundamentals",
-    "get_option_chains",
-    "get_option_instruments",
-    "get_option_quotes",
-    "get_option_historicals",
-}
-
-
 def _robinhood_client() -> RobinhoodClient:
     if not robinhood_enabled():
         raise RuntimeError("Robinhood integration is disabled; set ROBINHOOD_ENABLED=true")
@@ -570,7 +699,8 @@ def _robinhood_client() -> RobinhoodClient:
     return RobinhoodClient(
         url,
         oauth=OAuthConfig(url),
-        allowed_tools=_ROBINHOOD_PROVIDER_TOOLS,
+        market_tools=capabilities.MARKET_READ_TOOLS,
+        account_tools=capabilities.ACCOUNT_READ_TOOLS,
     )
 
 
@@ -630,33 +760,211 @@ def _quote_row(value):
 
 def get_market_snapshot(ticker: str) -> dict:
     ticker = ticker.strip().upper()
-    payload = _robinhood_client().call_tool("get_equity_quotes", {"symbols": [ticker]})
-    rows = _rows(payload, "quotes", "equity_quotes")
-    if not rows:
+    provider = RobinhoodPortfolioProvider(_robinhood_client())
+    quote = provider.get_equity_quotes([ticker]).get(ticker)
+    if quote is None:
         return {"error": f"No Robinhood quote found for {ticker}", "source": "robinhood_mcp"}
-    row = _quote_row(rows[0])
     return {
         "result_type": "market_snapshot",
         "ticker": ticker,
-        "last": _first(
-            row,
-            "last",
-            "last_price",
-            "lastPrice",
-            "last_trade_price",
-            "last_non_reg_trade_price",
-            "price",
+        "last": str(quote.last) if quote.last is not None else None,
+        "bid": str(quote.bid) if quote.bid is not None else None,
+        "ask": str(quote.ask) if quote.ask is not None else None,
+        "retrieved_at": quote.retrieved_at.isoformat(),
+        "source": "robinhood_mcp",
+    }
+
+
+_SEC_CONCEPTS = (
+    "Revenue",
+    "NetIncomeLoss",
+    "CashAndCashEquivalents",
+    "LongTermDebt",
+    "EntityCommonStockSharesOutstanding",
+)
+
+_PORTFOLIO_TOP_POSITIONS = 15
+_PORTFOLIO_TOP_LARGEST = 5
+
+
+def _str_or_none(value) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _research_freshness(freshness_items: list[dict]) -> dict:
+    """Aggregate per-position research freshness to one latest non-empty dict."""
+    non_empty = [item for item in freshness_items if item]
+    if not non_empty:
+        return {}
+    return max(
+        non_empty,
+        key=lambda item: (
+            item.get("sec_latest_filed_at") or "0000-00-00",
+            item.get("finra_settlement_date") or "0000-00-00",
+            item.get("finra_known_at") or "",
         ),
-        "bid": _first(row, "bid", "bid_price", "bidPrice"),
-        "ask": _first(row, "ask", "ask_price", "askPrice"),
-        "retrieved_at": _first(
-            row,
-            "retrieved_at",
-            "retrievedAt",
-            "venue_last_non_reg_trade_time",
-            "venue_last_trade_time",
-            "timestamp",
+    )
+
+
+def _position_research_row(position, research_item) -> dict:
+    row = {
+        "ticker": position.ticker,
+        "quantity": str(position.quantity),
+        "market_price": _str_or_none(position.market_price),
+        "price_type": position.price_type,
+        "market_value": _str_or_none(position.market_value),
+        "portfolio_weight": _str_or_none(position.portfolio_weight),
+        "unrealized_gain": _str_or_none(position.unrealized_gain),
+        "security_id": position.security_id,
+        "entity_id": position.entity_id,
+        "resolved": position.entity_id is not None,
+    }
+    if research_item is not None:
+        sec = {}
+        for concept in _SEC_CONCEPTS:
+            fact = research_item.latest_sec_metrics.get(concept)
+            if fact:
+                sec[concept] = {
+                    "value": _str_or_none(fact.get("value")),
+                    "period_end": fact.get("period_end") or None,
+                }
+        row["sec"] = sec
+        finra = research_item.latest_finra_metrics
+        if finra:
+            row["finra"] = {
+                "short_position": _str_or_none(finra.get("short_position")),
+                "prev_position": _str_or_none(finra.get("prev_position")),
+                "change": _str_or_none(finra.get("short_interest_change")),
+                "change_pct": _str_or_none(finra.get("short_interest_change_pct")),
+                "days_to_cover": _str_or_none(finra.get("days_to_cover")),
+                "settlement_date": finra.get("settlement_date") or None,
+            }
+    return row
+
+
+def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
+    """Bounded, deterministic portfolio snapshot (spec §23)."""
+    del model
+    refresh = bool(arguments.get("refresh", False))
+    provider = RobinhoodPortfolioProvider(_robinhood_client())
+    if refresh:
+        snapshot = sync_robinhood_portfolio(provider, data_root=None)
+    else:
+        snapshot = read_latest_snapshot(data_root=None) or sync_robinhood_portfolio(provider, data_root=None)
+    research = {
+        item.position.position_id: item
+        for item in enrich_portfolio_research(snapshot)
+    }
+    positions_by_id = {position.position_id: position for position in snapshot.positions}
+    ranked = largest_positions(
+        [(position.position_id, position.market_value) for position in snapshot.positions],
+        limit=_PORTFOLIO_TOP_POSITIONS,
+    )
+    position_rows = [
+        _position_research_row(positions_by_id[position_id], research.get(position_id))
+        for position_id, _ in ranked
+    ]
+    omitted_count = max(0, len(snapshot.positions) - len(position_rows))
+    return {
+        "result_type": "portfolio_snapshot",
+        # Persistent snapshot/account identifiers stay local. Tool results are
+        # rendered into OpenRouter context, where they are not needed.
+        "created_at": snapshot.created_at.isoformat(),
+        "broker": snapshot.broker,
+        "account_count": len(snapshot.account_ids),
+        "total_value": _str_or_none(snapshot.total_value),
+        "cash": _str_or_none(snapshot.cash),
+        "invested_value": _str_or_none(snapshot.invested_value),
+        "position_count": len(snapshot.positions),
+        "priced_position_count": sum(
+            1 for position in snapshot.positions if position.market_value is not None
         ),
+        "unresolved_position_count": sum(
+            1 for position in snapshot.positions if position.entity_id is None
+        ),
+        "concentration": _str_or_none(
+            portfolio_concentration(
+                [position.portfolio_weight for position in snapshot.positions]
+            )
+        ),
+        "positions": position_rows,
+        "omitted_count": omitted_count,
+        "largest_positions": [
+            {"ticker": ticker, "market_value": _str_or_none(value)}
+            for ticker, value in largest_positions(
+                [(position.ticker, position.market_value) for position in snapshot.positions],
+                limit=_PORTFOLIO_TOP_LARGEST,
+            )
+        ],
+        "unresolved": [
+            position.ticker
+            for position in snapshot.positions
+            if position.entity_id is None
+        ],
+        "freshness": {
+            "snapshot_created_at": snapshot.created_at.isoformat(),
+            **_research_freshness(
+                [item.research_data_freshness for item in research.values()]
+            ),
+        },
+        "source": "robinhood_mcp",
+    }
+
+
+_SCAN_SPECS_CAP = 60
+_SCAN_LIST_CAP = 60
+_SCAN_RESULTS_ROWS = 20
+_SCAN_WRITE_PREVIEW_ROWS = 10
+
+
+def _scan_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Instrument rows from a scan payload under any of the common keys."""
+    rows = _rows(data, "results", "instruments", "rows", "items")
+    return rows if rows is not None else []
+
+
+def _get_scanner_filter_specs(arguments: dict, model: str) -> dict:
+    del arguments, model
+    data = RobinhoodPortfolioProvider(_robinhood_client()).get_scanner_filter_specs()
+    specs = data.get("filter_specs")
+    rows = [row for row in specs if isinstance(row, dict)] if isinstance(specs, list) else _scan_rows(data)
+    return {
+        "result_type": "scan_specs",
+        "count": len(rows),
+        "specs": rows[:_SCAN_SPECS_CAP],
+        "omitted_count": max(0, len(rows) - _SCAN_SPECS_CAP),
+        "source": "robinhood_mcp",
+    }
+
+
+def _get_scans(arguments: dict, model: str) -> dict:
+    del arguments, model
+    rows = RobinhoodPortfolioProvider(_robinhood_client()).get_scans()
+    return {
+        "result_type": "scan_list",
+        "count": len(rows),
+        "scans": rows[:_SCAN_LIST_CAP],
+        "omitted_count": max(0, len(rows) - _SCAN_LIST_CAP),
+        "source": "robinhood_mcp",
+    }
+
+
+def _run_scan(arguments: dict, model: str) -> dict:
+    del model
+    scan_id = str(arguments["scan_id"])
+    limit = max(1, min(int(arguments.get("limit") or _SCAN_RESULTS_ROWS), 25))
+    data = RobinhoodPortfolioProvider(_robinhood_client()).run_scan(scan_id)
+    rows = _scan_rows(data)
+    return {
+        "result_type": "scan_results",
+        "scan_id": scan_id,
+        "title": str(_first(data, "title", "name") or ""),
+        "total": _first(data, "total", "total_matches", "match_count", "count"),
+        "rows": rows[:limit],
+        "omitted": max(0, len(rows) - limit),
+        "sort": _first(data, "sort", "sort_order"),
+        "filters": _first(data, "filters", "active_filters"),
+        "live": True,
         "source": "robinhood_mcp",
     }
 
@@ -857,6 +1165,10 @@ _ROBINHOOD_HANDLERS = {
         args["ticker"], args["option_type"], args["target_price"], args.get("min_dte"), args.get("max_dte"),
         args.get("strike_min"), args.get("strike_max"), args.get("limit", 20)
     ),
+    "get_portfolio_snapshot": lambda arguments, model: _get_portfolio_snapshot(arguments, model),
+    "get_scanner_filter_specs": lambda arguments, model: _get_scanner_filter_specs(arguments, model),
+    "get_scans": lambda arguments, model: _get_scans(arguments, model),
+    "run_scan": lambda arguments, model: _run_scan(arguments, model),
 }
 
 
@@ -885,6 +1197,14 @@ def execute_tool(name: str, arguments: dict, model: str) -> dict:
             return get_earnings_summary(arguments["ticker"], model)
         if name == "diff_risk_factors":
             return edgar_client.diff_risk_factors(arguments["ticker"])
+        if name == "get_analyst_estimates":
+            return analyst_client.get_analyst_estimates(arguments["ticker"])
+        if name == "get_sp500_weight":
+            return analyst_client.get_sp500_weight(arguments["ticker"])
+        if name == "get_obligations":
+            return obligations.get_obligations(arguments["ticker"])
+        if name == "get_valuation_metrics":
+            return valuation.get_valuation_metrics(arguments["ticker"])
         if name in _FINRA_HANDLERS:
             return _FINRA_HANDLERS[name](arguments, model)
         if name in _ROBINHOOD_HANDLERS:
@@ -894,4 +1214,8 @@ def execute_tool(name: str, arguments: dict, model: str) -> dict:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
     except Exception as e:
         logger.exception("Tool '%s' failed", name)
+        if name in _ROBINHOOD_HANDLERS:
+            # Provider errors can echo request arguments. Do not place those
+            # details in a tool message that is subsequently sent to the LLM.
+            return {"error": f"Robinhood tool '{name}' failed; provider details withheld."}
         return {"error": f"Tool '{name}' failed: {e}"}

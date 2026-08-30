@@ -152,6 +152,42 @@ DATASETS: dict[str, Dataset] = {
         )),
         unique_keys=("pipeline", "source", "key", "payload_hash"),
     ),
+    "portfolio_snapshots": Dataset(
+        name="portfolio_snapshots",
+        schema=pa.schema(_fields(
+            ("snapshot_id", TEXT), ("broker", TEXT), ("created_at", TEXT),
+            ("cash", DOUBLE), ("invested_value", DOUBLE), ("total_value", DOUBLE),
+            ("account_count", INTEGER), ("position_count", INTEGER),
+            ("priced_position_count", INTEGER), ("unresolved_position_count", INTEGER),
+            ("source", TEXT), ("parser_version", TEXT), ("calculation_version", TEXT),
+        )),
+        unique_keys=("snapshot_id",),
+    ),
+    "portfolio_positions": Dataset(
+        name="portfolio_positions",
+        schema=pa.schema(_fields(
+            ("snapshot_id", TEXT), ("position_id", TEXT), ("account_id", TEXT),
+            ("security_id", TEXT), ("entity_id", TEXT), ("ticker", TEXT),
+            ("quantity", DOUBLE), ("average_cost", DOUBLE), ("market_price", DOUBLE),
+            ("price_type", TEXT), ("market_value", DOUBLE), ("unrealized_gain", DOUBLE),
+            ("unrealized_gain_pct", DOUBLE), ("portfolio_weight", DOUBLE),
+            ("source", TEXT), ("quote_retrieved_at", TEXT),
+        )),
+        unique_keys=("position_id",),
+    ),
+    "company_obligations": Dataset(
+        name="company_obligations",
+        schema=pa.schema(_fields(
+            ("obligation_id", TEXT), ("ticker", TEXT), ("obligation_type", TEXT),
+            ("amount_billions", DOUBLE), ("certainty", TEXT), ("status", TEXT),
+            ("revenue_matched", pa.bool_()), ("default_triggered", pa.bool_()),
+            ("fiscal_year", TEXT), ("excerpt", TEXT), ("source", TEXT),
+            ("filed_at", TEXT), ("as_of", TEXT), ("known_at", TEXT),
+            ("retrieved_at", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+        )),
+        unique_keys=("obligation_id",),
+        partition_field="filed_at",
+    ),
 }
 
 

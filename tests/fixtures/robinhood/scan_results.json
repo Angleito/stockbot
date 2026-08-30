@@ -1,0 +1,19 @@
+{
+  "structured_content": {
+    "data": {
+      "scan_id": "scan-rsi-1",
+      "title": "RSI Oversold",
+      "total": 3,
+      "results": [
+        {"ticker": "WING", "instrument_id": "instr-wing", "type": "stock", "RSI": "24.1", "Volume": "820000"},
+        {"ticker": "SOFI", "instrument_id": "instr-sofi", "type": "stock", "RSI": "27.8", "Volume": "41000000"},
+        {"ticker": "PLTR", "instrument_id": "instr-pltr", "type": "stock", "RSI": "29.0", "Volume": "38000000"}
+      ],
+      "sort": {"column": "Market cap", "direction": "desc"},
+      "filters": [
+        {"filter_type": "FILTER_TYPE_RSI", "predicate": "<", "values": ["30"], "interval": "1d", "length": 14}
+      ]
+    },
+    "guide": "Present results as a table; mention this is live data."
+  }
+}

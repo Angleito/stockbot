@@ -1,5 +1,7 @@
 # Stock Analyst AI: Target Architecture and Implementation Roadmap
 
+> **Roadmap notice:** This document describes the intended architecture and roadmap. Some components are not implemented yet.
+
 This document is the build plan for turning this repository into a research system that can ingest large amounts of market and company data, find unusual relationships, and let an AI agent investigate them without placing the full dataset in the model's context window.
 
 The intended product is a research assistant and opportunity-ranking system, not an oracle or autonomous trading system. Its edge should come from joining public facts earlier and more consistently than a person can, preserving exactly when each fact became public, and showing the evidence behind every thesis.

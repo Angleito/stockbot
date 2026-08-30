@@ -42,3 +42,9 @@ edgar_cache/
 *.swp
 *.swo
 data/
+
+# Local test and platform artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store

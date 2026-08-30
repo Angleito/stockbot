@@ -41,6 +41,12 @@ class MarketSnapshot:
     retrieved_at: datetime
     source: str = "robinhood_mcp"
 
+    @property
+    def mid(self) -> Decimal | None:
+        if self.bid is not None and self.ask is not None:
+            return (self.bid + self.ask) / Decimal("2")
+        return None
+
 
 @dataclass(frozen=True)
 class OptionQuote:

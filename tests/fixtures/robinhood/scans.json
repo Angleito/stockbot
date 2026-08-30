@@ -1,0 +1,30 @@
+{
+  "structured_content": {
+    "data": {
+      "scans": [
+        {
+          "id": "scan-rsi-1",
+          "title": "RSI Oversold",
+          "filters": [
+            {"filter_type": "FILTER_TYPE_RSI", "predicate": "<", "values": ["30"], "interval": "1d", "length": 14}
+          ],
+          "columns": [
+            {"display_name": "RSI", "visible": true},
+            {"display_name": "Volume", "visible": true}
+          ],
+          "sort": {"column": "Market cap", "direction": "desc"},
+          "cortex_managed": false
+        },
+        {
+          "id": "scan-cortex-2",
+          "title": "Cortex Momentum",
+          "filters": [],
+          "columns": [],
+          "sort": null,
+          "cortex_managed": true
+        }
+      ]
+    },
+    "guide": "Cortex-managed scans are read-only via MCP."
+  }
+}

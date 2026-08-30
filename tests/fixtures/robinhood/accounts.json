@@ -1,0 +1,18 @@
+{
+  "structured_content": {
+    "data": {
+      "accounts": [
+        {
+          "account_number": "100000001",
+          "brokerage_account_type": "individual",
+          "state": "active"
+        },
+        {
+          "account_number": "100000002",
+          "brokerage_account_type": "individual",
+          "state": "active"
+        }
+      ]
+    }
+  }
+}

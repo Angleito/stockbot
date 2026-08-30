@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from app.agent import run_chat
 from app.config import get_default_model
 
-app = FastAPI(title="SEC Filing Research Assistant", version="0.1.0")
+app = FastAPI(title="Stockbot", version="0.1.0")
 
 
 class ChatMessage(BaseModel):
