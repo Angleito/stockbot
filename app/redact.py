@@ -36,6 +36,14 @@ _REDACTED = "[REDACTED]"
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _SK_OR_V1_RE = re.compile(r"\bsk-or-v1-[A-Za-z0-9_-]{8,}")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+# Account identifiers ("account", "account_number", "account id", "account
+# no.") followed by a digit run. Label-anchored: bare digit runs (CIKs,
+# accession numbers) stay untouched; 4-digit years ("account 2026") do not
+# match the {6,} threshold. Case-insensitive, like SENSITIVE_KEY_NORMS.
+_ACCOUNT_ID_RE = re.compile(
+    r"(\baccount(?:[_\s-]*(?:number|id|no\.?))?\b[^0-9]{0,20})(\d{6,})",
+    re.IGNORECASE,
+)
 
 
 def _norm_key(key: object) -> str:
@@ -64,12 +72,14 @@ def redact_value(value: object) -> object:
 
 
 def redact_text(text: str) -> str:
-    """Mask bearer tokens, sk-or-v1 API keys, and JWTs in free text."""
+    """Mask bearer tokens, sk-or-v1 API keys, JWTs, and account identifiers
+    in free text."""
     if not isinstance(text, str):
         text = str(text)
     text = _BEARER_RE.sub("Bearer [REDACTED]", text)
     text = _SK_OR_V1_RE.sub("sk-or-v1-[REDACTED]", text)
     text = _JWT_RE.sub("eyJ[REDACTED JWT]", text)
+    text = _ACCOUNT_ID_RE.sub(r"\1[REDACTED]", text)
     return text
 
 

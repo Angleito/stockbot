@@ -568,6 +568,7 @@ def run_chat(
                             error_message=error_message,
                         )
                         result_summary = redact_json(json.dumps(result))
+                        rendered = render_tool_result(result)
                         recorder.record_event(
                             EventType.TOOL_COMPLETED if not failed else EventType.TOOL_FAILED,
                             round=state.round,
@@ -581,20 +582,27 @@ def run_chat(
                             state.plan.required_data.append(
                                 {"tool": name, "arguments": redact_value(arguments)}
                             )
-                            if budget.add_evidence_tokens(len(result_summary) // 4):
-                                evidence_id = (
-                                    f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
+                            # Evidence is what the model actually receives: a
+                            # result that would cross the evidence budget is a
+                            # hard stop — no evidence record, and the tool
+                            # message is never appended to the transcript.
+                            if not budget.add_evidence_tokens(len(rendered) // 4):
+                                return _finish(
+                                    _BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted"
                                 )
-                                state.evidence.append(evidence_id)
-                                recorder.record_event(
-                                    EventType.EVIDENCE_ADDED,
-                                    round=state.round,
-                                    tool_name=name,
-                                    result_summary=result_summary,
-                                    success=True,
-                                    evidence_ids=[evidence_id],
-                                    metadata={"duration_ms": (t1 - t0) * 1000.0},
-                                )
+                            evidence_id = (
+                                f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
+                            )
+                            state.evidence.append(evidence_id)
+                            recorder.record_event(
+                                EventType.EVIDENCE_ADDED,
+                                round=state.round,
+                                tool_name=name,
+                                result_summary=result_summary,
+                                success=True,
+                                evidence_ids=[evidence_id],
+                                metadata={"duration_ms": (t1 - t0) * 1000.0},
+                            )
                         else:
                             state.failures.append(
                                 {"tool": name, "error": result.get("error")}
@@ -603,7 +611,7 @@ def run_chat(
                         msgs.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id", ""),
-                            "content": render_tool_result(result),
+                            "content": rendered,
                         })
                     if failed_tools:
                         # Strict failed-tool rule: stop the tool loop before another

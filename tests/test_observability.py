@@ -459,6 +459,12 @@ def test_redact_text_units():
     # Already-redacted output is stable under re-redaction.
     assert redact_text("Bearer [REDACTED]") == "Bearer [REDACTED]"
     assert redact_text("sk-or-v1-[REDACTED]") == "sk-or-v1-[REDACTED]"
+    # Account identifiers in free text (review round 2 P1).
+    assert redact_text("My account_number is 12345678") == "My account_number is [REDACTED]"
+    assert redact_text("My account_id=87654321") == "My account_id=[REDACTED]"
+    # Bare digit runs stay untouched (CIKs/accession numbers are structural).
+    assert redact_text("cik 0000320193 filing") == "cik 0000320193 filing"
+    assert redact_text("account 2026 taxes") == "account 2026 taxes"
 
 
 def test_redact_value_units():
@@ -519,7 +525,10 @@ def test_question_redacted_in_store(monkeypatch):
     fake = FakeOpenRouter([_final("ok")])
     monkeypatch.setattr(agent, "_call_openrouter", fake)
     result = run_chat(
-        [{"role": "user", "content": "What is my balance? Bearer abc123, key sk-or-v1-abcdefghijklmnop"}],
+        [{"role": "user", "content": (
+            "My account_number is 12345678, my account_id=87654321. "
+            "What is my balance? Bearer abc123, key sk-or-v1-abcdefghijklmnop"
+        )}],
         model="test",
         context=_research_context(),
         policy=TEST_POLICY,
@@ -527,6 +536,7 @@ def test_question_redacted_in_store(monkeypatch):
     )
     run = get_run(result.run_id)
     assert run["question"] == (
+        "My account_number is [REDACTED], my account_id=[REDACTED]. "
         "What is my balance? Bearer [REDACTED], key sk-or-v1-[REDACTED]"
     )
 
@@ -545,7 +555,7 @@ def test_question_redacted_in_store(monkeypatch):
         conn.close()
     dump = "\n".join(chunks)
 
-    for secret in ("12345678", "abc123", "sk-or-v1-abcdefghijklmnop"):
+    for secret in ("12345678", "87654321", "abc123", "sk-or-v1-abcdefghijklmnop"):
         assert secret not in dump, f"secret leaked in runs DB: {secret}"
     # The "abc" credential value from (a); word boundaries so provider
     # request ids from other tests ("req_abc") cannot false-positive.
@@ -756,3 +766,95 @@ def test_budget_limits_independent_of_recorder(monkeypatch, tmp_path, disable_re
     assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
     if not disable_recorder:
         assert get_run(result.run_id)["status"] == "budget_exhausted"
+
+def test_evidence_budget_terminates_run(monkeypatch):
+    """A tool result that would cross the evidence budget is a hard stop:
+    the run ends budget_exhausted and the result never reaches the model."""
+    big_result = {
+        "ticker": "AAPL",
+        "rows": [{"period": f"2026-Q{i}", "value": i * 1.5, "note": "x" * 20}
+                 for i in range(60)],
+        "source": "test",
+    }
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: big_result
+    )
+    context = _research_context(run_limits=RunLimits(max_evidence_tokens=100))
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test", context=context, policy=TEST_POLICY, return_result=True,
+    )
+    assert len(fake.calls) == 1  # the tool result never fed a second call
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert result.evidence_refs == []
+    run = get_run(result.run_id)
+    assert run["status"] == "budget_exhausted"
+    events = get_events(result.run_id)
+    assert [ev for ev in events if ev["event_type"] == "evidence_added"] == []
+
+
+def test_reserve_methods_enforce_runtime(monkeypatch):
+    """Reserves refuse once elapsed runtime is gone, even with call slots left."""
+    budget = ExecutionBudget(
+        max_rounds=8, max_tool_calls=2, max_model_calls=2,
+        max_runtime=1.0, max_evidence_tokens=48000,
+    )
+    assert budget.reserve_model_call() is True
+    assert budget.reserve_tool_call() is True
+    budget._started -= 60  # pretend the budget started 60s ago
+    assert budget.runtime_remaining() <= 0
+    assert budget.reserve_model_call() is False
+    assert budget.reserve_tool_call() is False
+
+    # The nested-helper path surfaces the same refusal as an exception.
+    token = set_current_budget(budget)
+    monkeypatch.setattr(
+        tools_module.requests, "post",
+        lambda *a, **k: pytest.fail("nested model call must not run"),
+    )
+    try:
+        with pytest.raises(BudgetExhaustedError):
+            tools_module._llm_complete("test", "prompt")
+    finally:
+        reset_current_budget(token)
+
+
+class _RuntimeScriptedBudget(ExecutionBudget):
+    """runtime_remaining yields scripted values. Read order in run_chat:
+    AgentState construction, loop-top _update_budget view, loop-top check,
+    main reserve, forced-answer reserve (5 reads)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._remaining = iter([1.0, 1.0, 1.0, 1.0, 0.0])
+
+    def runtime_remaining(self):
+        return next(self._remaining)
+
+
+def test_forced_answer_respects_runtime_budget(monkeypatch):
+    """The forced-final-answer branch refuses the extra model call when the
+    runtime budget is already gone."""
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(agent, "ExecutionBudget", _RuntimeScriptedBudget)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: {"ticker": "AAPL"}
+    )
+    context = _research_context(run_limits=RunLimits(
+        max_rounds=0, max_model_calls=2, max_runtime=1.0
+    ))
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test", context=context, policy=TEST_POLICY, return_result=True,
+    )
+    assert len(fake.calls) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    run = get_run(result.run_id)
+    assert run["status"] == "budget_exhausted"

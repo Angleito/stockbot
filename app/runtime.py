@@ -175,13 +175,20 @@ class ExecutionBudget:
         return max(0.0, self.max_runtime - self.elapsed_seconds())
 
     def reserve_model_call(self) -> bool:
-        """Consume one model-call slot; False when the limit is already reached."""
+        """Consume one model-call slot; False when runtime or the call limit
+        is exhausted."""
+        if self.runtime_remaining() <= 0:
+            return False
         if self.model_calls >= self.max_model_calls:
             return False
         self.model_calls += 1
         return True
 
     def reserve_tool_call(self) -> bool:
+        """Consume one tool-call slot; False when runtime or the call limit
+        is exhausted."""
+        if self.runtime_remaining() <= 0:
+            return False
         if self.tool_calls >= self.max_tool_calls:
             return False
         self.tool_calls += 1
