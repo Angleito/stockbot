@@ -19,10 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.portfolio import PortfolioSnapshot, local_account_id
+from app.domain.market.securities import SecurityResolution
+from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, local_account_id
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_sync import (
+    build_position,
     read_latest_snapshot,
+    resolve_security,
     sync_robinhood_portfolio,
 )
 from app.storage import parquet
@@ -107,6 +110,24 @@ def _happy_payloads():
         "get_portfolio": lambda args: _inline_balance(args["account_number"]),
         "get_equity_quotes": _inline_quotes(),
     }
+
+
+def _alias_row(**overrides):
+    """One entity_aliases row for WING/sec:cik:0000320193; overrides win."""
+    row = {
+        "alias_type": "ticker",
+        "alias_value": "WING",
+        "entity_id": "sec:cik:0000320193",
+        "security_id": "sec:equity:0000320193",
+        "source": "sec",
+        "valid_from": "2026-01-01",
+        "known_at": "2026-08-25T00:00:00Z",
+        "retrieved_at": "2026-08-25T00:00:00Z",
+        "content_hash": "alias-wing",
+        "parser_version": "test",
+    }
+    row.update(overrides)
+    return row
 
 
 def _seed_wing_alias(data_root):
@@ -194,7 +215,8 @@ def test_sync_builds_valued_snapshot_with_two_accounts(data_root):
     assert msft.account_id == local_account_id("100000002")
     weights = [position.portfolio_weight for position in snapshot.positions]
     assert all(weight is not None for weight in weights)
-    assert sum(weights) == pytest.approx(Decimal("1"))
+    assert snapshot.total_value is not None
+    assert sum(weights) == pytest.approx(snapshot.invested_value / snapshot.total_value)
 
 
 def test_local_account_id_is_opaque_and_deterministic():
@@ -393,6 +415,94 @@ def test_sync_without_explicit_now_uses_utc_now(data_root, monkeypatch):
     )
     assert snapshot.created_at == NOW
     assert snapshot.snapshot_id == SNAPSHOT_ID
+
+
+# ---------------------------------------------------------------------------
+# resolve_security / build_position
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_security_alias_learned_after_as_of_unresolved(data_root):
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    parquet.write_rows("entity_aliases", [
+        _alias_row(known_at="2026-08-26T00:00:00Z", retrieved_at="2026-08-26T00:00:00Z", content_hash="learned-later"),
+    ], root=data_root / "parquet")
+    late = resolve_security("WING", as_of=as_of, data_root=data_root)
+    assert late.resolved is False
+    assert late.resolution_method == "unresolved"
+    parquet.write_rows("entity_aliases", [
+        _alias_row(known_at="2026-08-25T00:00:00Z", retrieved_at="2026-08-25T00:00:00Z", source="control", content_hash="knowable"),
+    ], root=data_root / "parquet")
+    known = resolve_security("WING", as_of=as_of, data_root=data_root)
+    assert known.resolved is True
+    assert known.resolution_method == "entity_alias"
+    assert known.entity_id == "sec:cik:0000320193"
+
+
+def test_resolve_security_expired_alias_unresolved(data_root):
+    parquet.write_rows("entity_aliases", [
+        _alias_row(valid_from="2026-01-01", valid_to="2026-08-24", known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="expired"),
+        _alias_row(valid_from="2026-01-01", valid_to="2026-08-25", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="boundary"),
+    ], root=data_root / "parquet")
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    expired = resolve_security("WING", as_of=as_of, data_root=data_root)
+    assert expired.resolved is False
+    assert expired.resolution_method == "unresolved"
+    # Half-open boundary: a date-only valid_to is midnight, so
+    # valid_to="2026-08-25" is already expired at 00:00 on the 25th.
+    boundary = resolve_security(
+        "WING", as_of=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    assert boundary.resolved is False
+    assert boundary.resolution_method == "unresolved"
+
+
+def test_resolve_security_ambiguous_ticker(data_root):
+    parquet.write_rows("entity_aliases", [
+        _alias_row(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193", content_hash="alias-a"),
+        _alias_row(entity_id="sec:cik:0000999999", security_id="sec:equity:0000999999", source="control", content_hash="alias-b"),
+    ], root=data_root / "parquet")
+    resolution = resolve_security(
+        "WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "ambiguous"
+    assert resolution.entity_id is None
+    assert resolution.security_id is None
+
+
+def test_resolve_security_same_entity_multiple_rows_resolves(data_root):
+    parquet.write_rows("entity_aliases", [
+        _alias_row(security_id=None, known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="older"),
+        _alias_row(security_id="sec:equity:0000320193", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="newer"),
+    ], root=data_root / "parquet")
+    resolution = resolve_security(
+        "WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    assert resolution.resolved is True
+    assert resolution.resolution_method == "entity_alias"
+    assert resolution.entity_id == "sec:cik:0000320193"
+    assert resolution.security_id == "sec:equity:0000320193"
+
+
+def test_build_position_passes_asset_type():
+    raw = BrokeragePositionInput(
+        position_id="pos-1",
+        account_id="acc-1",
+        ticker="WING",
+        provider_instrument_id="instr-1",
+        quantity=Decimal("10"),
+        average_cost=Decimal("95.50"),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        source="robinhood_mcp",
+        asset_type="option",
+    )
+    position = build_position(
+        raw,
+        SecurityResolution(None, None, "WING", False, "unresolved"),
+        None,
+    )
+    assert position.asset_type == "option"
 
 
 # ---------------------------------------------------------------------------

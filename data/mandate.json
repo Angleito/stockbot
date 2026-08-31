@@ -1,0 +1,7 @@
+{
+  "limits": [
+    {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
+    {"metric": "minimum_cash", "operator": ">=", "threshold": 0.10}
+  ],
+  "prohibited_assets": []
+}

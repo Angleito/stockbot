@@ -126,8 +126,11 @@ def test_load_mandate_missing_file(tmp_path):
     {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": "abc"}]},
     {"limits": [{"metric": "sector_exposure", "operator": "<=", "threshold": 0.2}]},
     {"limits": [{"metric": "sector_exposure", "target": "", "operator": "<=", "threshold": 0.2}]},
-    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1, "unit": "bananas"}]},
-    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1, "severity": "fatal"}]},
+    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.25, "unit": "dollars"}]},
+    {"limits": [{"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 0.20, "unit": "dollars"}]},
+    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 1.5}]},
+    {"limits": [{"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 1.5}]},
+    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 1.5}]},
     {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": "GME"},
     {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": [""]},
     {"limits": "nope"},
@@ -175,6 +178,8 @@ def test_single_position_weight_none_weight_not_evaluable():
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
     assert evaluation.not_evaluable == (
+        "sector_exposure: WING (no weight)",
+        "sector_exposure: ZZZZ (no weight)",
         "single_position_weight: WING (no weight)",
         "single_position_weight: ZZZZ (no weight)",
     )
@@ -233,6 +238,38 @@ def test_prohibited_assets_ticker_and_entity_matches():
         assert breach.actual == "WING"
         assert breach.note == "position WING (snap-1:acc-1:WING)"
     assert {breach.target for breach in evaluation.breaches} == {"wing", "sec:cik:0000320193"}
+
+
+def test_sector_exposure_unpriced_position_not_evaluable():
+    snapshot = _hand_built_snapshot(weight=None)
+    mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
+    evaluation = evaluate_mandate(
+        snapshot, mandate,
+        sector_map={"sec:cik:0000320193": "semiconductors"},
+    )
+    assert evaluation.breaches == ()
+    assert evaluation.not_evaluable == (
+        "sector_exposure: WING (no weight)",
+        "sector_exposure: ZZZZ (no weight)",
+    )
+
+
+def test_minimum_cash_zero_total_value_not_evaluable():
+    snapshot = _hand_built_snapshot()
+    snapshot = PortfolioSnapshot(
+        snapshot_id=snapshot.snapshot_id,
+        created_at=snapshot.created_at,
+        broker=snapshot.broker,
+        account_ids=snapshot.account_ids,
+        cash=Decimal("0"),
+        invested_value=Decimal("0"),
+        total_value=Decimal("0"),
+        positions=snapshot.positions,
+    )
+    mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
+    evaluation = evaluate_mandate(snapshot, mandate)
+    assert evaluation.breaches == ()
+    assert evaluation.not_evaluable == ("minimum_cash: total value is zero",)
 
 
 def test_sector_exposure_buckets_unknown_and_breaches():

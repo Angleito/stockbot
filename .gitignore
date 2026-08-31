@@ -41,7 +41,8 @@ edgar_cache/
 .idea/
 *.swp
 *.swo
-data/
+data/*
+!data/mandate.json
 
 # Local test and platform artifacts
 .pytest_cache/

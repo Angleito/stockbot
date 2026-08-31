@@ -79,11 +79,13 @@ def _evaluate_limit(
         if limit.unit == "dollars":
             actual = snapshot.cash
         else:
-            actual = (
-                snapshot.cash / snapshot.total_value
-                if snapshot.cash is not None and snapshot.total_value is not None
-                else None
-            )
+            if snapshot.cash is None or snapshot.total_value is None:
+                not_evaluable.append("minimum_cash: cash unavailable")
+                return
+            if snapshot.total_value == 0:
+                not_evaluable.append("minimum_cash: total value is zero")
+                return
+            actual = snapshot.cash / snapshot.total_value
         if actual is None:
             not_evaluable.append("minimum_cash: cash unavailable")
             return
@@ -111,9 +113,11 @@ def evaluate_mandate(
     entity is unknown or unmapped bucket to ``UNKNOWN_SECTOR``.
     """
     sector_map = sector_map or {}
+    not_evaluable: list[str] = []
     sector_exposures: dict[str, Decimal] = {}
     for position in snapshot.positions:
         if position.portfolio_weight is None:
+            not_evaluable.append(f"sector_exposure: {position.ticker} (no weight)")
             continue
         if position.entity_id is not None and position.entity_id in sector_map:
             sector = sector_map[position.entity_id]
@@ -124,7 +128,6 @@ def evaluate_mandate(
         )
 
     breaches: list[RiskBreach] = []
-    not_evaluable: list[str] = []
     for limit in mandate.limits:
         _evaluate_limit(limit, snapshot, sector_exposures, breaches, not_evaluable)
     for entry in mandate.prohibited_assets:

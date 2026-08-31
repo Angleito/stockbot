@@ -8,7 +8,7 @@ the versioned Parquet datasets.  Never exposes provider internals.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
@@ -38,37 +38,50 @@ def resolve_security(
     ticker: str,
     *,
     provider_instrument_id: str | None = None,
-    as_of: date | None = None,
+    as_of: datetime | None = None,
     data_root: Path | None = None,
 ) -> SecurityResolution:
     """Resolve a ticker to a Stockbot security/entity identity.
 
     ``provider_instrument_id`` is preserved on the position but is NOT used
     for resolution: Robinhood instrument IDs are not bridged to Stockbot
-    identities yet.  Resolution is point-in-time over entity_aliases
-    (newest-wins per ticker, knowable on/before ``as_of``); an alias with a
-    later ``known_at`` can never retroactively resolve an earlier snapshot.
-    No mappings are ever invented: unknown tickers resolve to
-    ``resolved=False``.
+    identities yet.  Resolution is point-in-time over entity_aliases: an
+    alias is visible only when ``known_at <= as_of`` (timestamp precision)
+    AND its half-open validity interval ``[valid_from, valid_to)`` contains
+    ``as_of`` (``NULL`` bounds are unbounded; date-only values are midnight,
+    so ``valid_to="2026-08-25"`` is expired on the 25th).  Multiple active
+    entities for one ticker resolve as ``"ambiguous"`` — never
+    source/order-wins.  No mappings are ever invented: unknown tickers
+    resolve to ``resolved=False``.
     """
     del provider_instrument_id
-    as_of = as_of or datetime.now(timezone.utc).date()
+    as_of = as_of or datetime.now(timezone.utc)
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     rows = duckdb.query(
         "SELECT alias_type, alias_value, entity_id, security_id, source, "
         "valid_from, valid_to, known_at, retrieved_at FROM entity_aliases "
         "WHERE alias_type = 'ticker' AND alias_value = ? AND "
         f"{clause} "
-        "QUALIFY row_number() OVER (PARTITION BY alias_value "
-        "ORDER BY known_at DESC, retrieved_at DESC) = 1",
-        params=[ticker.strip().upper(), param],
+        "AND (valid_from IS NULL OR CAST(valid_from AS TIMESTAMP) <= CAST(? AS TIMESTAMP)) "
+        "AND (valid_to IS NULL OR CAST(valid_to AS TIMESTAMP) > CAST(? AS TIMESTAMP))",
+        params=[ticker.strip().upper(), param, param, param],
         data_root=data_root,
     )
     if not rows:
         return SecurityResolution(None, None, ticker, False, "unresolved")
-    alias = TickerAlias.from_row(rows[0])
+    entities = list(dict.fromkeys(row["entity_id"] for row in rows))
+    if len(entities) > 1:
+        return SecurityResolution(None, None, ticker, False, "ambiguous")
+    newest = sorted(
+        rows,
+        key=lambda r: (str(r.get("known_at") or ""), str(r.get("retrieved_at") or "")),
+        reverse=True,
+    )[0]
+    alias = TickerAlias.from_row(newest)
     entity_id = alias.entity_id
-    if entity_id.startswith("sec:cik:"):
+    if alias.security_id is not None:
+        security_id = alias.security_id
+    elif entity_id.startswith("sec:cik:"):
         security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
     else:
         security_id = None
@@ -104,6 +117,7 @@ def build_position(
         retrieved_at=raw.retrieved_at,
         price_type=valuation["price_type"],
         quote_retrieved_at=quote.retrieved_at if quote else None,
+        asset_type=raw.asset_type,
     )
 
 
@@ -116,9 +130,9 @@ def build_portfolio_snapshot(
 ) -> PortfolioSnapshot:
     """Assemble the deterministic, immutable portfolio snapshot.
 
-    Position weights use ``invested_value`` as the denominator (cash is
-    carried on the snapshot, not per position).  Cash is the sum of non-None
-    balances and is never invented as zero.
+    Position weights use ``total_value`` as the denominator (cash included);
+    weights are ``None`` when total value is unknown.  Cash is the sum of
+    non-None balances and is never invented as zero.
     """
     invested_value, _, _ = portfolio_market_value([position.market_value for position in positions])
     cash_values = [balance.cash for balance in cash_balances if balance.cash is not None]
@@ -143,7 +157,7 @@ def build_portfolio_snapshot(
                 market_value=position.market_value,
                 unrealized_gain=position.unrealized_gain,
                 unrealized_gain_pct=position.unrealized_gain_pct,
-                portfolio_weight=position_weight(position.market_value, invested_value),
+                portfolio_weight=position_weight(position.market_value, total_value),
                 source=position.source,
                 retrieved_at=position.retrieved_at,
                 price_type=position.price_type,
@@ -337,6 +351,7 @@ def sync_robinhood_portfolio(
             resolve_security(
                 raw.ticker,
                 provider_instrument_id=raw.provider_instrument_id,
+                as_of=created_at,
                 data_root=data_root,
             ),
             to_quote(quotes[raw.ticker]) if raw.ticker in quotes else None,

@@ -6,7 +6,7 @@ The resolution rules under test:
 - lookups are case-insensitive (UPPER);
 - an alias whose ``known_at`` is after ``as_of`` is invisible (no
   retroactive contamination);
-- when several alias versions are knowable at ``as_of`` the newest wins;
+- two active aliases pointing at different entities resolve as ambiguous;
 - unknown tickers resolve to ``resolved=False`` and never crash;
 - ``provider_instrument_id`` is accepted but does not change the result.
 """
@@ -121,7 +121,7 @@ def test_alias_known_after_as_of_is_invisible(data_root):
     assert on_day.entity_id == AMD_ENTITY
 
 
-def test_newest_wins_across_alias_versions(data_root):
+def test_ambiguous_when_multiple_entities_knowable(data_root):
     _seed_entity(data_root)
     _seed_entity(data_root, entity_id="sec:cik:0000320194", name="AMD Relabeled")
     _seed_security(data_root, security_id="sec:equity:0000320194", entity_id="sec:cik:0000320194", ticker="AMD")
@@ -133,11 +133,14 @@ def test_newest_wins_across_alias_versions(data_root):
         known_at="2026-06-01T12:00:00Z",
     )
     before_relabel = resolve_security("AMD", as_of=date(2026, 3, 1), data_root=data_root)
+    assert before_relabel.resolved is True
     assert before_relabel.entity_id == AMD_ENTITY
     assert before_relabel.security_id == AMD_SECURITY
     after_relabel = resolve_security("AMD", as_of=date(2026, 8, 1), data_root=data_root)
-    assert after_relabel.entity_id == "sec:cik:0000320194"
-    assert after_relabel.security_id == "sec:equity:0000320194"
+    assert after_relabel.resolved is False
+    assert after_relabel.resolution_method == "ambiguous"
+    assert after_relabel.entity_id is None
+    assert after_relabel.security_id is None
 
 
 def test_provider_instrument_id_does_not_change_resolution(data_root):

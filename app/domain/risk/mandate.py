@@ -71,20 +71,24 @@ def load_mandate(path: Path) -> Mandate:
                 f"mandate limit {index}: unknown operator {operator!r} "
                 f"(supported: {', '.join(SUPPORTED_OPERATORS)})"
             )
-        if "threshold" not in entry:
-            raise ValueError(f"mandate limit {index}: missing threshold")
-        threshold = _decimal_threshold(entry["threshold"], index=index)
-        severity = entry.get("severity", "warning")
-        if severity not in SUPPORTED_SEVERITIES:
-            raise ValueError(
-                f"mandate limit {index}: unknown severity {severity!r} "
-                f"(supported: {', '.join(SUPPORTED_SEVERITIES)})"
-            )
         unit = entry.get("unit", "ratio")
         if unit not in SUPPORTED_UNITS:
             raise ValueError(
                 f"mandate limit {index}: unknown unit {unit!r} "
                 f"(supported: {', '.join(SUPPORTED_UNITS)})"
+            )
+        if "threshold" not in entry:
+            raise ValueError(f"mandate limit {index}: missing threshold")
+        threshold = _decimal_threshold(entry["threshold"], index=index)
+        if metric in ("single_position_weight", "sector_exposure") and unit != "ratio":
+            raise ValueError(f"mandate limit {index}: {metric} requires unit 'ratio'")
+        if unit == "ratio" and threshold > 1:
+            raise ValueError(f"mandate limit {index}: threshold must be at most 1 for ratio units")
+        severity = entry.get("severity", "warning")
+        if severity not in SUPPORTED_SEVERITIES:
+            raise ValueError(
+                f"mandate limit {index}: unknown severity {severity!r} "
+                f"(supported: {', '.join(SUPPORTED_SEVERITIES)})"
             )
         target = entry.get("target")
         if metric == "sector_exposure" and not (isinstance(target, str) and target.strip()):
