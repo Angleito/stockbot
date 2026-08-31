@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   tool_call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, round INTEGER,
   tool_name TEXT NOT NULL, tool_version TEXT, arguments_json TEXT,
   started_at TEXT NOT NULL, completed_at TEXT, duration_ms REAL, status TEXT,
-  result_row_count INTEGER, result_bytes INTEGER, result_hash TEXT,
+  result_row_count INTEGER, returned_count INTEGER, truncated INTEGER,
+  result_bytes INTEGER, result_hash TEXT,
   source_names TEXT, source_freshness TEXT, error_type TEXT, error_message TEXT);
 CREATE TABLE IF NOT EXISTS model_calls (
   model_call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, round INTEGER,
@@ -60,9 +61,15 @@ CREATE TABLE IF NOT EXISTS model_calls (
   completed_at TEXT, duration_ms REAL, input_tokens INTEGER, output_tokens INTEGER,
   reasoning_tokens INTEGER, cached_tokens INTEGER, estimated_cost REAL,
   finish_reason TEXT, tool_call_count INTEGER, provider_request_id TEXT);
+CREATE TABLE IF NOT EXISTS evidence (
+  evidence_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+  round INTEGER, tool_name TEXT, rendered_hash TEXT NOT NULL,
+  rendered_bytes INTEGER NOT NULL, estimated_tokens INTEGER NOT NULL,
+  source_names TEXT, source_freshness TEXT, rendered_text TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
 """
 
 
@@ -142,6 +149,12 @@ class RunRecorder:
             os.makedirs(path.parent, exist_ok=True)
             conn = sqlite3.connect(str(path))
             conn.executescript(_SCHEMA)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+            if "returned_count" not in cols:
+                conn.execute("ALTER TABLE tool_calls ADD COLUMN returned_count INTEGER")
+            if "truncated" not in cols:
+                conn.execute("ALTER TABLE tool_calls ADD COLUMN truncated INTEGER")
+            conn.commit()
             self.started_at = _now()
             conn.execute(
                 "INSERT INTO agent_runs (run_id, request_id, started_at, question,"
@@ -266,6 +279,8 @@ class RunRecorder:
         completed_at: str,
         status: str,
         result_row_count: int,
+        returned_count: Optional[int],
+        truncated: bool,
         result_bytes: int,
         result_hash: str,
         source_names: str,
@@ -281,16 +296,52 @@ class RunRecorder:
             self._conn.execute(
                 "INSERT INTO tool_calls (tool_call_id, run_id, round, tool_name,"
                 " tool_version, arguments_json, started_at, completed_at, duration_ms,"
-                " status, result_row_count, result_bytes, result_hash, source_names,"
-                " source_freshness, error_type, error_message)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, result_row_count, returned_count, truncated, result_bytes,"
+                " result_hash, source_names, source_freshness, error_type, error_message)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     tool_call_id, self.run_id, round, tool_name,
                     self.tool_registry_version,
                     redact_json(arguments_json), started_at, completed_at,
                     _duration_ms(started_at, completed_at),
-                    status, result_row_count, result_bytes, result_hash,
+                    status, result_row_count, returned_count,
+                    (1 if truncated else 0), result_bytes, result_hash,
                     source_names, source_freshness, error_type, message,
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            self._disable(exc)
+
+    def record_evidence(
+        self,
+        *,
+        evidence_id: str,
+        run_id: str,
+        tool_call_id: str,
+        round: Optional[int],
+        tool_name: str,
+        rendered_hash: str,
+        rendered_bytes: int,
+        estimated_tokens: int,
+        source_names: str,
+        source_freshness: str,
+        rendered_text: str,
+    ) -> None:
+        """Persist one rendered-evidence record (what the model received)."""
+        if not self.enabled:
+            return
+        try:
+            self._note_round(round)
+            self._conn.execute(
+                "INSERT INTO evidence (evidence_id, run_id, tool_call_id, round,"
+                " tool_name, rendered_hash, rendered_bytes, estimated_tokens,"
+                " source_names, source_freshness, rendered_text)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, run_id, tool_call_id, round, tool_name,
+                    rendered_hash, rendered_bytes, estimated_tokens,
+                    source_names, source_freshness, rendered_text,
                 ),
             )
             self._conn.commit()
@@ -567,6 +618,22 @@ def get_model_calls(run_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM model_calls WHERE run_id = ? ORDER BY started_at", (run_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def get_evidence(run_id: str) -> list[dict]:
+    try:
+        conn = _query_conn()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY evidence_id", (run_id,)
             ).fetchall()
             return [dict(row) for row in rows]
         finally:

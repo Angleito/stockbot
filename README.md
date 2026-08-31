@@ -27,7 +27,7 @@ Stockbot keeps raw source data and normalized analytical data separate, preserve
 ```bash
 cp .env.example .env
 # Fill only the credentials for integrations you intend to use.
-make setup
+bun run setup
 ```
 
 Offline tests do not need FINRA, Robinhood, SEC, or OpenRouter credentials.
@@ -65,14 +65,15 @@ context, then retain the same capability policy, TLS, and operational controls.
 ## Running tests
 
 ```bash
-make test
-make typecheck
-make test-collect
+bun run test
+bun run typecheck
+bun run test-collect
 # Fresh-environment verification:
-make verify
+bun run verify
 ```
 
-The default suite is offline. FINRA and Robinhood smoke tests are opt-in Make targets.
+The default suite is offline. FINRA and Robinhood smoke tests are opt-in
+bun scripts (smoke-mock, smoke-prod, smoke-robinhood).
 
 ## Optional Robinhood integration
 

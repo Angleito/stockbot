@@ -1265,6 +1265,21 @@ def tool_is_permitted(name: str, context: RequestContext) -> bool:
     return capability is not None and capability in context.capabilities
 
 
+def _validate_tool_arguments(name: str, arguments: Any) -> str | None:
+    """Schema-level argument check: object-ness plus required keys. Returns
+    an error message, or None when the arguments are acceptable. Type
+    checking is intentionally out of scope; lenient handler coercions
+    (int(...), ...) remain the source of truth for value shapes."""
+    if not isinstance(arguments, dict):
+        return f"Tool arguments must be a JSON object for tool '{name}'"
+    tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
+    parameters = (tool["function"].get("parameters") or {}) if tool else {}
+    missing = [key for key in (parameters.get("required") or []) if key not in arguments]
+    if missing:
+        return f"Missing required argument(s) for tool '{name}': {', '.join(missing)}"
+    return None
+
+
 def execute_tool(
     name: str,
     arguments: dict,
@@ -1278,6 +1293,9 @@ def execute_tool(
     try:
         if not tool_is_permitted(name, context):
             return {"error": f"Tool is not permitted: {name}"}
+        invalid = _validate_tool_arguments(name, arguments)
+        if invalid is not None:
+            return {"error": invalid, "error_type": "invalid_tool_arguments"}
         handler = (
             _DIRECT_HANDLERS.get(name)
             or _FINRA_HANDLERS.get(name)

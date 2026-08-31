@@ -535,7 +535,9 @@ def test_datapoints_missing_fields_rejected(http):
     )
     assert "error" in result
     assert "fields" in result["error"]
-    assert http["post"].call_count == 1  # no data POST
+    # The schema validator rejects the missing required "fields" argument
+    # before any network call (no token POST either).
+    assert http["post"].call_count == 0
 
 
 def test_datapoints_empty_fields_rejected(http):
