@@ -99,11 +99,3 @@ def allowed_read_tools(
         default=frozenset(),
     )
     return market_set | account_set
-
-
-def permitted_tools(
-    *, market: frozenset[str] | None = None,
-    account: frozenset[str] | None = None,
-) -> frozenset[str]:
-    """Compatibility name for the read-only tool allowlist."""
-    return allowed_read_tools(market=market, account=account)

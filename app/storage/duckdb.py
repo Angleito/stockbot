@@ -23,7 +23,6 @@ import pyarrow.parquet as pq
 from . import parquet
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
-DEFAULT_DB_PATH = DEFAULT_DATA_ROOT / "warehouse.duckdb"
 
 _DATE_GRANULARITY_AS_OF = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 
@@ -47,7 +46,7 @@ def _data_roots(data_root: Path) -> tuple[Path, Path]:
     return parquet_root, db_root
 
 
-def connect(data_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
+def _connect(data_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
     """Open (creating if needed) the warehouse database for a data root."""
     parquet_root, db_root = _data_roots(Path(data_root) if data_root else DEFAULT_DATA_ROOT)
     db_root.mkdir(parents=True, exist_ok=True)
@@ -95,7 +94,7 @@ def query(
     (see :func:`as_of_clause`).  A regression test proves that a query built
     this way cannot observe records with a later ``known_at``.
     """
-    conn = connect(data_root)
+    conn = _connect(data_root)
     try:
         conn.execute("BEGIN TRANSACTION")
         try:

@@ -82,13 +82,6 @@ def position_weight(
     return _ratio(market_value, portfolio_total)
 
 
-def cash_weight(
-    cash: Decimal | None, portfolio_total: Decimal | None
-) -> Decimal | None:
-    """Return cash as a fraction of the portfolio total, else None."""
-    return _ratio(cash, portfolio_total)
-
-
 def largest_positions(
     items: Sequence[tuple[str, Decimal | None]],
     limit: int | None = None,

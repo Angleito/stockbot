@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   agent_version TEXT, prompt_version TEXT, tool_registry_version TEXT, git_sha TEXT,
   as_of TEXT, round_count INTEGER, model_call_count INTEGER, tool_call_count INTEGER,
   input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
-  estimated_model_cost REAL, estimated_tool_cost REAL, estimated_total_cost REAL,
+  estimated_model_cost REAL, estimated_total_cost REAL,
   final_answer_hash TEXT, error_type TEXT, error_message TEXT);
 CREATE TABLE IF NOT EXISTS agent_events (
   event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
@@ -370,14 +370,12 @@ class RunRecorder:
                 "UPDATE agent_runs SET completed_at = ?, duration_ms = ?, status = ?,"
                 " round_count = ?, model_call_count = ?, tool_call_count = ?,"
                 " input_tokens = ?, output_tokens = ?, total_tokens = ?,"
-                " estimated_model_cost = ?, estimated_tool_cost = ?,"
-                " estimated_total_cost = ?, final_answer_hash = ?,"
+                " estimated_model_cost = ?, estimated_total_cost = ?, final_answer_hash = ?,"
                 " error_type = ?, error_message = ? WHERE run_id = ?",
                 (
                     completed_at, duration, status, self._max_round, self.model_calls,
                     self._tool_seq, self._input_tokens, self._output_tokens,
-                    self._total_tokens, self._estimated_model_cost, 0.0,
-                    self._estimated_model_cost, answer_hash, error_type, message,
+                    self._total_tokens, self._estimated_model_cost, self._estimated_model_cost, answer_hash, error_type, message,
                     self.run_id,
                 ),
             )

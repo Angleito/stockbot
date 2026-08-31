@@ -164,11 +164,9 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert len(result.evidence_refs) == 1
     assert result.evidence_refs[0].startswith(f"{result.run_id}:evid:")
     assert result.data_freshness == {"SEC EDGAR company facts": "2026-08-29"}
-    assert result.claims == [] and result.counterevidence_refs == []
-    assert result.unresolved_questions == []
 
     # Typed runtime objects construct and behave as specified.
-    plan = ResearchPlan(question="q", entities=[], as_of="d", hypotheses=[], required_data=[])
+    plan = ResearchPlan(question="q", as_of="d", required_data=[])
     assert plan.to_dict()["required_data"] == []
     budget = BudgetRemaining(
         rounds=8, tool_calls=64, model_calls=32, runtime_seconds=600.0, evidence_tokens=48000
@@ -189,7 +187,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     )
     assert call.status == "completed"
     assert EventType.RUN_STARTED == "run_started"
-    assert len(list(EventType)) == 17
+    assert len(list(EventType)) == 13
 
     # Summary row.
     run = get_run(result.run_id)
@@ -206,7 +204,6 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert run["output_tokens"] == 10
     assert run["total_tokens"] == 30
     assert run["estimated_total_cost"] == pytest.approx(0.00024)
-    assert run["estimated_tool_cost"] == 0.0
     assert run["agent_version"] == "0.1.0"
     assert run["prompt_version"] == "1"
     assert run["tool_registry_version"] == agent.TOOL_REGISTRY_VERSION

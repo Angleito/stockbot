@@ -41,12 +41,6 @@ def sec_doc_id(kind: str, key: str, content_hash: str) -> str:
     return f"sec:doc:{kind}:{key}:{content_hash[:16]}"
 
 
-def finra_doc_id(dataset: str, partition: tuple[str, ...], content_hash: str) -> str:
-    """Stable document ID for an archived FINRA partition payload."""
-    safe = dataset.replace("/", "__")
-    return f"finra:doc:{safe}:{':'.join(partition)}:{content_hash[:16]}"
-
-
 def run_id() -> str:
     """New run identity for a research run."""
     return f"run:{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"

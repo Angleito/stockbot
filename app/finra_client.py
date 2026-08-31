@@ -649,7 +649,7 @@ def get_finra_datapoints(
         selected = _validate_datapoint_fields(spec, fields)
         _require_datapoint_narrowing(ticker, start_date, end_date, filters)
         sort = _validate_sort(spec, sort_fields, sort_order)
-        limit = _clamp_datapoint_limit(limit)
+        limit = _clamp_limit(limit, default=DATAPOINTS_DEFAULT_LIMIT, maximum=DATAPOINTS_MAX_LIMIT)
 
         via_partitions = _use_partition_flow(spec, sort, ticker, start_date, end_date, filters)
         if via_partitions:
@@ -1246,16 +1246,6 @@ def _require_datapoint_narrowing(
             "ticker, date/date range, or filters. Unbounded raw-data requests "
             "are not allowed."
         )
-
-
-def _clamp_datapoint_limit(limit: Optional[int]) -> int:
-    if limit is None:
-        return DATAPOINTS_DEFAULT_LIMIT
-    try:
-        n = int(limit)
-    except (TypeError, ValueError):
-        return DATAPOINTS_DEFAULT_LIMIT
-    return max(1, min(n, DATAPOINTS_MAX_LIMIT))
 
 
 def _select_fields(row: dict, fields: list[str]) -> dict:
@@ -2055,14 +2045,14 @@ def _build_payload(
     return payload
 
 
-def _clamp_limit(limit: Optional[int]) -> int:
+def _clamp_limit(limit: Optional[int], *, default: int = DEFAULT_LIMIT, maximum: int = MAX_LIMIT) -> int:
     if limit is None:
-        return DEFAULT_LIMIT
+        return default
     try:
         n = int(limit)
     except (TypeError, ValueError):
-        return DEFAULT_LIMIT
-    return max(1, min(n, MAX_LIMIT))
+        return default
+    return max(1, min(n, maximum))
 
 
 def _validate_offset(entry: CatalogEntry, offset: Any) -> int:
@@ -2107,13 +2097,8 @@ def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
             return hit["records"], hit.get("headers") or {}
         # Legacy cached plain list (pre-analysis layer): no headers.
         return hit, {}
-    records, headers = _post_query(spec.group, _dataset_path_name(spec), payload)
+    _, records, headers = ingestion_post_query(spec.group, _dataset_path_name(spec), payload)
     cache.set(cache_key, {"records": records, "headers": headers})
-    return records, headers
-
-
-def _post_query(group: str, dataset_name: str, payload: dict) -> tuple[list, dict]:
-    _, records, headers = ingestion_post_query(group, dataset_name, payload)
     return records, headers
 
 

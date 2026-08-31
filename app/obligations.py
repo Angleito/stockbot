@@ -25,7 +25,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from . import cache
 from . import edgar_client
@@ -148,11 +148,6 @@ _8K_OBLIGATION_KEYWORDS = (
     "commitment",
 )
 
-_GUARANTEE_RE = re.compile(
-    r"maximum\s*(?:gross\s*)?exposure[\s\S]{0,250}?\$([\d.,]+)\s*(?:billion|million)",
-    re.I,
-)
-
 _NOTE_KEYWORDS = {
     "debt": ("debt",),
     "lease": ("lease",),
@@ -176,13 +171,6 @@ _TAX_BENEFITS_RE = re.compile(
     r"(?: were| was| is| are)\s*\$([\d.,]+)\s*(billion|million)",
     re.I,
 )
-
-_NOTE_CATEGORY_MAP = {
-    "debt": "debt",
-    "leases": "operating_leases",
-    "commitment": "purchase_commitments",
-}
-
 
 def _no_data(ticker: str, what: str) -> dict:
     return {"error": f"No obligations data for {ticker}: {what}"}

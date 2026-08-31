@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
-
-def _decimal(value: Any) -> Decimal | None:
-    if value in (None, ""):
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-
-def _first_present(payload: dict[str, Any], *keys: str) -> Any:
-    return next((payload[key] for key in keys if key in payload and payload[key] is not None), None)
+from .account import _decimal, _first_present
 
 
 def _date(value: Any) -> date | None:
@@ -75,20 +64,6 @@ class OptionQuote:
         if self.bid is not None and self.ask is not None:
             return (self.bid + self.ask) / Decimal("2")
         return self.mark
-
-
-def _json_value(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    return value
-
-
-def to_json_dict(value: Any) -> dict[str, Any]:
-    """Serialize a normalized model without leaking provider payloads."""
-    data = asdict(value)
-    return {key: _json_value(item) for key, item in data.items()}
 
 
 def normalize_option_quote(payload: dict[str, Any], *, ticker: str = "") -> OptionQuote:

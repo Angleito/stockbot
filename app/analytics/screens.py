@@ -6,9 +6,6 @@ DuckDB, enforces ``known_at <= as_of`` on every fact join, classifies
 eligible equities, and persists each run (coverage, exclusions, fact
 provenance, calculation version) before returning a bounded result to the
 agent tool.
-
-``app/short_interest_screen.py`` remains the interim SQLite product; this
-module is the foundation-backed implementation that the agent tool uses.
 """
 
 from __future__ import annotations

@@ -14,7 +14,6 @@ from . import analyst_client
 from . import edgar_client
 from . import finra_client
 from . import obligations
-from . import short_interest_screen
 from . import valuation
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .config import get_robinhood_mcp_url, robinhood_enabled
@@ -27,7 +26,7 @@ from .robinhood import capabilities
 from .robinhood.auth import OAuthConfig
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
-from .services.portfolio_research import enrich_portfolio_research
+from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
 from .runtime import BudgetExhaustedError
@@ -798,14 +797,6 @@ def get_market_snapshot(ticker: str) -> dict:
     }
 
 
-_SEC_CONCEPTS = (
-    "Revenue",
-    "NetIncomeLoss",
-    "CashAndCashEquivalents",
-    "LongTermDebt",
-    "EntityCommonStockSharesOutstanding",
-)
-
 _PORTFOLIO_TOP_POSITIONS = 15
 _PORTFOLIO_TOP_LARGEST = 5
 
@@ -844,7 +835,7 @@ def _position_research_row(position, research_item) -> dict:
     }
     if research_item is not None:
         sec = {}
-        for concept in _SEC_CONCEPTS:
+        for concept in SEC_CONCEPTS:
             fact = research_item.latest_sec_metrics.get(concept)
             if fact:
                 sec[concept] = {
@@ -1139,6 +1130,29 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price, min_d
     return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=target_price, limit=limit)}
 
 
+# Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
+# registry pattern as the FINRA/Robinhood handler maps below.
+_DIRECT_HANDLERS = {
+    "get_fundamentals": lambda args, model: edgar_client.get_fundamentals(
+        args["ticker"], args["metric"]
+    ),
+    "get_filing_section": lambda args, model: edgar_client.get_filing_section(
+        args["ticker"], args["form_type"], args["item"]
+    ),
+    "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
+        args["ticker"], args["statement_type"]
+    ),
+    "get_xbrl_facts": lambda args, model: edgar_client.get_xbrl_facts(
+        args["ticker"], args["concept"]
+    ),
+    "get_earnings_summary": lambda args, model: get_earnings_summary(args["ticker"], model),
+    "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(args["ticker"]),
+    "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(args["ticker"]),
+    "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(args["ticker"]),
+    "get_obligations": lambda args, model: obligations.get_obligations(args["ticker"]),
+    "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(args["ticker"]),
+}
+
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS = {
@@ -1264,39 +1278,14 @@ def execute_tool(
     try:
         if not tool_is_permitted(name, context):
             return {"error": f"Tool is not permitted: {name}"}
-        if name == "get_fundamentals":
-            return edgar_client.get_fundamentals(
-                arguments["ticker"], arguments["metric"]
-            )
-        if name == "get_filing_section":
-            return edgar_client.get_filing_section(
-                arguments["ticker"], arguments["form_type"], arguments["item"]
-            )
-        if name == "get_financial_statements":
-            return edgar_client.get_financial_statements(
-                arguments["ticker"], arguments["statement_type"]
-            )
-        if name == "get_xbrl_facts":
-            return edgar_client.get_xbrl_facts(
-                arguments["ticker"], arguments["concept"]
-            )
-        if name == "get_earnings_summary":
-            return get_earnings_summary(arguments["ticker"], model)
-        if name == "diff_risk_factors":
-            return edgar_client.diff_risk_factors(arguments["ticker"])
-        if name == "get_analyst_estimates":
-            return analyst_client.get_analyst_estimates(arguments["ticker"])
-        if name == "get_sp500_weight":
-            return analyst_client.get_sp500_weight(arguments["ticker"])
-        if name == "get_obligations":
-            return obligations.get_obligations(arguments["ticker"])
-        if name == "get_valuation_metrics":
-            return valuation.get_valuation_metrics(arguments["ticker"])
-        if name in _FINRA_HANDLERS:
-            return _FINRA_HANDLERS[name](arguments, model)
-        if name in _ROBINHOOD_HANDLERS:
-            return _ROBINHOOD_HANDLERS[name](arguments, model)
-        return {"error": f"Unknown tool '{name}'"}
+        handler = (
+            _DIRECT_HANDLERS.get(name)
+            or _FINRA_HANDLERS.get(name)
+            or _ROBINHOOD_HANDLERS.get(name)
+        )
+        if handler is None:
+            return {"error": f"Unknown tool '{name}'"}
+        return handler(arguments, model)
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
     except Exception as e:

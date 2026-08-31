@@ -52,64 +52,37 @@ def get_default_model() -> str:
     return os.getenv("DEFAULT_MODEL", FALLBACK_MODEL)
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    """Read a positive integer setting without silently accepting bad limits."""
+def _positive_env(name: str, default: float, *, integer: bool = False) -> int | float:
+    """Read a positive numeric setting without silently accepting bad limits."""
+    label = "integer" if integer else "number"
     value = (os.getenv(name) or "").strip()
     if not value:
         return default
     try:
-        parsed = int(value)
+        parsed = int(value) if integer else float(value)
     except ValueError as exc:
-        raise ValueError(f"{name} must be a positive integer") from exc
+        raise ValueError(f"{name} must be a positive {label}") from exc
     if parsed <= 0:
-        raise ValueError(f"{name} must be a positive integer")
+        raise ValueError(f"{name} must be a positive {label}")
     return parsed
 
 
-def _positive_float_env(name: str, default: float) -> float:
-    value = (os.getenv(name) or "").strip()
-    if not value:
-        return default
-    try:
-        parsed = float(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a positive number") from exc
-    if parsed <= 0:
-        raise ValueError(f"{name} must be a positive number")
-    return parsed
-
-
-def get_allowed_chat_models() -> frozenset[str]:
-    """Return the server-controlled OpenRouter model allowlist.
-
-    The default model is always included.  Additional models must be named by
-    the operator in ``CHAT_ALLOWED_MODELS``; an HTTP caller cannot select an
-    arbitrary model (and its price/security characteristics).
-    """
-    configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
-    return frozenset({get_default_model(), *(item.strip() for item in configured if item.strip())})
-
-
-def get_chat_max_messages() -> int:
-    return _positive_int_env("CHAT_MAX_MESSAGES", 20)
-
-
-def get_chat_max_content_chars() -> int:
-    return _positive_int_env("CHAT_MAX_CONTENT_CHARS", 12_000)
-
-
-def get_openrouter_timeout_seconds() -> float:
-    """Per-upstream-request timeout; bounds each model completion."""
-    return _positive_float_env("OPENROUTER_TIMEOUT_SECONDS", 60.0)
+def _env_bool(name: str) -> bool:
+    """True when the env var is set to a truthy value (1/true/yes)."""
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def get_local_chat_policy() -> ChatPolicy:
     """Build the single-principal runtime chat policy from local config."""
+    configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
     return ChatPolicy(
-        allowed_models=get_allowed_chat_models(),
-        max_messages=get_chat_max_messages(),
-        max_message_chars=get_chat_max_content_chars(),
-        upstream_timeout_seconds=get_openrouter_timeout_seconds(),
+        allowed_models=frozenset({
+            get_default_model(),
+            *(item.strip() for item in configured if item.strip()),
+        }),
+        max_messages=_positive_env("CHAT_MAX_MESSAGES", 20, integer=True),
+        max_message_chars=_positive_env("CHAT_MAX_CONTENT_CHARS", 12_000, integer=True),
+        upstream_timeout_seconds=_positive_env("OPENROUTER_TIMEOUT_SECONDS", 60.0),
     )
 
 
@@ -135,7 +108,7 @@ def get_finra_client_secret() -> str:
 
 
 def finra_use_mock() -> bool:
-    return os.getenv("FINRA_USE_MOCK", "").strip().lower() in ("1", "true", "yes")
+    return _env_bool("FINRA_USE_MOCK")
 
 
 def get_robinhood_mcp_url() -> str:
@@ -149,6 +122,4 @@ def get_robinhood_mcp_url() -> str:
 
 
 def robinhood_enabled() -> bool:
-    return os.getenv("ROBINHOOD_ENABLED", "false").strip().lower() in (
-        "1", "true", "yes"
-    )
+    return _env_bool("ROBINHOOD_ENABLED")

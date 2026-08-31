@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from ..analytics.screens import _resolve_as_of
 from ..domain.portfolio import PortfolioSnapshot, Position
 from ..storage import duckdb
 
@@ -45,7 +46,7 @@ def enrich_portfolio_research(
     """Enrich every snapshot position with its latest SEC facts and FINRA
     short-interest metrics, each restricted to ``known_at <= as_of``."""
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
-    as_of_str = _resolve_as_of(as_of)
+    as_of_str = _resolve_as_of(as_of.isoformat() if as_of is not None else None)
     results: list[PortfolioResearchPosition] = []
     for position in snapshot.positions:
         if position.entity_id is not None:
@@ -64,15 +65,6 @@ def enrich_portfolio_research(
             research_data_freshness=_freshness(as_of_str, sec_metrics, finra_metrics),
         ))
     return results
-
-
-def _resolve_as_of(as_of: date | None) -> str:
-    """Knowledge horizon for research enrichment: today's UTC date when
-    omitted (mirrors ``screens._resolve_as_of``), otherwise the caller's
-    date, compared at day granularity by ``as_of_clause``."""
-    if as_of is None:
-        return date.today().isoformat()
-    return as_of.isoformat()
 
 
 def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, Any]:

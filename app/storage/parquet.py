@@ -213,11 +213,7 @@ def _partition_year(date_value: Optional[str]) -> Optional[str]:
 
 def _exclusive_part_path(directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    for _ in range(100):
-        candidate = directory / f"part-{uuid.uuid4().hex}.parquet"
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError("could not allocate a unique parquet file name")
+    return directory / f"part-{uuid.uuid4().hex}.parquet"
 
 
 def _unique_key(row: dict, keys: tuple[str, ...]) -> tuple[str, ...]:
@@ -277,8 +273,3 @@ def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
 def count_rows(name: str, root: Optional[Path] = None) -> int:
     return read_table(name, root).num_rows
 
-
-def parquet_glob(name: str, root: Optional[Path] = None) -> str:
-    """DuckDB-friendly glob for querying one dataset via SQL."""
-    root = root or DEFAULT_PARQUET_ROOT
-    return str(root / dataset(name).name / "**" / "*.parquet")

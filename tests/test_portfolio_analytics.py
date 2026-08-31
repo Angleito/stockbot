@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.analytics.portfolio import (
-    cash_weight,
     largest_positions,
     portfolio_concentration,
     portfolio_market_value,
@@ -77,7 +76,6 @@ def test_weights_amd_nvda():
 
 def test_cash_and_positions():
     assert portfolio_market_value([Decimal("900"), Decimal("100")]) == (Decimal("1000"), 2, 2)
-    assert cash_weight(Decimal("100"), Decimal("1000")) == Decimal("0.1")
 
 
 def test_portfolio_market_value_missing_price_degrades_completeness():

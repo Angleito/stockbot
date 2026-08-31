@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
 from .account import (
     BrokerageAccount,
     BrokeragePosition,
     CashBalance,
+    _decimal,
+    _first_present,
     normalize_account,
     normalize_cash_balance,
     normalize_position,
@@ -49,19 +50,6 @@ def _provider_data(payload: Any) -> Any:
         if isinstance(payload.get("data"), dict):
             return payload["data"]
     return payload
-
-
-def _decimal(value: Any) -> Decimal | None:
-    if value in (None, ""):
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-
-def _first_present(payload: dict[str, Any], *keys: str) -> Any:
-    return next((payload[key] for key in keys if key in payload and payload[key] is not None), None)
 
 
 def _rows(payload: Any, *keys: str, wrap: bool = True) -> list[dict[str, Any]] | None:

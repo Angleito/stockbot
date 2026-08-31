@@ -214,14 +214,59 @@ def _finish_run(
     return ResearchResult(
         run_id=state.run_id,
         answer=text,
-        claims=[],
         evidence_refs=list(state.evidence),
-        counterevidence_refs=[],
         confidence=1.0 if status == "completed" else 0.0,
         data_freshness=data_freshness,
-        unresolved_questions=[],
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def _request_and_record(
+    recorder, state, model, msgs, available_tools, policy, budget
+) -> tuple[dict, float, str, float, list] | None:
+    """Reserve, call, and record one model round; None when the budget is
+    exhausted before the call."""
+    if not budget.reserve_model_call():
+        return None
+    t0 = time.perf_counter()
+    t0_iso = datetime.now(timezone.utc).isoformat()
+    recorder.record_event(
+        EventType.MODEL_REQUESTED,
+        round=state.round,
+        model=model,
+        metadata={
+            "message_count": len(msgs),
+            "tool_count": len(available_tools),
+        },
+    )
+    data = _call_openrouter(model, msgs, available_tools, policy.upstream_timeout_seconds)
+    t1 = time.perf_counter()
+    choice = data["choices"][0]
+    tool_calls = choice["message"].get("tool_calls") or []
+    estimated_cost = recorder.record_model_call(
+        round=state.round,
+        provider=recorder.provider,
+        model=model,
+        started_at=t0_iso,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        usage=data.get("usage"),
+        finish_reason=choice.get("finish_reason"),
+        tool_call_count=len(tool_calls),
+        provider_request_id=data.get("id"),
+    )
+    recorder.record_event(
+        EventType.MODEL_RESPONDED,
+        round=state.round,
+        model=model,
+        started_at=t0_iso,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        duration_ms=(t1 - t0) * 1000.0,
+        metadata={
+            "finish_reason": choice.get("finish_reason"),
+            "estimated_cost": estimated_cost,
+        },
+    )
+    return (data, t0, t0_iso, estimated_cost, tool_calls)
 
 
 def run_chat(
@@ -275,9 +320,7 @@ def run_chat(
     )
     plan = ResearchPlan(
         question=request.question,
-        entities=[],
         as_of=request.as_of,
-        hypotheses=[],
         required_data=[],
     )
     budget = ExecutionBudget(
@@ -369,49 +412,13 @@ def run_chat(
                         return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
 
                     recorder.current_round = state.round
-                    t0 = time.perf_counter()
-                    t0_iso = datetime.now(timezone.utc).isoformat()
-                    if not budget.reserve_model_call():
+                    result = _request_and_record(
+                        recorder, state, model, msgs, available_tools, policy, budget
+                    )
+                    if result is None:
                         return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
-                    recorder.record_event(
-                        EventType.MODEL_REQUESTED,
-                        round=state.round,
-                        model=model,
-                        metadata={
-                            "message_count": len(msgs),
-                            "tool_count": len(available_tools),
-                        },
-                    )
-                    data = _call_openrouter(
-                        model, msgs, available_tools, policy.upstream_timeout_seconds
-                    )
-                    t1 = time.perf_counter()
-                    choice = data["choices"][0]
-                    message = choice["message"]
-                    tool_calls = message.get("tool_calls") or []
-                    estimated_cost = recorder.record_model_call(
-                        round=state.round,
-                        provider=context.model_policy.provider,
-                        model=model,
-                        started_at=t0_iso,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                        usage=data.get("usage"),
-                        finish_reason=choice.get("finish_reason"),
-                        tool_call_count=len(tool_calls),
-                        provider_request_id=data.get("id"),
-                    )
-                    recorder.record_event(
-                        EventType.MODEL_RESPONDED,
-                        round=state.round,
-                        model=model,
-                        started_at=t0_iso,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                        duration_ms=(t1 - t0) * 1000.0,
-                        metadata={
-                            "finish_reason": choice.get("finish_reason"),
-                            "estimated_cost": estimated_cost,
-                        },
-                    )
+                    data, t0, t0_iso, estimated_cost, tool_calls = result
+                    message = data["choices"][0]["message"]
 
                     if not tool_calls:
                         text = message.get("content") or ""
@@ -423,49 +430,14 @@ def run_chat(
                             "Tool call limit reached. Answer with what you have now, "
                             "or say you don't have the data."
                         )})
-                        if not budget.reserve_model_call():
-                            return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                         recorder.current_round = state.round
-                        t0 = time.perf_counter()
-                        t0_iso = datetime.now(timezone.utc).isoformat()
-                        recorder.record_event(
-                            EventType.MODEL_REQUESTED,
-                            round=state.round,
-                            model=model,
-                            metadata={
-                                "message_count": len(msgs),
-                                "tool_count": len(available_tools),
-                            },
+                        result = _request_and_record(
+                            recorder, state, model, msgs, available_tools, policy, budget
                         )
-                        data = _call_openrouter(
-                            model, msgs, available_tools, policy.upstream_timeout_seconds
-                        )
-                        t1 = time.perf_counter()
-                        choice = data["choices"][0]
-                        estimated_cost = recorder.record_model_call(
-                            round=state.round,
-                            provider=context.model_policy.provider,
-                            model=model,
-                            started_at=t0_iso,
-                            completed_at=datetime.now(timezone.utc).isoformat(),
-                            usage=data.get("usage"),
-                            finish_reason=choice.get("finish_reason"),
-                            tool_call_count=len(choice["message"].get("tool_calls") or []),
-                            provider_request_id=data.get("id"),
-                        )
-                        recorder.record_event(
-                            EventType.MODEL_RESPONDED,
-                            round=state.round,
-                            model=model,
-                            started_at=t0_iso,
-                            completed_at=datetime.now(timezone.utc).isoformat(),
-                            duration_ms=(t1 - t0) * 1000.0,
-                            metadata={
-                                "finish_reason": choice.get("finish_reason"),
-                                "estimated_cost": estimated_cost,
-                            },
-                        )
-                        text = choice["message"].get("content") or ""
+                        if result is None:
+                            return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
+                        data, t0, t0_iso, estimated_cost, tool_calls = result
+                        text = data["choices"][0]["message"].get("content") or ""
                         return _finish(text, "partial")
 
                     # Append the assistant message that requested the tools.
@@ -647,22 +619,3 @@ def run_chat(
     finally:
         reset_current_recorder(recorder_token)
         reset_current_budget(budget_token)
-
-    # Unreachable, but keep a safe return.
-    if return_result:
-        return ResearchResult(
-            run_id=state.run_id,
-            answer="",
-            claims=[],
-            evidence_refs=[],
-            counterevidence_refs=[],
-            confidence=0.0,
-            data_freshness={},
-            unresolved_questions=[],
-            completed_at=datetime.now(timezone.utc).isoformat(),
-        )
-    if return_detailed_trace:
-        return "", detailed_trace
-    if return_trace:
-        return "", tool_trace
-    return ""

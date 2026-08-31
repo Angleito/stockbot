@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.services.portfolio_research import SEC_CONCEPTS
+
 MAX_TOOL_MESSAGE_BYTES = 64 * 1024
 
 TRUNCATED_MARKER = "... [Tool output truncated]"
@@ -136,15 +138,6 @@ def _render_option_comparison(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-_PORTFOLIO_SEC_CONCEPTS = (
-    "Revenue",
-    "NetIncomeLoss",
-    "CashAndCashEquivalents",
-    "LongTermDebt",
-    "EntityCommonStockSharesOutstanding",
-)
-
-
 def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
     lines = [
         f"Portfolio snapshot — {_cell(result.get('broker')) or 'robinhood'}",
@@ -203,7 +196,7 @@ def _portfolio_position_line(row: dict) -> str:
         parts.append("[UNRESOLVED]")
     sec = row.get("sec") or {}
     sec_parts = []
-    for concept in _PORTFOLIO_SEC_CONCEPTS:
+    for concept in SEC_CONCEPTS:
         fact = sec.get(concept)
         if isinstance(fact, dict) and _cell(fact.get("value")):
             label = concept[:3].lower()

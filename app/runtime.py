@@ -24,17 +24,13 @@ class ResearchRequest:
 @dataclass
 class ResearchPlan:
     question: str
-    entities: list[str]
     as_of: str
-    hypotheses: list[str]
     required_data: list[dict]
 
     def to_dict(self) -> dict:
         return {
             "question": self.question,
-            "entities": self.entities,
             "as_of": self.as_of,
-            "hypotheses": self.hypotheses,
             "required_data": self.required_data,
         }
 
@@ -55,8 +51,6 @@ class AgentState:
     round: int = 0
     tool_calls: list[ToolCall] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
-    claims: list[dict] = field(default_factory=list)
-    unresolved_questions: list[str] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
     budget_remaining: BudgetRemaining | None = None
 
@@ -65,12 +59,9 @@ class AgentState:
 class ResearchResult:
     run_id: str
     answer: str
-    claims: list[dict]
     evidence_refs: list[str]
-    counterevidence_refs: list[str]
     confidence: float
     data_freshness: dict[str, str]
-    unresolved_questions: list[str]
     completed_at: str
 
 
@@ -222,10 +213,6 @@ class EventType(StrEnum):
     TOOL_COMPLETED = "tool_completed"
     TOOL_FAILED = "tool_failed"
     EVIDENCE_ADDED = "evidence_added"
-    CLAIM_CREATED = "claim_created"
-    CLAIM_UPDATED = "claim_updated"
-    CHALLENGE_STARTED = "challenge_started"
-    CHALLENGE_COMPLETED = "challenge_completed"
     FINALIZATION_STARTED = "finalization_started"
     FINAL_ANSWER_CREATED = "final_answer_created"
     RUN_COMPLETED = "run_completed"

@@ -9,8 +9,8 @@ from .auth import DEFAULT_TOKEN_PATH, OAuthConfig, build_oauth_provider
 from .capabilities import (
     ACCOUNT_READ_TOOLS,
     MARKET_READ_TOOLS,
+    allowed_read_tools,
     is_blocked,
-    permitted_tools,
 )
 
 
@@ -73,7 +73,7 @@ class RobinhoodClient:
         self.market_tools = market_tools
         self.account_tools = account_tools
         self.allowed_tools = allowed_tools
-        self.permitted_tools = permitted_tools(
+        self.permitted_tools = allowed_read_tools(
             market=market_tools, account=account_tools
         )
         self.transport_factory = transport_factory
