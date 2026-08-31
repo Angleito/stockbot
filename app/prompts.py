@@ -1,5 +1,8 @@
 """System prompt and reading prompt, as constants."""
 
+# Prompt version for observability records; bump when SYSTEM_PROMPT changes materially.
+PROMPT_VERSION = "1"
+
 SYSTEM_PROMPT = """You are a financial research assistant with access to
 tools for SEC filing data, stock fundamentals, public FINRA market data, and
 read-only Robinhood stock/options market data.

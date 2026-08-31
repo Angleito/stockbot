@@ -7,6 +7,8 @@ own stable identifier (SEC CIK, accession number, content hash).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 
 def sec_entity_id(cik: int | str) -> str:
     """Stable SEC entity ID: sec:cik:0000320193."""
@@ -43,3 +45,13 @@ def finra_doc_id(dataset: str, partition: tuple[str, ...], content_hash: str) ->
     """Stable document ID for an archived FINRA partition payload."""
     safe = dataset.replace("/", "__")
     return f"finra:doc:{safe}:{':'.join(partition)}:{content_hash[:16]}"
+
+
+def run_id() -> str:
+    """New run identity for a research run."""
+    return f"run:{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
+
+
+def request_id() -> str:
+    """New request identity for a research request."""
+    return f"req:{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
