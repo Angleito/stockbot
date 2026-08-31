@@ -567,7 +567,7 @@ def test_query_finra_end_to_end_real_result_rendered(finra_http, monkeypatch):
     content = tool_msgs[0]["content"]
 
     # The client-side result itself carries the briefing contract.
-    real_result = execute_tool("query_finra", args, model="test")
+    real_result = execute_tool("query_finra", args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in real_result, real_result
     assert "records" not in real_result
     assert real_result["coverage"]["page_complete"] is True

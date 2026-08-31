@@ -98,6 +98,7 @@ def test_agent_owns_system_message_and_rejects_privileged_input(monkeypatch):
         "test", context=context, policy=TEST_POLICY,
     ) == "ok"
     assert calls[0][0]["role"] == "system"
+    assert sum(message["role"] == "system" for message in calls[0]) == 1
     assert calls[0][0]["content"] != "prior response"
 
 

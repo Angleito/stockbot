@@ -17,7 +17,7 @@ from . import short_interest_screen
 from . import valuation
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .config import get_robinhood_mcp_url, robinhood_enabled
-from .policy import Capability, LOCAL_CONTEXT, RequestContext
+from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
 from .prompts import READING_PROMPT_TEMPLATE
@@ -1237,7 +1237,7 @@ def execute_tool(
     arguments: dict,
     model: str,
     *,
-    context: RequestContext = LOCAL_CONTEXT,
+    context: RequestContext,
 ) -> dict:
     """Dispatch a tool call by name. Always returns a JSON-serializable dict;
     never raises — errors are returned as {"error": ...} so the model can

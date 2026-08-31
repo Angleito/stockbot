@@ -15,6 +15,7 @@ from app import finra_analysis
 from app import finra_client
 from app import tools as tools_module
 from app.tools import execute_tool
+from app.policy import LOCAL_CONTEXT
 
 from tests.test_finra import (
     FakeCache,
@@ -129,7 +130,7 @@ def test_analysis_tools_never_return_raw_records(http, tool, args):
     )
     http["post"].side_effect = [_token_response(), _response(rows)]
 
-    result = execute_tool(tool, args, model="test")
+    result = execute_tool(tool, args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in result, result
     assert "records" not in result
     assert "coverage" in result
@@ -154,7 +155,7 @@ def test_numeric_summaries(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     stats = result["metrics"]["fields"]["currentShortPositionQuantity"]
@@ -173,7 +174,7 @@ def test_latest_vs_prior_change_and_percent(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     lvp = result["metrics"]["latest_vs_prior"]
@@ -193,7 +194,7 @@ def test_date_aware_ordering_and_coverage_dates(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["coverage"]["first_date"] == "2026-08-12"
@@ -224,7 +225,7 @@ def test_categorical_breakdown(http):
             "start_date": "2026-08-14",
             "end_date": "2026-08-14",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["metrics"]["categorical"]["productCategory"] == {
@@ -242,7 +243,7 @@ def test_missing_value_warnings(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert any("currentShortPositionQuantity" in w and "2/2" in w for w in result["warnings"])
@@ -256,7 +257,7 @@ def test_partial_coverage_warning(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["coverage"]["complete"] is False
@@ -279,7 +280,7 @@ def test_pagination_header_driven(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 17
@@ -293,7 +294,7 @@ def test_pagination_estimate_when_header_absent(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] is None
@@ -319,7 +320,7 @@ def test_coverage_query_incomplete_when_total_exceeds_page(http):
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = result["coverage"]
@@ -343,7 +344,7 @@ def test_coverage_complete_single_page(http):
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = result["coverage"]
@@ -365,7 +366,7 @@ def test_coverage_analysis_incomplete_at_internal_cap(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = result["coverage"]
@@ -388,7 +389,7 @@ def test_coverage_unknown_when_record_total_missing(http):
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = result["coverage"]
@@ -416,7 +417,7 @@ def test_analysis_model_receives_deterministic_analysis_only(http, analysis_mode
             "ticker": "AAPL",
             "analysis_goal": "Is short interest trending up?",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["briefing"]["summary"] == "Short interest declined."
@@ -444,7 +445,7 @@ def test_analysis_model_http_error_fallback(http, analysis_model):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["briefing"] is None
@@ -460,7 +461,7 @@ def test_analysis_model_timeout_fallback(http, analysis_model):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["briefing"] is None
@@ -475,7 +476,7 @@ def test_analysis_model_invalid_json_fallback(http, analysis_model):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["briefing"] is None
@@ -490,7 +491,7 @@ def test_analysis_model_malformed_shape_fallback(http, analysis_model):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["briefing"] is None
@@ -506,7 +507,7 @@ def test_analysis_cached_by_query_goal_model(http, analysis_model):
         "analysis_goal": "Trend direction?",
     }
     for _ in range(2):
-        result = execute_tool("query_finra", args, model="test")
+        result = execute_tool("query_finra", args, model="test", context=LOCAL_CONTEXT)
         assert "error" not in result, result
         assert result["briefing_source"] == "analysis_model"
     assert len(analysis_model["calls"]) == 1  # second call served from cache
@@ -515,7 +516,7 @@ def test_analysis_cached_by_query_goal_model(http, analysis_model):
     execute_tool(
         "query_finra",
         {**args, "analysis_goal": "Level vs prior cycle?"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert len(analysis_model["calls"]) == 2
 
@@ -530,7 +531,7 @@ def test_datapoints_missing_fields_rejected(http):
     result = execute_tool(
         "get_finra_datapoints",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "fields" in result["error"]
@@ -546,7 +547,7 @@ def test_datapoints_empty_fields_rejected(http):
             "fields": [],
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "fields" in result["error"]
@@ -560,7 +561,7 @@ def test_datapoints_unbounded_rejected(http):
             "dataset": "otcMarket/consolidatedShortInterest",
             "fields": ["settlementDate"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "narrowing" in result["error"]
@@ -576,7 +577,7 @@ def test_datapoints_unknown_field_rejected(http):
             "fields": ["notARealField"],
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in result["error"]
@@ -594,7 +595,7 @@ def test_datapoints_forwards_only_selected_fields(http):
             "ticker": "AAPL",
             "limit": 2,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -616,7 +617,7 @@ def test_datapoints_default_limit_ten_and_max_twenty_five(http):
             "fields": ["settlementDate"],
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in default_result, default_result
     assert _data_body(http["post"])["limit"] == 10
@@ -630,7 +631,7 @@ def test_datapoints_default_limit_ten_and_max_twenty_five(http):
             "ticker": "AAPL",
             "limit": 999,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in big_result, big_result
     assert _data_body(http["post"])["limit"] == 25
@@ -651,7 +652,7 @@ def test_datapoints_pagination_metadata(http):
             "ticker": "AAPL",
             "limit": 2,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 9
@@ -677,7 +678,7 @@ def test_datapoints_sort_fields_in_payload(http):
             "filters": [{"field": "settlementDate", "value": "2026-08-14"}],
             "sort_fields": ["-settlementDate"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -696,7 +697,7 @@ def test_datapoints_invalid_sort_field_rejected_before_http(http):
             "ticker": "AAPL",
             "sort_fields": ["-notARealField"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in result["error"]
@@ -714,7 +715,7 @@ def test_datapoints_sort_order_requires_date_field(http):
             "filters": [{"field": "registrationTypeCode", "value": "BD"}],
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "no date field" in result["error"]
@@ -733,7 +734,7 @@ def test_datapoints_sort_order_and_sort_fields_conflict(http):
             "sort_fields": ["-settlementDate"],
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "not both" in result["error"]
@@ -784,7 +785,7 @@ def test_datapoints_latest_five_returns_descending_dates(http):
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     # Two partition queries (08-14 fills 2, 08-07 fills the remaining 3),
@@ -824,7 +825,7 @@ def test_datapoints_more_than_ten_fields_rejected(http):
             "fields": fields,
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "10" in result["error"]
@@ -847,7 +848,7 @@ def test_datapoints_ten_fields_accepted(http):
             "fields": fields,
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
 

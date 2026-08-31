@@ -1,11 +1,12 @@
 import json
+import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
-from app.policy import Capability, RequestContext
+from app.policy import Capability, LOCAL_CONTEXT, RequestContext
 from app.services.portfolio_research import PortfolioResearchPosition
 from app.tool_render import render_tool_result
 
@@ -99,6 +100,11 @@ def test_execution_rechecks_application_capability():
         "get_portfolio_snapshot", {}, model="test", context=context
     )
     assert result == {"error": "Tool is not permitted: get_portfolio_snapshot"}
+
+
+def test_execute_tool_requires_explicit_context():
+    with pytest.raises(TypeError, match="context"):
+        tools.execute_tool("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")
 
 
 def test_scan_read_handlers_are_bounded(monkeypatch):
@@ -303,7 +309,7 @@ def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch
         raise RuntimeError("provider rejected account_number=100000001")
 
     monkeypatch.setitem(tools._ROBINHOOD_HANDLERS, "get_portfolio_snapshot", fail)
-    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test")
+    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=LOCAL_CONTEXT)
     assert "100000001" not in result["error"]
     assert "100000001" not in render_tool_result(result)
 

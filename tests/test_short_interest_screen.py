@@ -420,7 +420,7 @@ def test_tool_is_registered_dispatched_and_rendered(monkeypatch):
         "entries": [{"rank": 1, "ticker": "AAA", "short_shares": 5, "shares_outstanding": 10, "short_interest_percent": 50, "sec_shares_as_of": "2026-08-01", "sec_filed_at": "2026-08-02"}],
         "coverage": {"finra_rows": 1, "eligible_rows": 1, "exclusions": {}}, "environment": "mock",
     })
-    result = execute_tool("get_short_interest_leaderboard", {"limit": 1}, "test")
+    result = execute_tool("get_short_interest_leaderboard", {"limit": 1}, "test", context=LOCAL_CONTEXT)
     assert result["entries"][0]["ticker"] == "AAA"
     assert "50.00%" in render_tool_result(result)
 

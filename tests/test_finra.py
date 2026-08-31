@@ -17,6 +17,7 @@ from app import finra_client
 from app import tools as tools_module
 from app.config import FINRA_API_BASE, FINRA_TOKEN_URL
 from app.tools import execute_tool
+from app.policy import LOCAL_CONTEXT
 
 FIXTURES = Path(__file__).parent / "fixtures" / "finra"
 
@@ -155,7 +156,7 @@ def test_short_interest_payload(http):
     result = execute_tool(
         "get_short_interest",
         {"ticker": "aapl", "settlementDate": "2026-08-14"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
 
     assert "error" not in result, result
@@ -218,7 +219,7 @@ def test_latest_short_interest_rejects_stale_production_data(http, monkeypatch):
         lambda *_args: ([{"settlementDate": stale_date}], {}, 1, False),
     )
 
-    result = execute_tool("get_short_interest", {"ticker": "AAPL"}, model="test")
+    result = execute_tool("get_short_interest", {"ticker": "AAPL"}, model="test", context=LOCAL_CONTEXT)
 
     assert "error" in result
     assert "Current FINRA short interest is unavailable" in result["error"]
@@ -236,14 +237,14 @@ def test_full_catalog_describe_query_flow(http):
         _response([{"issueSymbolIdentifier": "AAPL", "tradeDate": "2026-08-14"}]),
     ]
 
-    listed = execute_tool("list_finra_datasets", {}, model="test")
+    listed = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" not in listed, listed
     entry = _entry(listed, "otcMarket/thresholdList")
     assert entry is not None
     assert entry["access"] == "unknown"
 
     described = execute_tool(
-        "describe_finra_dataset", {"dataset_id": "otcMarket/thresholdList"}, model="test"
+        "describe_finra_dataset", {"dataset_id": "otcMarket/thresholdList"}, model="test", context=LOCAL_CONTEXT
     )
     assert "error" not in described, described
     assert described["ticker_field"] == "issueSymbolIdentifier"
@@ -262,7 +263,7 @@ def test_full_catalog_describe_query_flow(http):
             "start_date": "2026-08-14",
             "end_date": "2026-08-14",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in queried, queried
     body = _data_body(http["post"])
@@ -291,7 +292,7 @@ def test_full_catalog_describe_query_flow(http):
 
 def test_list_finra_datasets(http):
     http["post"].side_effect = [_token_response()]
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" not in result, result
     names = {d["dataset"] for d in result["datasets"]}
     assert "otcMarket/consolidatedShortInterest" in names
@@ -308,7 +309,7 @@ def test_list_finra_datasets(http):
 
 def test_list_excludes_entitled_and_retired(http):
     http["post"].side_effect = [_token_response()]
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     names = {d["dataset"] for d in result["datasets"]}
     # Confirmed non-public (accessType=Firm) and retired entries are dropped.
     assert "registration/firmRegistrationsSample" not in names
@@ -317,7 +318,7 @@ def test_list_excludes_entitled_and_retired(http):
 
 def test_access_reporting_public_and_unknown(http):
     http["post"].side_effect = [_token_response(), _token_response()]
-    listed = execute_tool("list_finra_datasets", {}, model="test")
+    listed = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     snapshot = _entry(listed, "finra/industrySnapshotFirmsByRegistrationType")
     assert snapshot["access"] == "public"  # isPublic: true in fixture
     assert _entry(listed, "otcMarket/weeklySummary")["access"] == "unknown"
@@ -326,14 +327,14 @@ def test_access_reporting_public_and_unknown(http):
     described = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "finra/industrySnapshotFirmsByRegistrationType"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert described.get("access") == "public"
 
 
 def test_capabilities_not_guessed(http):
     http["post"].side_effect = [_token_response()]
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
 
     # No override for this dataset: capabilities must be null, not guessed.
     snapshot = _entry(result, "finra/industrySnapshotFirmsByRegistrationType")
@@ -351,13 +352,13 @@ def test_capabilities_not_guessed(http):
 def test_list_finra_datasets_group_search(http):
     http["post"].side_effect = [_token_response(), _token_response()]
     by_group = execute_tool(
-        "list_finra_datasets", {"group": "fixedIncomeMarket"}, model="test"
+        "list_finra_datasets", {"group": "fixedIncomeMarket"}, model="test", context=LOCAL_CONTEXT
     )
     assert all(d["group"] == "fixedIncomeMarket" for d in by_group["datasets"])
 
     finra_client.reset_discovery_cache()
     by_search = execute_tool(
-        "list_finra_datasets", {"search": "short interest"}, model="test"
+        "list_finra_datasets", {"search": "short interest"}, model="test", context=LOCAL_CONTEXT
     )
     assert any(
         "consolidatedShortInterest" in d["dataset"] for d in by_search["datasets"]
@@ -372,7 +373,7 @@ def test_catalog_search_token_ranked_weekly_summary(http):
     """
     http["post"].side_effect = [_token_response()]
     result = execute_tool(
-        "list_finra_datasets", {"search": "AAPL OTC weekly trading volume"}, model="test"
+        "list_finra_datasets", {"search": "AAPL OTC weekly trading volume"}, model="test", context=LOCAL_CONTEXT
     )
     assert "error" not in result, result
     assert result["datasets"], "expected ranked matches"
@@ -385,7 +386,7 @@ def test_catalog_search_token_ranked_weekly_summary(http):
 def test_catalog_search_ranked_scores_and_filtering(http):
     http["post"].side_effect = [_token_response()]
     result = execute_tool(
-        "list_finra_datasets", {"search": "OTC weekly volume"}, model="test"
+        "list_finra_datasets", {"search": "OTC weekly volume"}, model="test", context=LOCAL_CONTEXT
     )
     assert "error" not in result, result
     datasets = [d["dataset"] for d in result["datasets"]]
@@ -398,7 +399,7 @@ def test_catalog_search_ranked_scores_and_filtering(http):
 
     finra_client.reset_discovery_cache()
     unmatched = execute_tool(
-        "list_finra_datasets", {"search": "zzzz no such topic"}, model="test"
+        "list_finra_datasets", {"search": "zzzz no such topic"}, model="test", context=LOCAL_CONTEXT
     )
     assert unmatched["datasets"] == []
 
@@ -406,7 +407,7 @@ def test_catalog_search_ranked_scores_and_filtering(http):
 def test_catalog_search_phrase_alias_volume(http):
     http["post"].side_effect = [_token_response()]
     result = execute_tool(
-        "list_finra_datasets", {"search": "trading volume"}, model="test"
+        "list_finra_datasets", {"search": "trading volume"}, model="test", context=LOCAL_CONTEXT
     )
     assert "error" not in result, result
     assert "otcMarket/weeklySummary" in {
@@ -424,7 +425,7 @@ def test_describe_finra_dataset(http):
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["dataset"] == "otcMarket/weeklySummary"
@@ -458,7 +459,7 @@ def test_query_finra_date_range(http):
             "end_date": "2026-08-07",
             "limit": 5,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -485,7 +486,7 @@ def test_max_limit_clamped(http):
             "end_date": "2026-08-01",
             "limit": 99999,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _data_body(http["post"])["limit"] == finra_client.MAX_LIMIT
@@ -509,7 +510,7 @@ def test_valid_filters_included(http):
                 }
             ],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert {
@@ -529,7 +530,7 @@ def test_invalid_op_rejected(http):
                 {"field": "totalWeeklyShareQuantity", "op": "CONTAINS", "value": "1"}
             ],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Unsupported compare op" in result["error"]
@@ -543,7 +544,7 @@ def test_invalid_filter_field(http):
             "dataset": "otcMarket/consolidatedShortInterest",
             "filters": [{"field": "notARealField", "value": "x"}],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in result["error"]
@@ -557,7 +558,7 @@ def test_invalid_documented_enum_rejected_before_http(http):
             "dataset": "otcMarket/weeklySummary",
             "filters": [{"field": "summaryTypeCode", "value": "BOGUS_TYPE"}],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Allowed values" in result["error"]
@@ -580,7 +581,7 @@ def test_malformed_filters_rejected(http, bad_filter):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "filters": [bad_filter]},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     lowered = result["error"].lower()
@@ -603,7 +604,7 @@ def test_weekly_summary_default_filter_no_conflict(http):
                 {"field": "summaryTypeCode", "op": "EQUAL", "value": "ATS_W_SMBL"}
             ],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     type_filters = [
@@ -623,7 +624,7 @@ def test_weekly_summary_applies_default_when_absent(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "weeklySummary", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert {
@@ -638,7 +639,7 @@ def test_ticker_on_non_symbol_dataset(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "treasuryDailyAggregates", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "ticker/symbol" in result["error"]
@@ -658,7 +659,7 @@ def test_treasury_monthly_date_field(http):
             "end_date": "2026-08-01",
             "limit": 3,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _data_body(http["post"])["compareFilters"] == [
@@ -673,7 +674,7 @@ def test_treasury_monthly_date_field(http):
 def test_query_finra_unknown_dataset(http):
     http["post"].side_effect = [_token_response()]
     result = execute_tool(
-        "query_finra", {"dataset": "notARealDataset"}, model="test"
+        "query_finra", {"dataset": "notARealDataset"}, model="test", context=LOCAL_CONTEXT
     )
     assert "error" in result
     assert "Unknown FINRA dataset" in result["error"]
@@ -688,7 +689,7 @@ def test_legacy_bare_name(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["dataset"] == "consolidatedShortInterest"
@@ -697,7 +698,7 @@ def test_legacy_bare_name(http):
 
 def test_ambiguous_bare_name(http):
     http["post"].side_effect = [_token_response()]
-    result = execute_tool("query_finra", {"dataset": "sharedName"}, model="test")
+    result = execute_tool("query_finra", {"dataset": "sharedName"}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "Ambiguous" in result["error"]
     assert "groupA/sharedName" in result["error"]
@@ -718,7 +719,7 @@ def test_industry_snapshot_queries_dataset(http):
             "dataset": "finra/industrySnapshotFirmsByRegistrationType",
             "limit": 50,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     data_url = http["post"].call_args_list[1].args[0]
@@ -746,7 +747,7 @@ def test_pagination_valid_full_page(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 50, "offset": 100},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -766,7 +767,7 @@ def test_pagination_partial_page(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 50, "offset": 100},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["returned_count"] == 2
@@ -788,7 +789,7 @@ def test_pagination_header_driven(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 2},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 5
@@ -805,7 +806,7 @@ def test_pagination_header_driven_exhausted(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 5, "offset": 0},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 5
@@ -819,7 +820,7 @@ def test_negative_offset_rejected(http, offset):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "offset": offset},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "offset must be >= 0" in result["error"]
@@ -831,7 +832,7 @@ def test_offset_exceeds_finra_max(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "offset": 500001},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "500000" in result["error"]
@@ -845,7 +846,7 @@ def test_offset_rejected_when_unsupported(http):
             "dataset": "finra/industrySnapshotFirmsByRegistrationType",
             "offset": 10,
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "does not support record offset" in result["error"]
@@ -863,20 +864,20 @@ def test_discovery_and_result_cache_hits(http):
         _response([{"issueSymbolIdentifier": "AAPL"}]),
     ]
 
-    first_list = execute_tool("list_finra_datasets", {}, model="test")
+    first_list = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" not in first_list, first_list
     assert http["get"].call_count == 1
 
     # Simulate a new process: in-memory discovery cleared, SQLite cache kept.
     finra_client.reset_discovery_cache()
-    second_list = execute_tool("list_finra_datasets", {}, model="test")
+    second_list = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert second_list == first_list
     assert http["get"].call_count == 1  # served from cache, no new GET
 
     first_query = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in first_query, first_query
     gets_after_first_query = http["get"].call_count  # catalog + metadata
@@ -885,7 +886,7 @@ def test_discovery_and_result_cache_hits(http):
     second_query = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert second_query == first_query
     assert http["get"].call_count == gets_after_first_query
@@ -902,7 +903,7 @@ def test_token_fetched_once_across_calls(http):
         result = execute_tool(
             "query_finra",
             {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-            model="test",
+            model="test", context=LOCAL_CONTEXT,
         )
         assert "error" not in result, result
     # One token POST even across two queries (result cache serves the second).
@@ -926,7 +927,7 @@ def test_catalog_metadata_data_urls_and_auth(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
 
@@ -974,7 +975,7 @@ def test_uppercase_catalog_paths_are_normalized_before_requests(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
 
     assert "error" not in result, result
@@ -1027,21 +1028,21 @@ def test_query_cache_isolated_by_finra_environment(http, fake_cache, monkeypatch
 
 def test_catalog_connection_error(http):
     http["get"].side_effect = requests.ConnectionError("api.finra.org unreachable")
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "FINRA catalog unavailable" in result["error"]
 
 
 def test_catalog_http_500(http):
     http["get"].side_effect = lambda url, **kw: _response({}, status=500)
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "FINRA catalog unavailable" in result["error"]
 
 
 def test_catalog_malformed_response(http):
     http["get"].side_effect = lambda url, **kw: _response({"unexpected": 1})
-    result = execute_tool("list_finra_datasets", {}, model="test")
+    result = execute_tool("list_finra_datasets", {}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "FINRA catalog unavailable" in result["error"]
 
@@ -1057,7 +1058,7 @@ def test_metadata_auth_error_describe(http, status):
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert str(status) in result["error"]
@@ -1075,7 +1076,7 @@ def test_metadata_auth_error_query(http, status):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert str(status) in result["error"]
@@ -1092,7 +1093,7 @@ def test_metadata_malformed_response(http):
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Unexpected metadata response" in result["error"]
@@ -1104,7 +1105,7 @@ def test_entitlement_403_on_data(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "403" in result["error"]
@@ -1124,7 +1125,7 @@ def test_missing_credentials(monkeypatch):
         )
 
     monkeypatch.setattr("app.config._require_env", _raise_env)
-    result = execute_tool("get_short_interest", {"ticker": "AAPL"}, model="test")
+    result = execute_tool("get_short_interest", {"ticker": "AAPL"}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "FINRA_CLIENT_ID" in result["error"]
 
