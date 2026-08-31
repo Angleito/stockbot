@@ -568,7 +568,10 @@ def run_chat(
                             error_message=error_message,
                         )
                         result_summary = redact_json(json.dumps(result))
-                        rendered = render_tool_result(result)
+                        rendered = render_tool_result(
+                            result,
+                            max_bytes=context.run_limits.max_tool_result_bytes,
+                        )
                         recorder.record_event(
                             EventType.TOOL_COMPLETED if not failed else EventType.TOOL_FAILED,
                             round=state.round,

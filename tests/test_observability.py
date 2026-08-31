@@ -29,6 +29,7 @@ from app.runtime import (
     ResearchResult,
     ToolCall,
 )
+from app.tool_render import render_tool_result
 from app.storage.runs import (
     get_events,
     get_model_calls,
@@ -858,3 +859,34 @@ def test_forced_answer_respects_runtime_budget(monkeypatch):
     assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
     run = get_run(result.run_id)
     assert run["status"] == "budget_exhausted"
+
+def test_tool_result_bounded_by_max_tool_result_bytes(monkeypatch):
+    """max_tool_result_bytes bounds the tool message the model receives,
+    not just the observability-summary truncation."""
+    big = {
+        "ticker": "AAPL",
+        "rows": [{"period_end": f"2026-Q{i}", "value": i, "note": "x" * 30}
+                 for i in range(300)],
+        "source": "test",
+    }
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL"}),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: big
+    )
+    context = _research_context(run_limits=RunLimits(max_tool_result_bytes=1024))
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test", context=context, policy=TEST_POLICY, return_result=True,
+    )
+    assert result.answer == "ok"
+    tool_msg = next(m for m in fake.calls[1] if m["role"] == "tool")
+    # Control: the fixture genuinely renders past the run limit at the
+    # renderer's default byte budget.
+    assert "period_end 2026-Q299" in render_tool_result(big)
+    # The model receives the run-limit-bounded render, not the default one.
+    assert len(tool_msg["content"].encode("utf-8")) <= 1024
+    assert "period_end 2026-Q299" not in tool_msg["content"]
