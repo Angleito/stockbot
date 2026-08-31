@@ -61,14 +61,32 @@ def _cmd_runs(limit: int) -> None:
         )
 
 
-def _cmd_refresh_data(settlement_date: str, ciks: list[int]) -> None:
-    summary = prepare_short_interest_data(settlement_date, ciks=ciks)
+def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int]) -> None:
+    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks)
     print(json.dumps(summary, indent=2))
     from app.analytics.screens import materialize_short_interest_screen
     result = materialize_short_interest_screen(settlement_date)
     if result.get("error"):
         print(f"Leaderboard error: {result['error']}")
         return
+    coverage = result["coverage"]
+    ex = coverage["exclusions"]
+    finra_rows = coverage["finra_rows"]
+    mapped = finra_rows - ex["unmapped_symbol"]
+    shares_covered = (
+        finra_rows - ex["unmapped_symbol"] - ex["ambiguous_ticker_mapping"]
+        - ex["not_classified_common_equity"] - ex["missing_shares_outstanding"]
+    )
+    eligible = coverage["eligible_rows"]
+    pct = 100.0 * eligible / finra_rows if finra_rows else 0.0
+    print(f"FINRA securities:             {finra_rows:,}")
+    print(f"Ticker mappings:              {mapped:,}")
+    print(f"Shares-outstanding coverage:  {shares_covered:,}")
+    print(f"Eligible screen universe:     {eligible:,}")
+    print()
+    print(f"Coverage: {pct:.1f}%")
+    if summary["unresolved_tickers"]:
+        print(f"Unresolved tickers (no SEC mapping, facts not fetched): {summary['unresolved_tickers']}")
     print(f"Leaderboard entries: {[e['ticker'] for e in result.get('entries', [])]}")
 
 
@@ -122,7 +140,8 @@ def main() -> None:
     inspect_parser.add_argument("run_id", help="run id, e.g. run:20260829T123456789012")
     refresh_parser = subparsers.add_parser("refresh-data", help="fetch + normalize SEC/FINRA research data into the Parquet store")
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
-    refresh_parser.add_argument("--ciks", type=int, action="append", default=[320193], help="SEC CIKs for company facts (repeatable; default 320193)")
+    refresh_parser.add_argument("--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)")
+    refresh_parser.add_argument("--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)")
     args = parser.parse_args()
 
     if args.command == "runs":
@@ -130,7 +149,7 @@ def main() -> None:
     elif args.command == "inspect":
         _cmd_inspect(args.run_id)
     elif args.command == "refresh-data":
-        _cmd_refresh_data(args.settlement_date, args.ciks)
+        _cmd_refresh_data(args.settlement_date, args.ticker, args.cik)
     else:
         model = getattr(args, "model", None) or get_default_model()
         _chat(model)

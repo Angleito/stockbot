@@ -70,7 +70,7 @@ def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path
     if not latest:
         horizon = f" knowable on or before {as_of}" if as_of else ""
         raise ValueError(
-            f"No FINRA short interest is ingested{horizon}; run 'python cli.py refresh-data' first."
+            f"No FINRA short interest is ingested{horizon}; run 'python cli.py refresh-data --settlement-date YYYY-MM-DD' first."
         )
     return str(latest)
 
@@ -173,7 +173,7 @@ def materialize_short_interest_screen(
             "error": (
                 f"No normalized FINRA short interest for settlement date "
                 f"{settlement_date} is knowable on or before {as_of}; run "
-                "'python cli.py refresh-data' first (or pass a later as_of)."
+                f"'python cli.py refresh-data --settlement-date {settlement_date}' first (or pass a later as_of)."
             )
         }
     ticker_aliases = _ticker_alias_map(as_of, data_root)

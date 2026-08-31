@@ -32,6 +32,12 @@ DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
+_SEC_THROTTLE_SECONDS = 0.13
+_SEC_MAX_ATTEMPTS = 3
+_SEC_BACKOFF_BASE = 0.5
+_SEC_BACKOFF_CAP = 10.0
+_sec_last_request: float = 0.0
+
 
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -44,28 +50,74 @@ def _sec_headers() -> dict[str, str]:
     }
 
 
+def _sec_throttle() -> None:
+    """Pace SEC requests to at least one per ``_SEC_THROTTLE_SECONDS``."""
+    global _sec_last_request
+    now = time.monotonic()
+    if now - _sec_last_request < _SEC_THROTTLE_SECONDS:
+        time.sleep(_SEC_THROTTLE_SECONDS)
+    _sec_last_request = time.monotonic()
+
+
+def _sec_get(url: str) -> bytes:
+    """GET one SEC endpoint with pacing and bounded retry on 429/5xx.
+
+    Backoff is exponential with an optional Retry-After override; the last
+    response's status is raised once attempts are exhausted.
+    """
+    resp = None
+    for attempt in range(_SEC_MAX_ATTEMPTS):
+        _sec_throttle()
+        resp = requests.get(url, headers=_sec_headers(), timeout=60)
+        if resp.status_code != 429 and resp.status_code < 500:
+            break
+        raw = resp.headers.get("Retry-After")
+        try:
+            retry_after = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
+        delay = retry_after if retry_after is not None else _SEC_BACKOFF_BASE * 2 ** attempt
+        time.sleep(min(delay, _SEC_BACKOFF_CAP))
+    assert resp is not None
+    resp.raise_for_status()
+    return resp.content
+
+
 def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict:
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
     now = _utc_now()
     url = SEC_TICKERS_URL
-    resp = requests.get(url, headers=_sec_headers(), timeout=60)
-    resp.raise_for_status()
-    payload = resp.content
+    payload = _sec_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
         "sec", "company_tickers", "company_tickers", payload,
         url=url, retrieved_at=now, root=data_root / "raw",
     )
-    datasets = normalize_sec_tickers(json.loads(payload), retrieved_at=now, content_hash=content_hash)
+    payload_json = json.loads(payload)
+    datasets = normalize_sec_tickers(payload_json, retrieved_at=now, content_hash=content_hash)
     written = sum(
         parquet.write_rows(name, rows, root=data_root / "parquet")
         for name, rows in datasets.items()
     )
+    ticker_ciks: dict[str, int] = {}
+    items = payload_json.values() if isinstance(payload_json, dict) else (payload_json or [])
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        try:
+            cik = int(item.get("cik_str"))
+        except (TypeError, ValueError):
+            continue
+        ticker_ciks[ticker] = cik
     return {
         "source": "sec:company_tickers",
         "written": written,
         "content_hash": content_hash,
         "retrieved_at": now,
+        "ticker_ciks": ticker_ciks,
     }
 
 
@@ -73,9 +125,7 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
     now = _utc_now()
     url = SEC_FACTS_URL.format(cik=cik)
-    resp = requests.get(url, headers=_sec_headers(), timeout=60)
-    resp.raise_for_status()
-    payload = resp.content
+    payload = _sec_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
         "sec", f"cik{cik:010d}", "companyfacts", payload,
@@ -167,10 +217,34 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
     }
 
 
-def prepare_short_interest_data(settlement_date: str, *, ciks: Sequence[int] = (320193,), data_root: Optional[Path] = None) -> dict:
-    summary = {
-        "sec_tickers": refresh_sec_tickers(data_root=data_root),
-        "sec_facts": [refresh_sec_company_facts(cik, data_root=data_root) for cik in ciks],
-        "finra": refresh_finra_short_interest(settlement_date, data_root=data_root),
+def prepare_short_interest_data(
+    settlement_date: str,
+    *,
+    tickers: Sequence[str] = (),
+    ciks: Sequence[int] = (),
+    data_root: Optional[Path] = None,
+) -> dict:
+    """Refresh the SEC ticker universe and the full FINRA snapshot, and
+    enrich SEC company facts only for the explicitly requested tickers/CIKs.
+
+    The store accumulates across refreshes (raw-archive write-once dedup +
+    Parquet unique-key dedup), so different ``--ticker`` sets grow the facts
+    cache; the leaderboard screen itself is always market-wide.  An
+    unresolved ticker fetches nothing and is reported in the summary; a
+    facts HTTP failure propagates (no silent partial refresh).
+    """
+    requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
+    sec_tickers = refresh_sec_tickers(data_root=data_root)
+    ticker_ciks = sec_tickers["ticker_ciks"]
+    unresolved = [t for t in requested if t not in ticker_ciks]
+    enrich_ciks = list(dict.fromkeys(
+        [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
+    ))
+    sec_facts = [refresh_sec_company_facts(cik, data_root=data_root) for cik in enrich_ciks]
+    finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
+    return {
+        "sec_tickers": sec_tickers,
+        "sec_facts": sec_facts,
+        "finra": finra,
+        "unresolved_tickers": unresolved,
     }
-    return summary
