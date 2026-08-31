@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -450,9 +450,9 @@ def get_short_interest_leaderboard(
 
 
 def _utc_now() -> str:
-    import time
-
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+	"""UTC publication timestamp; microsecond precision so same-second
+	materializations still order by publication time."""
+	return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 # ---------------------------------------------------------------------------

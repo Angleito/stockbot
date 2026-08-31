@@ -24,7 +24,7 @@ from app.normalization import (
 )
 from app.storage import duckdb, parquet
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 SETTLEMENT = "2026-08-14"
 
@@ -159,6 +159,38 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root):
     assert ("CCC", "DDD", "AAA", "BBB") in versions   # enriched version published
     assert ("CCC", "AAA", "BBB") in versions          # old version immutable
     # Reader serves the latest applicable version
+    latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
+
+
+def test_created_at_has_sub_second_precision(data_root, monkeypatch):
+    """Same-second publications get distinct created_at values, so the reader
+    orders by publication time instead of the run_id hash tie-breaker."""
+    class FrozenClock:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 8, 14, 12, 0, 0, 250000, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(screens, "datetime", FrozenClock)
+    assert screens._utc_now() == "2026-08-14T12:00:00.250000+00:00"
+
+
+def test_same_second_versions_ordered_by_publication(data_root, monkeypatch):
+    """The later of two same-second publications wins, regardless of run_id."""
+    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
+    _seed_short_interest(data_root, _default_rows() + [
+        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
+         "currentShortPositionQuantity": 20},
+    ])
+    _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
+    times = iter([
+        "2026-08-14T12:00:00.250000+00:00",  # first version
+        "2026-08-14T12:00:00.800000+00:00",  # enriched version, later same second
+    ])
+    monkeypatch.setattr(screens, "_utc_now", lambda: next(times))
+    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
+    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
 
