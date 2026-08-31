@@ -22,6 +22,7 @@ from .runtime import (
     AgentState,
     BudgetRemaining,
     EventType,
+    ExecutionBudget,
     ResearchPlan,
     ResearchRequest,
     ResearchResult,
@@ -31,7 +32,9 @@ from .storage.ids import request_id, run_id
 from .storage.runs import (
     RunRecorder,
     get_runs_db_path,
+    reset_current_budget,
     reset_current_recorder,
+    set_current_budget,
     set_current_recorder,
 )
 from .tool_render import render_tool_result
@@ -148,15 +151,9 @@ def _git_sha() -> str:
     return _git_sha_cache
 
 
-def _update_budget(state: AgentState, limits, elapsed_seconds: float, recorder) -> None:
-    """Recompute remaining budget from the typed state and recorder counters."""
-    state.budget_remaining = BudgetRemaining(
-        rounds=max(0, limits.max_rounds - state.round),
-        tool_calls=max(0, limits.max_tool_calls - len(state.tool_calls)),
-        model_calls=max(0, limits.max_model_calls - recorder.model_calls),
-        runtime_seconds=max(0.0, limits.max_runtime - elapsed_seconds),
-        evidence_tokens=max(0, limits.max_evidence_tokens - recorder.evidence_tokens),
-    )
+def _update_budget(state: AgentState, budget: ExecutionBudget) -> None:
+    """Refresh the typed BudgetRemaining view from the execution budget."""
+    state.budget_remaining = budget.remaining(state.round)
 
 
 def _tool_source_meta(result) -> tuple[list[str], dict]:
@@ -263,9 +260,12 @@ def run_chat(
         raise ChatInputError("requested model is not allowed")
     normalized_messages = _normalize_public_messages(messages, policy)
 
+    # The question is redacted before it enters the observability path
+    # (agent_runs.question column and RUN_STARTED/PLAN_CREATED metadata);
+    # the raw user message stays in the conversation sent to the model.
     request = ResearchRequest(
         request_id=request_id(),
-        question=normalized_messages[-1]["content"],
+        question=redact_json(normalized_messages[-1]["content"]),
         created_at=datetime.now(timezone.utc).isoformat(),
         as_of=context.as_of or date.today().isoformat(),
         principal=context.principal_id,
@@ -280,16 +280,17 @@ def run_chat(
         hypotheses=[],
         required_data=[],
     )
+    budget = ExecutionBudget(
+        max_rounds=context.run_limits.max_rounds,
+        max_tool_calls=context.run_limits.max_tool_calls,
+        max_model_calls=context.run_limits.max_model_calls,
+        max_runtime=context.run_limits.max_runtime,
+        max_evidence_tokens=context.run_limits.max_evidence_tokens,
+    )
     state = AgentState(
         run_id=run_id(),
         plan=plan,
-        budget_remaining=BudgetRemaining(
-            rounds=context.run_limits.max_rounds,
-            tool_calls=context.run_limits.max_tool_calls,
-            model_calls=context.run_limits.max_model_calls,
-            runtime_seconds=context.run_limits.max_runtime,
-            evidence_tokens=context.run_limits.max_evidence_tokens,
-        ),
+        budget_remaining=budget.remaining(0),
     )
     recorder = RunRecorder(
         run_id=state.run_id,
@@ -338,8 +339,8 @@ def run_chat(
             return result.answer, tool_trace
         return result.answer
 
-    started = time.perf_counter()
-    token = set_current_recorder(recorder)
+    recorder_token = set_current_recorder(recorder)
+    budget_token = set_current_budget(budget)
     try:
         with recorder:
             recorder.record_event(
@@ -359,18 +360,19 @@ def run_chat(
             )
             try:
                 while True:
-                    _update_budget(
-                        state, context.run_limits, time.perf_counter() - started, recorder
-                    )
+                    _update_budget(state, budget)
                     if (
-                        state.budget_remaining.model_calls <= 0
-                        or state.budget_remaining.runtime_seconds <= 0
+                        budget.model_calls_remaining() <= 0
+                        or budget.runtime_remaining() <= 0
+                        or budget.evidence_remaining() <= 0
                     ):
                         return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
 
                     recorder.current_round = state.round
                     t0 = time.perf_counter()
                     t0_iso = datetime.now(timezone.utc).isoformat()
+                    if not budget.reserve_model_call():
+                        return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                     recorder.record_event(
                         EventType.MODEL_REQUESTED,
                         round=state.round,
@@ -421,6 +423,8 @@ def run_chat(
                             "Tool call limit reached. Answer with what you have now, "
                             "or say you don't have the data."
                         )})
+                        if not budget.reserve_model_call():
+                            return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                         recorder.current_round = state.round
                         t0 = time.perf_counter()
                         t0_iso = datetime.now(timezone.utc).isoformat()
@@ -467,7 +471,7 @@ def run_chat(
                     # Append the assistant message that requested the tools.
                     msgs.append(message)
                     failed_tools: list[tuple[str, dict]] = []
-                    if state.budget_remaining.tool_calls <= 0:
+                    if budget.tool_calls_remaining() <= 0:
                         return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                     for tc in tool_calls:
                         fn = tc["function"]
@@ -476,6 +480,8 @@ def run_chat(
                             arguments = json.loads(fn["arguments"] or "{}")
                         except json.JSONDecodeError:
                             arguments = {}
+                        if not budget.reserve_tool_call():
+                            return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                         logger.info("Tool call: %s(%s)", name, redact_value(arguments))
                         if want_trace:
                             tool_trace.append(name)
@@ -575,19 +581,20 @@ def run_chat(
                             state.plan.required_data.append(
                                 {"tool": name, "arguments": redact_value(arguments)}
                             )
-                            evidence_id = (
-                                f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
-                            )
-                            state.evidence.append(evidence_id)
-                            recorder.record_event(
-                                EventType.EVIDENCE_ADDED,
-                                round=state.round,
-                                tool_name=name,
-                                result_summary=result_summary,
-                                success=True,
-                                evidence_ids=[evidence_id],
-                                metadata={"duration_ms": (t1 - t0) * 1000.0},
-                            )
+                            if budget.add_evidence_tokens(len(result_summary) // 4):
+                                evidence_id = (
+                                    f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
+                                )
+                                state.evidence.append(evidence_id)
+                                recorder.record_event(
+                                    EventType.EVIDENCE_ADDED,
+                                    round=state.round,
+                                    tool_name=name,
+                                    result_summary=result_summary,
+                                    success=True,
+                                    evidence_ids=[evidence_id],
+                                    metadata={"duration_ms": (t1 - t0) * 1000.0},
+                                )
                         else:
                             state.failures.append(
                                 {"tool": name, "error": result.get("error")}
@@ -627,7 +634,8 @@ def run_chat(
                 )
                 raise
     finally:
-        reset_current_recorder(token)
+        reset_current_recorder(recorder_token)
+        reset_current_budget(budget_token)
 
     # Unreachable, but keep a safe return.
     if return_result:

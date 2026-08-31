@@ -20,7 +20,8 @@ import requests
 
 from . import cache
 from .config import OPENROUTER_BASE_URL, get_finra_analysis_model, get_openrouter_api_key
-from .storage.runs import record_model_call_from_current
+from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +434,8 @@ def _call_analysis_model(
 def _post_completion(model: str, messages: list, max_tokens: int) -> str:
     """OpenRouter completion used only by the FINRA analysis layer."""
     t0_iso = datetime.now(timezone.utc).isoformat()
+    if not reserve_model_call_from_current():
+        raise BudgetExhaustedError("model call budget exhausted")
     resp = requests.post(
         f"{OPENROUTER_BASE_URL}/chat/completions",
         headers={

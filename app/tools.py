@@ -29,7 +29,8 @@ from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services.portfolio_research import enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
-from .storage.runs import record_model_call_from_current
+from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -652,6 +653,8 @@ TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode(
 def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
     """Plain (tool-less) completion — used only by get_earnings_summary."""
     t0_iso = datetime.now(timezone.utc).isoformat()
+    if not reserve_model_call_from_current():
+        raise BudgetExhaustedError("model call budget exhausted")
     resp = requests.post(
         f"{OPENROUTER_BASE_URL}/chat/completions",
         headers={

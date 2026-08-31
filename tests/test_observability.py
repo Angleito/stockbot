@@ -13,13 +13,17 @@ from pathlib import Path
 import pytest
 
 from app import agent
+from app import finra_analysis
+from app import tools as tools_module
 from app.agent import _BUDGET_EXHAUSTED_RESPONSE, run_chat
 from app.policy import Capability, ChatPolicy, RequestContext, RunLimits
 from app.redact import redact_json, redact_text, redact_value
 from app.runtime import (
     AgentState,
+    BudgetExhaustedError,
     BudgetRemaining,
     EventType,
+    ExecutionBudget,
     ModelCall,
     ResearchPlan,
     ResearchResult,
@@ -32,6 +36,8 @@ from app.storage.runs import (
     get_runs_db_path,
     get_tool_calls,
     list_runs,
+    reset_current_budget,
+    set_current_budget,
 )
 
 TEST_POLICY = ChatPolicy(
@@ -86,6 +92,25 @@ def _tool_round(tool_name, tool_args, usage=None, request_id="req_abc"):
                 }
             }
         ],
+        "usage": usage or _usage(),
+    }
+
+
+def _tool_round_multi(tool_specs, usage=None, request_id="req_abc"):
+    """One response requesting several tools: list of (name, args) tuples."""
+    return {
+        "id": request_id,
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": f"call_{i}", "type": "function",
+                     "function": {"name": name, "arguments": json.dumps(args)}}
+                    for i, (name, args) in enumerate(tool_specs)
+                ],
+            }
+        }],
         "usage": usage or _usage(),
     }
 
@@ -461,3 +486,273 @@ def test_redact_json_units():
         '{"token": "[REDACTED]", "ticker": "AAPL"}'
     )
     assert redact_json("not json") == "not json"
+
+# ---------------------------------------------------------------------------
+# Recorder-independent budgets + stored-question redaction (PR #2 fixes)
+# ---------------------------------------------------------------------------
+
+
+def test_question_redacted_in_store(monkeypatch):
+    """The stored question column is redacted at write time; the raw user
+    message (with credentials) never reaches the DB."""
+    monkeypatch.setattr(
+        agent, "execute_tool",
+        lambda name, args, model, **kwargs: {"source": "test"},
+    )
+
+    # (a) Pure-JSON question: dict-key-norm redaction applies.
+    fake = FakeOpenRouter([_final("ok")])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": '{"account_number": "12345678", "access_token": "abc"}'}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    run = get_run(result.run_id)
+    assert "[REDACTED]" in run["question"]
+    assert "12345678" not in run["question"]
+    assert "abc" not in run["question"]
+
+    # (b) Free-text question: Bearer/sk-or text rules apply via the fallback.
+    fake = FakeOpenRouter([_final("ok")])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "What is my balance? Bearer abc123, key sk-or-v1-abcdefghijklmnop"}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    run = get_run(result.run_id)
+    assert run["question"] == (
+        "What is my balance? Bearer [REDACTED], key sk-or-v1-[REDACTED]"
+    )
+
+    # Raw-DB dump of every text column across all four tables leaks nothing.
+    db_path = get_runs_db_path(Path("."))
+    conn = sqlite3.connect(str(db_path))
+    try:
+        chunks = []
+        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls"):
+            cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+            for col in cols:
+                for row in conn.execute(f"SELECT {col} FROM {table}"):
+                    if row[0] is not None:
+                        chunks.append(str(row[0]))
+    finally:
+        conn.close()
+    dump = "\n".join(chunks)
+
+    for secret in ("12345678", "abc123", "sk-or-v1-abcdefghijklmnop"):
+        assert secret not in dump, f"secret leaked in runs DB: {secret}"
+    # The "abc" credential value from (a); word boundaries so provider
+    # request ids from other tests ("req_abc") cannot false-positive.
+    assert re.search(r"\babc\b", dump) is None
+
+
+def test_forced_answer_respects_model_budget(monkeypatch):
+    """The forced-final-answer branch reserves before its extra model call."""
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: {"ticker": "AAPL"}
+    )
+    context = _research_context(run_limits=RunLimits(max_rounds=0, max_model_calls=1))
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test",
+        context=context,
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert len(fake.calls) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    run = get_run(result.run_id)
+    assert run["status"] == "budget_exhausted"
+
+
+def test_round_cap_forced_answer(monkeypatch):
+    """Happy path of the round-cap branch: the forced answer call is budgeted
+    and recorded."""
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL"}),
+        _final("answer"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: {"ticker": "AAPL"}
+    )
+    context = _research_context(run_limits=RunLimits(max_rounds=0, max_model_calls=2))
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test",
+        context=context,
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert len(fake.calls) == 2
+    assert result.answer == "answer"
+    run = get_run(result.run_id)
+    assert run["status"] == "partial"
+    assert len(get_model_calls(result.run_id)) == 2
+
+
+def test_nested_model_call_reserves_budget(monkeypatch):
+    """A nested model call inside a tool reserves against the run budget
+    before the network call; exhaustion surfaces as a failed tool."""
+    fake = FakeOpenRouter([
+        _tool_round("get_earnings_summary", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        tools_module.edgar_client, "get_latest_earnings_release",
+        lambda ticker: {"ticker": ticker, "text": "press release text", "source": "8-K test"},
+    )
+    monkeypatch.setattr("app.cache.get", lambda *a, **k: None)
+    monkeypatch.setattr(
+        tools_module.requests, "post",
+        lambda *a, **k: pytest.fail("nested model call must not run"),
+    )
+    context = _research_context(run_limits=RunLimits(max_model_calls=1))
+    result = run_chat(
+        [{"role": "user", "content": "How did AAPL do last quarter?"}],
+        model="test",
+        context=context,
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert len(fake.calls) == 1
+    assert result.answer.startswith("The requested data is unavailable")
+    assert "model call budget exhausted" in result.answer
+    run = get_run(result.run_id)
+    assert run["status"] == "partial"
+
+
+def test_nested_helpers_reserve_budget(monkeypatch):
+    """Nested model helpers reserve against the active budget before any
+    network call; with capacity they proceed to the call."""
+    budget = ExecutionBudget(
+        max_rounds=8, max_tool_calls=64, max_model_calls=1,
+        max_runtime=600.0, max_evidence_tokens=48000,
+    )
+    assert budget.reserve_model_call() is True
+    token = set_current_budget(budget)
+    monkeypatch.setattr(
+        tools_module.requests, "post",
+        lambda *a, **k: pytest.fail("nested model call must not run"),
+    )
+    monkeypatch.setattr(
+        finra_analysis.requests, "post",
+        lambda *a, **k: pytest.fail("nested model call must not run"),
+    )
+    try:
+        with pytest.raises(BudgetExhaustedError):
+            tools_module._llm_complete("test", "prompt")
+        with pytest.raises(BudgetExhaustedError):
+            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
+    finally:
+        reset_current_budget(token)
+
+    # With capacity the helpers run through to the (stubbed) network call.
+    class _FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "id": "req_nested",
+                "usage": _usage(),
+                "choices": [{"message": {"content": "summary text", "finish_reason": "stop"}}],
+            }
+
+    budget2 = ExecutionBudget(
+        max_rounds=8, max_tool_calls=64, max_model_calls=2,
+        max_runtime=600.0, max_evidence_tokens=48000,
+    )
+    token2 = set_current_budget(budget2)
+    monkeypatch.setattr(tools_module.requests, "post", lambda *a, **k: _FakeResp())
+    monkeypatch.setattr(finra_analysis.requests, "post", lambda *a, **k: _FakeResp())
+    try:
+        assert tools_module._llm_complete("test", "prompt") == "summary text"
+        assert (
+            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
+            == "summary text"
+        )
+    finally:
+        reset_current_budget(token2)
+
+
+@pytest.mark.parametrize("disable_recorder", [False, True])
+def test_budget_limits_independent_of_recorder(monkeypatch, tmp_path, disable_recorder):
+    """Every budget limit behaves identically whether the recorder is healthy
+    or disabled: enforcement never depends on observability."""
+
+    def _budget_case(limits, script):
+        fake = FakeOpenRouter(script)
+        monkeypatch.setattr(agent, "_call_openrouter", fake)
+        executed = []
+        monkeypatch.setattr(
+            agent, "execute_tool",
+            lambda name, args, model, **kwargs: executed.append(name)
+            or {"ticker": "AAPL", "source": "test"},
+        )
+        if disable_recorder:
+            blocker = tmp_path / "file"
+            blocker.write_text("x")
+            monkeypatch.setenv("RUNS_DB_PATH", str(blocker / "runs.sqlite"))
+        result = run_chat(
+            [{"role": "user", "content": "q"}], model="test",
+            context=_research_context(run_limits=limits),
+            policy=TEST_POLICY, return_result=True,
+        )
+        return result, fake, executed
+
+    # Model-call cap: one call + one tool, then exhausted at the loop top.
+    result, fake, executed = _budget_case(
+        RunLimits(max_model_calls=1),
+        [_tool_round("get_fundamentals", {"ticker": "AAPL"})],
+    )
+    assert len(fake.calls) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert len(executed) == 1
+    if not disable_recorder:
+        # When disabled the broken RUNS_DB_PATH makes get_run return None.
+        assert get_run(result.run_id)["status"] == "budget_exhausted"
+
+    # Tool-call cap: the second tool in one round is refused before it runs.
+    result, fake, executed = _budget_case(
+        RunLimits(max_tool_calls=1),
+        [_tool_round_multi([
+            ("get_fundamentals", {"ticker": "AAPL"}),
+            ("get_xbrl_facts", {"ticker": "AAPL", "concept": "Revenue"}),
+        ])],
+    )
+    assert len(executed) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert len(fake.calls) == 1
+    if not disable_recorder:
+        assert get_run(result.run_id)["status"] == "budget_exhausted"
+
+    # Runtime cap: no model call happens at all.
+    result, fake, executed = _budget_case(
+        RunLimits(max_runtime=0),
+        [_final("ok")],
+    )
+    assert len(fake.calls) == 0
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    if not disable_recorder:
+        assert get_run(result.run_id)["status"] == "budget_exhausted"
+
+    # Evidence cap: same.
+    result, fake, executed = _budget_case(
+        RunLimits(max_evidence_tokens=0),
+        [_final("ok")],
+    )
+    assert len(fake.calls) == 0
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    if not disable_recorder:
+        assert get_run(result.run_id)["status"] == "budget_exhausted"

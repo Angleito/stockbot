@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..redact import redact_json, redact_text
-from ..runtime import EventType
+from ..runtime import EventType, ExecutionBudget
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class RunRecorder:
                 " prompt_version, tool_registry_version, git_sha, as_of)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    self.run_id, self.request_id, self.started_at, self.question,
+                    self.run_id, self.request_id, self.started_at, redact_json(self.question),
                     self.provider, self.model, json.dumps(self.model_parameters),
                     self.agent_version, self.prompt_version,
                     self.tool_registry_version, self.git_sha, self.as_of,
@@ -456,6 +456,34 @@ def record_model_call_from_current(
         tool_call_count=tool_call_count,
         provider_request_id=provider_request_id,
     )
+
+
+# -- current-budget contextvar (reserve-before-call inside nested helpers) ---
+
+_current_budget: ContextVar[Optional[ExecutionBudget]] = ContextVar(
+    "current_budget", default=None
+)
+
+
+def get_current_budget() -> Optional[ExecutionBudget]:
+    return _current_budget.get()
+
+
+def set_current_budget(budget: ExecutionBudget) -> Token:
+    return _current_budget.set(budget)
+
+
+def reset_current_budget(token: Token) -> None:
+    _current_budget.reset(token)
+
+
+def reserve_model_call_from_current() -> bool:
+    """Reserve one model call against the active budget, if any. No active
+    budget (standalone tool use) always succeeds."""
+    budget = get_current_budget()
+    if budget is None:
+        return True
+    return budget.reserve_model_call()
 
 
 # -- read-side query helpers -------------------------------------------------

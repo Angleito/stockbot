@@ -4,8 +4,7 @@ Pure-stdlib module (no app imports): request/plan/budget/state/result
 dataclasses plus the event/tool/model records and the EventType enum.
 """
 
-from __future__ import annotations
-
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -134,6 +133,76 @@ class ModelCall:
     finish_reason: str | None
     tool_call_count: int
     provider_request_id: str | None
+
+
+class BudgetExhaustedError(RuntimeError):
+    """Raised by nested model helpers when no model-call budget remains."""
+
+
+@dataclass
+class ExecutionBudget:
+    """Enforcement-side run budget: consumption counters + hard limits.
+
+    RunRecorder (telemetry) only observes consumption; this object is the
+    source of truth for limit enforcement, so observability failures never
+    change research behavior. reserve_* methods consume BEFORE an external
+    call; remaining() reports the typed BudgetRemaining view.
+    """
+
+    max_rounds: int
+    max_tool_calls: int
+    max_model_calls: int
+    max_runtime: float
+    max_evidence_tokens: int
+    tool_calls: int = 0
+    model_calls: int = 0
+    evidence_tokens: int = 0
+    _started: float = field(default_factory=time.perf_counter, init=False, repr=False)
+
+    def elapsed_seconds(self) -> float:
+        return time.perf_counter() - self._started
+
+    def model_calls_remaining(self) -> int:
+        return max(0, self.max_model_calls - self.model_calls)
+
+    def tool_calls_remaining(self) -> int:
+        return max(0, self.max_tool_calls - self.tool_calls)
+
+    def evidence_remaining(self) -> int:
+        return max(0, self.max_evidence_tokens - self.evidence_tokens)
+
+    def runtime_remaining(self) -> float:
+        return max(0.0, self.max_runtime - self.elapsed_seconds())
+
+    def reserve_model_call(self) -> bool:
+        """Consume one model-call slot; False when the limit is already reached."""
+        if self.model_calls >= self.max_model_calls:
+            return False
+        self.model_calls += 1
+        return True
+
+    def reserve_tool_call(self) -> bool:
+        if self.tool_calls >= self.max_tool_calls:
+            return False
+        self.tool_calls += 1
+        return True
+
+    def add_evidence_tokens(self, count: int) -> bool:
+        """Register evidence tokens only while within budget; False refuses the addition."""
+        if self.evidence_tokens + count > self.max_evidence_tokens:
+            return False
+        self.evidence_tokens += count
+        return True
+
+    def remaining(self, rounds_used: int = 0) -> BudgetRemaining:
+        """Typed view for AgentState.budget_remaining; rounds come from the loop's state.round."""
+        return BudgetRemaining(
+            rounds=max(0, self.max_rounds - rounds_used),
+            tool_calls=self.tool_calls_remaining(),
+            model_calls=self.model_calls_remaining(),
+            runtime_seconds=self.runtime_remaining(),
+            evidence_tokens=self.evidence_remaining(),
+        )
 
 
 class EventType(StrEnum):
