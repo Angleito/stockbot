@@ -15,6 +15,7 @@ import requests
 from app import analyst_client
 from app import tool_render
 from app.tools import execute_tool
+from app.policy import LOCAL_CONTEXT
 
 YAHOO_FIXTURES = Path(__file__).parent / "fixtures" / "yahoo"
 SLICK_FIXTURES = Path(__file__).parent / "fixtures" / "slickcharts"
@@ -226,9 +227,9 @@ def test_execute_tool_dispatch(monkeypatch, fake_cache):
     monkeypatch.setattr(analyst_client, "_ensure_session", lambda: session)
     monkeypatch.setattr(analyst_client, "_get_crumb", lambda: "crumb-1")
 
-    result = execute_tool("get_analyst_estimates", {"ticker": "NVDA"}, "model-x")
+    result = execute_tool("get_analyst_estimates", {"ticker": "NVDA"}, "model-x", context=LOCAL_CONTEXT)
     assert result["price_targets"]["median"] == 300.0
-    result = execute_tool("get_sp500_weight", {"ticker": "NVDA"}, "model-x")
+    result = execute_tool("get_sp500_weight", {"ticker": "NVDA"}, "model-x", context=LOCAL_CONTEXT)
     assert result["weight_pct"] == pytest.approx(7.40)
 
 

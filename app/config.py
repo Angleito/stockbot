@@ -6,6 +6,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from edgar import set_identity
 
+from .policy import ChatPolicy
+
 # Default fallback only when the env var is unset. Keep env/CLI overrides
 # authoritative; this value must be valid on the target OpenRouter account.
 FALLBACK_MODEL = "google/gemini-2.5-flash"
@@ -50,6 +52,67 @@ def get_default_model() -> str:
     return os.getenv("DEFAULT_MODEL", FALLBACK_MODEL)
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer setting without silently accepting bad limits."""
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return parsed
+
+
+def get_allowed_chat_models() -> frozenset[str]:
+    """Return the server-controlled OpenRouter model allowlist.
+
+    The default model is always included.  Additional models must be named by
+    the operator in ``CHAT_ALLOWED_MODELS``; an HTTP caller cannot select an
+    arbitrary model (and its price/security characteristics).
+    """
+    configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
+    return frozenset({get_default_model(), *(item.strip() for item in configured if item.strip())})
+
+
+def get_chat_max_messages() -> int:
+    return _positive_int_env("CHAT_MAX_MESSAGES", 20)
+
+
+def get_chat_max_content_chars() -> int:
+    return _positive_int_env("CHAT_MAX_CONTENT_CHARS", 12_000)
+
+
+def get_openrouter_timeout_seconds() -> float:
+    """Per-upstream-request timeout; bounds each model completion."""
+    return _positive_float_env("OPENROUTER_TIMEOUT_SECONDS", 60.0)
+
+
+def get_local_chat_policy() -> ChatPolicy:
+    """Build the single-principal runtime chat policy from local config."""
+    return ChatPolicy(
+        allowed_models=get_allowed_chat_models(),
+        max_messages=get_chat_max_messages(),
+        max_message_chars=get_chat_max_content_chars(),
+        upstream_timeout_seconds=get_openrouter_timeout_seconds(),
+    )
+
+
 def get_finra_analysis_model() -> Optional[str]:
     """Secondary low-cost OpenRouter model used to phrase FINRA briefings.
 
@@ -76,9 +139,13 @@ def finra_use_mock() -> bool:
 
 
 def get_robinhood_mcp_url() -> str:
-    return os.getenv(
+    # Validate here as well as in OAuthConfig so environment and --server-url
+    # paths cannot accidentally direct Robinhood credentials to another host.
+    from .robinhood.auth import validate_robinhood_server_url
+
+    return validate_robinhood_server_url(os.getenv(
         "ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"
-    )
+    ))
 
 
 def robinhood_enabled() -> bool:

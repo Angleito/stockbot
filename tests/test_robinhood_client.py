@@ -8,7 +8,12 @@ import pytest
 from mcp.server import MCPServer
 
 from app.robinhood.auth import LoopbackCallback, load_tokens, parse_callback_url, save_tokens
-from app.robinhood.client import RobinhoodClient, RobinhoodToolError, normalize_result
+from app.robinhood.client import (
+    RobinhoodClient,
+    RobinhoodToolError,
+    _HttpSessionContext,
+    normalize_result,
+)
 
 
 def test_oauth_state_is_private_and_round_trips(tmp_path):
@@ -63,15 +68,61 @@ def test_mcp_v2_transport_adapter_lists_and_calls_tools():
     server = MCPServer("fixture")
 
     @server.tool()
-    def quote(symbol: str) -> dict:
+    def get_equity_quotes(symbol: str) -> dict:
         return {"symbol": symbol, "last": "10.00"}
 
     client = RobinhoodClient(
         "fixture",
         transport_factory=lambda url, auth: server,
-        allowed_tools={"quote"},
+        allowed_tools={"get_equity_quotes"},
     )
-    assert client.list_tools()[0]["name"] == "quote"
-    result = client.call_tool("quote", {"symbol": "WING"})
+    assert client.list_tools()[0]["name"] == "get_equity_quotes"
+    result = client.call_tool("get_equity_quotes", {"symbol": "WING"})
     assert result["content"][0]["text"]
     assert '"last": "10.00"' in result["content"][0]["text"]
+
+
+def test_authenticated_mcp_transport_does_not_follow_redirects():
+    seen = {}
+
+    class FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeHttpx:
+        @staticmethod
+        def AsyncClient(**kwargs):
+            seen.update(kwargs)
+            return FakeHttpClient()
+
+    class FakeTransport:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeClient:
+        def __init__(self, transport):
+            self.transport = transport
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    context = _HttpSessionContext(
+        "https://agent.robinhood.com/mcp/trading",
+        object(),
+        lambda url, **kwargs: FakeTransport(),
+        FakeClient,
+        FakeHttpx,
+    )
+    asyncio.run(context.__aenter__())
+    asyncio.run(context.__aexit__())
+
+    assert seen["follow_redirects"] is False

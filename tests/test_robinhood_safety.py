@@ -92,15 +92,16 @@ def test_account_reads_allowed_only_when_explicitly_allowlisted():
             client.call_tool(tool, {})
 
 
-def test_default_client_allows_market_reads_and_denies_trading():
+def test_default_client_allows_market_reads_and_denies_account_and_trading_reads():
     client = RobinhoodClient(
         "fixture",
         transport_factory=lambda url, auth: _fixture_server(),
     )
     result = client.call_tool("get_equity_quotes", {"symbol": "WING"})
     assert result["content"][0]["text"]
-    with pytest.raises(RobinhoodToolError):
-        client.call_tool("get_equity_orders", {})
+    for tool in ("get_accounts", "get_portfolio", "get_equity_positions", "get_scans", "run_scan"):
+        with pytest.raises(RobinhoodToolError):
+            client.call_tool(tool, {})
     with pytest.raises(RobinhoodToolError):
         client.call_tool("place_equity_order", {})
 
@@ -109,8 +110,12 @@ SCAN_READ_TOOLS = ["get_scanner_filter_specs", "get_scans", "run_scan"]
 SCAN_WRITE_TOOLS = ["create_scan", "update_scan_filters", "update_scan_config"]
 
 
-def test_scan_reads_are_allowed_by_default():
-    client = RobinhoodClient("fixture", transport_factory=lambda url, auth: _fixture_server())
+def test_scan_reads_require_explicit_account_capability():
+    client = RobinhoodClient(
+        "fixture",
+        transport_factory=lambda url, auth: _fixture_server(),
+        account_tools=frozenset({"get_scans", "run_scan"}),
+    )
     for tool in ("get_scanner_filter_specs", "get_scans", "run_scan"):
         result = client.call_tool(tool, {"scan_id": "s"} if tool == "run_scan" else {})
         assert result["content"][0]["text"]
@@ -136,3 +141,10 @@ def test_deprecated_allowed_tools_alias_still_works():
     assert result["content"][0]["text"]
     with pytest.raises(RobinhoodToolError):
         client.call_tool("get_accounts", {})
+
+
+def test_capability_categories_cannot_be_cross_configured():
+    with pytest.raises(ValueError, match="Unknown market_read"):
+        RobinhoodClient("https://example.test", market_tools=frozenset({"get_accounts"}))
+    with pytest.raises(ValueError, match="Unknown account_read"):
+        RobinhoodClient("https://example.test", account_tools=frozenset({"get_equity_quotes"}))

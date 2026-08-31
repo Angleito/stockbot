@@ -15,6 +15,7 @@ import requests
 from app import finra_client
 from app.tool_render import render_tool_result
 from app.tools import execute_tool
+from app.policy import LOCAL_CONTEXT
 
 from tests.test_finra import (
     FakeCache,
@@ -106,7 +107,7 @@ def test_datapoints_ascending_sort_via_partitions_oldest_first(http):
             "limit": 3,
             "sort_order": "asc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
@@ -149,7 +150,7 @@ def test_datapoints_multi_partition_queries_only_published_tuples(http):
             "limit": 3,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
@@ -200,7 +201,7 @@ def test_datapoints_ascending_multi_partition_oldest_first(http):
             "limit": 2,
             "sort_order": "asc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
@@ -252,7 +253,7 @@ def test_datapoints_partition_budget_exhausted_errors(http):
                 "limit": 5,
                 "sort_order": "desc",
             },
-            model="test",
+            model="test", context=LOCAL_CONTEXT,
         )
         assert "error" in result
         assert "Narrow" in result["error"] or "narrow" in result["error"]
@@ -283,7 +284,7 @@ def test_datapoints_empty_partitions_budget_exhaustion_errors(http, monkeypatch)
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     posts = _data_posts(http["post"])
     assert len(posts) == 2  # exactly the budget; more tuples remain unchecked
@@ -315,7 +316,7 @@ def test_datapoints_failed_partitions_count_toward_budget(http, monkeypatch, sta
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     posts = _data_posts(http["post"])
     assert len(posts) == 3  # exactly the budget, no unlimited retries
@@ -355,7 +356,7 @@ def test_datapoints_complete_short_result_warns(http):
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert len(result["records"]) == 3
@@ -379,7 +380,7 @@ def test_datapoints_unpartitioned_date_sort_rejected_before_http(http):
             "ticker": "AAPL",
             "sort_fields": ["-lastUpdateDate"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "EQUAL" in result["error"]
@@ -404,7 +405,7 @@ def test_datapoints_date_range_sort_rejected_when_mapped_date_field(http):
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Date-range" in result["error"]
@@ -441,7 +442,7 @@ def test_datapoints_date_range_sort_still_walks_partition_field_ranges(http):
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["sort_source"] == "partitions"
@@ -469,7 +470,7 @@ def test_datapoints_non_date_sort_rejected_before_http(http):
             "ticker": "AAPL",
             "sort_fields": ["-currentShortPositionQuantity"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "EQUAL" in result["error"]
@@ -488,7 +489,7 @@ def test_datapoints_multi_field_sort_rejected_when_unpartitioned(http):
             "ticker": "AAPL",
             "sort_fields": ["-settlementDate", "+currentShortPositionQuantity"],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Multi-field" in result["error"]
@@ -517,12 +518,12 @@ def test_datapoints_partitions_cached_across_calls(http):
         "limit": 1,
         "sort_order": "desc",
     }
-    first = execute_tool("get_finra_datapoints", args, model="test")
+    first = execute_tool("get_finra_datapoints", args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in first, first
     gets_after_first = len(_partitions_get_calls(http["get"]))
 
     finra_client.reset_partitions_cache()  # new process: disk cache still warm
-    second = execute_tool("get_finra_datapoints", args, model="test")
+    second = execute_tool("get_finra_datapoints", args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in second, second
     assert len(_partitions_get_calls(http["get"])) == gets_after_first
 
@@ -594,7 +595,7 @@ def test_partition_cache_old_flattened_shape_ignored(http, fake_cache):
         "limit": 1,
         "sort_order": "desc",
     }
-    result = execute_tool("get_finra_datapoints", args, model="test")
+    result = execute_tool("get_finra_datapoints", args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in result, result
     # The flattened hit was rejected: partitions refetched and rewritten as
     # JSON-safe lists, normalized to tuples in memory.
@@ -630,7 +631,7 @@ def test_datapoints_http_400_structured_error(http):
             "fields": ["settlementDate", "currentShortPositionQuantity"],
             "ticker": "AAPL",
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "400" in result["error"]
@@ -692,7 +693,7 @@ def test_briefing_fresh_current(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2026-08-14"
@@ -707,7 +708,7 @@ def test_briefing_fresh_stale(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2025-12-01"
@@ -725,7 +726,7 @@ def test_briefing_no_date_field_unknown(http):
     result = execute_tool(
         "query_finra",
         {"dataset": "finra/industrySnapshotFirmsByRegistrationType", "limit": 1},
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] is None
@@ -744,7 +745,7 @@ def test_datapoints_fresh_stale_warning(http):
             "ticker": "AAPL",
             "filters": [{"field": "settlementDate", "value": "2025-12-01"}],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2025-12-01"
@@ -769,7 +770,7 @@ def test_environment_marker_mock_mode(http, monkeypatch):
             "ticker": "AAPL",
             "filters": [{"field": "settlementDate", "value": "2026-08-14"}],
         },
-        model="test",
+        model="test", context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["environment"] == "mock"

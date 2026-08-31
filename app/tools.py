@@ -17,6 +17,7 @@ from . import short_interest_screen
 from . import valuation
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .config import get_robinhood_mcp_url, robinhood_enabled
+from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
 from .prompts import READING_PROMPT_TEMPLATE
@@ -692,7 +693,10 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
     return result
 
 
-def _robinhood_client() -> RobinhoodClient:
+def _robinhood_client(
+    *, account_tools: frozenset[str] = frozenset(),
+) -> RobinhoodClient:
+    """Construct a broker client with only the MCP reads this handler needs."""
     if not robinhood_enabled():
         raise RuntimeError("Robinhood integration is disabled; set ROBINHOOD_ENABLED=true")
     url = get_robinhood_mcp_url()
@@ -700,7 +704,7 @@ def _robinhood_client() -> RobinhoodClient:
         url,
         oauth=OAuthConfig(url),
         market_tools=capabilities.MARKET_READ_TOOLS,
-        account_tools=capabilities.ACCOUNT_READ_TOOLS,
+        account_tools=account_tools,
     )
 
 
@@ -846,7 +850,11 @@ def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
     """Bounded, deterministic portfolio snapshot (spec §23)."""
     del model
     refresh = bool(arguments.get("refresh", False))
-    provider = RobinhoodPortfolioProvider(_robinhood_client())
+    provider = RobinhoodPortfolioProvider(_robinhood_client(
+        account_tools=frozenset({
+            "get_accounts", "get_portfolio", "get_equity_positions",
+        })
+    ))
     if refresh:
         snapshot = sync_robinhood_portfolio(provider, data_root=None)
     else:
@@ -939,7 +947,9 @@ def _get_scanner_filter_specs(arguments: dict, model: str) -> dict:
 
 def _get_scans(arguments: dict, model: str) -> dict:
     del arguments, model
-    rows = RobinhoodPortfolioProvider(_robinhood_client()).get_scans()
+    rows = RobinhoodPortfolioProvider(_robinhood_client(
+        account_tools=frozenset({"get_scans"})
+    )).get_scans()
     return {
         "result_type": "scan_list",
         "count": len(rows),
@@ -953,7 +963,9 @@ def _run_scan(arguments: dict, model: str) -> dict:
     del model
     scan_id = str(arguments["scan_id"])
     limit = max(1, min(int(arguments.get("limit") or _SCAN_RESULTS_ROWS), 25))
-    data = RobinhoodPortfolioProvider(_robinhood_client()).run_scan(scan_id)
+    data = RobinhoodPortfolioProvider(_robinhood_client(
+        account_tools=frozenset({"run_scan"})
+    )).run_scan(scan_id)
     rows = _scan_rows(data)
     return {
         "result_type": "scan_results",
@@ -1171,12 +1183,68 @@ _ROBINHOOD_HANDLERS = {
     "run_scan": lambda arguments, model: _run_scan(arguments, model),
 }
 
+# Every model-visible tool has one application-level capability. This is
+# separate from the Robinhood MCP registry, which governs broker operations.
+TOOL_CAPABILITIES: dict[str, Capability] = {
+    "get_fundamentals": Capability.RESEARCH,
+    "get_filing_section": Capability.RESEARCH,
+    "get_earnings_summary": Capability.RESEARCH,
+    "diff_risk_factors": Capability.RESEARCH,
+    "get_financial_statements": Capability.RESEARCH,
+    "get_xbrl_facts": Capability.RESEARCH,
+    "get_short_interest": Capability.RESEARCH,
+    "get_short_interest_leaderboard": Capability.RESEARCH,
+    "get_reg_sho_volume": Capability.RESEARCH,
+    "get_threshold_securities": Capability.RESEARCH,
+    "get_analyst_estimates": Capability.RESEARCH,
+    "get_sp500_weight": Capability.RESEARCH,
+    "get_obligations": Capability.RESEARCH,
+    "get_valuation_metrics": Capability.RESEARCH,
+    "list_finra_datasets": Capability.RESEARCH,
+    "describe_finra_dataset": Capability.RESEARCH,
+    "get_finra_datapoints": Capability.RESEARCH,
+    "query_finra": Capability.RESEARCH,
+    "get_market_snapshot": Capability.RESEARCH,
+    "get_option_chain": Capability.RESEARCH,
+    "analyze_option_contract": Capability.RESEARCH,
+    "compare_options": Capability.RESEARCH,
+    "get_scanner_filter_specs": Capability.RESEARCH,
+    "get_portfolio_snapshot": Capability.PORTFOLIO_READ,
+    "get_scans": Capability.PORTFOLIO_READ,
+    "run_scan": Capability.PORTFOLIO_READ,
+}
+PORTFOLIO_AUTHORIZED_TOOLS: frozenset[str] = frozenset(
+    name for name, capability in TOOL_CAPABILITIES.items()
+    if capability is Capability.PORTFOLIO_READ
+)
 
-def execute_tool(name: str, arguments: dict, model: str) -> dict:
+
+def tools_for_capabilities(capabilities: frozenset[Capability]) -> list[dict]:
+    """Return only schemas whose application capability is granted."""
+    return [
+        tool for tool in TOOLS
+        if TOOL_CAPABILITIES.get(tool["function"]["name"]) in capabilities
+    ]
+
+
+def tool_is_permitted(name: str, context: RequestContext) -> bool:
+    capability = TOOL_CAPABILITIES.get(name)
+    return capability is not None and capability in context.capabilities
+
+
+def execute_tool(
+    name: str,
+    arguments: dict,
+    model: str,
+    *,
+    context: RequestContext,
+) -> dict:
     """Dispatch a tool call by name. Always returns a JSON-serializable dict;
     never raises — errors are returned as {"error": ...} so the model can
     report them honestly (guardrail behavior)."""
     try:
+        if not tool_is_permitted(name, context):
+            return {"error": f"Tool is not permitted: {name}"}
         if name == "get_fundamentals":
             return edgar_client.get_fundamentals(
                 arguments["ticker"], arguments["metric"]

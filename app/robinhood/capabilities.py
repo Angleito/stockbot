@@ -59,13 +59,45 @@ def tool_capability(name: str) -> RobinhoodCapability | None:
     return None
 
 
+def _configured_subset(
+    supplied: frozenset[str] | None,
+    canonical: frozenset[str],
+    capability: RobinhoodCapability,
+    *,
+    default: frozenset[str],
+) -> frozenset[str]:
+    """Validate an optional configuration can only reduce a capability."""
+    if supplied is None:
+        return default
+    configured = frozenset(supplied)
+    invalid = configured - canonical
+    if invalid:
+        names = ", ".join(sorted(invalid))
+        raise ValueError(f"Unknown {capability.value} tool configuration: {names}")
+    return configured & canonical
+
+
 def allowed_read_tools(
     *, market: frozenset[str] | None = None,
     account: frozenset[str] | None = None,
 ) -> frozenset[str]:
-    """Union of the explicitly allowlisted market and account read tools."""
-    market_set = MARKET_READ_TOOLS if market is None else frozenset(market)
-    account_set = ACCOUNT_READ_TOOLS if account is None else frozenset(account)
+    """Union of configured subsets of the canonical read-only registry.
+
+    Configuration never becomes an allowlist of its own: every supplied name
+    is verified against the appropriate canonical capability set.
+    """
+    market_set = _configured_subset(
+        market,
+        MARKET_READ_TOOLS,
+        RobinhoodCapability.MARKET_READ,
+        default=MARKET_READ_TOOLS,
+    )
+    account_set = _configured_subset(
+        account,
+        ACCOUNT_READ_TOOLS,
+        RobinhoodCapability.ACCOUNT_READ,
+        default=frozenset(),
+    )
     return market_set | account_set
 
 

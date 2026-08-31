@@ -14,6 +14,7 @@ import pytest
 from app import agent as agent_module
 from app import finra_client
 from app.agent import run_chat
+from app.policy import ChatPolicy, LOCAL_CONTEXT
 from app.tool_render import (
     MAX_TOOL_MESSAGE_BYTES,
     TRUNCATED_MARKER,
@@ -26,6 +27,14 @@ from tests.test_finra import (
     _mock_get,
     _response,
     _token_response,
+)
+
+
+TEST_POLICY = ChatPolicy(
+    allowed_models=frozenset({"test"}),
+    max_messages=20,
+    max_message_chars=12_000,
+    upstream_timeout_seconds=1,
 )
 
 
@@ -125,7 +134,7 @@ class FakeOpenRouter:
         self.tool_args = tool_args
         self.calls = []
 
-    def __call__(self, model, messages):
+    def __call__(self, model, messages, *_):
         self.calls.append(messages)
         if len(self.calls) == 1:
             return {
@@ -163,11 +172,13 @@ def fake_agent(monkeypatch):
         fake = FakeOpenRouter(tool_name, tool_args)
         monkeypatch.setattr(agent_module, "_call_openrouter", fake)
         monkeypatch.setattr(
-            agent_module, "execute_tool", lambda name, args, model: result
+            agent_module, "execute_tool", lambda name, args, model, **kwargs: result
         )
         text, _trace = run_chat(
             [{"role": "user", "content": "Test question"}],
             model="test",
+            context=LOCAL_CONTEXT,
+            policy=TEST_POLICY,
             return_trace=True,
         )
         tool_msgs = [
@@ -361,7 +372,7 @@ class FakeTwoToolRound:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, model, messages):
+    def __call__(self, model, messages, *_):
         self.calls.append(messages)
         return {
             "choices": [
@@ -403,7 +414,7 @@ def test_failed_tool_does_not_use_successful_sibling_results(monkeypatch):
     fake = FakeTwoToolRound()
     monkeypatch.setattr(agent_module, "_call_openrouter", fake)
 
-    def _execute(name, args, model):
+    def _execute(name, args, model, **kwargs):
         if name == "get_short_interest":
             return {
                 "dataset": "consolidatedShortInterest",
@@ -419,6 +430,8 @@ def test_failed_tool_does_not_use_successful_sibling_results(monkeypatch):
     text, _trace = run_chat(
         [{"role": "user", "content": "Test question"}],
         model="test",
+        context=LOCAL_CONTEXT,
+        policy=TEST_POLICY,
         return_trace=True,
     )
     assert len(fake.calls) == 1  # loop stopped after the failed round
@@ -544,6 +557,8 @@ def test_query_finra_end_to_end_real_result_rendered(finra_http, monkeypatch):
     _text, _trace = run_chat(
         [{"role": "user", "content": "What is AAPL's short interest?"}],
         model="test",
+        context=LOCAL_CONTEXT,
+        policy=TEST_POLICY,
         return_trace=True,
     )
 
@@ -552,7 +567,7 @@ def test_query_finra_end_to_end_real_result_rendered(finra_http, monkeypatch):
     content = tool_msgs[0]["content"]
 
     # The client-side result itself carries the briefing contract.
-    real_result = execute_tool("query_finra", args, model="test")
+    real_result = execute_tool("query_finra", args, model="test", context=LOCAL_CONTEXT)
     assert "error" not in real_result, real_result
     assert "records" not in real_result
     assert real_result["coverage"]["page_complete"] is True

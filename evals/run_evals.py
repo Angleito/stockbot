@@ -9,7 +9,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agent import run_chat
-from app.config import get_default_model
+from app.config import get_default_model, get_local_chat_policy
+from app.policy import LOCAL_CONTEXT
 
 
 def _is_ordered_subsequence(required: list, trace: list) -> bool:
@@ -47,6 +48,8 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 response, detailed = run_chat(
                     [{"role": "user", "content": question}],
                     model=model,
+                    context=LOCAL_CONTEXT,
+                    policy=get_local_chat_policy(),
                     return_detailed_trace=True,
                 )
                 trace = [t["name"] for t in detailed]

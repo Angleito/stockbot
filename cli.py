@@ -3,7 +3,8 @@
 import argparse
 
 from app.agent import run_chat
-from app.config import get_default_model
+from app.config import get_default_model, get_local_chat_policy
+from app.policy import LOCAL_CONTEXT
 
 
 def main() -> None:
@@ -27,7 +28,12 @@ def main() -> None:
         if not user_input or user_input.lower() in ("quit", "exit"):
             break
         messages.append({"role": "user", "content": user_input})
-        response = run_chat(messages, args.model)
+        response = run_chat(
+            messages,
+            args.model,
+            context=LOCAL_CONTEXT,
+            policy=get_local_chat_policy(),
+        )
         messages.append({"role": "assistant", "content": response})
         print(f"\nassistant: {response}\n")
 
