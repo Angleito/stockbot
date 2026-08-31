@@ -75,9 +75,11 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
             empty_dir.mkdir(parents=True, exist_ok=True)
             pq.write_table(parquet.dataset(name).schema.empty_table(), str(empty_dir / "part-empty.parquet"))
             glob_path = empty_dir / "*.parquet"
+        # Dataset schemas evolve (e.g. screen_runs stage counters): old and
+        # new parquet files must coexist, so scans union columns by name.
         conn.execute(
             f"CREATE OR REPLACE VIEW {name} AS "
-            f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning = true)"
+            f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning = true, union_by_name = true)"
         )
 
 

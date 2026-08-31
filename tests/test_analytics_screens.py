@@ -10,7 +10,11 @@ The acceptance criteria under test:
 - only eligible, classified equity securities are ranked.
 """
 
+import json
+
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from app.analytics import screens
 from app.normalization import (
@@ -124,6 +128,76 @@ def test_rerun_is_deterministic_and_creates_no_duplicates(data_root):
     assert [e["ticker"] for e in first["entries"]] == [e["ticker"] for e in second["entries"]]
     assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 1
     assert parquet.count_rows("screen_entries", root=data_root / "parquet") == 3
+
+
+def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root):
+    """A pre-stage-counter (11-column) run reads via union-by-name, its
+    counters reconstruct from exclusions, and it coexists with a
+    counter-bearing run written through the production path."""
+    _seed_default(data_root)
+    old_dir = data_root / "parquet" / "screen_runs" / "settlement_date_year=2026"
+    old_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table({
+            "run_id": [f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14"],
+            "screen": [screens.SCREEN_NAME],
+            "settlement_date": [SETTLEMENT],
+            "as_of": ["2026-08-14"],
+            "created_at": ["2026-08-14T00:00:00Z"],
+            "calc_version": [screens.SCREEN_CALC_VERSION],
+            "finra_rows": [6],
+            "eligible_rows": [3],
+            "exclusions_json": [json.dumps({
+                "unmapped_symbol": 1, "ambiguous_ticker_mapping": 1,
+                "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
+                "invalid_short_interest": 1,
+            })],
+            "environment": ["test"],
+            "parser_version": ["pre-counter"],
+        }, schema=pa.schema([
+            pa.field("run_id", pa.string()), pa.field("screen", pa.string()),
+            pa.field("settlement_date", pa.string()), pa.field("as_of", pa.string()),
+            pa.field("created_at", pa.string()), pa.field("calc_version", pa.string()),
+            pa.field("finra_rows", pa.int64()), pa.field("eligible_rows", pa.int64()),
+            pa.field("exclusions_json", pa.string()), pa.field("environment", pa.string()),
+            pa.field("parser_version", pa.string()),
+        ])),
+        str(old_dir / "part-old.parquet"),
+    )
+    result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert result["coverage"] == {
+        "finra_rows": 6, "eligible_rows": 3,
+        "valid_short_interest_rows": 5, "mapped_rows": 4,
+        "unambiguous_rows": 3, "common_equity_rows": 3,
+        "shares_outstanding_rows": 3,
+        "exclusions": {"unmapped_symbol": 1, "ambiguous_ticker_mapping": 1,
+                       "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
+                       "invalid_short_interest": 1},
+    }
+    parquet.write_rows("screen_runs", [{
+        "run_id": f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-21",
+        "screen": screens.SCREEN_NAME,
+        "settlement_date": SETTLEMENT,
+        "as_of": "2026-08-21",
+        "created_at": "2026-08-21T00:00:00Z",
+        "calc_version": screens.SCREEN_CALC_VERSION,
+        "finra_rows": 3, "eligible_rows": 2,
+        "valid_short_interest_rows": 3, "mapped_rows": 2,
+        "unambiguous_rows": 2, "common_equity_rows": 2,
+        "shares_outstanding_rows": 2,
+        "exclusions_json": json.dumps({
+            "unmapped_symbol": 1, "ambiguous_ticker_mapping": 0,
+            "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
+            "invalid_short_interest": 0,
+        }),
+        "environment": "test",
+        "parser_version": screens.SCREEN_CALC_VERSION,
+    }], root=data_root / "parquet")
+    old_again = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert old_again["coverage"]["mapped_rows"] == 4  # reconstructed, not clobbered
+    new_result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
+    assert new_result["coverage"]["mapped_rows"] == 2  # stored counters used
+    assert new_result["coverage"]["eligible_rows"] == 2
 
 
 def test_read_is_bounded_by_limit(data_root):

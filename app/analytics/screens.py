@@ -320,6 +320,22 @@ def read_short_interest_screen(
         freshness = "stale" if days > finra_client.STALE_AFTER_DAYS else "current"
     except (TypeError, ValueError):
         freshness = "unknown"
+    exclusions = json.loads(run["exclusions_json"])
+    if run.get("valid_short_interest_rows") is None:
+        # Old-schema run (pre stage-counter commit): the sequential pipeline
+        # excluded rows in this exact order, so the cumulative counters are
+        # reconstructible from the exclusive exclusions.
+        valid = run["finra_rows"] - exclusions["invalid_short_interest"]
+        mapped = valid - exclusions["unmapped_symbol"]
+        unambiguous = mapped - exclusions["ambiguous_ticker_mapping"]
+        common_equity = unambiguous - exclusions["not_classified_common_equity"]
+        shares_outstanding = common_equity - exclusions["missing_shares_outstanding"]
+    else:
+        valid = run["valid_short_interest_rows"]
+        mapped = run["mapped_rows"]
+        unambiguous = run["unambiguous_rows"]
+        common_equity = run["common_equity_rows"]
+        shares_outstanding = run["shares_outstanding_rows"]
     return {
         "source": "FINRA consolidated short interest + SEC EDGAR company facts (parquet)",
         "metric": "short shares divided by SEC-reported shares outstanding (not public float)",
@@ -331,12 +347,12 @@ def read_short_interest_screen(
         "coverage": {
             "finra_rows": run["finra_rows"],
             "eligible_rows": run["eligible_rows"],
-            "valid_short_interest_rows": run.get("valid_short_interest_rows") or 0,
-            "mapped_rows": run.get("mapped_rows") or 0,
-            "unambiguous_rows": run.get("unambiguous_rows") or 0,
-            "common_equity_rows": run.get("common_equity_rows") or 0,
-            "shares_outstanding_rows": run.get("shares_outstanding_rows") or 0,
-            "exclusions": json.loads(run["exclusions_json"]),
+            "valid_short_interest_rows": valid,
+            "mapped_rows": mapped,
+            "unambiguous_rows": unambiguous,
+            "common_equity_rows": common_equity,
+            "shares_outstanding_rows": shares_outstanding,
+            "exclusions": exclusions,
         },
         "source_records": [
             f"FINRA otcMarket/consolidatedShortInterest (settlement {settlement_date})",
