@@ -179,19 +179,34 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
 
 def test_fact_with_period_after_settlement_is_never_used(data_root):
     """The shares-outstanding fact must be as of (or before) the settlement
-    date; a fact with a later period end is not eligible."""
+    date; a fact with a later period end is not eligible — even when it is
+    already knowable at the as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, {
-        1: [{"end": "2026-09-01", "val": 100, "accn": "a1", "filed": "2026-09-02"}],
-        2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
+        1: [{"end": "2026-09-01", "val": 100, "accn": "a1", "filed": "2026-08-20"}],
+        2: [{"end": "2026-06-30", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
         3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
     })
     _seed_short_interest(data_root, _default_rows())
 
-    result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
 
     assert result["coverage"]["exclusions"]["missing_shares_outstanding"] == 1
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
+
+
+def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path):
+    """Fresh data root built from raw fixtures via production normalizers
+    only: seeding uses app.normalization + parquet.write_rows, and the
+    leaderboard reads the real store — no normalized rows hand-constructed."""
+    data_root = tmp_path / "data"
+    _seed_default(data_root)
+
+    result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+
+    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
+    assert [e["short_interest_percent"] for e in result["entries"]] == [50.0, 20.0, 10.0]
+    assert result["source_records"]
 
 
 # ---------------------------------------------------------------------------

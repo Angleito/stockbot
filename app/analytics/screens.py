@@ -147,16 +147,6 @@ def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
     return by_entity
 
 
-def _select_fact(facts: list[dict]) -> Optional[dict]:
-    """Latest fact for an entity; the list is already sorted newest-first."""
-    for fact in facts:
-        value = fact.get("value")
-        if value is None or float(value) <= 0:
-            continue
-        return fact
-    return None
-
-
 def materialize_short_interest_screen(
     settlement_date: str,
     as_of: Optional[str] = None,
@@ -217,7 +207,7 @@ def materialize_short_interest_screen(
         if security_types.get(entity_id) != _COMMON_EQUITY:
             exclusions["not_classified_common_equity"] += 1
             continue
-        fact = _select_fact(facts_by_entity.get(entity_id) or [])
+        fact = _select_fact_for_period(facts_by_entity.get(entity_id) or [], settlement_date)
         if fact is None:
             # Classified common equity but no shares-outstanding fact
             # knowable on/before as_of with period end <= settlement: a data
