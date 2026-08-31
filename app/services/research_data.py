@@ -230,8 +230,9 @@ def prepare_short_interest_data(
     The store accumulates across refreshes (raw-archive write-once dedup +
     Parquet unique-key dedup), so different ``--ticker`` sets grow the facts
     cache; the leaderboard screen itself is always market-wide.  An
-    unresolved ticker fetches nothing and is reported in the summary; a
-    facts HTTP failure propagates (no silent partial refresh).
+    unresolved ticker fetches nothing and is reported in the summary; an
+    enrichment failure is reported in ``failed_enrichments`` and never
+    blocks the FINRA snapshot.
     """
     requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
     sec_tickers = refresh_sec_tickers(data_root=data_root)
@@ -240,11 +241,25 @@ def prepare_short_interest_data(
     enrich_ciks = list(dict.fromkeys(
         [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
     ))
-    sec_facts = [refresh_sec_company_facts(cik, data_root=data_root) for cik in enrich_ciks]
     finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
+    cik_to_ticker = {cik: ticker for ticker, cik in ticker_ciks.items()}
+    sec_facts: list[dict] = []
+    failed_enrichments: list[dict] = []
+    for cik in enrich_ciks:
+        try:
+            sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))
+        except Exception as exc:
+            failed_enrichments.append({
+                "ticker": cik_to_ticker.get(cik),
+                "cik": cik,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    public_tickers = {k: v for k, v in sec_tickers.items() if k != "ticker_ciks"}
+    public_tickers["ticker_count"] = len(ticker_ciks)
     return {
-        "sec_tickers": sec_tickers,
+        "sec_tickers": public_tickers,
         "sec_facts": sec_facts,
         "finra": finra,
         "unresolved_tickers": unresolved,
+        "failed_enrichments": failed_enrichments,
     }

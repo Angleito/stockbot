@@ -186,6 +186,16 @@ def materialize_short_interest_screen(
         "missing_shares_outstanding": 0,
         "invalid_short_interest": 0,
     }
+    # Stage counters are cumulative complements of the exclusions: a row
+    # excluded at an earlier stage never reached the later checks, so the
+    # CLI reports these directly instead of deriving them from exclusions.
+    counters = {
+        "valid_short_interest_rows": 0,
+        "mapped_rows": 0,
+        "unambiguous_rows": 0,
+        "common_equity_rows": 0,
+        "shares_outstanding_rows": 0,
+    }
     candidates: list[dict] = []
     for row in rows:
         symbol = str(row["symbol_code"])
@@ -194,19 +204,23 @@ def materialize_short_interest_screen(
             exclusions["invalid_short_interest"] += 1
             continue
         short_shares = float(short_shares)
+        counters["valid_short_interest_rows"] += 1
         entity_ids = ticker_aliases.get(symbol)
         if not entity_ids:
             exclusions["unmapped_symbol"] += 1
             continue
+        counters["mapped_rows"] += 1
         if len(entity_ids) > 1:
             exclusions["ambiguous_ticker_mapping"] += 1
             continue
+        counters["unambiguous_rows"] += 1
         entity_id = entity_ids[0]
         # Eligibility is the stored security classification, not a fact-
         # presence proxy: only entities classified as common equity rank.
         if security_types.get(entity_id) != _COMMON_EQUITY:
             exclusions["not_classified_common_equity"] += 1
             continue
+        counters["common_equity_rows"] += 1
         fact = _select_fact_for_period(facts_by_entity.get(entity_id) or [], settlement_date)
         if fact is None:
             # Classified common equity but no shares-outstanding fact
@@ -214,6 +228,7 @@ def materialize_short_interest_screen(
             # gap, not proof of non-common-equity.
             exclusions["missing_shares_outstanding"] += 1
             continue
+        counters["shares_outstanding_rows"] += 1
         shares = float(fact["value"])
         candidates.append({
             "entity_id": entity_id,
@@ -242,6 +257,11 @@ def materialize_short_interest_screen(
             "calc_version": SCREEN_CALC_VERSION,
             "finra_rows": len(rows),
             "eligible_rows": len(candidates),
+            "valid_short_interest_rows": counters["valid_short_interest_rows"],
+            "mapped_rows": counters["mapped_rows"],
+            "unambiguous_rows": counters["unambiguous_rows"],
+            "common_equity_rows": counters["common_equity_rows"],
+            "shares_outstanding_rows": counters["shares_outstanding_rows"],
             "exclusions_json": json.dumps(exclusions, sort_keys=True),
             "environment": finra_client._environment(),
             "parser_version": SCREEN_CALC_VERSION,
@@ -311,6 +331,11 @@ def read_short_interest_screen(
         "coverage": {
             "finra_rows": run["finra_rows"],
             "eligible_rows": run["eligible_rows"],
+            "valid_short_interest_rows": run.get("valid_short_interest_rows") or 0,
+            "mapped_rows": run.get("mapped_rows") or 0,
+            "unambiguous_rows": run.get("unambiguous_rows") or 0,
+            "common_equity_rows": run.get("common_equity_rows") or 0,
+            "shares_outstanding_rows": run.get("shares_outstanding_rows") or 0,
             "exclusions": json.loads(run["exclusions_json"]),
         },
         "source_records": [

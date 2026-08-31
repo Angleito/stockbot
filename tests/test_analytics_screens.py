@@ -102,6 +102,9 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root):
     assert result["entries"][0]["short_interest_percent"] == 50
     assert result["coverage"] == {
         "finra_rows": 3, "eligible_rows": 3,
+        "valid_short_interest_rows": 3, "mapped_rows": 3,
+        "unambiguous_rows": 3, "common_equity_rows": 3,
+        "shares_outstanding_rows": 3,
         "exclusions": {"unmapped_symbol": 0, "ambiguous_ticker_mapping": 0,
                        "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
                        "invalid_short_interest": 0},

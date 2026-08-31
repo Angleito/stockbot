@@ -70,13 +70,9 @@ def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int])
         print(f"Leaderboard error: {result['error']}")
         return
     coverage = result["coverage"]
-    ex = coverage["exclusions"]
     finra_rows = coverage["finra_rows"]
-    mapped = finra_rows - ex["unmapped_symbol"]
-    shares_covered = (
-        finra_rows - ex["unmapped_symbol"] - ex["ambiguous_ticker_mapping"]
-        - ex["not_classified_common_equity"] - ex["missing_shares_outstanding"]
-    )
+    mapped = coverage["mapped_rows"]
+    shares_covered = coverage["shares_outstanding_rows"]
     eligible = coverage["eligible_rows"]
     pct = 100.0 * eligible / finra_rows if finra_rows else 0.0
     print(f"FINRA securities:             {finra_rows:,}")
@@ -87,6 +83,8 @@ def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int])
     print(f"Coverage: {pct:.1f}%")
     if summary["unresolved_tickers"]:
         print(f"Unresolved tickers (no SEC mapping, facts not fetched): {summary['unresolved_tickers']}")
+    for fail in summary["failed_enrichments"]:
+        print(f"Enrichment failed: ticker={fail['ticker']} cik={fail['cik']} error={fail['error']}")
     print(f"Leaderboard entries: {[e['ticker'] for e in result.get('entries', [])]}")
 
 
