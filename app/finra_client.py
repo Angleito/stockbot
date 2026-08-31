@@ -2105,7 +2105,7 @@ def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
 def ingestion_post_query(
     group: str, dataset_name: str, payload: dict
 ) -> tuple[bytes, list, dict]:
-    """Raw FINRA data-plane POST for the ingestion pipeline.
+    """Raw FINRA data-plane POST used by the research data refresh service (app/services/research_data.py).
 
     Returns (response body bytes, parsed records, captured pagination
     headers).  It bypasses the chat SQLite cache on purpose: the immutable

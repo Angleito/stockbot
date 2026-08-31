@@ -1,11 +1,13 @@
 """Terminal client — thin wrapper around app.agent.run_chat."""
 
 import argparse
+import json
 import sys
 
 from app.agent import run_chat
 from app.config import get_default_model, get_local_chat_policy
 from app.policy import LOCAL_CONTEXT
+from app.services.research_data import prepare_short_interest_data
 from app.storage.runs import (
     get_events,
     get_model_calls,
@@ -59,6 +61,17 @@ def _cmd_runs(limit: int) -> None:
         )
 
 
+def _cmd_refresh_data(settlement_date: str, ciks: list[int]) -> None:
+    summary = prepare_short_interest_data(settlement_date, ciks=ciks)
+    print(json.dumps(summary, indent=2))
+    from app.analytics.screens import materialize_short_interest_screen
+    result = materialize_short_interest_screen(settlement_date)
+    if result.get("error"):
+        print(f"Leaderboard error: {result['error']}")
+        return
+    print(f"Leaderboard entries: {[e['ticker'] for e in result.get('entries', [])]}")
+
+
 def _cmd_inspect(run_id: str) -> None:
     run = get_run(run_id)
     if run is None:
@@ -107,12 +120,17 @@ def main() -> None:
     runs_parser.add_argument("--limit", type=int, default=20, help="max rows (default 20)")
     inspect_parser = subparsers.add_parser("inspect", help="show one run's record")
     inspect_parser.add_argument("run_id", help="run id, e.g. run:20260829T123456789012")
+    refresh_parser = subparsers.add_parser("refresh-data", help="fetch + normalize SEC/FINRA research data into the Parquet store")
+    refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
+    refresh_parser.add_argument("--ciks", type=int, action="append", default=[320193], help="SEC CIKs for company facts (repeatable; default 320193)")
     args = parser.parse_args()
 
     if args.command == "runs":
         _cmd_runs(args.limit)
     elif args.command == "inspect":
         _cmd_inspect(args.run_id)
+    elif args.command == "refresh-data":
+        _cmd_refresh_data(args.settlement_date, args.ciks)
     else:
         model = getattr(args, "model", None) or get_default_model()
         _chat(model)
