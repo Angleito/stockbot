@@ -115,16 +115,9 @@ app/
     facts.py
     events.py
     signals.py
-  ingestion/
-    base.py                    # Connector and checkpoint interfaces
-    sec/
-    finra/
-    market/
-    biotech/
-  normalization/
-    sec.py
-    finra.py
-    biotech.py
+  normalization.py             # Deterministic SEC/FINRA normalizers
+  services/
+    research_data.py           # Fetch -> archive -> normalize -> Parquet (CLI: python cli.py refresh-data)
   storage/
     database.py
     raw_archive.py
@@ -357,7 +350,8 @@ Complete phases in order. A phase is complete only when its acceptance criteria 
 - [x] Implement the immutable raw archive with content hashes.
       (`app/storage/raw_archive.py`: write-once `data/raw/` payloads + retrieval manifests)
 - [x] Add ingestion checkpoints, retry policy, rate limiting, and structured logs.
-      (`app/ingestion/`: tenacity retry/backoff, SEC pacing, checkpoint dataset keyed by payload hash)
+      (`app/normalization.py` + `app/services/research_data.py`: deterministic normalizers;
+      fetch -> archive -> normalize -> Parquet refresh with retry and pacing)
 - [x] Add `known_at`, `published_at`, and `effective_at` conventions.
       (SEC facts: `known_at` = filed date; FINRA snapshots: `known_at` = first complete-archive time,
       `published_at` NULL where the source exposes no publication timestamp)
