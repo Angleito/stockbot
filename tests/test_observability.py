@@ -13,9 +13,15 @@ from pathlib import Path
 import pytest
 
 from app import agent
+from app import analytics
 from app import finra_analysis
 from app import tools as tools_module
 from app.agent import _BUDGET_EXHAUSTED_RESPONSE, run_chat
+from app.normalization import (
+    normalize_sec_tickers,
+    normalize_sec_company_facts,
+    normalize_finra_short_interest,
+)
 from app.policy import Capability, ChatPolicy, RequestContext, RunLimits
 from app.redact import redact_json, redact_text, redact_value
 from app.runtime import (
@@ -30,6 +36,7 @@ from app.runtime import (
     ToolCall,
 )
 from app.tool_render import render_tool_result
+from app.storage import parquet
 from app.storage.runs import (
     get_events,
     get_model_calls,
@@ -126,6 +133,85 @@ def _final(content, usage=None, request_id="req_def"):
 
 def _research_context(**overrides):
     return RequestContext("test", frozenset({Capability.RESEARCH}), **overrides)
+
+
+def _seed_leaderboard_data(data_root):
+    """Seed a tmp parquet store with production normalizers only.
+
+    Same fixture payloads as tests/test_analytics_screens.py (AAA/BBB/CCC
+    tickers, shares-outstanding facts, FINRA rows for 2026-08-14).
+    """
+    tickers = {
+        str(i): {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}
+        for i, (ticker, cik) in enumerate(zip(("AAA", "BBB", "CCC"), (1, 2, 3)))
+    }
+    datasets = normalize_sec_tickers(tickers, retrieved_at="2026-08-10T12:00:00Z", content_hash="tickers-hash")
+    for name, rows in datasets.items():
+        parquet.write_rows(name, rows, root=data_root / "parquet")
+    for cik, shares in ((1, 100), (2, 200), (3, 10)):
+        payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
+            "EntityCommonStockSharesOutstanding": {"units": {"shares": [
+                {"end": "2026-08-01", "val": shares, "accn": f"a{cik}", "filed": "2026-08-02"},
+            ]}},
+        }}}
+        datasets = normalize_sec_company_facts(
+            payload, retrieved_at="2026-08-10T12:00:00Z", content_hash=f"facts-{cik}",
+            source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+            source_record_id=f"cik{cik:010d}",
+        )
+        for name, rows in datasets.items():
+            parquet.write_rows(name, rows, root=data_root / "parquet")
+    rows = [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 20},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 20},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 5},
+    ]
+    datasets = normalize_finra_short_interest(
+        rows, settlement_date="2026-08-14", known_at="2026-08-10T12:00:00Z",
+        retrieved_at="2026-08-10T12:00:00Z", content_hash="snapshot-hash",
+        source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
+        source_record_id="otcMarket/consolidatedShortInterest:2026-08-14",
+    )
+    for name, rows_ in datasets.items():
+        parquet.write_rows(name, rows_, root=data_root / "parquet")
+
+
+def test_agent_tool_path_short_interest_leaderboard(monkeypatch, tmp_path):
+    """Source-to-tool-to-runtime demo path: production normalizers seed a
+    tmp store, and the REAL dispatcher (unpatched execute_tool) serves the
+    leaderboard tool to the scripted model."""
+    screens_module = analytics.screens
+    _seed_leaderboard_data(tmp_path)
+    monkeypatch.setattr(screens_module, "DEFAULT_DATA_ROOT", tmp_path)
+    fake = FakeOpenRouter([
+        _tool_round("get_short_interest_leaderboard", {"settlement_date": "2026-08-14", "as_of": "2026-08-21"}),
+        _final("The short-interest leaderboard ranked CCC first."),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+
+    result = run_chat(
+        [{"role": "user", "content": "Rank the short-interest leaderboard for 2026-08-14."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+
+    assert result.answer == "The short-interest leaderboard ranked CCC first."
+    assert result.confidence == 1.0
+    assert result.evidence_refs
+    run = get_run(result.run_id)
+    assert run["status"] == "completed"
+    assert run["tool_call_count"] == 1
+    (call,) = get_tool_calls(result.run_id)
+    assert call["tool_name"] == "get_short_interest_leaderboard"
+    assert call["status"] == "completed"
+    event_types = [ev["event_type"] for ev in get_events(result.run_id)]
+    assert (
+        event_types.index("tool_requested")
+        < event_types.index("tool_completed")
+        < event_types.index("evidence_added")
+    )
 
 
 # ---------------------------------------------------------------------------
