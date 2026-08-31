@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Sequence
 
-from ..robinhood.options import MarketSnapshot
+from ..domain.market.quotes import Quote
 
 ZERO = Decimal("0")
 
@@ -16,7 +16,7 @@ def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | 
     return numerator / denominator
 
 
-def valuation_price(quote: MarketSnapshot | None) -> dict[str, Any]:
+def valuation_price(quote: Quote | None) -> dict[str, Any]:
     """Select the single deterministic valuation price for a quote.
 
     Precedence: (1) ``last`` when present; (2) ``mid`` (the bid/ask midpoint

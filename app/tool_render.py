@@ -42,6 +42,8 @@ def render_tool_result(
         text = _render_option_comparison(result, max_bytes)
     elif result.get("result_type") == "portfolio_snapshot":
         text = _render_portfolio_snapshot(result, max_bytes)
+    elif result.get("result_type") == "mandate_evaluation":
+        text = _render_mandate_evaluation(result, max_bytes)
     elif result.get("result_type") == "scan_specs":
         text = _render_scan_specs(result, max_bytes)
     elif result.get("result_type") == "scan_list":
@@ -170,6 +172,62 @@ def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
     if freshness_parts:
         lines.append("Research freshness: " + "; ".join(freshness_parts))
     lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
+    """Compact mandate report: breaches, sector exposures, not-evaluable."""
+
+    def value_text(value, metric: str) -> str:
+        if value is None:
+            return "unavailable"
+        if metric == "prohibited_assets":
+            return _cell(value)
+        try:
+            return f"{float(value) * 100:.1f}%"
+        except (TypeError, ValueError):
+            return _cell(value)
+
+    lines = [
+        "Mandate evaluation",
+        f"Snapshot created: {_cell(result.get('snapshot_created_at')) or 'unavailable'}",
+    ]
+    breaches = result.get("breaches") or []
+    if breaches:
+        lines.append("Breaches:")
+        for breach in breaches:
+            if not isinstance(breach, dict):
+                continue
+            metric = _cell(breach.get("metric")) or "?"
+            target = f" {breach['target']}" if breach.get("target") else ""
+            severity = _cell(breach.get("severity")) or "warning"
+            line = (
+                f"  [{severity}] {metric}{target}: "
+                f"actual {value_text(breach.get('actual'), metric)}, "
+                f"limit {value_text(breach.get('limit'), metric)}"
+            )
+            if breach.get("excess") is not None:
+                line += f", excess {value_text(breach.get('excess'), metric)}"
+            if breach.get("note"):
+                line += f" [{_cell(breach['note'])}]"
+            lines.append(line)
+    else:
+        lines.append("No breaches.")
+    exposures = result.get("sector_exposures") or {}
+    if exposures:
+        exposure_parts = []
+        for sector, weight in exposures.items():
+            try:
+                exposure_parts.append(f"{_cell(sector)} {float(weight) * 100:.1f}%")
+            except (TypeError, ValueError):
+                exposure_parts.append(f"{_cell(sector)} {_cell(weight)}")
+        lines.append("Sector exposures: " + ", ".join(exposure_parts))
+    not_evaluable = result.get("not_evaluable") or []
+    if not_evaluable:
+        lines.append("Not evaluable:")
+        for reason in not_evaluable:
+            lines.append(f"  - {_cell(reason)}")
+    lines.append("Source: " + str(result.get("source", "mandate")))
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 

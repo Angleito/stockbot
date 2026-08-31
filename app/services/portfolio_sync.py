@@ -21,24 +21,17 @@ from ..analytics.portfolio import (
     unrealized_gain_pct,
     valuation_price,
 )
-from ..domain.portfolio import PortfolioSnapshot, Position, local_account_id
+from ..domain.market.securities import SecurityResolution, TickerAlias
+from ..domain.market.quotes import Quote
+from ..domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position, local_account_id
 from ..robinhood.account import BrokerageAccount, BrokeragePosition, CashBalance
-from ..robinhood.options import MarketSnapshot
+from ..robinhood.adapters import to_position_input, to_quote
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
 from ..storage import duckdb, ids, parquet
 
 SNAPSHOT_SOURCE = "robinhood_mcp"
 PARSER_VERSION = "robinhood-mcp-account-v1"
 CALCULATION_VERSION = "portfolio-snapshot-v1"
-
-
-@dataclass(frozen=True)
-class SecurityResolution:
-    security_id: str | None
-    entity_id: str | None
-    ticker: str
-    resolved: bool
-    resolution_method: str
 
 
 def resolve_security(
@@ -62,7 +55,8 @@ def resolve_security(
     as_of = as_of or datetime.now(timezone.utc).date()
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     rows = duckdb.query(
-        "SELECT alias_value, entity_id FROM entity_aliases "
+        "SELECT alias_type, alias_value, entity_id, security_id, source, "
+        "valid_from, valid_to, known_at, retrieved_at FROM entity_aliases "
         "WHERE alias_type = 'ticker' AND alias_value = ? AND "
         f"{clause} "
         "QUALIFY row_number() OVER (PARTITION BY alias_value "
@@ -72,7 +66,8 @@ def resolve_security(
     )
     if not rows:
         return SecurityResolution(None, None, ticker, False, "unresolved")
-    entity_id = str(rows[0]["entity_id"])
+    alias = TickerAlias.from_row(rows[0])
+    entity_id = alias.entity_id
     if entity_id.startswith("sec:cik:"):
         security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
     else:
@@ -81,9 +76,9 @@ def resolve_security(
 
 
 def build_position(
-    raw: BrokeragePosition,
+    raw: BrokeragePositionInput,
     resolution: SecurityResolution,
-    quote: MarketSnapshot | None,
+    quote: Quote | None,
 ) -> Position:
     """Build a valued position; portfolio_weight is None here (computed by
     the snapshot builder once the invested total is known)."""
@@ -153,6 +148,7 @@ def build_portfolio_snapshot(
                 retrieved_at=position.retrieved_at,
                 price_type=position.price_type,
                 quote_retrieved_at=position.quote_retrieved_at,
+                asset_type=position.asset_type,
             )
         )
     built = tuple(built_positions)
@@ -224,6 +220,7 @@ def persist_snapshot(
             "quote_retrieved_at": (
                 position.quote_retrieved_at.isoformat() if position.quote_retrieved_at else None
             ),
+            "asset_type": position.asset_type,
         } for position in snapshot.positions],
         root=parquet_root,
     )
@@ -249,6 +246,7 @@ def _position_from_row(row: dict, retrieved_at: datetime) -> Position:
         )
     }
     quote_retrieved_at = row.get("quote_retrieved_at")
+    asset_type = row.get("asset_type") or "equity"
     return Position(
         position_id=str(row["position_id"]),
         account_id=str(row["account_id"]),
@@ -269,6 +267,7 @@ def _position_from_row(row: dict, retrieved_at: datetime) -> Position:
             datetime.fromisoformat(quote_retrieved_at.replace("Z", "+00:00"))
             if quote_retrieved_at else None
         ),
+        asset_type=asset_type,
     )
 
 
@@ -334,13 +333,13 @@ def sync_robinhood_portfolio(
     quotes = provider.get_equity_quotes(tickers)
     positions = [
         build_position(
-            raw,
+            to_position_input(raw),
             resolve_security(
                 raw.ticker,
                 provider_instrument_id=raw.provider_instrument_id,
                 data_root=data_root,
             ),
-            quotes.get(raw.ticker),
+            to_quote(quotes[raw.ticker]) if raw.ticker in quotes else None,
         )
         for raw in raw_positions
     ]

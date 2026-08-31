@@ -689,3 +689,46 @@ def test_portfolio_snapshot_truncated_when_budget_tiny():
     text = render_tool_result(result, max_bytes=128)
     assert len(text.encode("utf-8")) <= 128
     assert text  # non-empty
+
+def test_mandate_evaluation_renders_breaches_and_exposures():
+    result = {
+        "result_type": "mandate_evaluation",
+        "snapshot_id": "portfolio:robinhood:2026-08-25T12:00:00+00:00",
+        "snapshot_created_at": "2026-08-25T12:00:00+00:00",
+        "breaches": [
+            {
+                "metric": "sector_exposure",
+                "target": "semiconductors",
+                "severity": "critical",
+                "actual": "0.75",
+                "limit": "0.20",
+                "excess": "0.55",
+                "note": None,
+            },
+            {
+                "metric": "prohibited_assets",
+                "target": "GME",
+                "severity": "warning",
+                "actual": "GME",
+                "limit": "GME",
+                "excess": None,
+                "note": "position GME (snap-1:acc-1:GME)",
+            },
+        ],
+        "sector_exposures": {"semiconductors": "0.75", "unknown_sector": "0.25"},
+        "not_evaluable": ["single_position_weight: ZZZZ (no weight)"],
+        "source": "mandate",
+    }
+    text = render_tool_result(result)
+    assert "Mandate evaluation" in text
+    assert "Snapshot created: 2026-08-25T12:00:00+00:00" in text
+    assert "[critical] sector_exposure semiconductors:" in text
+    assert "actual 75.0%, limit 20.0%, excess 55.0%" in text
+    # Prohibited-asset values render verbatim, not as percent.
+    assert "actual GME, limit GME" in text
+    assert "Sector exposures: semiconductors 75.0%, unknown_sector 25.0%" in text
+    assert "Not evaluable:" in text
+    assert "- single_position_weight: ZZZZ (no weight)" in text
+    assert "Source: mandate" in text
+    assert "{" not in text
+    assert len(text.encode("utf-8")) <= MAX_TOOL_MESSAGE_BYTES

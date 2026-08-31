@@ -11,19 +11,20 @@ from app.analytics.portfolio import (
     unrealized_gain_pct,
     valuation_price,
 )
-from app.robinhood.options import MarketSnapshot
+from app.domain.market.quotes import Quote
 
 
-def _snapshot(**overrides) -> MarketSnapshot:
+def _snapshot(**overrides) -> Quote:
     values = {
         "ticker": "AMD",
         "last": Decimal("100"),
         "bid": Decimal("99.5"),
         "ask": Decimal("100.5"),
         "retrieved_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+        "source": "robinhood_mcp",
     }
     values.update(overrides)
-    return MarketSnapshot(**values)
+    return Quote(**values)
 
 
 def test_valuation_price_prefers_last():
@@ -127,7 +128,7 @@ def test_portfolio_concentration():
     assert portfolio_concentration([None, None]) is None
 
 
-def test_market_snapshot_mid():
+def test_quote_mid():
     assert _snapshot().mid == Decimal("100")
     assert _snapshot(bid=None).mid is None
     assert _snapshot(ask=None).mid is None

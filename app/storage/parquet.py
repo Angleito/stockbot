@@ -174,9 +174,18 @@ DATASETS: dict[str, Dataset] = {
             ("quantity", DOUBLE), ("average_cost", DOUBLE), ("market_price", DOUBLE),
             ("price_type", TEXT), ("market_value", DOUBLE), ("unrealized_gain", DOUBLE),
             ("unrealized_gain_pct", DOUBLE), ("portfolio_weight", DOUBLE),
-            ("source", TEXT), ("quote_retrieved_at", TEXT),
+            ("source", TEXT), ("quote_retrieved_at", TEXT), ("asset_type", TEXT),
         )),
         unique_keys=("position_id",),
+    ),
+    "sector_mappings": Dataset(
+        name="sector_mappings",
+        schema=pa.schema(_fields(
+            ("entity_id", TEXT), ("sector", TEXT), ("source", TEXT),
+            ("known_at", TEXT), ("retrieved_at", TEXT), ("content_hash", TEXT),
+            ("parser_version", TEXT),
+        )),
+        unique_keys=("entity_id", "sector", "source", "known_at"),
     ),
     "company_obligations": Dataset(
         name="company_obligations",

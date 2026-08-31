@@ -3,11 +3,15 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from app.agent import run_chat
 from app.config import get_default_model, get_local_chat_policy
 from app.policy import LOCAL_CONTEXT
+from app.domain.risk.mandate import load_mandate
+from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data
+from app.storage import duckdb
 from app.storage.runs import (
     get_events,
     get_model_calls,
@@ -123,6 +127,53 @@ def _cmd_inspect(run_id: str) -> None:
         )
 
 
+def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
+    """Evaluate a mandate against the latest persisted snapshot; report or exit 1."""
+    try:
+        evaluation = evaluate_latest_mandate(mandate_path, data_root=data_root)
+        mandate = load_mandate(mandate_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    units = {
+        (limit.metric, limit.target): limit.unit
+        for limit in mandate.limits
+    }
+
+    def fmt(value, metric: str, target: str | None) -> str:
+        if metric == "prohibited_assets" or units.get((metric, target)) == "dollars":
+            return str(value)
+        return f"{float(value) * 100:.1f}%"
+
+    print(f"Mandate: {mandate_path}")
+    print(f"Snapshot: {evaluation.snapshot_id} created {evaluation.created_at.isoformat()}")
+    print(
+        "Sector exposures: "
+        + ", ".join(
+            f"{sector} {float(weight) * 100:.1f}%"
+            for sector, weight in evaluation.sector_exposures.items()
+        )
+    )
+    if evaluation.breaches:
+        print("Breaches:")
+        for breach in evaluation.breaches:
+            target = f" {breach.target}" if breach.target else ""
+            line = (
+                f"    [{breach.severity}] {breach.metric}{target}: "
+                f"actual {fmt(breach.actual, breach.metric, breach.target)}, "
+                f"limit {fmt(breach.limit, breach.metric, breach.target)}"
+            )
+            if breach.excess is not None:
+                line += f", excess {fmt(breach.excess, breach.metric, breach.target)}"
+            print(line)
+    else:
+        print("No breaches.")
+    if evaluation.not_evaluable:
+        print("Not evaluable:")
+        for reason in evaluation.not_evaluable:
+            print(f"    - {reason}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     subparsers = parser.add_subparsers(dest="command")
@@ -140,6 +191,9 @@ def main() -> None:
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
     refresh_parser.add_argument("--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)")
     refresh_parser.add_argument("--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)")
+    mandate_parser = subparsers.add_parser("evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot")
+    mandate_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
+    mandate_parser.add_argument("--mandate", default=None, help="mandate JSON file (default: <data-root>/mandate.json)")
     args = parser.parse_args()
 
     if args.command == "runs":
@@ -148,6 +202,13 @@ def main() -> None:
         _cmd_inspect(args.run_id)
     elif args.command == "refresh-data":
         _cmd_refresh_data(args.settlement_date, args.ticker, args.cik)
+    elif args.command == "evaluate-mandate":
+        data_root = args.data_root or None
+        mandate_path = (
+            Path(args.mandate) if args.mandate
+            else Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
+        )
+        _cmd_evaluate_mandate(mandate_path, data_root)
     else:
         model = getattr(args, "model", None) or get_default_model()
         _chat(model)

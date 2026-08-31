@@ -40,6 +40,20 @@ class Position:
     retrieved_at: datetime
     price_type: str | None = None
     quote_retrieved_at: datetime | None = None
+    asset_type: str = "equity"
+
+
+@dataclass(frozen=True)
+class BrokeragePositionInput:
+    position_id: str
+    account_id: str
+    ticker: str
+    provider_instrument_id: str | None
+    quantity: Decimal
+    average_cost: Decimal | None
+    retrieved_at: datetime
+    source: str
+    asset_type: str = "equity"
 
 
 @dataclass(frozen=True)

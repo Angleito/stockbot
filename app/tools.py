@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 from decimal import Decimal
 from typing import Any
 
@@ -26,8 +27,10 @@ from .robinhood import capabilities
 from .robinhood.auth import OAuthConfig
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
+from .services import risk as risk_service
 from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
+from .storage import duckdb
 from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
 from .runtime import BudgetExhaustedError
 
@@ -624,6 +627,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "evaluate_mandate",
+            "description": "Deterministic risk/mandate evaluation of the latest portfolio snapshot against data/mandate.json: sector exposure, single-position weight, minimum cash, prohibited assets. Breaches are computed by Stockbot; explain them, do not recalculate.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_scans",
             "description": "Lists the user's saved Robinhood scanners (screeners): id, title, active filters, configured columns, sort order, and whether the scan is Cortex-managed (read-only).",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -799,6 +810,36 @@ def get_market_snapshot(ticker: str) -> dict:
 
 _PORTFOLIO_TOP_POSITIONS = 15
 _PORTFOLIO_TOP_LARGEST = 5
+
+def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict:
+    """Deterministic mandate evaluation over the latest persisted snapshot."""
+    path = mandate_path or Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
+    try:
+        evaluation = risk_service.evaluate_latest_mandate(path, data_root=data_root)
+    except FileNotFoundError as exc:
+        return {"error": str(exc)}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {
+        "result_type": "mandate_evaluation",
+        "snapshot_id": evaluation.snapshot_id,
+        "snapshot_created_at": evaluation.created_at.isoformat(),
+        "breaches": [
+            {
+                "metric": breach.metric,
+                "target": breach.target,
+                "severity": breach.severity,
+                "actual": str(breach.actual) if breach.actual is not None else None,
+                "limit": str(breach.limit) if breach.limit is not None else None,
+                "excess": str(breach.excess) if breach.excess is not None else None,
+                "note": breach.note,
+            }
+            for breach in evaluation.breaches
+        ],
+        "sector_exposures": {sector: str(weight) for sector, weight in evaluation.sector_exposures.items()},
+        "not_evaluable": list(evaluation.not_evaluable),
+        "source": "mandate",
+    }
 
 
 def _str_or_none(value) -> str | None:
@@ -1133,6 +1174,7 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price, min_d
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
 _DIRECT_HANDLERS = {
+    "evaluate_mandate": lambda args, model: evaluate_mandate(),
     "get_fundamentals": lambda args, model: edgar_client.get_fundamentals(
         args["ticker"], args["metric"]
     ),
@@ -1219,6 +1261,7 @@ _ROBINHOOD_HANDLERS = {
 # Every model-visible tool has one application-level capability. This is
 # separate from the Robinhood MCP registry, which governs broker operations.
 TOOL_CAPABILITIES: dict[str, Capability] = {
+    "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
     "get_filing_section": Capability.RESEARCH,
     "get_earnings_summary": Capability.RESEARCH,

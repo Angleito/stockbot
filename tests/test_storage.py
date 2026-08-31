@@ -159,7 +159,8 @@ def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc
                   ticker="AAPL", quantity=10.0, average_cost=150.25, market_price=160.0,
                   price_type="last_trade", market_value=1600.0, unrealized_gain=97.5,
                   unrealized_gain_pct=0.0649, portfolio_weight=0.0648,
-                  source="robinhood-api", quote_retrieved_at="2026-08-25T12:00:00Z"):
+                  source="robinhood-api", quote_retrieved_at="2026-08-25T12:00:00Z",
+                  asset_type="equity"):
     return {
         "snapshot_id": snapshot_id,
         "position_id": position_id,
@@ -177,6 +178,7 @@ def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc
         "portfolio_weight": portfolio_weight,
         "source": source,
         "quote_retrieved_at": quote_retrieved_at,
+        "asset_type": asset_type,
     }
 
 
@@ -258,6 +260,7 @@ def test_portfolio_columns_are_typed(data_root):
     assert pos.schema.field("quantity").type == pa.float64()
     assert pos.schema.field("market_price").type == pa.float64()
     assert pos.schema.field("unrealized_gain").type == pa.float64()
+    assert pos.schema.field("asset_type").type == pa.string()
     assert pos.column("quantity").to_pylist() == [10.0]
     assert pos.column("ticker").to_pylist() == ["AAPL"]
     assert pos.column("price_type").to_pylist() == ["last_trade"]
