@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.portfolio import PortfolioSnapshot
+from app.domain.portfolio import PortfolioSnapshot, local_account_id
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_sync import (
     read_latest_snapshot,
@@ -170,14 +170,14 @@ def test_sync_builds_valued_snapshot_with_two_accounts(data_root):
     _, _, snapshot = _run_sync(data_root)
     assert isinstance(snapshot, PortfolioSnapshot)
     assert snapshot.broker == "robinhood"
-    assert snapshot.account_ids == ("100000001", "100000002")
+    assert snapshot.account_ids == (local_account_id("100000001"), local_account_id("100000002"))
     assert snapshot.created_at == NOW
     assert snapshot.cash == Decimal("3234.56")
     assert snapshot.invested_value == Decimal("3390.24")
     assert snapshot.total_value == Decimal("6624.80")
     assert len(snapshot.positions) == 5
     by_id = {position.position_id: position for position in snapshot.positions}
-    wing = by_id[f"{SNAPSHOT_ID}:100000001:WING"]
+    wing = by_id[f"{SNAPSHOT_ID}:{local_account_id('100000001')}:WING"]
     assert wing.market_value == Decimal("1168.40")
     assert wing.market_price == Decimal("116.84")
     assert wing.quantity == Decimal("10")
@@ -187,14 +187,21 @@ def test_sync_builds_valued_snapshot_with_two_accounts(data_root):
     assert wing.entity_id == "sec:cik:0000320193"
     assert wing.security_id == "sec:equity:0000320193"
     assert wing.source == "robinhood_mcp"
-    aapl = by_id[f"{SNAPSHOT_ID}:100000001:AAPL"]
+    aapl = by_id[f"{SNAPSHOT_ID}:{local_account_id('100000001')}:AAPL"]
     assert aapl.market_value == Decimal("80.00")
-    msft = by_id[f"{SNAPSHOT_ID}:100000002:MSFT"]
+    msft = by_id[f"{SNAPSHOT_ID}:{local_account_id('100000002')}:MSFT"]
     assert msft.market_value == Decimal("2025.00")
-    assert msft.account_id == "100000002"
+    assert msft.account_id == local_account_id("100000002")
     weights = [position.portfolio_weight for position in snapshot.positions]
     assert all(weight is not None for weight in weights)
     assert sum(weights) == pytest.approx(Decimal("1"))
+
+
+def test_local_account_id_is_opaque_and_deterministic():
+    assert local_account_id("100000001") == local_account_id("100000001")
+    assert local_account_id("100000001") == "local:91b1e23ddbc8bddc"
+    assert "100000001" not in local_account_id("100000001")
+    assert local_account_id("100000001") != local_account_id("100000002")
 
 
 def test_sync_raises_on_malformed_quantity(data_root):
@@ -255,7 +262,7 @@ def test_read_latest_snapshot_round_trips(data_root):
     assert restored.snapshot_id == snapshot.snapshot_id
     assert restored.created_at == snapshot.created_at
     assert restored.broker == "robinhood"
-    assert restored.account_ids == ("100000001", "100000002")
+    assert restored.account_ids == (local_account_id("100000001"), local_account_id("100000002"))
     assert restored.cash == pytest.approx(snapshot.cash)
     assert restored.invested_value == pytest.approx(snapshot.invested_value)
     assert restored.total_value == pytest.approx(snapshot.total_value)
@@ -341,6 +348,27 @@ def test_persisted_rows_contain_no_oauth_data(data_root, monkeypatch):
                 assert not any(part in str(value).lower() for part in forbidden), (
                     f"{name}.{key} carries forbidden data"
                 )
+
+
+def test_persisted_rows_never_contain_raw_account_ids(data_root):
+    _seed_wing_alias(data_root)
+    _run_sync(data_root)
+    snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
+    positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
+    for table in (snapshots, positions):
+        for column_index in range(table.num_columns):
+            for cell in table.column(column_index).to_pylist():
+                if cell is not None:
+                    assert "100000001" not in str(cell) and "100000002" not in str(cell), (
+                        f"raw broker account id leaked into persisted cell: {cell!r}"
+                    )
+    assert positions.column("account_id").to_pylist() == [
+        local_account_id("100000001"),
+        local_account_id("100000001"),
+        local_account_id("100000001"),
+        local_account_id("100000002"),
+        local_account_id("100000002"),
+    ]
 
 
 def test_sync_without_explicit_now_uses_utc_now(data_root, monkeypatch):

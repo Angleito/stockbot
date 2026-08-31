@@ -21,7 +21,7 @@ from ..analytics.portfolio import (
     unrealized_gain_pct,
     valuation_price,
 )
-from ..domain.portfolio import PortfolioSnapshot, Position
+from ..domain.portfolio import PortfolioSnapshot, Position, local_account_id
 from ..robinhood.account import BrokerageAccount, BrokeragePosition, CashBalance
 from ..robinhood.options import MarketSnapshot
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
@@ -131,28 +131,31 @@ def build_portfolio_snapshot(
     total_value = invested_value + cash if invested_value is not None and cash is not None else None
 
     snapshot_id = f"portfolio:robinhood:{created_at.isoformat()}"
-    account_ids = tuple(account.account_id for account in accounts)
-    built = tuple(
-        Position(
-            position_id=f"{snapshot_id}:{position.account_id}:{position.ticker}",
-            account_id=position.account_id,
-            security_id=position.security_id,
-            entity_id=position.entity_id,
-            ticker=position.ticker,
-            quantity=position.quantity,
-            average_cost=position.average_cost,
-            market_price=position.market_price,
-            market_value=position.market_value,
-            unrealized_gain=position.unrealized_gain,
-            unrealized_gain_pct=position.unrealized_gain_pct,
-            portfolio_weight=position_weight(position.market_value, invested_value),
-            source=position.source,
-            retrieved_at=position.retrieved_at,
-            price_type=position.price_type,
-            quote_retrieved_at=position.quote_retrieved_at,
+    account_ids = tuple(local_account_id(account.account_id) for account in accounts)
+    built_positions: list[Position] = []
+    for position in positions:
+        account_id = local_account_id(position.account_id)
+        built_positions.append(
+            Position(
+                position_id=f"{snapshot_id}:{account_id}:{position.ticker}",
+                account_id=account_id,
+                security_id=position.security_id,
+                entity_id=position.entity_id,
+                ticker=position.ticker,
+                quantity=position.quantity,
+                average_cost=position.average_cost,
+                market_price=position.market_price,
+                market_value=position.market_value,
+                unrealized_gain=position.unrealized_gain,
+                unrealized_gain_pct=position.unrealized_gain_pct,
+                portfolio_weight=position_weight(position.market_value, invested_value),
+                source=position.source,
+                retrieved_at=position.retrieved_at,
+                price_type=position.price_type,
+                quote_retrieved_at=position.quote_retrieved_at,
+            )
         )
-        for position in positions
-    )
+    built = tuple(built_positions)
     return PortfolioSnapshot(
         snapshot_id=snapshot_id,
         created_at=created_at,
@@ -174,7 +177,7 @@ def persist_snapshot(
 ) -> None:
     """Persist an immutable snapshot (idempotent: a rerun writes 0 rows).
 
-    Never writes OAuth/token or raw provider payload data.
+    Never writes OAuth/token or raw provider payload data or raw broker account identifiers.
     """
     parquet_root = Path(data_root) / "parquet" if data_root else None
     parquet.write_rows(
@@ -273,8 +276,11 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
     """Return the newest persisted snapshot, or None when none exists.
 
     ``account_ids`` is reconstructed from the persisted positions (the
-    snapshot schema carries only account_count); accounts without positions
-    are not recoverable.
+    snapshot schema carries only account_count) as local opaque
+    identifiers; accounts without positions are not recoverable.
+    Positions are returned in persisted write order: a snapshot's rows
+    are written in one batch, and position_id embeds opaque account ids
+    that do not sort by account.
     """
     rows = duckdb.query(
         "SELECT * FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1",
@@ -286,7 +292,7 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
     snapshot_id = str(row["snapshot_id"])
     created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
     position_rows = duckdb.query(
-        "SELECT * FROM portfolio_positions WHERE snapshot_id = ? ORDER BY position_id",
+        "SELECT * FROM portfolio_positions WHERE snapshot_id = ?",
         params=[snapshot_id],
         data_root=data_root,
     )

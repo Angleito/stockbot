@@ -11,7 +11,8 @@ reachable, every discovered read tool is covered by the allowlist (drift
 guard tying discovery to app/robinhood/capabilities.py), every
 trading-looking tool is deny-listed, and the full read-only portfolio sync
 persists a snapshot that round-trips through read_latest_snapshot with no
-OAuth/token material in any persisted row.  No trading/write tool is ever
+OAuth/token material in any persisted row, and no raw broker account
+identifier is printed or persisted.  No trading/write tool is ever
 invoked.
 """
 
@@ -48,10 +49,6 @@ TRADING_KEYWORDS = (
     "exercise", "withdraw", "deposit", "transfer",
 )
 FORBIDDEN_COLUMNS = ("token", "oauth", "secret", "access", "refresh", "authorization")
-
-
-def _masked(account_ids):
-    return [f"...{account_id[-4:]}" for account_id in account_ids]
 
 
 def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path):
@@ -113,20 +110,16 @@ def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path):
             assert not any(part in column.lower() for part in FORBIDDEN_COLUMNS), (
                 f"{table_name}.{column} is a forbidden column"
             )
+        for account in accounts:
+            raw_account_id = account.account_id
+            assert not any(
+                raw_account_id in str(cell)
+                for column in table.column_names
+                for cell in table.column(column).to_pylist()
+                if cell is not None
+            ), f"persisted {table_name} leaks raw broker account id"
 
-    print("Robinhood smoke summary:")
-    print(f"  discovered tools: {len(tools)}")
-    account_ids = [account.account_id for account in accounts]
-    print(f"  accounts: {len(account_ids)} (masked: {', '.join(_masked(account_ids))})")
+    print("Robinhood smoke passed")
+    print(f"  accounts: {len(accounts)}")
     print(f"  positions: {len(snapshot.positions)}")
-    if snapshot.total_value is not None:
-        print(f"  total value: ${snapshot.total_value:.2f}")
-    else:
-        print("  total value: unavailable")
-    for position in snapshot.positions:
-        market_value = (
-            f"${position.market_value:.2f}"
-            if position.market_value is not None
-            else "unpriced"
-        )
-        print(f"  {position.ticker}: {position.quantity} shares, {market_value}")
+    print("  portfolio sync: OK")
