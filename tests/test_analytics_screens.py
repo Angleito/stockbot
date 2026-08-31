@@ -22,7 +22,7 @@ from app.normalization import (
     normalize_sec_company_facts,
     normalize_finra_short_interest,
 )
-from app.storage import parquet
+from app.storage import duckdb, parquet
 
 from datetime import date
 
@@ -128,6 +128,39 @@ def test_rerun_is_deterministic_and_creates_no_duplicates(data_root):
     assert [e["ticker"] for e in first["entries"]] == [e["ticker"] for e in second["entries"]]
     assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 1
     assert parquet.count_rows("screen_entries", root=data_root / "parquet") == 3
+
+
+def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root):
+    """Mid-day targeted enrichment publishes a new screen version instead of
+    being deduplicated away; the old version stays immutable."""
+    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
+    _seed_short_interest(data_root, _default_rows() + [
+        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
+         "currentShortPositionQuantity": 20},
+    ])
+    _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
+    first = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in first["entries"]] == ["CCC", "AAA", "BBB"]
+    assert first["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    # Mid-day enrichment: DDD facts (filed 2026-08-05 -> known_at, visible at as_of 08-14)
+    _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
+    second = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in second["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
+    # Both versions exist (append-only); deterministic no-op on identical inputs
+    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 2
+    runs = duckdb.query("SELECT run_id FROM screen_runs ORDER BY created_at, run_id", data_root=data_root)
+    assert len(runs) == 2 and runs[0]["run_id"] != runs[1]["run_id"]
+    versions = set()
+    for r in runs:
+        versions.add(tuple(row["ticker"] for row in duckdb.query(
+            "SELECT ticker FROM screen_entries WHERE run_id = ? ORDER BY rank",
+            params=[r["run_id"]], data_root=data_root)))
+    assert ("CCC", "DDD", "AAA", "BBB") in versions   # enriched version published
+    assert ("CCC", "AAA", "BBB") in versions          # old version immutable
+    # Reader serves the latest applicable version
+    latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
 
 
 def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root):

@@ -10,6 +10,7 @@ agent tool.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from pathlib import Path
@@ -147,6 +148,52 @@ def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
     return by_entity
 
 
+def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path) -> str:
+    """Deterministic hash of the source rows the screen consumed.
+
+    Mirrors the filters of _snapshot_rows/_ticker_alias_map/
+    _security_type_map/_facts_by_entity (same WHERE/QUALIFY clauses) so the
+    fingerprint changes exactly when the materialized inputs change: new SEC
+    enrichment, corrected FINRA snapshot. Stable otherwise.
+    """
+    clause, param = duckdb.as_of_clause(as_of)
+    payload = {
+        "short_interest": duckdb.query(
+            "SELECT row_id, content_hash, known_at FROM short_interest "
+            f"WHERE settlement_date = ? AND {clause} "
+            "QUALIFY row_number() OVER (PARTITION BY symbol_code "
+            "ORDER BY known_at DESC, retrieved_at DESC) = 1 ORDER BY symbol_code",
+            params=[settlement_date, param],
+            data_root=data_root,
+        ),
+        "entity_aliases": duckdb.query(
+            "SELECT alias_type, alias_value, entity_id, source, valid_from, "
+            "content_hash, known_at FROM entity_aliases "
+            f"WHERE alias_type = 'ticker' AND {clause} "
+            "ORDER BY alias_value, entity_id, source, valid_from",
+            params=[param],
+            data_root=data_root,
+        ),
+        "securities": duckdb.query(
+            "SELECT security_id, content_hash, known_at FROM securities "
+            f"WHERE {clause} "
+            "QUALIFY row_number() OVER (PARTITION BY entity_id "
+            "ORDER BY known_at DESC, retrieved_at DESC) = 1 ORDER BY entity_id",
+            params=[param],
+            data_root=data_root,
+        ),
+        "financial_facts": duckdb.query(
+            "SELECT fact_id, content_hash, known_at FROM financial_facts "
+            f"WHERE concept = ? AND {clause} ORDER BY fact_id",
+            params=[_SHARES_CONCEPT, param],
+            data_root=data_root,
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+
+
 def materialize_short_interest_screen(
     settlement_date: str,
     as_of: Optional[str] = None,
@@ -244,7 +291,7 @@ def materialize_short_interest_screen(
             "sec_source_url": fact.get("source_url"),
         })
     candidates.sort(key=lambda item: (-item["short_interest_percent"], item["ticker"]))
-    run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}"
+    run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
     parquet.write_rows(
         "screen_runs",
@@ -303,16 +350,18 @@ def read_short_interest_screen(
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
     limit = _clamp_limit(limit)
     as_of = _resolve_as_of(as_of)
-    run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}"
     runs = duckdb.query(
-        "SELECT * FROM screen_runs WHERE run_id = ?", params=[run_id], data_root=data_root
+        "SELECT * FROM screen_runs WHERE screen = ? AND settlement_date = ? AND as_of = ? "
+        "ORDER BY created_at DESC, run_id DESC LIMIT 1",
+        params=[SCREEN_NAME, settlement_date, as_of],
+        data_root=data_root,
     )
     if not runs:
         return {"error": f"No published short-interest leaderboard for settlement date {settlement_date}."}
     run = runs[0]
     entries = duckdb.query(
         "SELECT * FROM screen_entries WHERE run_id = ? ORDER BY rank LIMIT ?",
-        params=[run_id, limit],
+        params=[run["run_id"], limit],
         data_root=data_root,
     )
     try:
@@ -383,8 +432,8 @@ def get_short_interest_leaderboard(
     as_of: Optional[str] = None,
     data_root: Optional[Path] = None,
 ) -> dict:
-    """Return a bounded leaderboard, materializing the requested cycle if it
-    has not been published for the requested ``as_of``.
+    """Return a bounded leaderboard, materializing the requested cycle
+    (republishing only when its inputs changed) for the requested ``as_of``.
 
     ``as_of`` defaults to today; pass an explicit as_of for a historical
     screen (only data knowable on/before as_of is used).
@@ -392,11 +441,9 @@ def get_short_interest_leaderboard(
     try:
         as_of = _resolve_as_of(as_of)
         target = settlement_date or latest_settlement_date(as_of, data_root)
-        result = read_short_interest_screen(target, as_of, limit, data_root=data_root)
-        if "error" in result:
-            result = materialize_short_interest_screen(target, as_of, data_root=data_root)
-            if "error" not in result:
-                result = read_short_interest_screen(target, as_of, limit, data_root=data_root)
+        result = materialize_short_interest_screen(target, as_of, data_root=data_root)
+        if "error" not in result:
+            result = read_short_interest_screen(target, as_of, limit, data_root=data_root)
         return result
     except Exception as exc:
         return {"error": f"Short-interest leaderboard is unavailable: {exc}"}
