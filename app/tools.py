@@ -1,8 +1,9 @@
 """Tool implementations + OpenAI-format JSON schemas for OpenRouter."""
 
+import hashlib
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -28,6 +29,8 @@ from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services.portfolio_research import enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
+from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -643,10 +646,15 @@ TOOLS = [
         },
     },
 ]
+# Content-derived registry version for observability records.
+TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
     """Plain (tool-less) completion — used only by get_earnings_summary."""
+    t0_iso = datetime.now(timezone.utc).isoformat()
+    if not reserve_model_call_from_current():
+        raise BudgetExhaustedError("model call budget exhausted")
     resp = requests.post(
         f"{OPENROUTER_BASE_URL}/chat/completions",
         headers={
@@ -661,7 +669,18 @@ def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    payload = resp.json()
+    record_model_call_from_current(
+        provider="openrouter",
+        model=model,
+        started_at=t0_iso,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        usage=payload.get("usage"),
+        finish_reason=payload.get("choices", [{}])[0].get("finish_reason"),
+        tool_call_count=0,
+        provider_request_id=payload.get("id"),
+    )
+    return payload["choices"][0]["message"]["content"]
 
 
 def get_earnings_summary(ticker: str, model: str) -> dict:
