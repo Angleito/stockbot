@@ -18,10 +18,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import requests
+
 from ..redact import redact_json, redact_text
 from ..runtime import EventType, ExecutionBudget
 
 logger = logging.getLogger(__name__)
+
+def model_error_category(exc: Exception) -> str:
+    """Map an upstream exception to a coarse category for observability."""
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.HTTPError):
+        return "http"
+    if isinstance(exc, requests.ConnectionError):
+        return "connection"
+    if isinstance(exc, json.JSONDecodeError):
+        return "parse"
+    return "other"
 
 # Default data root when the recorder is not given an explicit one.
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
@@ -52,17 +66,25 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   tool_call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, round INTEGER,
   tool_name TEXT NOT NULL, tool_version TEXT, arguments_json TEXT,
   started_at TEXT NOT NULL, completed_at TEXT, duration_ms REAL, status TEXT,
-  result_row_count INTEGER, result_bytes INTEGER, result_hash TEXT,
-  source_names TEXT, source_freshness TEXT, error_type TEXT, error_message TEXT);
+  result_row_count INTEGER, returned_count INTEGER, truncated INTEGER,
+  result_bytes INTEGER, result_hash TEXT,
+    source_names TEXT, source_freshness TEXT, as_of TEXT, error_type TEXT, error_message TEXT);
 CREATE TABLE IF NOT EXISTS model_calls (
   model_call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, round INTEGER,
   provider TEXT NOT NULL, model TEXT NOT NULL, started_at TEXT NOT NULL,
   completed_at TEXT, duration_ms REAL, input_tokens INTEGER, output_tokens INTEGER,
   reasoning_tokens INTEGER, cached_tokens INTEGER, estimated_cost REAL,
-  finish_reason TEXT, tool_call_count INTEGER, provider_request_id TEXT);
+    finish_reason TEXT, tool_call_count INTEGER, provider_request_id TEXT,
+  status TEXT NOT NULL DEFAULT 'completed', error_type TEXT, error_category TEXT);
+CREATE TABLE IF NOT EXISTS evidence (
+  evidence_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+  round INTEGER, tool_name TEXT, rendered_hash TEXT NOT NULL,
+  rendered_bytes INTEGER NOT NULL, estimated_tokens INTEGER NOT NULL,
+    source_names TEXT, source_freshness TEXT, as_of TEXT, rendered_text TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
 """
 
 
@@ -142,6 +164,26 @@ class RunRecorder:
             os.makedirs(path.parent, exist_ok=True)
             conn = sqlite3.connect(str(path))
             conn.executescript(_SCHEMA)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+            if "returned_count" not in cols:
+                conn.execute("ALTER TABLE tool_calls ADD COLUMN returned_count INTEGER")
+            if "truncated" not in cols:
+                conn.execute("ALTER TABLE tool_calls ADD COLUMN truncated INTEGER")
+            if "as_of" not in cols:
+                conn.execute("ALTER TABLE tool_calls ADD COLUMN as_of TEXT")
+            mcols = {row[1] for row in conn.execute("PRAGMA table_info(model_calls)")}
+            if "status" not in mcols:
+                conn.execute(
+                    "ALTER TABLE model_calls ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+                )
+            if "error_type" not in mcols:
+                conn.execute("ALTER TABLE model_calls ADD COLUMN error_type TEXT")
+            if "error_category" not in mcols:
+                conn.execute("ALTER TABLE model_calls ADD COLUMN error_category TEXT")
+            ecols = {row[1] for row in conn.execute("PRAGMA table_info(evidence)")}
+            if "as_of" not in ecols:
+                conn.execute("ALTER TABLE evidence ADD COLUMN as_of TEXT")
+            conn.commit()
             self.started_at = _now()
             conn.execute(
                 "INSERT INTO agent_runs (run_id, request_id, started_at, question,"
@@ -266,10 +308,13 @@ class RunRecorder:
         completed_at: str,
         status: str,
         result_row_count: int,
+        returned_count: Optional[int],
+        truncated: bool,
         result_bytes: int,
         result_hash: str,
         source_names: str,
         source_freshness: str,
+        as_of: Optional[str],
         error_type: Optional[str],
         error_message: Optional[str],
     ) -> None:
@@ -281,16 +326,53 @@ class RunRecorder:
             self._conn.execute(
                 "INSERT INTO tool_calls (tool_call_id, run_id, round, tool_name,"
                 " tool_version, arguments_json, started_at, completed_at, duration_ms,"
-                " status, result_row_count, result_bytes, result_hash, source_names,"
-                " source_freshness, error_type, error_message)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, result_row_count, returned_count, truncated, result_bytes,"
+                " result_hash, source_names, source_freshness, as_of, error_type, error_message)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     tool_call_id, self.run_id, round, tool_name,
                     self.tool_registry_version,
                     redact_json(arguments_json), started_at, completed_at,
                     _duration_ms(started_at, completed_at),
-                    status, result_row_count, result_bytes, result_hash,
-                    source_names, source_freshness, error_type, message,
+                    status, result_row_count, returned_count,
+                    (1 if truncated else 0), result_bytes, result_hash,
+                    source_names, source_freshness, as_of, error_type, message,
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            self._disable(exc)
+
+    def record_evidence(
+        self,
+        *,
+        evidence_id: str,
+        run_id: str,
+        tool_call_id: str,
+        round: Optional[int],
+        tool_name: str,
+        rendered_hash: str,
+        rendered_bytes: int,
+        estimated_tokens: int,
+        source_names: str,
+        source_freshness: str,
+        as_of: Optional[str],
+        rendered_text: str,
+    ) -> None:
+        """Persist one rendered-evidence record (what the model received)."""
+        if not self.enabled:
+            return
+        try:
+            self._note_round(round)
+            self._conn.execute(
+                "INSERT INTO evidence (evidence_id, run_id, tool_call_id, round,"
+                " tool_name, rendered_hash, rendered_bytes, estimated_tokens,"
+                " source_names, source_freshness, as_of, rendered_text)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, run_id, tool_call_id, round, tool_name,
+                    rendered_hash, rendered_bytes, estimated_tokens,
+                    source_names, source_freshness, as_of, rendered_text,
                 ),
             )
             self._conn.commit()
@@ -309,6 +391,9 @@ class RunRecorder:
         finish_reason: Optional[str] = None,
         tool_call_count: int = 0,
         provider_request_id: Optional[str] = None,
+        status: str = "completed",
+        error_type: Optional[str] = None,
+        error_category: Optional[str] = None,
     ) -> float:
         """Record one model completion; returns the estimated USD cost."""
         if not self.enabled:
@@ -332,14 +417,16 @@ class RunRecorder:
                 "INSERT INTO model_calls (model_call_id, run_id, round, provider,"
                 " model, started_at, completed_at, duration_ms, input_tokens,"
                 " output_tokens, reasoning_tokens, cached_tokens, estimated_cost,"
-                " finish_reason, tool_call_count, provider_request_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " finish_reason, tool_call_count, provider_request_id,"
+                " status, error_type, error_category)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     f"{self.run_id}:mc:{self.model_calls}", self.run_id, round,
                     provider, model, started_at, completed_at,
                     _duration_ms(started_at, completed_at),
                     input_tokens, output_tokens, reasoning_tokens, cached_tokens,
                     cost, finish_reason, tool_call_count, provider_request_id,
+                    status, error_type, error_category,
                 ),
             )
             self._conn.commit()
@@ -438,6 +525,9 @@ def record_model_call_from_current(
     finish_reason: Optional[str] = None,
     tool_call_count: int = 0,
     provider_request_id: Optional[str] = None,
+    status: str = "completed",
+    error_type: Optional[str] = None,
+    error_category: Optional[str] = None,
 ) -> float:
     """Record a nested model call against the active recorder, if any."""
     recorder = get_current_recorder()
@@ -453,6 +543,9 @@ def record_model_call_from_current(
         finish_reason=finish_reason,
         tool_call_count=tool_call_count,
         provider_request_id=provider_request_id,
+        status=status,
+        error_type=error_type,
+        error_category=error_category,
     )
 
 
@@ -567,6 +660,22 @@ def get_model_calls(run_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM model_calls WHERE run_id = ? ORDER BY started_at", (run_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def get_evidence(run_id: str) -> list[dict]:
+    try:
+        conn = _query_conn()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY evidence_id", (run_id,)
             ).fetchall()
             return [dict(row) for row in rows]
         finally:

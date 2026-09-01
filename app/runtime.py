@@ -25,13 +25,11 @@ class ResearchRequest:
 class ResearchPlan:
     question: str
     as_of: str
-    required_data: list[dict]
 
     def to_dict(self) -> dict:
         return {
             "question": self.question,
             "as_of": self.as_of,
-            "required_data": self.required_data,
         }
 
 
@@ -60,9 +58,19 @@ class ResearchResult:
     run_id: str
     answer: str
     evidence_refs: list[str]
-    confidence: float
+    groundedness: str
     data_freshness: dict[str, str]
     completed_at: str
+
+
+@dataclass(frozen=True)
+class ToolResultMeta:
+    row_count: int
+    returned_count: int | None
+    truncated: bool
+    as_of: str | None
+    source_names: list[str]
+    source_freshness: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -98,10 +106,13 @@ class ToolCall:
     duration_ms: float
     status: str
     result_row_count: int
+    returned_count: int | None
+    truncated: bool
     result_bytes: int
     result_hash: str
     source_names: str
     source_freshness: str
+    as_of: str | None
     error_type: str | None
     error_message: str | None
 
@@ -205,9 +216,10 @@ class ExecutionBudget:
 
 class EventType(StrEnum):
     RUN_STARTED = "run_started"
-    PLAN_CREATED = "plan_created"
+    RESEARCH_CONTEXT_CREATED = "research_context_created"
     MODEL_REQUESTED = "model_requested"
     MODEL_RESPONDED = "model_responded"
+    MODEL_FAILED = "model_failed"
     TOOL_REQUESTED = "tool_requested"
     TOOL_STARTED = "tool_started"
     TOOL_COMPLETED = "tool_completed"
