@@ -18,10 +18,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import requests
+
 from ..redact import redact_json, redact_text
 from ..runtime import EventType, ExecutionBudget
 
 logger = logging.getLogger(__name__)
+
+def model_error_category(exc: Exception) -> str:
+    """Map an upstream exception to a coarse category for observability."""
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.HTTPError):
+        return "http"
+    if isinstance(exc, requests.ConnectionError):
+        return "connection"
+    if isinstance(exc, json.JSONDecodeError):
+        return "parse"
+    return "other"
 
 # Default data root when the recorder is not given an explicit one.
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
@@ -511,6 +525,9 @@ def record_model_call_from_current(
     finish_reason: Optional[str] = None,
     tool_call_count: int = 0,
     provider_request_id: Optional[str] = None,
+    status: str = "completed",
+    error_type: Optional[str] = None,
+    error_category: Optional[str] = None,
 ) -> float:
     """Record a nested model call against the active recorder, if any."""
     recorder = get_current_recorder()
@@ -526,6 +543,9 @@ def record_model_call_from_current(
         finish_reason=finish_reason,
         tool_call_count=tool_call_count,
         provider_request_id=provider_request_id,
+        status=status,
+        error_type=error_type,
+        error_category=error_category,
     )
 
 

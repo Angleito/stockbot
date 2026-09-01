@@ -17,6 +17,7 @@ import requests
 from app import agent
 from app import analytics
 from app import finra_analysis
+from app import finra_client
 from app import tools as tools_module
 from app.agent import _BUDGET_EXHAUSTED_RESPONSE, run_chat
 from app.normalization import (
@@ -50,6 +51,8 @@ from app.storage.runs import (
     reset_current_budget,
     set_current_budget,
 )
+
+from tests.test_finra import FakeCache, _mock_get, _response, _token_response
 
 TEST_POLICY = ChatPolicy(
     allowed_models=frozenset({"test"}),
@@ -807,6 +810,119 @@ def test_nested_model_call_reserves_budget(monkeypatch):
     assert "model call budget exhausted" in result.answer
     run = get_run(result.run_id)
     assert run["status"] == "partial"
+
+
+def test_nested_earnings_failure_recorded(monkeypatch):
+    """A failed nested model call inside a tool records a failed model_calls
+    row (status/error_type/error_category), and model_call_count counts it."""
+    fake = FakeOpenRouter([
+        _tool_round("get_earnings_summary", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        tools_module.edgar_client, "get_latest_earnings_release",
+        lambda ticker: {"ticker": ticker, "text": "press release text", "source": "8-K test"},
+    )
+    monkeypatch.setattr("app.cache.get", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise requests.Timeout("boom")
+
+    monkeypatch.setattr(tools_module.requests, "post", _boom)
+    result = run_chat(
+        [{"role": "user", "content": "How did AAPL do last quarter?"}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert result.answer.startswith("The requested data is unavailable")
+    run = get_run(result.run_id)
+    assert run["status"] == "partial"
+    assert run["model_call_count"] == 2
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["status"] == "failed"
+    model_calls = get_model_calls(result.run_id)
+    assert len(model_calls) == 2
+    assert model_calls[0]["status"] == "completed"
+    failed = model_calls[1]
+    assert failed["status"] == "failed"
+    assert failed["error_type"] == "Timeout"
+    assert failed["error_category"] == "timeout"
+    assert failed["input_tokens"] == 0
+    assert failed["estimated_cost"] == 0
+
+
+def test_finra_nested_failure_records_and_falls_back(monkeypatch):
+    """A failed nested FINRA analysis call records a failed model_calls row
+    while the deterministic briefing still wins."""
+    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "mock/analysis-model")
+    monkeypatch.setenv("FINRA_USE_MOCK", "")
+    monkeypatch.setattr(finra_client, "get_finra_client_id", lambda: "client")
+    monkeypatch.setattr(finra_client, "get_finra_client_secret", lambda: "secret")
+    finra_client.reset_token_cache()
+    finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
+    monkeypatch.setattr(finra_client, "cache", FakeCache())
+    monkeypatch.setattr(finra_analysis, "cache", FakeCache())
+    monkeypatch.setattr(finra_client.requests, "get", _mock_get)
+
+    rows = [{
+        "symbolCode": "AAPL",
+        "issueName": "Apple Inc.",
+        "settlementDate": "2026-08-14",
+        "currentShortPositionQuantity": 100,
+    }]
+
+    def fake_post(url, **kwargs):
+        if "/chat/completions" in url:
+            raise requests.Timeout("nested analysis timeout")
+        if "token" in url:
+            return _token_response()
+        return _response(rows)
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    fake = FakeOpenRouter([
+        _tool_round("query_finra", {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+        }),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "Analyze AAPL short interest."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert result.answer == "ok"
+    assert result.groundedness == "grounded"
+    assert result.evidence_refs
+    run = get_run(result.run_id)
+    assert run["status"] == "completed"
+    # 3 rows: two primary rounds (tool round + final answer) + the failed
+    # nested analysis attempt, which model_call_count must include.
+    assert run["model_call_count"] == 3
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["status"] == "completed"
+    events = get_events(result.run_id)
+    completed = [
+        ev for ev in events
+        if ev["event_type"] == "tool_completed" and ev["tool_name"] == "query_finra"
+    ]
+    assert completed and "deterministic_only" in completed[0]["result_summary"]
+    model_calls = get_model_calls(result.run_id)
+    assert len(model_calls) == 3
+    assert model_calls[0]["status"] == "completed"
+    failed = next(m for m in model_calls if m["status"] == "failed")
+    assert failed["status"] == "failed"
+    assert failed["error_type"] == "Timeout"
+    assert failed["error_category"] == "timeout"
+    assert failed["input_tokens"] == 0
+    assert failed["estimated_cost"] == 0
 
 
 def test_nested_helpers_reserve_budget(monkeypatch):

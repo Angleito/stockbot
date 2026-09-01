@@ -33,6 +33,7 @@ from .storage.ids import request_id, run_id
 from .storage.runs import (
     RunRecorder,
     get_runs_db_path,
+    model_error_category,
     reset_current_budget,
     reset_current_recorder,
     set_current_budget,
@@ -107,18 +108,6 @@ def _call_openrouter(
         )
     resp.raise_for_status()
     return resp.json()
-
-
-def _model_error_category(exc: Exception) -> str:
-    if isinstance(exc, requests.Timeout):
-        return "timeout"
-    if isinstance(exc, requests.HTTPError):
-        return "http"
-    if isinstance(exc, requests.ConnectionError):
-        return "connection"
-    if isinstance(exc, json.JSONDecodeError):
-        return "parse"
-    return "other"
 
 
 def _normalize_public_messages(messages: list, policy: ChatPolicy) -> list[dict[str, str]]:
@@ -282,7 +271,7 @@ def _request_and_record(
             metadata={
                 "provider": recorder.provider,
                 "error_type": type(exc).__name__,
-                "error_category": _model_error_category(exc),
+                "error_category": model_error_category(exc),
             },
         )
         recorder.record_model_call(
@@ -294,7 +283,7 @@ def _request_and_record(
             usage=None,
             status="failed",
             error_type=type(exc).__name__,
-            error_category=_model_error_category(exc),
+            error_category=model_error_category(exc),
         )
         raise
     t1 = time.perf_counter()

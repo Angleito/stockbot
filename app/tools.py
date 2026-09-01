@@ -28,7 +28,11 @@ from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
-from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .storage.runs import (
+    model_error_category,
+    record_model_call_from_current,
+    reserve_model_call_from_current,
+)
 from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -654,21 +658,34 @@ def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
     t0_iso = datetime.now(timezone.utc).isoformat()
     if not reserve_model_call_from_current():
         raise BudgetExhaustedError("model call budget exhausted")
-    resp = requests.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {get_openrouter_api_key()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {get_openrouter_api_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        record_model_call_from_current(
+            provider="openrouter",
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=model_error_category(exc),
+        )
+        raise
     record_model_call_from_current(
         provider="openrouter",
         model=model,
