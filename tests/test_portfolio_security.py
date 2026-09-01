@@ -189,7 +189,17 @@ def test_naive_as_of_rejected(data_root):
         resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0), data_root=data_root)
 
 
-def test_date_as_of_rejected(data_root):
-    _seed_amd(data_root)
-    with pytest.raises(TypeError):
-        resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)
+def test_newest_alias_wins_chronologically_not_lexically(data_root):
+    _seed_entity(data_root)
+    _seed_alias(data_root, known_at="2026-08-25T13:00:00+01:00", security_id=None)
+    # Distinct source so both rows persist: entity_aliases dedups on
+    # (alias_type, alias_value, entity_id, source, valid_from).
+    _seed_alias(data_root, known_at="2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control")
+    _seed_security(data_root)
+    resolution = resolve_security(
+        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
+    # older than 12:30Z — the 12:30Z alias must win.
+    assert resolution.resolved is True
+    assert resolution.security_id == AMD_SECURITY

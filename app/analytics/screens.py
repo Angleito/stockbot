@@ -88,7 +88,7 @@ def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> list[di
         "SELECT * FROM short_interest "
         f"WHERE settlement_date = ? AND {clause} "
         "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-        "ORDER BY known_at DESC, retrieved_at DESC) = 1 "
+        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 "
         "ORDER BY symbol_code",
         params=[settlement_date, param],
         data_root=data_root,
@@ -120,7 +120,7 @@ def _security_type_map(as_of: str, data_root: Path) -> dict[str, str]:
         "SELECT entity_id, security_type FROM securities "
         f"WHERE {clause} "
         "QUALIFY row_number() OVER (PARTITION BY entity_id "
-        "ORDER BY known_at DESC, retrieved_at DESC) = 1",
+        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
         params=[param],
         data_root=data_root,
     )
@@ -162,7 +162,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             "SELECT row_id, content_hash, known_at FROM short_interest "
             f"WHERE settlement_date = ? AND {clause} "
             "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-            "ORDER BY known_at DESC, retrieved_at DESC) = 1 ORDER BY symbol_code",
+            "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 ORDER BY symbol_code",
             params=[settlement_date, param],
             data_root=data_root,
         ),
@@ -178,7 +178,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             "SELECT security_id, content_hash, known_at FROM securities "
             f"WHERE {clause} "
             "QUALIFY row_number() OVER (PARTITION BY entity_id "
-            "ORDER BY known_at DESC, retrieved_at DESC) = 1 ORDER BY entity_id",
+            "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 ORDER BY entity_id",
             params=[param],
             data_root=data_root,
         ),

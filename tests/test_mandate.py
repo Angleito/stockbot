@@ -455,6 +455,23 @@ def test_load_sector_map_newest_wins(data_root):
     }
 
 
+def test_load_sector_map_mixed_offsets_newest_wins(data_root):
+    parquet.write_rows(
+        "sector_mappings",
+        [
+            _sector_row("sec:cik:0000320193", "aero", "2026-08-25T13:00:00+01:00"),
+            _sector_row("sec:cik:0000320193", "semiconductors", "2026-08-25T12:30:00Z"),
+        ],
+        root=data_root / "parquet",
+    )
+    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
+    # older than 12:30Z — semiconductors must win.
+    assert risk_service.load_sector_map(data_root=data_root) == {
+        "sec:cik:0000320193": "semiconductors"
+    }
+
+
+
 def test_load_sector_map_as_of_prefers_older(data_root):
     parquet.write_rows(
         "sector_mappings",

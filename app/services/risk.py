@@ -26,7 +26,7 @@ def load_sector_map(
     rows = duckdb.query(
         "SELECT entity_id, sector FROM sector_mappings "
         f"WHERE {clause} "
-        "QUALIFY row_number() OVER (PARTITION BY entity_id ORDER BY known_at DESC, retrieved_at DESC) = 1",
+        "QUALIFY row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
         params=params,
         data_root=data_root,
     )

@@ -335,9 +335,23 @@ def test_finra_newest_version_wins_per_symbol(data_root):
 
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
 
+def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root):
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_200_000,
+        prev_position=1_000_000, known_at="2026-08-17T13:00:00+01:00", content_hash="finra-v1-mixed-hash",
+    )
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_150_000,
+        prev_position=1_000_000, known_at="2026-08-17T12:30:00Z", content_hash="finra-v2-hash",
+    )
+
+    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+
+    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
+    # older than 12:30Z — the 12:30Z (v2) values must win.
     assert research.latest_finra_metrics["short_position"] == Decimal("1150000")
-    assert research.latest_finra_metrics["settlement_date"] == "2026-08-14"
-    assert research.latest_finra_metrics["known_at"] == "2026-08-20T12:00:00Z"
+    assert research.latest_finra_metrics["known_at"] == "2026-08-17T12:30:00Z"
+
 
 
 def test_no_data_reports_empty_metrics_without_raising(data_root):

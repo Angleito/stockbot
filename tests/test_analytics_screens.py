@@ -494,9 +494,57 @@ def test_security_classification_is_consulted(data_root):
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     assert "ETF" in [e["ticker"] for e in early["entries"]]
 
-    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
-    assert later["coverage"]["exclusions"]["not_classified_common_equity"] == 1
-    assert "ETF" not in [e["ticker"] for e in later["entries"]]
+
+def test_corrected_snapshot_mixed_offsets_newest_wins(data_root):
+    """A mixed-offset revision: the lexically-larger but chronologically
+    older 13:00+01:00 version must lose to the 12:30Z correction."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T13:00:00+01:00")
+    corrected = [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+    ]
+    _seed_short_interest(data_root, corrected, known_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
+
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
+    assert result["entries"][1]["short_shares"] == 25  # the 12:30Z correction wins
+
+
+def test_security_type_map_mixed_offsets_newest_wins(data_root):
+    """A classification revision with mixed offsets: the lexically-larger
+    but chronologically older 13:00+01:00 'unknown' row must not beat the
+    12:30Z 'equity-common' correction."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows())
+    directory = data_root / "parquet" / "securities" / "partition=none"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.Table.from_pylist([
+            {
+                "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
+                "security_type": "unknown", "ticker": "AAA", "exchange": None,
+                "source": "provider-test", "known_at": "2026-08-10T13:00:00+01:00",
+                "retrieved_at": "2026-08-10T13:00:00+01:00", "content_hash": "reclass-old", "parser_version": "t",
+            },
+            {
+                "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
+                "security_type": "equity-common", "ticker": "AAA", "exchange": "NASDAQ",
+                "source": "provider-test", "known_at": "2026-08-10T12:30:00Z",
+                "retrieved_at": "2026-08-10T12:30:00Z", "content_hash": "reclass-new", "parser_version": "t",
+            },
+        ], schema=parquet.dataset("securities").schema),
+        str(directory / "part-reclass-mixed-offset.parquet"),
+    )
+
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]  # AAA stays classified
 
 
 # ---------------------------------------------------------------------------

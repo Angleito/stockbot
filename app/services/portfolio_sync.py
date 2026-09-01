@@ -72,7 +72,9 @@ def resolve_security(
         "WHERE alias_type = 'ticker' AND alias_value = ? AND "
         f"{clause} "
         "AND (valid_from IS NULL OR CAST(valid_from AS TIMESTAMP) <= CAST(? AS TIMESTAMP)) "
-        "AND (valid_to IS NULL OR CAST(valid_to AS TIMESTAMP) > CAST(? AS TIMESTAMP))",
+        "AND (valid_to IS NULL OR CAST(valid_to AS TIMESTAMP) > CAST(? AS TIMESTAMP)) "
+        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, "
+        "CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST",
         params=[ticker.strip().upper(), param, param, param],
         data_root=data_root,
     )
@@ -81,11 +83,7 @@ def resolve_security(
     entities = list(dict.fromkeys(row["entity_id"] for row in rows))
     if len(entities) > 1:
         return SecurityResolution(None, None, ticker, False, "ambiguous")
-    newest = sorted(
-        rows,
-        key=lambda r: (str(r.get("known_at") or ""), str(r.get("retrieved_at") or "")),
-        reverse=True,
-    )[0]
+    newest = rows[0]
     alias = TickerAlias.from_row(newest)
     entity_id = alias.entity_id
     if alias.security_id is not None:
@@ -147,9 +145,12 @@ def build_portfolio_snapshot(
     (all-or-nothing completeness); partial or missing balances yield
     ``None``, never an invented partial sum.
     """
+    account_ids = {a.account_id for a in accounts}
+    balance_ids = {b.account_id for b in cash_balances}
     cash_complete = (
         bool(cash_balances)
         and len(cash_balances) == len(accounts)
+        and balance_ids == account_ids
         and all(balance.cash is not None for balance in cash_balances)
     )
     cash = sum(balance.cash for balance in cash_balances) if cash_complete else None

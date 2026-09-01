@@ -613,11 +613,22 @@ def test_partial_cash_nils_total_and_weights():
     assert all(position.portfolio_weight is None for position in snapshot.positions)
 
 
-def test_missing_balance_nils_total():
+def test_duplicate_balance_for_one_account_incomplete():
     snapshot = build_portfolio_snapshot(
         accounts=[_account("100000001"), _account("100000002")],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000"))],
+        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000001", Decimal("2000"))],
+        created_at=NOW,
+    )
+    assert snapshot.cash is None
+    assert snapshot.total_value is None
+
+
+def test_mismatched_balance_account_ids_incomplete():
+    snapshot = build_portfolio_snapshot(
+        accounts=[_account("100000001"), _account("100000002")],
+        positions=[_position()],
+        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000003", Decimal("2000"))],
         created_at=NOW,
     )
     assert snapshot.cash is None

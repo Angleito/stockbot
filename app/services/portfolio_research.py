@@ -118,7 +118,7 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
         "AND CAST(settlement_date AS DATE) <= CAST(? AS DATE) "
         f"AND {clause} "
         "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-        "ORDER BY known_at DESC, retrieved_at DESC) = 1",
+        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
         params=[ticker, as_of, param],
         data_root=data_root,
     )
