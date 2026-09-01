@@ -20,7 +20,11 @@ import requests
 
 from . import cache
 from .config import OPENROUTER_BASE_URL, get_finra_analysis_model, get_openrouter_api_key
-from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .storage.runs import (
+    model_error_category,
+    record_model_call_from_current,
+    reserve_model_call_from_current,
+)
 from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -436,22 +440,35 @@ def _post_completion(model: str, messages: list, max_tokens: int) -> str:
     t0_iso = datetime.now(timezone.utc).isoformat()
     if not reserve_model_call_from_current():
         raise BudgetExhaustedError("model call budget exhausted")
-    resp = requests.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {get_openrouter_api_key()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=ANALYSIS_TIMEOUT_SECONDS,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {get_openrouter_api_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=ANALYSIS_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        record_model_call_from_current(
+            provider="openrouter",
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=model_error_category(exc),
+        )
+        raise
     record_model_call_from_current(
         provider="openrouter",
         model=model,

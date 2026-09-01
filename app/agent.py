@@ -27,11 +27,13 @@ from .runtime import (
     ResearchRequest,
     ResearchResult,
     ToolCall,
+    ToolResultMeta,
 )
 from .storage.ids import request_id, run_id
 from .storage.runs import (
     RunRecorder,
     get_runs_db_path,
+    model_error_category,
     reset_current_budget,
     reset_current_recorder,
     set_current_budget,
@@ -156,25 +158,35 @@ def _update_budget(state: AgentState, budget: ExecutionBudget) -> None:
     state.budget_remaining = budget.remaining(state.round)
 
 
-def _tool_source_meta(result) -> tuple[list[str], dict]:
-    """Best-effort top-level source name + freshness extraction from a result."""
-    if not isinstance(result, dict) or result.get("source") is None:
-        return [], {}
-    source = str(result["source"])
-    source_names = [source]
-    source_freshness: dict[str, str] = {}
-    for key in ("as_of", "freshness", "retrieved_at"):
-        if key in result:
-            source_freshness[source] = str(result[key])
-            break
-    return source_names, source_freshness
+_NON_DATA_LIST_KEYS = frozenset({"source_records", "warnings", "metrics", "trends"})
 
 
-def _tool_row_count(result) -> int:
-    """Largest top-level list in a result, as a row-count estimate."""
+def _tool_result_meta(result) -> ToolResultMeta:
+    """Best-effort telemetry envelope for a tool result: row counts,
+    truncation, source name, and freshness."""
     if not isinstance(result, dict):
-        return 0
-    return max((len(value) for value in result.values() if isinstance(value, list)), default=0)
+        return ToolResultMeta(0, None, False, None, [], {})
+    source = result.get("source") or result.get("dataset_id") or result.get("dataset")
+    source_names = [str(source)] if source is not None else []
+    freshness_value = next(
+        (result[k] for k in ("data_freshness", "freshness", "as_of_date", "as_of", "retrieved_at")
+         if result.get(k) is not None),
+        None)
+    source_freshness = (
+        {str(source): str(freshness_value)} if source is not None and freshness_value is not None else {})
+    as_of = next((result[k] for k in ("as_of_date", "as_of", "retrieved_at")
+                  if result.get(k) is not None), None)
+    returned_count = result.get("returned_count") if isinstance(result.get("returned_count"), int) else None
+    row_count = result.get("row_count") if isinstance(result.get("row_count"), int) else max(
+        (len(v) for k, v in result.items() if isinstance(v, list) and k not in _NON_DATA_LIST_KEYS),
+        default=0)
+    total = result.get("total_records")
+    truncated = (
+        bool(result.get("truncated"))
+        or result.get("may_have_more") is True
+        or (returned_count is not None and isinstance(total, int) and returned_count < total))
+    return ToolResultMeta(row_count, returned_count, truncated,
+                          str(as_of) if as_of is not None else None, source_names, source_freshness)
 
 
 def _finish_run(
@@ -215,7 +227,11 @@ def _finish_run(
         run_id=state.run_id,
         answer=text,
         evidence_refs=list(state.evidence),
-        confidence=1.0 if status == "completed" else 0.0,
+        groundedness=(
+            "grounded"
+            if (status == "completed" and state.evidence)
+            else ("unverified" if status == "completed" else "partial")
+        ),
         data_freshness=data_freshness,
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -239,7 +255,37 @@ def _request_and_record(
             "tool_count": len(available_tools),
         },
     )
-    data = _call_openrouter(model, msgs, available_tools, policy.upstream_timeout_seconds)
+    try:
+        data = _call_openrouter(
+            model, msgs, available_tools, policy.upstream_timeout_seconds
+        )
+    except Exception as exc:
+        t1 = time.perf_counter()
+        recorder.record_event(
+            EventType.MODEL_FAILED,
+            round=state.round,
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            duration_ms=(t1 - t0) * 1000.0,
+            metadata={
+                "provider": recorder.provider,
+                "error_type": type(exc).__name__,
+                "error_category": model_error_category(exc),
+            },
+        )
+        recorder.record_model_call(
+            round=state.round,
+            provider=recorder.provider,
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=model_error_category(exc),
+        )
+        raise
     t1 = time.perf_counter()
     choice = data["choices"][0]
     tool_calls = choice["message"].get("tool_calls") or []
@@ -306,8 +352,9 @@ def run_chat(
     normalized_messages = _normalize_public_messages(messages, policy)
 
     # The question is redacted before it enters the observability path
-    # (agent_runs.question column and RUN_STARTED/PLAN_CREATED metadata);
-    # the raw user message stays in the conversation sent to the model.
+    # (agent_runs.question column and RUN_STARTED/RESEARCH_CONTEXT_CREATED
+    # metadata); the raw user message stays in the conversation sent to the
+    # model.
     request = ResearchRequest(
         request_id=request_id(),
         question=redact_json(normalized_messages[-1]["content"]),
@@ -321,7 +368,6 @@ def run_chat(
     plan = ResearchPlan(
         question=request.question,
         as_of=request.as_of,
-        required_data=[],
     )
     budget = ExecutionBudget(
         max_rounds=context.run_limits.max_rounds,
@@ -399,7 +445,9 @@ def run_chat(
                 },
             )
             recorder.record_event(
-                EventType.PLAN_CREATED, round=0, metadata={"plan": plan.to_dict()}
+                EventType.RESEARCH_CONTEXT_CREATED,
+                round=0,
+                metadata={"question": request.question, "as_of": request.as_of},
             )
             try:
                 while True:
@@ -448,12 +496,21 @@ def run_chat(
                     for tc in tool_calls:
                         fn = tc["function"]
                         name = fn["name"]
-                        try:
-                            arguments = json.loads(fn["arguments"] or "{}")
-                        except json.JSONDecodeError:
-                            arguments = {}
                         if not budget.reserve_tool_call():
                             return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
+                        try:
+                            arguments = json.loads(fn["arguments"] or "{}")
+                            malformed = False
+                        except json.JSONDecodeError:
+                            arguments = fn["arguments"] or ""
+                            malformed = True
+                        if malformed:
+                            result = {
+                                "error": f"Tool arguments are not valid JSON for tool '{name}'",
+                                "error_type": "invalid_tool_arguments",
+                            }
+                        else:
+                            result = None
                         logger.info("Tool call: %s(%s)", name, redact_value(arguments))
                         if want_trace:
                             tool_trace.append(name)
@@ -464,43 +521,50 @@ def run_chat(
                             tool_name=name,
                             arguments=arguments,
                         )
-                        recorder.record_event(
-                            EventType.TOOL_STARTED,
-                            round=state.round,
-                            tool_name=name,
-                            arguments=arguments,
-                        )
-                        t0 = time.perf_counter()
-                        t0_iso = datetime.now(timezone.utc).isoformat()
-                        if name not in permitted_tool_names:
-                            # A model must not be able to invoke a tool that was
-                            # omitted from its schema (for example, a portfolio
-                            # tool for a user without that authorization).
-                            result = {"error": f"Tool is not permitted: {name}"}
-                        elif (
-                            context.tool_policy.max_arguments_bytes
-                            and len(json.dumps(arguments))
-                            > context.tool_policy.max_arguments_bytes
-                        ):
-                            result = {
-                                "error": (
-                                    f"Tool arguments exceed the maximum size "
-                                    f"({context.tool_policy.max_arguments_bytes} bytes): {name}"
-                                )
-                            }
+                        if not malformed:
+                            recorder.record_event(
+                                EventType.TOOL_STARTED,
+                                round=state.round,
+                                tool_name=name,
+                                arguments=arguments,
+                            )
+                            t0 = time.perf_counter()
+                            t0_iso = datetime.now(timezone.utc).isoformat()
+                            if name not in permitted_tool_names:
+                                # A model must not be able to invoke a tool that was
+                                # omitted from its schema (for example, a portfolio
+                                # tool for a user without that authorization).
+                                result = {"error": f"Tool is not permitted: {name}"}
+                            elif (
+                                context.tool_policy.max_arguments_bytes
+                                and len(json.dumps(arguments))
+                                > context.tool_policy.max_arguments_bytes
+                            ):
+                                result = {
+                                    "error": (
+                                        f"Tool arguments exceed the maximum size "
+                                        f"({context.tool_policy.max_arguments_bytes} bytes): {name}"
+                                    )
+                                }
+                            else:
+                                result = execute_tool(name, arguments, model, context=context)
+                            t1 = time.perf_counter()
                         else:
-                            result = execute_tool(name, arguments, model, context=context)
-                        t1 = time.perf_counter()
+                            t0 = time.perf_counter()
+                            t0_iso = datetime.now(timezone.utc).isoformat()
+                            t1 = time.perf_counter()
                         failed = _is_failed_result(result)
                         denied = failed and "not permitted" in str(result.get("error", ""))
                         status = "completed" if not failed else ("denied" if denied else "failed")
                         error_type = None
                         error_message = None
                         if failed:
-                            error_type = "permission_denied" if denied else "tool_error"
+                            error_type = result.get("error_type") or (
+                                "permission_denied" if denied else "tool_error"
+                            )
                             error_message = redact_text(str(result.get("error")))[:2000]
                         tool_call_id = f"{state.run_id}:tc:{recorder.next_tool_seq()}"
-                        source_names, source_freshness = _tool_source_meta(result)
+                        meta = _tool_result_meta(result)
                         call = ToolCall(
                             tool_call_id=tool_call_id,
                             run_id=state.run_id,
@@ -512,13 +576,16 @@ def run_chat(
                             completed_at=datetime.now(timezone.utc).isoformat(),
                             duration_ms=(t1 - t0) * 1000.0,
                             status=status,
-                            result_row_count=_tool_row_count(result),
+                            result_row_count=meta.row_count,
+                            returned_count=meta.returned_count,
+                            truncated=meta.truncated,
                             result_bytes=len(json.dumps(result)),
                             result_hash=hashlib.sha256(
                                 json.dumps(result, sort_keys=True).encode()
                             ).hexdigest(),
-                            source_names=json.dumps(source_names),
-                            source_freshness=json.dumps(source_freshness),
+                            source_names=json.dumps(meta.source_names),
+                            source_freshness=json.dumps(meta.source_freshness),
+                            as_of=meta.as_of,
                             error_type=error_type,
                             error_message=error_message,
                         )
@@ -532,10 +599,13 @@ def run_chat(
                             completed_at=call.completed_at,
                             status=status,
                             result_row_count=call.result_row_count,
+                            returned_count=call.returned_count,
+                            truncated=call.truncated,
                             result_bytes=call.result_bytes,
                             result_hash=call.result_hash,
                             source_names=call.source_names,
                             source_freshness=call.source_freshness,
+                            as_of=call.as_of,
                             error_type=error_type,
                             error_message=error_message,
                         )
@@ -554,9 +624,6 @@ def run_chat(
                             metadata={"duration_ms": (t1 - t0) * 1000.0},
                         )
                         if not failed:
-                            state.plan.required_data.append(
-                                {"tool": name, "arguments": redact_value(arguments)}
-                            )
                             # Evidence is what the model actually receives: a
                             # result that would cross the evidence budget is a
                             # hard stop — no evidence record, and the tool
@@ -569,6 +636,20 @@ def run_chat(
                                 f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
                             )
                             state.evidence.append(evidence_id)
+                            recorder.record_evidence(
+                                evidence_id=evidence_id,
+                                run_id=state.run_id,
+                                tool_call_id=tool_call_id,
+                                round=state.round,
+                                tool_name=name,
+                                rendered_hash=hashlib.sha256(rendered.encode()).hexdigest(),
+                                rendered_bytes=len(rendered.encode("utf-8")),
+                                estimated_tokens=len(rendered) // 4,
+                                source_names=call.source_names,
+                                source_freshness=call.source_freshness,
+                                as_of=meta.as_of,
+                                rendered_text=redact_text(rendered),
+                            )
                             recorder.record_event(
                                 EventType.EVIDENCE_ADDED,
                                 round=state.round,

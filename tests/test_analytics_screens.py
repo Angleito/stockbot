@@ -114,8 +114,8 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root):
                        "invalid_short_interest": 0},
     }
     assert result["calculation_version"] == screens.SCREEN_CALC_VERSION
-    # Default as_of is the live horizon (today), not the settlement date.
-    assert result["as_of_date"] == date.today().isoformat()
+    # Default as_of is the live horizon (UTC today), not the settlement date.
+    assert result["as_of_date"] == datetime.now(timezone.utc).date().isoformat()
     assert result["source_records"]
     assert result["entries"][0]["sec_accession"] == "c1"
     assert result["entries"][0]["sec_source_url"].endswith("CIK0000000003.json")

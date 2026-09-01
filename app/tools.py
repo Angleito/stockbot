@@ -28,7 +28,11 @@ from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
-from .storage.runs import record_model_call_from_current, reserve_model_call_from_current
+from .storage.runs import (
+    model_error_category,
+    record_model_call_from_current,
+    reserve_model_call_from_current,
+)
 from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -654,21 +658,34 @@ def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
     t0_iso = datetime.now(timezone.utc).isoformat()
     if not reserve_model_call_from_current():
         raise BudgetExhaustedError("model call budget exhausted")
-    resp = requests.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {get_openrouter_api_key()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {get_openrouter_api_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        record_model_call_from_current(
+            provider="openrouter",
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=model_error_category(exc),
+        )
+        raise
     record_model_call_from_current(
         provider="openrouter",
         model=model,
@@ -1265,6 +1282,21 @@ def tool_is_permitted(name: str, context: RequestContext) -> bool:
     return capability is not None and capability in context.capabilities
 
 
+def _validate_tool_arguments(name: str, arguments: Any) -> str | None:
+    """Schema-level argument check: object-ness plus required keys. Returns
+    an error message, or None when the arguments are acceptable. Type
+    checking is intentionally out of scope; lenient handler coercions
+    (int(...), ...) remain the source of truth for value shapes."""
+    if not isinstance(arguments, dict):
+        return f"Tool arguments must be a JSON object for tool '{name}'"
+    tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
+    parameters = (tool["function"].get("parameters") or {}) if tool else {}
+    missing = [key for key in (parameters.get("required") or []) if key not in arguments]
+    if missing:
+        return f"Missing required argument(s) for tool '{name}': {', '.join(missing)}"
+    return None
+
+
 def execute_tool(
     name: str,
     arguments: dict,
@@ -1278,6 +1310,9 @@ def execute_tool(
     try:
         if not tool_is_permitted(name, context):
             return {"error": f"Tool is not permitted: {name}"}
+        invalid = _validate_tool_arguments(name, arguments)
+        if invalid is not None:
+            return {"error": invalid, "error_type": "invalid_tool_arguments"}
         handler = (
             _DIRECT_HANDLERS.get(name)
             or _FINRA_HANDLERS.get(name)

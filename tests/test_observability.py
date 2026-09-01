@@ -4,6 +4,7 @@ Offline: monkeypatches agent._call_openrouter and agent.execute_tool.
 RUNS_DB_PATH is isolated per session by the root conftest fixture.
 """
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -11,10 +12,12 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import requests
 
 from app import agent
 from app import analytics
 from app import finra_analysis
+from app import finra_client
 from app import tools as tools_module
 from app.agent import _BUDGET_EXHAUSTED_RESPONSE, run_chat
 from app.normalization import (
@@ -39,6 +42,7 @@ from app.tool_render import render_tool_result
 from app.storage import parquet
 from app.storage.runs import (
     get_events,
+    get_evidence,
     get_model_calls,
     get_run,
     get_runs_db_path,
@@ -47,6 +51,8 @@ from app.storage.runs import (
     reset_current_budget,
     set_current_budget,
 )
+
+from tests.test_finra import FakeCache, _mock_get, _response, _token_response
 
 TEST_POLICY = ChatPolicy(
     allowed_models=frozenset({"test"}),
@@ -104,6 +110,32 @@ def _tool_round(tool_name, tool_args, usage=None, request_id="req_abc"):
     }
 
 
+def _tool_round_raw(tool_name, raw_arguments, usage=None, request_id="req_abc"):
+    """One tool request whose arguments field is a raw string, not JSON."""
+    return {
+        "id": request_id,
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": raw_arguments,
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": usage or _usage(),
+    }
+
+
 def _tool_round_multi(tool_specs, usage=None, request_id="req_abc"):
     """One response requesting several tools: list of (name, args) tuples."""
     return {
@@ -116,6 +148,24 @@ def _tool_round_multi(tool_specs, usage=None, request_id="req_abc"):
                     {"id": f"call_{i}", "type": "function",
                      "function": {"name": name, "arguments": json.dumps(args)}}
                     for i, (name, args) in enumerate(tool_specs)
+                ],
+            }
+        }],
+        "usage": usage or _usage(),
+    }
+
+def _tool_round_multi_raw(tool_specs, usage=None, request_id="req_abc"):
+    """One response requesting several tools: (name, raw arguments string)."""
+    return {
+        "id": request_id,
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": f"call_{i}", "type": "function",
+                     "function": {"name": name, "arguments": raw}}
+                    for i, (name, raw) in enumerate(tool_specs)
                 ],
             }
         }],
@@ -198,7 +248,7 @@ def test_agent_tool_path_short_interest_leaderboard(monkeypatch, tmp_path):
     )
 
     assert result.answer == "The short-interest leaderboard ranked CCC first."
-    assert result.confidence == 1.0
+    assert result.groundedness == "grounded"
     assert result.evidence_refs
     run = get_run(result.run_id)
     assert run["status"] == "completed"
@@ -212,6 +262,39 @@ def test_agent_tool_path_short_interest_leaderboard(monkeypatch, tmp_path):
         < event_types.index("tool_completed")
         < event_types.index("evidence_added")
     )
+
+def test_leaderboard_real_telemetry_envelope(monkeypatch, tmp_path):
+    """Real leaderboard payload through the real dispatcher carries the
+    envelope: row_count is the eligible universe, returned_count the
+    post-LIMIT entries, truncated reflects the cut, and as_of persists on
+    the tool_calls and evidence rows."""
+    screens_module = analytics.screens
+    _seed_leaderboard_data(tmp_path)
+    monkeypatch.setattr(screens_module, "DEFAULT_DATA_ROOT", tmp_path)
+    fake = FakeOpenRouter([
+        _tool_round("get_short_interest_leaderboard", {
+            "settlement_date": "2026-08-14", "as_of": "2026-08-21", "limit": 2,
+        }),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+
+    result = run_chat(
+        [{"role": "user", "content": "Rank the short-interest leaderboard for 2026-08-14."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+
+    assert result.answer == "ok"
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["result_row_count"] == 3
+    assert tc["returned_count"] == 2
+    assert tc["truncated"] == 1
+    assert tc["as_of"] == "2026-08-21"
+    (evidence,) = get_evidence(result.run_id)
+    assert evidence["as_of"] == "2026-08-21"
 
 
 # ---------------------------------------------------------------------------
@@ -246,14 +329,14 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert isinstance(result, ResearchResult)
     assert result.run_id.startswith("run:")
     assert result.answer == "AAPL EPS is 6.3 per the 10-Q."
-    assert result.confidence == 1.0
+    assert result.groundedness == "grounded"
     assert len(result.evidence_refs) == 1
     assert result.evidence_refs[0].startswith(f"{result.run_id}:evid:")
     assert result.data_freshness == {"SEC EDGAR company facts": "2026-08-29"}
 
     # Typed runtime objects construct and behave as specified.
-    plan = ResearchPlan(question="q", as_of="d", required_data=[])
-    assert plan.to_dict()["required_data"] == []
+    plan = ResearchPlan(question="q", as_of="d")
+    assert plan.to_dict() == {"question": "q", "as_of": "d"}
     budget = BudgetRemaining(
         rounds=8, tool_calls=64, model_calls=32, runtime_seconds=600.0, evidence_tokens=48000
     )
@@ -262,8 +345,9 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     call = ToolCall(
         tool_call_id="t", run_id="run:x", round=0, tool_name="n", tool_version="v",
         arguments_json="{}", started_at="a", completed_at="b", duration_ms=1.0,
-        status="completed", result_row_count=0, result_bytes=2, result_hash="h",
-        source_names="[]", source_freshness="{}", error_type=None, error_message=None,
+        status="completed", result_row_count=0, returned_count=None, truncated=False,
+        result_bytes=2, result_hash="h",
+        source_names="[]", source_freshness="{}", as_of=None, error_type=None, error_message=None,
     )
     ModelCall(
         model_call_id="m", run_id="run:x", round=0, provider="p", model="m",
@@ -273,7 +357,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     )
     assert call.status == "completed"
     assert EventType.RUN_STARTED == "run_started"
-    assert len(list(EventType)) == 13
+    assert len(list(EventType)) == 14
 
     # Summary row.
     run = get_run(result.run_id)
@@ -299,7 +383,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     # Event stream: exact order, contiguous 1..N sequences.
     events = get_events(result.run_id)
     assert [ev["event_type"] for ev in events] == [
-        "run_started", "plan_created",
+        "run_started", "research_context_created",
         "model_requested", "model_responded",
         "tool_requested", "tool_started", "tool_completed", "evidence_added",
         "model_requested", "model_responded",
@@ -318,6 +402,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert tc["tool_version"] == agent.TOOL_REGISTRY_VERSION
     assert json.loads(tc["source_names"]) == ["SEC EDGAR company facts"]
     assert json.loads(tc["source_freshness"]) == {"SEC EDGAR company facts": "2026-08-29"}
+    assert tc["as_of"] == "2026-08-29"
     assert tc["result_row_count"] == 0
     assert tc["error_type"] is None and tc["error_message"] is None
 
@@ -352,7 +437,7 @@ def test_redaction_enforced(monkeypatch):
         agent,
         "execute_tool",
         lambda name, args, model, **kwargs: {
-            "access_token": "eyJhbGciOiJIUzI1NiJ9.abc.def",
+            "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
             "account_id": "87654321",
             "nested": {"account_number": "11223344"},
             "source": "test",
@@ -377,12 +462,12 @@ def test_redaction_enforced(monkeypatch):
     ]
     assert "[REDACTED]" in requested[0]["arguments"]
 
-    # Raw DB dump of every text column across all four tables leaks nothing.
+    # Raw DB dump of every text column across all five tables leaks nothing.
     db_path = get_runs_db_path(Path("."))
     conn = sqlite3.connect(str(db_path))
     try:
         chunks = []
-        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls"):
+        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls", "evidence"):
             cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
             for col in cols:
                 for row in conn.execute(f"SELECT {col} FROM {table}"):
@@ -396,7 +481,7 @@ def test_redaction_enforced(monkeypatch):
         "12345678",
         "87654321",
         "11223344",
-        "eyJhbGciOiJIUzI1NiJ9.abc.def",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
         "sk-or-v1-abcdefghijklmnop",
     ):
         assert secret not in dump, f"secret leaked in runs DB: {secret}"
@@ -435,7 +520,7 @@ def test_failed_tool_run_is_partial(monkeypatch):
     )
     assert result.answer.startswith("The requested data is unavailable")
     assert "no data found" in result.answer
-    assert result.confidence == 0.0
+    assert result.groundedness == "partial"
     assert result.evidence_refs == []
 
     run = get_run(result.run_id)
@@ -500,6 +585,7 @@ def test_budget_exhausted_stops_run(monkeypatch):
     )
     assert len(fake.calls) == 1
     assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert result.groundedness == "partial"
     run = get_run(result.run_id)
     assert run["status"] == "budget_exhausted"
     assert run["model_call_count"] == 1
@@ -624,12 +710,12 @@ def test_question_redacted_in_store(monkeypatch):
         "What is my balance? Bearer [REDACTED], key sk-or-v1-[REDACTED]"
     )
 
-    # Raw-DB dump of every text column across all four tables leaks nothing.
+    # Raw-DB dump of every text column across all five tables leaks nothing.
     db_path = get_runs_db_path(Path("."))
     conn = sqlite3.connect(str(db_path))
     try:
         chunks = []
-        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls"):
+        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls", "evidence"):
             cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
             for col in cols:
                 for row in conn.execute(f"SELECT {col} FROM {table}"):
@@ -724,6 +810,119 @@ def test_nested_model_call_reserves_budget(monkeypatch):
     assert "model call budget exhausted" in result.answer
     run = get_run(result.run_id)
     assert run["status"] == "partial"
+
+
+def test_nested_earnings_failure_recorded(monkeypatch):
+    """A failed nested model call inside a tool records a failed model_calls
+    row (status/error_type/error_category), and model_call_count counts it."""
+    fake = FakeOpenRouter([
+        _tool_round("get_earnings_summary", {"ticker": "AAPL"}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        tools_module.edgar_client, "get_latest_earnings_release",
+        lambda ticker: {"ticker": ticker, "text": "press release text", "source": "8-K test"},
+    )
+    monkeypatch.setattr("app.cache.get", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise requests.Timeout("boom")
+
+    monkeypatch.setattr(tools_module.requests, "post", _boom)
+    result = run_chat(
+        [{"role": "user", "content": "How did AAPL do last quarter?"}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert result.answer.startswith("The requested data is unavailable")
+    run = get_run(result.run_id)
+    assert run["status"] == "partial"
+    assert run["model_call_count"] == 2
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["status"] == "failed"
+    model_calls = get_model_calls(result.run_id)
+    assert len(model_calls) == 2
+    assert model_calls[0]["status"] == "completed"
+    failed = model_calls[1]
+    assert failed["status"] == "failed"
+    assert failed["error_type"] == "Timeout"
+    assert failed["error_category"] == "timeout"
+    assert failed["input_tokens"] == 0
+    assert failed["estimated_cost"] == 0
+
+
+def test_finra_nested_failure_records_and_falls_back(monkeypatch):
+    """A failed nested FINRA analysis call records a failed model_calls row
+    while the deterministic briefing still wins."""
+    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "mock/analysis-model")
+    monkeypatch.setenv("FINRA_USE_MOCK", "")
+    monkeypatch.setattr(finra_client, "get_finra_client_id", lambda: "client")
+    monkeypatch.setattr(finra_client, "get_finra_client_secret", lambda: "secret")
+    finra_client.reset_token_cache()
+    finra_client.reset_discovery_cache()
+    finra_client.reset_partitions_cache()
+    monkeypatch.setattr(finra_client, "cache", FakeCache())
+    monkeypatch.setattr(finra_analysis, "cache", FakeCache())
+    monkeypatch.setattr(finra_client.requests, "get", _mock_get)
+
+    rows = [{
+        "symbolCode": "AAPL",
+        "issueName": "Apple Inc.",
+        "settlementDate": "2026-08-14",
+        "currentShortPositionQuantity": 100,
+    }]
+
+    def fake_post(url, **kwargs):
+        if "/chat/completions" in url:
+            raise requests.Timeout("nested analysis timeout")
+        if "token" in url:
+            return _token_response()
+        return _response(rows)
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    fake = FakeOpenRouter([
+        _tool_round("query_finra", {
+            "dataset": "otcMarket/consolidatedShortInterest",
+            "ticker": "AAPL",
+        }),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "Analyze AAPL short interest."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert result.answer == "ok"
+    assert result.groundedness == "grounded"
+    assert result.evidence_refs
+    run = get_run(result.run_id)
+    assert run["status"] == "completed"
+    # 3 rows: two primary rounds (tool round + final answer) + the failed
+    # nested analysis attempt, which model_call_count must include.
+    assert run["model_call_count"] == 3
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["status"] == "completed"
+    events = get_events(result.run_id)
+    completed = [
+        ev for ev in events
+        if ev["event_type"] == "tool_completed" and ev["tool_name"] == "query_finra"
+    ]
+    assert completed and "deterministic_only" in completed[0]["result_summary"]
+    model_calls = get_model_calls(result.run_id)
+    assert len(model_calls) == 3
+    assert model_calls[0]["status"] == "completed"
+    failed = next(m for m in model_calls if m["status"] == "failed")
+    assert failed["status"] == "failed"
+    assert failed["error_type"] == "Timeout"
+    assert failed["error_category"] == "timeout"
+    assert failed["input_tokens"] == 0
+    assert failed["estimated_cost"] == 0
 
 
 def test_nested_helpers_reserve_budget(monkeypatch):
@@ -965,11 +1164,242 @@ def test_tool_result_bounded_by_max_tool_result_bytes(monkeypatch):
         [{"role": "user", "content": "What is AAPL EPS?"}],
         model="test", context=context, policy=TEST_POLICY, return_result=True,
     )
+# ---------------------------------------------------------------------------
+# R1/R2/R3/R5/R6 hardening: malformed arguments, telemetry envelope,
+# evidence records, groundedness semantics, model failures
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_tool_arguments_rejected(monkeypatch):
+    """Unparseable tool arguments are rejected before execution: no
+    TOOL_STARTED, no dispatcher invocation."""
+    fake = FakeOpenRouter([
+        _tool_round_raw("get_short_interest_leaderboard", "{invalid"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda *a, **k: pytest.fail("execute_tool must not be called")
+    )
+    result = run_chat(
+        [{"role": "user", "content": "Rank the leaderboard."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+
+    assert result.answer.startswith("The requested data is unavailable")
+    assert result.groundedness == "partial"
+    assert result.evidence_refs == []
+    run = get_run(result.run_id)
+    assert run["status"] == "partial"
+    (call,) = get_tool_calls(result.run_id)
+    assert call["status"] == "failed"
+    assert call["error_type"] == "invalid_tool_arguments"
+    assert "{invalid" in call["arguments_json"]
+    event_types = [ev["event_type"] for ev in get_events(result.run_id)]
+    assert "tool_requested" in event_types
+    assert "tool_failed" in event_types
+    assert "tool_started" not in event_types
+
+def test_malformed_call_consumes_tool_budget(monkeypatch):
+    """Every model-requested tool call reserves a budget slot before parsing:
+    with max_tool_calls=1 a valid call followed by a malformed one exhausts
+    the budget (the malformed call is never parsed into a ToolCall row)."""
+    fake = FakeOpenRouter([
+        _tool_round_multi_raw([
+            ("get_fundamentals", '{"ticker": "AAPL"}'),
+            ("get_fundamentals", "{bad"),
+        ]),
+        _final("irrelevant"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool",
+        lambda name, args, model, **kwargs: {"ticker": "AAPL", "source": "test"},
+    )
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test",
+        context=_research_context(run_limits=RunLimits(max_tool_calls=1)),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert len(fake.calls) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert get_run(result.run_id)["status"] == "budget_exhausted"
+    (call,) = get_tool_calls(result.run_id)
+    assert call["tool_name"] == "get_fundamentals"
+    assert call["status"] == "completed"
+
+
+def test_schema_invalid_tool_arguments_rejected(monkeypatch):
+    """Schema validation inside the real dispatcher rejects missing required
+    arguments and non-object arguments before any handler/network code."""
+    # (a) Missing required ticker on get_short_interest.
+    fake = FakeOpenRouter([
+        _tool_round("get_short_interest", {}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "Short interest for the ticker."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert "Missing required argument" in result.answer
+    assert "ticker" in result.answer
+    (call,) = get_tool_calls(result.run_id)
+    assert call["status"] == "failed"
+    assert call["error_type"] == "invalid_tool_arguments"
+    assert get_run(result.run_id)["status"] == "partial"
+
+    # (b) Non-object arguments reach the dispatcher's validator.
+    fake = FakeOpenRouter([
+        _tool_round_raw("get_short_interest_leaderboard", "[1,2,3]"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "Rank the leaderboard."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert "must be a JSON object" in result.answer
+    (call,) = get_tool_calls(result.run_id)
+    assert call["status"] == "failed"
+    assert call["error_type"] == "invalid_tool_arguments"
+    assert get_run(result.run_id)["status"] == "partial"
+
+
+def test_tool_telemetry_envelope(monkeypatch):
+    """The tool telemetry envelope: data rows (not metadata lists), returned
+    count, truncation, and freshness all reach the tool_calls row."""
+    payload = {
+        "source": "FINRA consolidated short interest + SEC EDGAR company facts (parquet)",
+        "as_of_date": "2026-08-21",
+        "data_freshness": "current",
+        "source_records": ["a", "b", "c"],
+        "entries": [{"rank": 1, "ticker": "CCC"}, {"rank": 2, "ticker": "BBB"}],
+        "returned_count": 2,
+        "may_have_more": True,
+        "total_records": 5,
+    }
+    fake = FakeOpenRouter([
+        _tool_round("get_short_interest_leaderboard", {}),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: payload
+    )
+    result = run_chat(
+        [{"role": "user", "content": "Rank the leaderboard."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    (tc,) = get_tool_calls(result.run_id)
+    source = payload["source"]
+    assert tc["as_of"] == "2026-08-21"
+    assert json.loads(tc["source_names"]) == [source]
+    assert json.loads(tc["source_freshness"]) == {source: "current"}
+    assert result.data_freshness == {source: "current"}
+
+
+def test_evidence_record_rendered_hash(monkeypatch):
+    """Evidence rows persist exactly what the model received: rendered hash,
+    byte/token sizes, redacted text, and the tool-call linkage."""
+    payload = {
+        "ticker": "AAPL",
+        "eps": 6.3,
+        "source": "SEC EDGAR company facts",
+        "as_of": "2026-08-29",
+    }
+    fake = FakeOpenRouter([
+        _tool_round("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}),
+        _final("AAPL EPS is 6.3 per the 10-Q."),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool", lambda name, args, model, **kwargs: payload
+    )
+    context = _research_context()
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL's diluted EPS?"}],
+        model="test",
+        context=context,
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    rendered = render_tool_result(
+        payload, max_bytes=context.run_limits.max_tool_result_bytes
+    )
+    rows = get_evidence(result.run_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["rendered_hash"] == hashlib.sha256(rendered.encode()).hexdigest()
+    assert row["estimated_tokens"] == len(rendered) // 4
+    assert row["rendered_bytes"] == len(rendered.encode("utf-8"))
+    assert row["rendered_text"] == redact_text(rendered)
+    (tc,) = get_tool_calls(result.run_id)
+    assert row["tool_call_id"] == tc["tool_call_id"]
+    assert row["evidence_id"] == result.evidence_refs[0]
+
+
+def test_groundedness_unverified(monkeypatch):
+    """A completed run with zero tools is unverified, not grounded."""
+    fake = FakeOpenRouter([_final("ok")])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    result = run_chat(
+        [{"role": "user", "content": "hi"}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
     assert result.answer == "ok"
-    tool_msg = next(m for m in fake.calls[1] if m["role"] == "tool")
-    # Control: the fixture genuinely renders past the run limit at the
-    # renderer's default byte budget.
-    assert "period_end 2026-Q299" in render_tool_result(big)
-    # The model receives the run-limit-bounded render, not the default one.
-    assert len(tool_msg["content"].encode("utf-8")) <= 1024
-    assert "period_end 2026-Q299" not in tool_msg["content"]
+    assert result.groundedness == "unverified"
+    assert result.evidence_refs == []
+    assert get_run(result.run_id)["status"] == "completed"
+
+
+def test_model_failed_event(monkeypatch):
+    """A provider failure surfaces as model_requested -> model_failed ->
+    run_failed, a failed run row, and a failed model_calls row."""
+    def _boom(*a, **k):
+        raise requests.Timeout("boom")
+
+    monkeypatch.setattr(agent, "_call_openrouter", _boom)
+    with pytest.raises(requests.Timeout):
+        run_chat(
+            [{"role": "user", "content": "hi"}],
+            model="test",
+            context=_research_context(),
+            policy=TEST_POLICY,
+            return_result=True,
+        )
+    run = list_runs()[0]
+    assert run["status"] == "failed"
+    events = get_events(run["run_id"])
+    types = [ev["event_type"] for ev in events]
+    assert (
+        types.index("model_requested")
+        < types.index("model_failed")
+        < types.index("run_failed")
+    )
+    failed = next(ev for ev in events if ev["event_type"] == "model_failed")
+    assert failed["model"] == "test"
+    assert failed["duration_ms"] is not None and failed["duration_ms"] >= 0
+    assert json.loads(failed["metadata"])["error_category"] == "timeout"
+    assert json.loads(failed["metadata"])["error_type"] == "Timeout"
+    (call,) = get_model_calls(run["run_id"])
+    assert call["status"] == "failed"
+    assert call["error_type"] == "Timeout"
+    assert call["error_category"] == "timeout"
+    assert call["input_tokens"] == 0
+    assert call["estimated_cost"] == 0
+    assert run["model_call_count"] == 1
