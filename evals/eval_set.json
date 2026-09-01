@@ -197,5 +197,78 @@
       "must_contain": [],
       "must_not_contain": []
     }
+  },
+  {
+    "id": 19,
+    "question": "What's the latest news on AMD?",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "required_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 20,
+    "question": "What was AMD revenue last quarter?",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "expected_tools": ["get_xbrl_facts", "get_fundamentals"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 21,
+    "question": "What were the most shorted stocks on Aug 14?",
+    "ticker": null,
+    "expected_behavior": {
+      "required_tools": ["get_short_interest_leaderboard"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 22,
+    "question": "What changed this week that could affect AMD?",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "required_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 23,
+    "question": "How does recent news affect my AMD thesis?",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "required_tools": ["search_web"],
+      "expected_tools": ["get_portfolio_snapshot", "get_xbrl_facts", "get_fundamentals", "get_short_interest"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 24,
+    "question": "Research the competitive landscape for AMD's AI accelerator business.",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "required_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 25,
+    "question": "What are the strongest arguments against AMD's MI-series thesis?",
+    "ticker": "AMD",
+    "expected_behavior": {
+      "required_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
   }
 ]

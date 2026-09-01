@@ -41,6 +41,7 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
             required_tools = expected.get("required_tools", [])
             required_sequence = expected.get("required_tool_sequence", [])
             forbidden_tool_args = expected.get("forbidden_tool_args", {})
+            forbidden_tools = expected.get("forbidden_tools", [])
             must_contain = [s.lower() for s in expected.get("must_contain", [])]
             must_not_contain = [s.lower() for s in expected.get("must_not_contain", [])]
 
@@ -85,6 +86,12 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 else:
                     forbid_ok = True
 
+                # 1e. Forbidden tools must not be called
+                if forbidden_tools:
+                    forbid_tools_ok = not any(t in trace for t in forbidden_tools)
+                else:
+                    forbid_tools_ok = True
+
                 # 2. Check must_contain (if any match is sufficient when multiple alternatives provided)
                 if must_contain:
                     contain_ok = any(item in resp_lower for item in must_contain)
@@ -95,7 +102,7 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 not_contain_ok = not any(item in resp_lower for item in must_not_contain)
 
                 passed = (
-                    any_ok and all_ok and seq_ok and forbid_ok
+                    any_ok and all_ok and seq_ok and forbid_ok and forbid_tools_ok
                     and contain_ok and not_contain_ok
                 )
                 if passed:
@@ -112,6 +119,9 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                     details += f" (required order not followed: {required_sequence})"
                 if not forbid_ok:
                     details += f" (called with forbidden args: {forbidden_tool_args})"
+                if not forbid_tools_ok:
+                    called = [t for t in forbidden_tools if t in trace]
+                    details += f" (called forbidden tools: {called})"
                 if not contain_ok:
                     details += f" (missing one of required substrings: {must_contain})"
                 if not not_contain_ok:

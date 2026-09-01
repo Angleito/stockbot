@@ -13,6 +13,7 @@ import requests
 from . import analytics
 from . import analyst_client
 from . import edgar_client
+from . import exa_client
 from . import finra_client
 from . import obligations
 from . import valuation
@@ -661,6 +662,27 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Current qualitative evidence from the web (news, announcements, competitive/industry developments, management commentary, publications, specialist commentary, counterevidence) with bounded highlights. NOT a source for exact financial facts, portfolio state, historical point-in-time facts, mandate calculations, or deterministic screens — use the canonical SEC/FINRA/Robinhood/local-warehouse tools for those.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query: ticker/company/industry plus the research question. Never include account, portfolio, or personal identifiers."},
+                    "category": {"type": "string", "enum": ["news", "company", "publication", "financial report"], "description": "Optional category to narrow the search."},
+                    "include_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional domains to restrict results to."},
+                    "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional domains to exclude from results."},
+                    "start_published_date": {"type": "string", "description": "Optional start publication date YYYY-MM-DD, inclusive."},
+                    "end_published_date": {"type": "string", "description": "Optional end publication date YYYY-MM-DD, inclusive."},
+                    "search_type": {"type": "string", "enum": ["auto", "fast", "deep-lite"], "description": "Optional search mode (default auto)."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Maximum results, 1-10 (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 # Content-derived registry version for observability records.
 TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
@@ -1205,6 +1227,23 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price, min_d
     return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=target_price, limit=limit)}
 
 
+def _search_web(args: dict, model: str) -> dict:
+    """Exa-backed web search; harness-level soft failures must not stop the run."""
+    result = exa_client.search(
+        args["query"],
+        category=args.get("category"),
+        include_domains=args.get("include_domains"),
+        exclude_domains=args.get("exclude_domains"),
+        start_published_date=args.get("start_published_date"),
+        end_published_date=args.get("end_published_date"),
+        search_type=args.get("search_type") or "auto",
+        limit=args.get("limit") or exa_client.EXA_DEFAULT_LIMIT,
+    )
+    if isinstance(result, dict) and "error" in result:
+        result["soft"] = True  # harness-level: soft failures must not stop the run
+    return result
+
+
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
 _DIRECT_HANDLERS = {
@@ -1227,6 +1266,7 @@ _DIRECT_HANDLERS = {
     "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(args["ticker"]),
     "get_obligations": lambda args, model: obligations.get_obligations(args["ticker"]),
     "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(args["ticker"]),
+    "search_web": _search_web,
 }
 
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
@@ -1310,6 +1350,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "get_sp500_weight": Capability.RESEARCH,
     "get_obligations": Capability.RESEARCH,
     "get_valuation_metrics": Capability.RESEARCH,
+    "search_web": Capability.RESEARCH,
     "list_finra_datasets": Capability.RESEARCH,
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,

@@ -11,6 +11,7 @@ Stockbot is a local-first AI investment research system designed to give individ
 - A tool-using research agent using OpenRouter-backed models
 - Analyst-consensus and market-data adapters
 - Optional Robinhood portfolio, quote, option, and saved-scanner **read** integration with portfolio analytics
+- Optional Exa-backed external web research (`search_web`): bounded current-evidence search with highlights; results are research evidence, not canonical financial records
 
 ## Architecture principles
 
@@ -79,6 +80,17 @@ bun scripts (smoke-mock, smoke-prod, smoke-robinhood).
 ## Optional Robinhood integration
 
 Set `ROBINHOOD_ENABLED=true` and complete the local OAuth login flow before using the integration. OAuth and MCP transport are pinned to `https://agent.robinhood.com/mcp/trading`; persisted tokens/client registration are bound to that HTTPS origin. Stockbot only permits explicitly allowlisted read operations and blocks unknown operations. It blocks order placement, order cancellation/replacement, option exercise, withdrawals, deposits, and transfers. It does not support trading or modifying saved scanners.
+
+## Optional Exa integration
+
+Set `EXA_ENABLED=true` and `EXA_API_KEY` to enable external web research via
+the `search_web` tool. It returns bounded highlights for current qualitative
+evidence: news, announcements, competitive/industry developments,
+publications, specialist commentary, and counterevidence. Canonical
+SEC/FINRA/Robinhood/local-warehouse data remains authoritative — Exa never
+writes canonical datasets, and exact financial facts, portfolio state, and
+deterministic screens must come from the canonical tools. Searches appear in
+run traces (`cli.py inspect`) with their evidence.
 
 ## Data storage
 

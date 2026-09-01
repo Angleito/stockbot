@@ -375,6 +375,7 @@ def run_chat(
         max_model_calls=context.run_limits.max_model_calls,
         max_runtime=context.run_limits.max_runtime,
         max_evidence_tokens=context.run_limits.max_evidence_tokens,
+        max_exa_searches=context.run_limits.max_exa_searches,
     )
     state = AgentState(
         run_id=run_id(),
@@ -546,6 +547,12 @@ def run_chat(
                                         f"({context.tool_policy.max_arguments_bytes} bytes): {name}"
                                     )
                                 }
+                            elif name == "search_web" and not budget.reserve_exa_search():
+                                result = {
+                                    "error": "Exa search budget exhausted (max 3 per run)",
+                                    "source": "exa",
+                                    "soft": True,
+                                }
                             else:
                                 result = execute_tool(name, arguments, model, context=context)
                             t1 = time.perf_counter()
@@ -554,6 +561,7 @@ def run_chat(
                             t0_iso = datetime.now(timezone.utc).isoformat()
                             t1 = time.perf_counter()
                         failed = _is_failed_result(result)
+                        soft = failed and result.get("soft") is True
                         denied = failed and "not permitted" in str(result.get("error", ""))
                         status = "completed" if not failed else ("denied" if denied else "failed")
                         error_type = None
@@ -660,10 +668,11 @@ def run_chat(
                                 metadata={"duration_ms": (t1 - t0) * 1000.0},
                             )
                         else:
-                            state.failures.append(
-                                {"tool": name, "error": result.get("error")}
-                            )
-                            failed_tools.append((name, result))
+                            if not soft:
+                                state.failures.append(
+                                    {"tool": name, "error": result.get("error")}
+                                )
+                                failed_tools.append((name, result))
                         msgs.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id", ""),

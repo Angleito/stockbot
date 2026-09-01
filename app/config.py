@@ -20,6 +20,7 @@ FINRA_TOKEN_URL = (
     "?grant_type=client_credentials"
 )
 FINRA_API_BASE = "https://api.finra.org"
+EXA_API_BASE = "https://api.exa.ai"
 
 # Analyst consensus (unofficial Yahoo endpoint) + index-weight data sources.
 YAHOO_QUERY_BASE = "https://query2.finance.yahoo.com"
@@ -130,3 +131,14 @@ def get_robinhood_mcp_url() -> str:
 
 def robinhood_enabled() -> bool:
     return _env_bool("ROBINHOOD_ENABLED")
+
+
+def exa_enabled() -> bool:
+    """True when EXA_ENABLED is set to a truthy value."""
+    return _env_bool("EXA_ENABLED")
+
+
+def get_exa_api_key() -> Optional[str]:
+    """Exa API key, or None when unset (integration is optional)."""
+    value = (os.getenv("EXA_API_KEY") or "").strip()
+    return value or None

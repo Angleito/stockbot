@@ -16,6 +16,7 @@ from app.storage import duckdb
 from app.tool_render import issue_to_prose
 from app.storage.runs import (
     get_events,
+    get_evidence,
     get_model_calls,
     get_run,
     get_tool_calls,
@@ -136,6 +137,12 @@ def _cmd_inspect(run_id: str) -> None:
             f"rows={tc['result_row_count']} bytes={tc['result_bytes']} "
             f"err={tc['error_type']} {tc['error_message'] or ''}"
         )
+    print()
+    print("search_web evidence:")
+    for ev in get_evidence(run_id):
+        if ev["tool_name"] == "search_web":
+            snippet = (ev.get("rendered_text") or "").replace("\n", " ")[:200]
+            print(f"  {ev['evidence_id']} {ev['tool_call_id']} {snippet}")
     print()
     print("model calls:")
     for mc in get_model_calls(run_id):

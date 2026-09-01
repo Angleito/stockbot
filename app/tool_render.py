@@ -67,6 +67,8 @@ def render_tool_result(
         text = _render_briefing(result, max_bytes)
     elif result.get("source") == "sec" and "metric" in result:
         text = _render_sec_facts(result, max_bytes)
+    elif result.get("result_type") == "web_search":
+        text = _render_web_search(result, max_bytes)
     elif _is_text_result(result):
         text = _render_text_result(result, max_bytes)
     else:
@@ -143,6 +145,31 @@ def _render_option_comparison(result: dict, max_bytes: int) -> str:
         )) + " |")
     lines.append(f"Returned: {result.get('returned', 0)} of {result.get('matched', 0)} matched; ranking: {result.get('ranking', 'unknown')}")
     lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _render_web_search(result: dict, max_bytes: int) -> str:
+    lines = [
+        f"Web search: {result.get('query') or '?'} (mode: {result.get('search_type') or 'auto'})"
+    ]
+    evidence = result.get("evidence") or []
+    if not evidence:
+        lines.append("No evidence returned.")
+    for index, item in enumerate(evidence, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = _cell(item.get("title")) or item.get("url") or f"Result {index}"
+        meta = []
+        if item.get("published_at"):
+            meta.append(f"published {item['published_at']}")
+        if item.get("retrieved_at"):
+            meta.append(f"retrieved {item['retrieved_at']}")
+        suffix = f" ({'; '.join(meta)})" if meta else ""
+        lines.append(f"{index}. {title} — {item.get('source_domain') or 'unknown'}{suffix}")
+        if item.get("url"):
+            lines.append(f"   {item['url']}")
+        if item.get("highlight"):
+            lines.append(f"   {item['highlight']}")
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 

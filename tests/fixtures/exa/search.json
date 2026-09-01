@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "id": "amd-mi400",
+      "title": "AMD Unveils MI400 Accelerator With 4x Throughput",
+      "url": "https://ir.amd.com/news-releases/news-details/2026/amd-mi400",
+      "publishedDate": "2026-08-01T10:00:00.000Z",
+      "highlights": [
+        "AMD unveiled its MI400 accelerator, claiming 4x the FP16 throughput of the previous generation.",
+        "Shipments are expected to begin in the first half of next year, with hyperscaler design wins already announced."
+      ]
+    },
+    {
+      "id": "reuters-targets",
+      "title": "Analysts Raise AMD Price Targets After Earnings",
+      "url": "https://www.reuters.com/technology/amd-price-targets-2026/",
+      "highlights": [
+        "At least five brokers raised price targets on AMD following its quarterly results."
+      ]
+    },
+    {
+      "id": "no-url-item",
+      "title": "Rumor Roundup: AMD Supply Chain Chatter",
+      "publishedDate": "2026-08-03T09:30:00.000Z",
+      "highlights": [
+        "This item must be skipped during normalization because it lacks a url."
+      ]
+    }
+  ]
+}

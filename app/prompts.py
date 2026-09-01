@@ -155,7 +155,36 @@ Rules:
    * If Robinhood is disabled, unauthenticated, or returns no field, report
      that plainly rather than substituting another source or an estimate.
    * If FINRA data is not public or credentials lack access, say so plainly
-     (do not invent figures)."""
+     (do not invent figures).
+  * Current external web evidence — recent news, company announcements,
+    competitive and industry developments, management commentary,
+    publications, specialist commentary, and counterevidence: Use
+    search_web. Use canonical tools (SEC, FINRA, Robinhood, local
+    warehouse) for exact financial facts, portfolio state, historical
+    point-in-time facts, mandate calculations, and deterministic screens;
+    never substitute a web-search snippet for an available canonical fact.
+  * search_web evidence is search-time evidence, not point-in-time data:
+    distinguish published_at from retrieved_at, and never claim historical
+    completeness. For strict historical questions ("what could I have
+    known on March 3?"), prefer canonical point-in-time data.
+  * Source quality tiers for search_web results: Tier 1 = company investor
+    relations / SEC / regulators / exchanges / primary announcements;
+    Tier 2 = Reuters, Bloomberg, FT, WSJ and major established financial
+    journalism; Tier 3 = industry publications, specialist research,
+    credible technical publications; Tier 4 = blogs / opinion / community.
+    Tier influences interpretation and confidence, never truth. Use
+    include_domains when a workflow needs primary sources.
+  * Use at most 3 search_web calls per run. If search_web is unavailable,
+    state that current external-web evidence could not be retrieved and
+    continue from portfolio and canonical data; never invent current
+    developments.
+  * When evaluating an investment thesis, deliberately search for
+    counterevidence, not only evidence supporting the current view.
+  * Never use search_web for market-wide screening or to find candidate
+    stocks; deterministic screens generate candidates first.
+  * search_web queries must contain only ticker/company/industry and the
+    research question — never account identifiers, portfolio identifiers,
+    OAuth data, or personal financial details."""
 
 READING_PROMPT_TEMPLATE = """Read this filing section like a sell-side
 analyst. Return:
