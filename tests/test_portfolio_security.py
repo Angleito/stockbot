@@ -189,6 +189,12 @@ def test_naive_as_of_rejected(data_root):
         resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0), data_root=data_root)
 
 
+def test_date_as_of_rejected(data_root):
+    _seed_amd(data_root)
+    with pytest.raises(TypeError):
+        resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)
+
+
 def test_newest_alias_wins_chronologically_not_lexically(data_root):
     _seed_entity(data_root)
     _seed_alias(data_root, known_at="2026-08-25T13:00:00+01:00", security_id=None)
@@ -201,5 +207,31 @@ def test_newest_alias_wins_chronologically_not_lexically(data_root):
     )
     # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
     # older than 12:30Z — the 12:30Z alias must win.
+    assert resolution.resolved is True
+    assert resolution.security_id == AMD_SECURITY
+
+
+def test_same_instant_conflicting_securities_are_ambiguous(data_root):
+    _seed_entity(data_root)
+    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY)
+    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999", source="control")
+    _seed_security(data_root)
+    resolution = resolve_security(
+        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "ambiguous"
+    assert resolution.entity_id == AMD_ENTITY
+    assert resolution.security_id is None
+
+
+def test_same_instant_null_and_explicit_security_not_conflict(data_root):
+    _seed_entity(data_root)
+    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=None)
+    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control")
+    _seed_security(data_root)
+    resolution = resolve_security(
+        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
+    )
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY

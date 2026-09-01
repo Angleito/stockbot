@@ -111,7 +111,7 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root):
         "shares_outstanding_rows": 3,
         "exclusions": {"unmapped_symbol": 0, "ambiguous_ticker_mapping": 0,
                        "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
-                       "invalid_short_interest": 0},
+                       "invalid_short_interest": 0, "conflicting_versions": 0},
     }
     assert result["calculation_version"] == screens.SCREEN_CALC_VERSION
     # Default as_of is the live horizon (UTC today), not the settlement date.
@@ -383,6 +383,7 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root):
         "not_classified_common_equity": 0,
         "missing_shares_outstanding": 0,
         "invalid_short_interest": 1,     # FFF
+        "conflicting_versions": 0,
     }
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
 
@@ -494,6 +495,10 @@ def test_security_classification_is_consulted(data_root):
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     assert "ETF" in [e["ticker"] for e in early["entries"]]
 
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
+    assert later["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    assert "ETF" not in [e["ticker"] for e in later["entries"]]
+
 
 def test_corrected_snapshot_mixed_offsets_newest_wins(data_root):
     """A mixed-offset revision: the lexically-larger but chronologically
@@ -545,6 +550,44 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root):
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]  # AAA stays classified
+
+
+def test_same_instant_conflicting_versions_exclude_symbol(data_root):
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    _seed_short_interest(
+        data_root,
+        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
+        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+    )
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
+    assert result["coverage"]["exclusions"]["conflicting_versions"] == 1
+
+
+def test_same_instant_conflicting_classifications_exclude_entity(data_root):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows())
+    directory = data_root / "parquet" / "securities" / "partition=none"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.Table.from_pylist([{
+            "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
+            "security_type": "unknown", "ticker": "AAA", "exchange": None,
+            "source": "provider-test", "known_at": "2026-08-10T12:00:00Z",
+            "retrieved_at": "2026-08-10T12:00:00Z", "content_hash": "reclass-conflict", "parser_version": "t",
+        }], schema=parquet.dataset("securities").schema),
+        str(directory / "part-reclass-conflict.parquet"),
+    )
+
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert "AAA" not in [e["ticker"] for e in result["entries"]]
+    assert result["coverage"]["exclusions"]["not_classified_common_equity"] == 1
 
 
 # ---------------------------------------------------------------------------

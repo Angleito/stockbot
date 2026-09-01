@@ -334,6 +334,9 @@ def test_finra_newest_version_wins_per_symbol(data_root):
     )
 
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+    assert research.latest_finra_metrics["short_position"] == Decimal("1150000")
+    assert research.latest_finra_metrics["settlement_date"] == "2026-08-14"
+    assert research.latest_finra_metrics["known_at"] == "2026-08-20T12:00:00Z"
 
 def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root):
     _seed_short_interest(
@@ -351,6 +354,19 @@ def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root):
     # older than 12:30Z — the 12:30Z (v2) values must win.
     assert research.latest_finra_metrics["short_position"] == Decimal("1150000")
     assert research.latest_finra_metrics["known_at"] == "2026-08-17T12:30:00Z"
+
+
+def test_finra_same_instant_conflicting_versions_empty(data_root):
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_200_000,
+        prev_position=1_000_000, known_at="2026-08-17T12:00:00Z", content_hash="finra-c1-hash",
+    )
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_150_000,
+        prev_position=1_000_000, known_at="2026-08-17T12:00:00Z", content_hash="finra-c2-hash",
+    )
+    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+    assert research.latest_finra_metrics == {}
 
 
 

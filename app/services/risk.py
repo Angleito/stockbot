@@ -20,13 +20,17 @@ from .portfolio_sync import read_latest_snapshot
 def load_sector_map(
     data_root: Path | None = None, as_of: datetime | None = None
 ) -> dict[str, str]:
-    """Newest-per-entity sector from sector_mappings, knowable on/before as_of."""
+    """Newest-per-entity sector from sector_mappings, knowable on/before as_of;
+    same-instant conflicting sectors drop the entity (unknown exposure)."""
     clause, param = duckdb.as_of_clause(as_of.isoformat()) if as_of else ("1 = 1", None)
     params = [param] if param is not None else []
     rows = duckdb.query(
-        "SELECT entity_id, sector FROM sector_mappings "
-        f"WHERE {clause} "
-        "QUALIFY row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
+        "SELECT entity_id, sector FROM ("
+        "SELECT entity_id, sector, "
+        "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "count(DISTINCT sector) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+        f"FROM sector_mappings WHERE {clause}"
+        ") WHERE _rn = 1 AND _variants = 1",
         params=params,
         data_root=data_root,
     )

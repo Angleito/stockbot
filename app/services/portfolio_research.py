@@ -107,18 +107,22 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
     Newest source version wins per symbol (mirroring
     ``screens._snapshot_rows``: ``PARTITION BY symbol_code ORDER BY known_at
     DESC, retrieved_at DESC``), restricted to settlement cycles knowable on
-    or before ``as_of``.
+    or before ``as_of``.  Same-instant conflicting versions yield no
+    metrics (empty dict -> freshness finra fields None).
     """
     clause, param = duckdb.as_of_clause(as_of)
     rows = duckdb.query(
         "SELECT settlement_date, short_position, prev_position, "
-        "avg_daily_volume, days_to_cover, known_at "
+        "avg_daily_volume, days_to_cover, known_at FROM ("
+        "SELECT settlement_date, short_position, prev_position, "
+        "avg_daily_volume, days_to_cover, known_at, "
+        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
         "FROM short_interest "
         "WHERE symbol_code = UPPER(?) "
         "AND CAST(settlement_date AS DATE) <= CAST(? AS DATE) "
-        f"AND {clause} "
-        "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
+        f"AND {clause}"
+        ") WHERE _rn = 1 AND _variants = 1",
         params=[ticker, as_of, param],
         data_root=data_root,
     )

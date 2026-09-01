@@ -275,6 +275,7 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
         "not_classified_common_equity": 0,
         "missing_shares_outstanding": 0,
         "invalid_short_interest": 1,  # BAD
+        "conflicting_versions": 0,
     }
     assert [e["ticker"] for e in result["entries"]] == ["AAPL", "AMD"]
 

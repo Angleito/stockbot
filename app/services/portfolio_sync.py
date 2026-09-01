@@ -54,8 +54,10 @@ def resolve_security(
     ``as_of`` (``NULL`` bounds are unbounded; date-only values are midnight,
     so ``valid_to="2026-08-25"`` is expired on the 25th).  Multiple active
     entities for one ticker resolve as ``"ambiguous"`` — never
-    source/order-wins.  No mappings are ever invented: unknown tickers
-    resolve to ``resolved=False``.
+    source/order-wins.  Same-instant conflicting rows for one entity
+    (different resolved security ids) also resolve as ``"ambiguous"`` —
+    never an arbitrary row pick.  No mappings are ever invented: unknown
+    tickers resolve to ``resolved=False``.
     """
     del provider_instrument_id
     if as_of is None:
@@ -83,6 +85,15 @@ def resolve_security(
     entities = list(dict.fromkeys(row["entity_id"] for row in rows))
     if len(entities) > 1:
         return SecurityResolution(None, None, ticker, False, "ambiguous")
+    material_security_ids = set()
+    for row in rows:
+        row_security_id = row.get("security_id")
+        entity_id = str(row["entity_id"])
+        if row_security_id is None and entity_id.startswith("sec:cik:"):
+            row_security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
+        material_security_ids.add(str(row_security_id) if row_security_id is not None else None)
+    if len(material_security_ids) > 1:
+        return SecurityResolution(None, entities[0], ticker, False, "ambiguous")
     newest = rows[0]
     alias = TickerAlias.from_row(newest)
     entity_id = alias.entity_id

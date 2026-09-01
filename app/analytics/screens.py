@@ -76,23 +76,31 @@ def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path
     return str(latest)
 
 
-def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> list[dict]:
+def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict], int]:
     """Short-interest rows for one settlement cycle, point-in-time.
 
     Only source versions knowable on/before ``as_of`` are visible, and the
     newest such version wins per symbol (corrected snapshots supersede older
-    ones exactly when they become knowable).
+    ones exactly when they become knowable).  Same-instant conflicting
+    versions (identical known_at/retrieved_at, different material values)
+    resolve to unknown: the row is excluded, not arbitrarily picked.
+    Returns ``(clean_rows, conflicting_count)``.
     """
     clause, param = duckdb.as_of_clause(as_of)
-    return duckdb.query(
-        "SELECT * FROM short_interest "
-        f"WHERE settlement_date = ? AND {clause} "
-        "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 "
-        "ORDER BY symbol_code",
+    rows = duckdb.query(
+        "SELECT * EXCLUDE (_rn) FROM ("
+        "SELECT *, "
+        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+        f"FROM short_interest WHERE settlement_date = ? AND {clause}"
+        ") WHERE _rn = 1 ORDER BY symbol_code",
         params=[settlement_date, param],
         data_root=data_root,
     )
+    clean = [row for row in rows if row["_variants"] == 1]
+    for row in clean:
+        del row["_variants"]
+    return clean, len(rows) - len(clean)
 
 
 def _ticker_alias_map(as_of: str, data_root: Path) -> dict[str, list[str]]:
@@ -114,13 +122,17 @@ def _ticker_alias_map(as_of: str, data_root: Path) -> dict[str, list[str]]:
 def _security_type_map(as_of: str, data_root: Path) -> dict[str, str]:
     """entity_id -> security classification, restricted to classifications
     knowable on/before ``as_of``.  The newest classification row known at
-    as_of wins per entity (classification revisions are point-in-time)."""
+    as_of wins per entity (classification revisions are point-in-time);
+    same-instant conflicting classifications drop the entity (absent from
+    the map -> counted as not classified)."""
     clause, param = duckdb.as_of_clause(as_of)
     rows = duckdb.query(
-        "SELECT entity_id, security_type FROM securities "
-        f"WHERE {clause} "
-        "QUALIFY row_number() OVER (PARTITION BY entity_id "
-        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1",
+        "SELECT entity_id, security_type FROM ("
+        "SELECT entity_id, security_type, "
+        "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "count(DISTINCT security_type) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+        f"FROM securities WHERE {clause}"
+        ") WHERE _rn = 1 AND _variants = 1",
         params=[param],
         data_root=data_root,
     )
@@ -159,10 +171,12 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
     clause, param = duckdb.as_of_clause(as_of)
     payload = {
         "short_interest": duckdb.query(
-            "SELECT row_id, content_hash, known_at FROM short_interest "
-            f"WHERE settlement_date = ? AND {clause} "
-            "QUALIFY row_number() OVER (PARTITION BY symbol_code "
-            "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 ORDER BY symbol_code",
+            "SELECT row_id, content_hash, known_at FROM ("
+            "SELECT row_id, content_hash, known_at, symbol_code, short_position, prev_position, avg_daily_volume, days_to_cover, issue_name, "
+            "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+            "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+            f"FROM short_interest WHERE settlement_date = ? AND {clause}"
+            ") WHERE _rn = 1 AND _variants = 1 ORDER BY symbol_code",
             params=[settlement_date, param],
             data_root=data_root,
         ),
@@ -175,10 +189,12 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             data_root=data_root,
         ),
         "securities": duckdb.query(
-            "SELECT security_id, content_hash, known_at FROM securities "
-            f"WHERE {clause} "
-            "QUALIFY row_number() OVER (PARTITION BY entity_id "
-            "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) = 1 ORDER BY entity_id",
+            "SELECT security_id, content_hash, known_at FROM ("
+            "SELECT security_id, content_hash, known_at, entity_id, security_type, "
+            "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+            "count(DISTINCT security_type) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+            f"FROM securities WHERE {clause}"
+            ") WHERE _rn = 1 AND _variants = 1 ORDER BY entity_id",
             params=[param],
             data_root=data_root,
         ),
@@ -204,8 +220,9 @@ def materialize_short_interest_screen(
     ``as_of`` is the knowledge horizon: FINRA rows, ticker aliases, security
     classifications, and SEC facts are all restricted to ``known_at <=
     as_of``, and the newest FINRA source version known at as_of wins per
-    symbol.  When omitted it defaults to today (the live screen); historical
-    reproduction passes an explicit as_of.
+    symbol (same-instant conflicting versions resolve to unknown and are
+    excluded).  When omitted it defaults to today (the live screen);
+    historical reproduction passes an explicit as_of.
 
     The ranking is deterministic: same settlement date, same ``as_of``, same
     ingested data -> identical ranking.  The run is persisted with its
@@ -214,7 +231,7 @@ def materialize_short_interest_screen(
     """
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
     as_of = _resolve_as_of(as_of)
-    rows = _snapshot_rows(settlement_date, as_of, data_root)
+    rows, conflicting = _snapshot_rows(settlement_date, as_of, data_root)
     if not rows:
         return {
             "error": (
@@ -232,7 +249,9 @@ def materialize_short_interest_screen(
         "not_classified_common_equity": 0,
         "missing_shares_outstanding": 0,
         "invalid_short_interest": 0,
+        "conflicting_versions": 0,
     }
+    exclusions["conflicting_versions"] = conflicting
     # Stage counters are cumulative complements of the exclusions: a row
     # excluded at an earlier stage never reached the later checks, so the
     # CLI reports these directly instead of deriving them from exclusions.
@@ -490,7 +509,7 @@ def _cycle_entities(
     classifications knowable on/before ``as_of`` are used, and only entities
     classified as common equity rank.
     """
-    rows = _snapshot_rows(settlement_date, as_of, data_root)
+    rows, _ = _snapshot_rows(settlement_date, as_of, data_root)
     result: dict[str, dict] = {}
     for row in rows:
         symbol = str(row["symbol_code"])

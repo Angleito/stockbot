@@ -491,6 +491,18 @@ def test_load_sector_map_empty_dataset(data_root):
     assert risk_service.load_sector_map(data_root=data_root) == {}
 
 
+def test_load_sector_map_same_instant_conflict_drops_entity(data_root):
+    parquet.write_rows(
+        "sector_mappings",
+        [
+            _sector_row("sec:cik:0000320193", "semiconductors", "2026-08-25T12:00:00Z"),
+            _sector_row("sec:cik:0000320193", "technology", "2026-08-25T12:00:00Z"),
+        ],
+        root=data_root / "parquet",
+    )
+    assert risk_service.load_sector_map(data_root=data_root) == {}
+
+
 # ---------------------------------------------------------------------------
 # CLI command
 # ---------------------------------------------------------------------------
