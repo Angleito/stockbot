@@ -91,6 +91,8 @@ def load_mandate(path: Path) -> Mandate:
                 f"(supported: {', '.join(SUPPORTED_SEVERITIES)})"
             )
         target = entry.get("target")
+        if isinstance(target, str):
+            target = target.strip()
         if metric == "sector_exposure" and not (isinstance(target, str) and target.strip()):
             raise ValueError(
                 f"mandate limit {index}: sector_exposure requires a non-empty 'target' sector"
@@ -110,4 +112,7 @@ def load_mandate(path: Path) -> Mandate:
         isinstance(item, str) and item.strip() for item in prohibited
     ):
         raise ValueError("mandate: 'prohibited_assets' must be a list of non-empty strings")
-    return Mandate(limits=tuple(limits), prohibited_assets=tuple(prohibited))
+    return Mandate(
+        limits=tuple(limits),
+        prohibited_assets=tuple(item.strip() for item in prohibited),
+    )

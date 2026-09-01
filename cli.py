@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from app.agent import run_chat
@@ -59,8 +60,12 @@ def _cmd_runs(limit: int) -> None:
         duration = row["duration_ms"] if row["duration_ms"] is not None else 0.0
         cost = row["estimated_total_cost"] if row["estimated_total_cost"] is not None else 0.0
         question = (row["question"] or "")[:60]
+        started_local = (
+            datetime.fromisoformat(row["started_at"]).astimezone().isoformat()
+            if row["started_at"] else ""
+        )
         print(
-            f"{row['run_id']:<38} {(row['started_at'] or '')[:26]:<26} "
+            f"{row['run_id']:<38} {started_local[:26]:<26} "
             f"{(row['status'] or ''):<16} {duration:>10.0f} {cost:>9.6f}  {question}"
         )
 
@@ -98,6 +103,8 @@ def _cmd_inspect(run_id: str) -> None:
         print(f"error: no run found for {run_id}", file=sys.stderr)
         sys.exit(1)
     for key, value in run.items():
+        if key in ("started_at", "completed_at") and value:
+            value = datetime.fromisoformat(value).astimezone().isoformat()
         print(f"{key}: {value}")
     print()
     print("events (seq type round tool duration_ms summary):")
@@ -146,14 +153,15 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
         return f"{float(value) * 100:.1f}%"
 
     print(f"Mandate: {mandate_path}")
-    print(f"Snapshot: {evaluation.snapshot_id} created {evaluation.created_at.isoformat()}")
-    print(
-        "Sector exposures: "
-        + ", ".join(
-            f"{sector} {float(weight) * 100:.1f}%"
-            for sector, weight in evaluation.sector_exposures.items()
+    print(f"Snapshot: {evaluation.snapshot_id} created {evaluation.created_at.astimezone().isoformat()}")
+    if evaluation.sector_exposures:
+        print(
+            "Sector exposures: "
+            + ", ".join(
+                f"{sector} {float(weight) * 100:.1f}%"
+                for sector, weight in evaluation.sector_exposures.items()
+            )
         )
-    )
     if evaluation.breaches:
         print("Breaches:")
         for breach in evaluation.breaches:

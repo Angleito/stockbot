@@ -140,6 +140,17 @@ def test_load_mandate_rejects_bad_config(tmp_path, payload):
     with pytest.raises(ValueError):
         load_mandate(path)
 
+def test_load_mandate_normalizes_whitespace(tmp_path):
+    path = _write_mandate(tmp_path / "mandate.json", {
+        "limits": [
+            {"metric": "sector_exposure", "target": "  semiconductors  ", "operator": "<=", "threshold": 0.20},
+        ],
+        "prohibited_assets": [" GME ", " sec:cik:0000320193 "],
+    })
+    mandate = load_mandate(path)
+    assert mandate.limits[0].target == "semiconductors"
+    assert mandate.prohibited_assets == ("GME", "sec:cik:0000320193")
+
 
 # ---------------------------------------------------------------------------
 # evaluate_mandate math
@@ -177,9 +188,8 @@ def test_single_position_weight_none_weight_not_evaluable():
     mandate = _mandate([_limit("single_position_weight", "<=", "0.25")])
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
+    assert evaluation.sector_exposures == {}
     assert evaluation.not_evaluable == (
-        "sector_exposure: WING (no weight)",
-        "sector_exposure: ZZZZ (no weight)",
         "single_position_weight: WING (no weight)",
         "single_position_weight: ZZZZ (no weight)",
     )
@@ -225,6 +235,23 @@ def test_minimum_cash_unavailable_not_evaluable():
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
     assert evaluation.not_evaluable == ("minimum_cash: cash unavailable",)
+
+def test_minimum_cash_total_value_unavailable_not_evaluable():
+    snapshot = _hand_built_snapshot()
+    snapshot = PortfolioSnapshot(
+        snapshot_id=snapshot.snapshot_id,
+        created_at=snapshot.created_at,
+        broker=snapshot.broker,
+        account_ids=snapshot.account_ids,
+        cash=Decimal("1234.56"),
+        invested_value=snapshot.invested_value,
+        total_value=None,
+        positions=snapshot.positions,
+    )
+    mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
+    evaluation = evaluate_mandate(snapshot, mandate)
+    assert evaluation.breaches == ()
+    assert evaluation.not_evaluable == ("minimum_cash: total value unavailable",)
 
 
 def test_prohibited_assets_ticker_and_entity_matches():
@@ -388,7 +415,8 @@ def test_cli_evaluate_mandate_reports(capsys, data_root):
     _cmd_evaluate_mandate(mandate_path, data_root)
     out = capsys.readouterr().out
     assert f"Mandate: {mandate_path}" in out
-    assert "Snapshot: portfolio:robinhood:2026-08-25T12:00:00+00:00 created 2026-08-25T12:00:00+00:00" in out
+    expected_created = f"Snapshot: portfolio:robinhood:2026-08-25T12:00:00+00:00 created {datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()}"
+    assert expected_created in out
     assert "Sector exposures: semiconductors 75.0%, unknown_sector 25.0%" in out
     assert "[warning] sector_exposure semiconductors: actual 75.0%, limit 20.0%, excess 55.0%" in out
     assert "[warning] single_position_weight: actual 75.0%, limit 25.0%, excess 50.0%" in out

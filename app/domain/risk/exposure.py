@@ -79,8 +79,11 @@ def _evaluate_limit(
         if limit.unit == "dollars":
             actual = snapshot.cash
         else:
-            if snapshot.cash is None or snapshot.total_value is None:
+            if snapshot.cash is None:
                 not_evaluable.append("minimum_cash: cash unavailable")
+                return
+            if snapshot.total_value is None:
+                not_evaluable.append("minimum_cash: total value unavailable")
                 return
             if snapshot.total_value == 0:
                 not_evaluable.append("minimum_cash: total value is zero")
@@ -115,17 +118,21 @@ def evaluate_mandate(
     sector_map = sector_map or {}
     not_evaluable: list[str] = []
     sector_exposures: dict[str, Decimal] = {}
-    for position in snapshot.positions:
-        if position.portfolio_weight is None:
-            not_evaluable.append(f"sector_exposure: {position.ticker} (no weight)")
-            continue
-        if position.entity_id is not None and position.entity_id in sector_map:
-            sector = sector_map[position.entity_id]
-        else:
-            sector = UNKNOWN_SECTOR
-        sector_exposures[sector] = (
-            sector_exposures.get(sector, Decimal("0")) + position.portfolio_weight
-        )
+    needs_sector_exposure = any(
+        limit.metric == "sector_exposure" for limit in mandate.limits
+    )
+    if needs_sector_exposure:
+        for position in snapshot.positions:
+            if position.portfolio_weight is None:
+                not_evaluable.append(f"sector_exposure: {position.ticker} (no weight)")
+                continue
+            if position.entity_id is not None and position.entity_id in sector_map:
+                sector = sector_map[position.entity_id]
+            else:
+                sector = UNKNOWN_SECTOR
+            sector_exposures[sector] = (
+                sector_exposures.get(sector, Decimal("0")) + position.portfolio_weight
+            )
 
     breaches: list[RiskBreach] = []
     for limit in mandate.limits:

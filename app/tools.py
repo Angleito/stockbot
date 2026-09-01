@@ -804,6 +804,7 @@ def get_market_snapshot(ticker: str) -> dict:
         "bid": str(quote.bid) if quote.bid is not None else None,
         "ask": str(quote.ask) if quote.ask is not None else None,
         "retrieved_at": quote.retrieved_at.isoformat(),
+        "retrieved_at_local": quote.retrieved_at.astimezone().isoformat(),
         "source": "robinhood_mcp",
     }
 
@@ -824,6 +825,7 @@ def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = 
         "result_type": "mandate_evaluation",
         "snapshot_id": evaluation.snapshot_id,
         "snapshot_created_at": evaluation.created_at.isoformat(),
+        "snapshot_created_at_local": evaluation.created_at.astimezone().isoformat(),
         "breaches": [
             {
                 "metric": breach.metric,
@@ -929,6 +931,7 @@ def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
         # Persistent snapshot/account identifiers stay local. Tool results are
         # rendered into OpenRouter context, where they are not needed.
         "created_at": snapshot.created_at.isoformat(),
+        "created_at_local": snapshot.created_at.astimezone().isoformat(),
         "broker": snapshot.broker,
         "account_count": len(snapshot.account_ids),
         "total_value": _str_or_none(snapshot.total_value),
@@ -962,6 +965,7 @@ def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
         ],
         "freshness": {
             "snapshot_created_at": snapshot.created_at.isoformat(),
+            "snapshot_created_at_local": snapshot.created_at.astimezone().isoformat(),
             **_research_freshness(
                 [item.research_data_freshness for item in research.values()]
             ),

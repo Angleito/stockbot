@@ -334,6 +334,47 @@ def test_missing_quote_price_degrades_snapshot_but_persists(data_root):
     assert restored.invested_value is None
     assert restored.positions[0].market_price is None
 
+def test_partial_pricing_nils_total_and_weights(data_root):
+    payloads = _happy_payloads()
+    payloads["get_equity_positions"] = lambda args: (
+        {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
+                                 "quantity": "10", "average_buy_price": "95.50"}]}}
+        if args["account_number"] == "100000001"
+        else {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
+                                      "quantity": "5", "average_buy_price": "150.25"}]}}
+    )
+    payloads["get_equity_quotes"] = {
+        "data": {"results": [{"quote": {"symbol": "WING", "last_trade_price": "116.84",
+                                       "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
+    }
+    _, _, snapshot = _run_sync(data_root, payloads)
+    assert snapshot.invested_value == Decimal("1168.40")
+    assert snapshot.total_value is None
+    assert snapshot.cash == Decimal("3234.56")
+    assert all(position.portfolio_weight is None for position in snapshot.positions)
+
+
+def test_zero_quantity_unpriced_does_not_block_completeness(data_root):
+    payloads = _happy_payloads()
+    payloads["get_equity_positions"] = lambda args: (
+        {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
+                                 "quantity": "0", "average_buy_price": "95.50"}]}}
+        if args["account_number"] == "100000001"
+        else {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
+                                      "quantity": "5", "average_buy_price": "150.25"}]}}
+    )
+    payloads["get_equity_quotes"] = {
+        "data": {"results": [{"quote": {"symbol": "AAPL", "last_trade_price": "160.00",
+                                       "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
+    }
+    _, _, snapshot = _run_sync(data_root, payloads)
+    assert snapshot.invested_value == Decimal("800.00")
+    assert snapshot.total_value is not None
+    aapl = next(position for position in snapshot.positions if position.ticker == "AAPL")
+    wing = next(position for position in snapshot.positions if position.ticker == "WING")
+    assert aapl.portfolio_weight is not None
+    assert wing.market_value is None
+
 
 def test_empty_accounts_still_persists_empty_snapshot(data_root):
     client = FakeClient({"get_accounts": {"accounts": []}})

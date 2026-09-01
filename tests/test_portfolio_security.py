@@ -85,7 +85,7 @@ def _seed_amd(data_root, **kwargs):
 
 def test_ticker_resolves_to_entity_and_security_ids(data_root):
     _seed_amd(data_root)
-    resolution = resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
     assert resolution.ticker == "AMD"
@@ -95,7 +95,7 @@ def test_ticker_resolves_to_entity_and_security_ids(data_root):
 
 def test_lookup_is_case_insensitive(data_root):
     _seed_amd(data_root)
-    resolution = resolve_security("amd", as_of=date(2026, 8, 25), data_root=data_root)
+    resolution = resolve_security("amd", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
     assert resolution.security_id == AMD_SECURITY
@@ -103,7 +103,7 @@ def test_lookup_is_case_insensitive(data_root):
 
 def test_unknown_ticker_is_unresolved_without_crashing(data_root):
     _seed_amd(data_root)
-    resolution = resolve_security("NOTREAL", as_of=date(2026, 8, 25), data_root=data_root)
+    resolution = resolve_security("NOTREAL", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
     assert resolution.entity_id is None
@@ -113,10 +113,10 @@ def test_unknown_ticker_is_unresolved_without_crashing(data_root):
 
 def test_alias_known_after_as_of_is_invisible(data_root):
     _seed_amd(data_root, known_at="2026-09-01T12:00:00Z")
-    early = resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)
+    early = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
     assert early.resolved is False
     assert early.resolution_method == "unresolved"
-    on_day = resolve_security("AMD", as_of=date(2026, 9, 1), data_root=data_root)
+    on_day = resolve_security("AMD", as_of=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc), data_root=data_root)
     assert on_day.resolved is True
     assert on_day.entity_id == AMD_ENTITY
 
@@ -132,11 +132,11 @@ def test_ambiguous_when_multiple_entities_knowable(data_root):
         security_id="sec:equity:0000320194",
         known_at="2026-06-01T12:00:00Z",
     )
-    before_relabel = resolve_security("AMD", as_of=date(2026, 3, 1), data_root=data_root)
+    before_relabel = resolve_security("AMD", as_of=datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc), data_root=data_root)
     assert before_relabel.resolved is True
     assert before_relabel.entity_id == AMD_ENTITY
     assert before_relabel.security_id == AMD_SECURITY
-    after_relabel = resolve_security("AMD", as_of=date(2026, 8, 1), data_root=data_root)
+    after_relabel = resolve_security("AMD", as_of=datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc), data_root=data_root)
     assert after_relabel.resolved is False
     assert after_relabel.resolution_method == "ambiguous"
     assert after_relabel.entity_id is None
@@ -145,11 +145,11 @@ def test_ambiguous_when_multiple_entities_knowable(data_root):
 
 def test_provider_instrument_id_does_not_change_resolution(data_root):
     _seed_amd(data_root)
-    plain = resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)
+    plain = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
     with_instrument = resolve_security(
         "AMD",
         provider_instrument_id="instr-amd",
-        as_of=date(2026, 8, 25),
+        as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
         data_root=data_root,
     )
     assert with_instrument == plain

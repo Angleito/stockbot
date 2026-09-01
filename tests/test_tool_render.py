@@ -7,6 +7,7 @@ unit tests. Offline and deterministic.
 """
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -674,6 +675,11 @@ def test_portfolio_snapshot_reports_unresolved_and_research_freshness():
     assert "SEC latest filing 2026-08-20" in text
     assert "FINRA settlement 2026-08-14" in text
     assert "Source: robinhood_mcp" in text
+    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    result["created_at_local"] = expected_local
+    result["freshness"]["snapshot_created_at_local"] = expected_local
+    text = render_tool_result(result)
+    assert f"(local {expected_local})" in text
 
 
 def test_large_portfolio_renders_omitted_count_within_budget():
@@ -722,6 +728,10 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
     text = render_tool_result(result)
     assert "Mandate evaluation" in text
     assert "Snapshot created: 2026-08-25T12:00:00+00:00" in text
+    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    result["snapshot_created_at_local"] = expected_local
+    text = render_tool_result(result)
+    assert f"(local {expected_local})" in text
     assert "[critical] sector_exposure semiconductors:" in text
     assert "actual 75.0%, limit 20.0%, excess 55.0%" in text
     # Prohibited-asset values render verbatim, not as percent.

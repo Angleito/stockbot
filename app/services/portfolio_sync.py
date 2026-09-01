@@ -43,6 +43,8 @@ def resolve_security(
 ) -> SecurityResolution:
     """Resolve a ticker to a Stockbot security/entity identity.
 
+    ``as_of`` must be a timezone-aware UTC datetime (timestamp precision;
+    a naive or date value is a type violation).
     ``provider_instrument_id`` is preserved on the position but is NOT used
     for resolution: Robinhood instrument IDs are not bridged to Stockbot
     identities yet.  Resolution is point-in-time over entity_aliases: an
@@ -131,13 +133,21 @@ def build_portfolio_snapshot(
     """Assemble the deterministic, immutable portfolio snapshot.
 
     Position weights use ``total_value`` as the denominator (cash included);
-    weights are ``None`` when total value is unknown.  Cash is the sum of
+    weights are ``None`` when total value is unknown.  Weights are ``None`` whenever any non-zero position lacks a valuation
+    (total_value is then ``None``; zero-quantity positions never block
+    completeness).  Cash is the sum of
     non-None balances and is never invented as zero.
     """
     invested_value, _, _ = portfolio_market_value([position.market_value for position in positions])
     cash_values = [balance.cash for balance in cash_balances if balance.cash is not None]
     cash = sum(cash_values) if cash_values else None
     total_value = invested_value + cash if invested_value is not None and cash is not None else None
+    valuation_complete = all(
+        position.market_value is not None or position.quantity == 0
+        for position in positions
+    )
+    if not valuation_complete:
+        total_value = None
 
     snapshot_id = f"portfolio:robinhood:{created_at.isoformat()}"
     account_ids = tuple(local_account_id(account.account_id) for account in accounts)

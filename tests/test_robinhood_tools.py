@@ -45,6 +45,10 @@ def test_market_snapshot_uses_compact_observed_fields(monkeypatch):
     assert result["ticker"] == "WING"
     assert result["last"] == "116.84"
     assert result["source"] == "robinhood_mcp"
+    expected_local = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    assert result["retrieved_at_local"] == expected_local
+    rendered = render_tool_result(result)
+    assert f"(local {expected_local})" in rendered
 
 
 def test_option_chain_is_normalized_and_bounded(monkeypatch):
@@ -277,6 +281,8 @@ def test_portfolio_snapshot_handler_refresh_path(monkeypatch):
     assert result["positions"][1]["sec"] == {}
     assert result["freshness"]["sec_latest_filed_at"] == "2026-08-20"
     assert result["freshness"]["snapshot_created_at"] == snapshot.created_at.isoformat()
+    assert result["created_at_local"] == snapshot.created_at.astimezone().isoformat()
+    assert result["freshness"]["snapshot_created_at_local"] == snapshot.created_at.astimezone().isoformat()
     # No raw provider payloads or internal structures leak to the top level.
     assert "accounts" not in result
     assert "quotes" not in result

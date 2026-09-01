@@ -74,12 +74,15 @@ def render_tool_result(
 
 
 def _render_market_snapshot(result: dict, max_bytes: int) -> str:
+    retrieved = f"Retrieved: {_cell(result.get('retrieved_at')) or 'unavailable'}"
+    if result.get("retrieved_at_local"):
+        retrieved += f" (local {result['retrieved_at_local']})"
     lines = [
         f"{result.get('ticker', '?')} market snapshot",
         f"Last: {_cell(result.get('last')) or 'unavailable'}",
         f"Bid: {_cell(result.get('bid')) or 'unavailable'}",
         f"Ask: {_cell(result.get('ask')) or 'unavailable'}",
-        f"Retrieved: {_cell(result.get('retrieved_at')) or 'unavailable'}",
+        retrieved,
         f"Source: {_cell(result.get('source')) or 'robinhood_mcp'}",
     ]
     return _truncate_bytes("\n".join(lines), max_bytes)
@@ -141,9 +144,12 @@ def _render_option_comparison(result: dict, max_bytes: int) -> str:
 
 
 def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
+    created = f"Created: {_cell(result.get('created_at')) or 'unavailable'}"
+    if result.get("created_at_local"):
+        created += f" (local {result['created_at_local']})"
     lines = [
         f"Portfolio snapshot — {_cell(result.get('broker')) or 'robinhood'}",
-        f"Created: {_cell(result.get('created_at')) or 'unavailable'}",
+        created,
         f"Total value: {_cell(result.get('total_value')) or 'unavailable'}",
         f"Cash: {_cell(result.get('cash')) or 'unavailable'}",
         f"Invested: {_cell(result.get('invested_value')) or 'unavailable'}",
@@ -163,8 +169,11 @@ def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
     freshness = result.get("freshness") or {}
     freshness_parts = []
     created = freshness.get("snapshot_created_at") or result.get("created_at")
+    created_local = freshness.get("snapshot_created_at_local") or result.get("created_at_local")
     if created:
-        freshness_parts.append(f"snapshot {created}")
+        freshness_parts.append(
+            f"snapshot {created}" + (f" (local {created_local})" if created_local else "")
+        )
     if freshness.get("sec_latest_filed_at"):
         freshness_parts.append(f"SEC latest filing {freshness['sec_latest_filed_at']}")
     if freshness.get("finra_settlement_date"):
@@ -188,9 +197,12 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
         except (TypeError, ValueError):
             return _cell(value)
 
+    snapshot_created = f"Snapshot created: {_cell(result.get('snapshot_created_at')) or 'unavailable'}"
+    if result.get("snapshot_created_at_local"):
+        snapshot_created += f" (local {result['snapshot_created_at_local']})"
     lines = [
         "Mandate evaluation",
-        f"Snapshot created: {_cell(result.get('snapshot_created_at')) or 'unavailable'}",
+        snapshot_created,
     ]
     breaches = result.get("breaches") or []
     if breaches:
