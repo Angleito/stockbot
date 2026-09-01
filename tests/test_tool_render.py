@@ -720,6 +720,16 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
                 "excess": None,
                 "note": "position GME (snap-1:acc-1:GME)",
             },
+            {
+                "metric": "minimum_cash",
+                "target": None,
+                "severity": "warning",
+                "actual": "500",
+                "limit": "1000",
+                "excess": "500",
+                "note": None,
+                "unit": "dollars",
+            },
         ],
         "sector_exposures": {"semiconductors": "0.75", "unknown_sector": "0.25"},
         "not_evaluable": ["single_position_weight: ZZZZ (no weight)"],
@@ -736,6 +746,8 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
     assert "actual 75.0%, limit 20.0%, excess 55.0%" in text
     # Prohibited-asset values render verbatim, not as percent.
     assert "actual GME, limit GME" in text
+    # Dollars-unit breaches render currency, not percent.
+    assert "actual $500.00, limit $1,000.00, excess $500.00" in text
     assert "Sector exposures: semiconductors 75.0%, unknown_sector 25.0%" in text
     assert "Not evaluable:" in text
     assert "- single_position_weight: ZZZZ (no weight)" in text

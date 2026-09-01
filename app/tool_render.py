@@ -187,11 +187,13 @@ def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
 def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
     """Compact mandate report: breaches, sector exposures, not-evaluable."""
 
-    def value_text(value, metric: str) -> str:
+    def value_text(value, metric: str, unit: str) -> str:
         if value is None:
             return "unavailable"
         if metric == "prohibited_assets":
             return _cell(value)
+        if unit == "dollars":
+            return f"${float(value):,.2f}"
         try:
             return f"{float(value) * 100:.1f}%"
         except (TypeError, ValueError):
@@ -215,11 +217,11 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
             severity = _cell(breach.get("severity")) or "warning"
             line = (
                 f"  [{severity}] {metric}{target}: "
-                f"actual {value_text(breach.get('actual'), metric)}, "
-                f"limit {value_text(breach.get('limit'), metric)}"
+                f"actual {value_text(breach.get('actual'), metric, breach.get('unit') or 'ratio')}, "
+                f"limit {value_text(breach.get('limit'), metric, breach.get('unit') or 'ratio')}"
             )
             if breach.get("excess") is not None:
-                line += f", excess {value_text(breach.get('excess'), metric)}"
+                line += f", excess {value_text(breach.get('excess'), metric, breach.get('unit') or 'ratio')}"
             if breach.get("note"):
                 line += f" [{_cell(breach['note'])}]"
             lines.append(line)

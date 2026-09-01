@@ -15,3 +15,4 @@ class RiskBreach:
     limit: Decimal | str | None
     excess: Decimal | None
     note: str | None = None
+    unit: str | None = None

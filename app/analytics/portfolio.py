@@ -37,6 +37,8 @@ def position_market_value(
     quantity: Decimal | None, price: Decimal | None
 ) -> Decimal | None:
     """Return ``quantity * price`` when both are present, else None."""
+    if quantity == 0:
+        return ZERO
     if quantity is None or price is None:
         return None
     return quantity * price

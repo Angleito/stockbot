@@ -43,8 +43,9 @@ def resolve_security(
 ) -> SecurityResolution:
     """Resolve a ticker to a Stockbot security/entity identity.
 
-    ``as_of`` must be a timezone-aware UTC datetime (timestamp precision;
-    a naive or date value is a type violation).
+    ``as_of`` must be a timezone-aware datetime; ``date`` and naive values
+    are rejected at runtime (TypeError/ValueError), and aware values are
+    normalized to UTC (timestamp precision).
     ``provider_instrument_id`` is preserved on the position but is NOT used
     for resolution: Robinhood instrument IDs are not bridged to Stockbot
     identities yet.  Resolution is point-in-time over entity_aliases: an
@@ -57,7 +58,13 @@ def resolve_security(
     resolve to ``resolved=False``.
     """
     del provider_instrument_id
-    as_of = as_of or datetime.now(timezone.utc)
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    elif not isinstance(as_of, datetime):
+        raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
+    elif as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    as_of = as_of.astimezone(timezone.utc)
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     rows = duckdb.query(
         "SELECT alias_type, alias_value, entity_id, security_id, source, "
@@ -133,14 +140,24 @@ def build_portfolio_snapshot(
     """Assemble the deterministic, immutable portfolio snapshot.
 
     Position weights use ``total_value`` as the denominator (cash included);
-    weights are ``None`` when total value is unknown.  Weights are ``None`` whenever any non-zero position lacks a valuation
-    (total_value is then ``None``; zero-quantity positions never block
-    completeness).  Cash is the sum of
-    non-None balances and is never invented as zero.
+    weights are ``None`` when total value is unknown.  Weights are ``None``
+    whenever any non-zero position lacks a valuation (total_value is then
+    ``None``; zero-quantity positions never block completeness).  Cash is the
+    sum of all balances, and only when every account has a non-None balance
+    (all-or-nothing completeness); partial or missing balances yield
+    ``None``, never an invented partial sum.
     """
-    invested_value, _, _ = portfolio_market_value([position.market_value for position in positions])
-    cash_values = [balance.cash for balance in cash_balances if balance.cash is not None]
-    cash = sum(cash_values) if cash_values else None
+    cash_complete = (
+        bool(cash_balances)
+        and len(cash_balances) == len(accounts)
+        and all(balance.cash is not None for balance in cash_balances)
+    )
+    cash = sum(balance.cash for balance in cash_balances) if cash_complete else None
+    invested_value = (
+        Decimal("0")
+        if not positions and cash is not None
+        else portfolio_market_value([position.market_value for position in positions])[0]
+    )
     total_value = invested_value + cash if invested_value is not None and cash is not None else None
     valuation_complete = all(
         position.market_value is not None or position.quantity == 0

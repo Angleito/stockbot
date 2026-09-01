@@ -20,9 +20,11 @@ from pathlib import Path
 import pytest
 
 from app.domain.market.securities import SecurityResolution
-from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, local_account_id
+from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position, local_account_id
+from app.robinhood.account import BrokerageAccount, CashBalance
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_sync import (
+    build_portfolio_snapshot,
     build_position,
     read_latest_snapshot,
     resolve_security,
@@ -373,7 +375,8 @@ def test_zero_quantity_unpriced_does_not_block_completeness(data_root):
     aapl = next(position for position in snapshot.positions if position.ticker == "AAPL")
     wing = next(position for position in snapshot.positions if position.ticker == "WING")
     assert aapl.portfolio_weight is not None
-    assert wing.market_value is None
+    assert wing.market_value == Decimal("0")
+    assert wing.portfolio_weight == Decimal("0")
 
 
 def test_empty_accounts_still_persists_empty_snapshot(data_root):
@@ -435,21 +438,23 @@ def test_persisted_rows_never_contain_raw_account_ids(data_root):
 
 
 def test_sync_without_explicit_now_uses_utc_now(data_root, monkeypatch):
-    class FrozenClock:
-        def __init__(self):
-            self.calls = 0
+    class FrozenClock(datetime):
+        """datetime subclass freezing now(); isinstance checks still pass."""
 
-        def __call__(self, *args):
-            self.calls += 1
-            return NOW
+        calls = 0
+
+        @staticmethod
+        def now(tz=None):
+            FrozenClock.calls += 1
+            return FrozenClock(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+
+        @staticmethod
+        def fromisoformat(value):
+            return datetime.fromisoformat(value)
 
     import app.services.portfolio_sync as portfolio_sync
 
-    clock = FrozenClock()
-    monkeypatch.setattr(portfolio_sync, "datetime", type("DT", (), {
-        "now": staticmethod(clock),
-        "fromisoformat": staticmethod(datetime.fromisoformat),
-    }))
+    monkeypatch.setattr(portfolio_sync, "datetime", FrozenClock)
     client = FakeClient(_happy_payloads())
     snapshot = sync_robinhood_portfolio(
         RobinhoodPortfolioProvider(client), data_root=data_root
@@ -544,6 +549,92 @@ def test_build_position_passes_asset_type():
         None,
     )
     assert position.asset_type == "option"
+
+
+def _position(market_value: Decimal | None = Decimal("500")) -> Position:
+    return Position(
+        position_id="pos-1",
+        account_id="100000001",
+        security_id="sec:equity:0000320193",
+        entity_id="sec:cik:0000320193",
+        ticker="AMD",
+        quantity=Decimal("1"),
+        average_cost=Decimal("400"),
+        market_price=market_value,
+        market_value=market_value,
+        unrealized_gain=Decimal("100") if market_value is not None else None,
+        unrealized_gain_pct=Decimal("0.25") if market_value is not None else None,
+        portfolio_weight=None,
+        source="robinhood_mcp",
+        retrieved_at=NOW,
+    )
+
+
+def _account(account_id="100000001") -> BrokerageAccount:
+    return BrokerageAccount(
+        account_id=account_id,
+        account_type="individual",
+        status="active",
+        retrieved_at=NOW,
+    )
+
+
+def _balance(account_id, cash) -> CashBalance:
+    return CashBalance(
+        account_id=account_id,
+        cash=cash,
+        buying_power=cash,
+        withdrawable_cash=cash,
+        retrieved_at=NOW,
+    )
+
+
+def test_cash_complete_multi_account_sums():
+    snapshot = build_portfolio_snapshot(
+        accounts=[_account("100000001"), _account("100000002")],
+        positions=[_position()],
+        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000002", Decimal("2000"))],
+        created_at=NOW,
+    )
+    assert snapshot.cash == Decimal("3000")
+    assert snapshot.invested_value == Decimal("500")
+    assert snapshot.total_value == Decimal("3500")
+
+
+def test_partial_cash_nils_total_and_weights():
+    snapshot = build_portfolio_snapshot(
+        accounts=[_account("100000001"), _account("100000002")],
+        positions=[_position()],
+        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000002", None)],
+        created_at=NOW,
+    )
+    assert snapshot.cash is None
+    assert snapshot.total_value is None
+    assert all(position.portfolio_weight is None for position in snapshot.positions)
+
+
+def test_missing_balance_nils_total():
+    snapshot = build_portfolio_snapshot(
+        accounts=[_account("100000001"), _account("100000002")],
+        positions=[_position()],
+        cash_balances=[_balance("100000001", Decimal("1000"))],
+        created_at=NOW,
+    )
+    assert snapshot.cash is None
+    assert snapshot.total_value is None
+
+
+def test_cash_only_portfolio_has_valid_totals():
+    snapshot = build_portfolio_snapshot(
+        accounts=[_account("100000001")],
+        positions=[],
+        cash_balances=[_balance("100000001", Decimal("5000"))],
+        created_at=NOW,
+    )
+    assert snapshot.invested_value == Decimal("0")
+    assert snapshot.cash == Decimal("5000")
+    assert snapshot.total_value == Decimal("5000")
+    assert snapshot.positions == ()
 
 
 # ---------------------------------------------------------------------------

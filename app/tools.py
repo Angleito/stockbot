@@ -821,6 +821,7 @@ def get_market_snapshot(ticker: str) -> dict:
         "bid": str(quote.bid) if quote.bid is not None else None,
         "ask": str(quote.ask) if quote.ask is not None else None,
         "retrieved_at": quote.retrieved_at.isoformat(),
+        # *_local fields are the process host's local timezone, not the end user's.
         "retrieved_at_local": quote.retrieved_at.astimezone().isoformat(),
         "source": "robinhood_mcp",
     }
@@ -852,6 +853,7 @@ def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = 
                 "limit": str(breach.limit) if breach.limit is not None else None,
                 "excess": str(breach.excess) if breach.excess is not None else None,
                 "note": breach.note,
+                "unit": breach.unit,
             }
             for breach in evaluation.breaches
         ],

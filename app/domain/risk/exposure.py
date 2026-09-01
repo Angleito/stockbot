@@ -43,18 +43,32 @@ def _evaluate_limit(
     not_evaluable: list[str],
 ) -> None:
     if limit.metric == "sector_exposure":
-        actual = sector_exposures.get(limit.target or "", Decimal("0"))
-        if not _OPS[limit.operator](actual, limit.threshold):
-            breaches.append(
-                RiskBreach(
-                    metric="sector_exposure",
-                    target=limit.target,
-                    severity=limit.severity,
-                    actual=actual,
-                    limit=limit.threshold,
-                    excess=_excess(limit.operator, actual, limit.threshold),
-                )
-            )
+        known = sector_exposures.get(limit.target or "", Decimal("0"))
+        unknown = (
+            Decimal("0")
+            if limit.target == UNKNOWN_SECTOR  # the target IS the unknown bucket; measured directly
+            else sector_exposures.get(UNKNOWN_SECTOR, Decimal("0"))
+        )
+        if limit.operator == "<=":
+            if known > limit.threshold:
+                breaches.append(RiskBreach(metric="sector_exposure", target=limit.target,
+                                           severity=limit.severity, actual=known,
+                                           limit=limit.threshold,
+                                           excess=_excess(limit.operator, known, limit.threshold),
+                                           unit=limit.unit))
+            elif unknown > 0:
+                not_evaluable.append(f"sector_exposure: {limit.target} (unknown exposure)")
+        else:  # ">="
+            if known >= limit.threshold:
+                pass
+            elif unknown > 0:
+                not_evaluable.append(f"sector_exposure: {limit.target} (unknown exposure)")
+            else:
+                breaches.append(RiskBreach(metric="sector_exposure", target=limit.target,
+                                           severity=limit.severity, actual=known,
+                                           limit=limit.threshold,
+                                           excess=_excess(limit.operator, known, limit.threshold),
+                                           unit=limit.unit))
     elif limit.metric == "single_position_weight":
         for position in snapshot.positions:
             weight = position.portfolio_weight
@@ -73,6 +87,7 @@ def _evaluate_limit(
                         limit=limit.threshold,
                         excess=_excess(limit.operator, weight, limit.threshold),
                         note=f"{position.ticker} ({position.position_id})",
+                        unit=limit.unit,
                     )
                 )
     elif limit.metric == "minimum_cash":
@@ -101,6 +116,7 @@ def _evaluate_limit(
                     actual=actual,
                     limit=limit.threshold,
                     excess=_excess(limit.operator, actual, limit.threshold),
+                    unit=limit.unit,
                 )
             )
 

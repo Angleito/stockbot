@@ -168,6 +168,7 @@ def test_single_position_weight_breach_and_clean_position():
     assert breach.excess == Decimal("0.50")
     assert breach.note == "WING (snap-1:acc-1:WING)"
     assert breach.severity == "warning"
+    assert breach.unit == "ratio"
 
 
 def test_single_position_weight_at_threshold_no_breach():
@@ -203,6 +204,7 @@ def test_minimum_cash_ratio_breach_and_excess():
     assert breach.metric == "minimum_cash"
     assert breach.actual == Decimal("1234.56") / Decimal("2462.96")
     assert breach.excess == Decimal("0.60") - breach.actual
+    assert breach.unit == "ratio"
 
 
 def test_minimum_cash_ratio_satisfied_no_breach():
@@ -217,6 +219,7 @@ def test_minimum_cash_dollars_unit():
     breach = evaluation.breaches[0]
     assert breach.actual == Decimal("1234.56")
     assert breach.excess == Decimal("5000") - Decimal("1234.56")
+    assert breach.unit == "dollars"
 
 
 def test_minimum_cash_unavailable_not_evaluable():
@@ -261,7 +264,7 @@ def test_prohibited_assets_ticker_and_entity_matches():
     for breach in evaluation.breaches:
         assert breach.metric == "prohibited_assets"
         assert breach.severity == "warning"
-        assert breach.excess is None
+        assert breach.unit is None
         assert breach.actual == "WING"
         assert breach.note == "position WING (snap-1:acc-1:WING)"
     assert {breach.target for breach in evaluation.breaches} == {"wing", "sec:cik:0000320193"}
@@ -324,6 +327,92 @@ def test_sector_exposure_missing_target_sector_is_zero():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
+    assert "sector_exposure: aero (unknown exposure)" in evaluation.not_evaluable
+
+
+def test_sector_max_known_below_threshold_with_unknown_not_evaluable():
+    mandate = _mandate([_limit("sector_exposure", "<=", "0.80", target="semiconductors")])
+    evaluation = evaluate_mandate(
+        _hand_built_snapshot(), mandate,
+        sector_map={"sec:cik:0000320193": "semiconductors"},
+    )
+    assert evaluation.breaches == ()
+    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
+
+
+def test_sector_max_known_above_threshold_with_unknown_breaches():
+    mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
+    evaluation = evaluate_mandate(
+        _hand_built_snapshot(), mandate,
+        sector_map={"sec:cik:0000320193": "semiconductors"},
+    )
+    assert len(evaluation.breaches) == 1
+    assert evaluation.breaches[0].actual == Decimal("0.75")
+    assert "sector_exposure: semiconductors (unknown exposure)" not in evaluation.not_evaluable
+
+
+def test_sector_min_known_below_threshold_with_unknown_not_evaluable():
+    mandate = _mandate([_limit("sector_exposure", ">=", "0.80", target="semiconductors")])
+    evaluation = evaluate_mandate(
+        _hand_built_snapshot(), mandate,
+        sector_map={"sec:cik:0000320193": "semiconductors"},
+    )
+    assert evaluation.breaches == ()
+    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
+
+
+def test_sector_min_known_above_threshold_with_unknown_passes():
+    mandate = _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")])
+    evaluation = evaluate_mandate(
+        _hand_built_snapshot(), mandate,
+        sector_map={"sec:cik:0000320193": "semiconductors"},
+    )
+    assert evaluation.breaches == ()
+    assert evaluation.not_evaluable == ()
+
+
+def test_sector_no_unknown_keeps_deterministic_behavior():
+    snapshot = PortfolioSnapshot(
+        snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
+        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+        broker="robinhood",
+        account_ids=("acc-1",),
+        cash=Decimal("1234.56"),
+        invested_value=Decimal("1228.40"),
+        total_value=Decimal("2462.96"),
+        positions=(
+            _position("snap-1:acc-1:WING", "WING", "sec:cik:0000320193", Decimal("0.75")),
+            _position("snap-1:acc-1:ZZZZ", "ZZZZ", "sec:cik:0000999999", Decimal("0.25")),
+        ),
+    )
+    sector_map = {"sec:cik:0000320193": "semiconductors", "sec:cik:0000999999": "aerospace"}
+    below = evaluate_mandate(
+        snapshot, _mandate([_limit("sector_exposure", "<=", "0.80", target="semiconductors")]),
+        sector_map=sector_map,
+    )
+    assert below.breaches == ()
+    assert below.not_evaluable == ()
+    above = evaluate_mandate(
+        snapshot, _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")]),
+        sector_map=sector_map,
+    )
+    assert above.breaches == ()
+    assert above.not_evaluable == ()
+    breach = evaluate_mandate(
+        snapshot, _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")]),
+        sector_map=sector_map,
+    )
+    assert len(breach.breaches) == 1
+    assert breach.breaches[0].actual == Decimal("0.75")
+    assert breach.not_evaluable == ()
+
+
+def test_empty_sector_map_sector_limits_not_falsely_safe():
+    mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
+    evaluation = evaluate_mandate(_hand_built_snapshot(), mandate, sector_map={})
+    assert evaluation.breaches == ()
+    assert evaluation.sector_exposures == {UNKNOWN_SECTOR: Decimal("1.0")}
+    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
 
 
 def test_empty_mandate_zero_breaches():
@@ -470,5 +559,6 @@ def test_tool_evaluate_mandate_happy_path(data_root):
     assert breach["metric"] == "sector_exposure"
     assert breach["actual"] == "0.75"
     assert breach["excess"] == "0.55"
+    assert all(breach["unit"] == "ratio" for breach in result["breaches"])
     assert result["not_evaluable"] == []
     assert result["source"] == "mandate"

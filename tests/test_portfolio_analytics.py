@@ -61,6 +61,7 @@ def test_position_market_value_fractional_shares():
 
 def test_position_market_value_zero_quantity_is_known_zero():
     assert position_market_value(Decimal("0"), Decimal("100")) == Decimal("0")
+    assert position_market_value(Decimal("0"), None) == Decimal("0")
 
 
 def test_position_market_value_missing_price_is_none():
