@@ -565,6 +565,21 @@ def test_same_instant_conflicting_versions_exclude_symbol(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
     assert result["coverage"]["exclusions"]["conflicting_versions"] == 1
 
+def test_all_versions_conflicting_reports_ambiguous_error(data_root):
+    _seed_short_interest(
+        data_root,
+        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
+        known_at="2026-08-10T12:00:00Z",
+    )
+    _seed_short_interest(
+        data_root,
+        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
+        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+    )
+    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert "error" in result
+    assert "conflict at the same instant" in result["error"]
+
 
 def test_same_instant_conflicting_classifications_exclude_entity(data_root):
     import pyarrow as pa

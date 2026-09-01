@@ -90,7 +90,7 @@ def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[l
     rows = duckdb.query(
         "SELECT * EXCLUDE (_rn) FROM ("
         "SELECT *, "
-        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST, content_hash DESC, row_id DESC) AS _rn, "
         "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
         f"FROM short_interest WHERE settlement_date = ? AND {clause}"
         ") WHERE _rn = 1 ORDER BY symbol_code",
@@ -129,7 +129,7 @@ def _security_type_map(as_of: str, data_root: Path) -> dict[str, str]:
     rows = duckdb.query(
         "SELECT entity_id, security_type FROM ("
         "SELECT entity_id, security_type, "
-        "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST, content_hash DESC, security_id DESC) AS _rn, "
         "count(DISTINCT security_type) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
         f"FROM securities WHERE {clause}"
         ") WHERE _rn = 1 AND _variants = 1",
@@ -173,7 +173,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
         "short_interest": duckdb.query(
             "SELECT row_id, content_hash, known_at FROM ("
             "SELECT row_id, content_hash, known_at, symbol_code, short_position, prev_position, avg_daily_volume, days_to_cover, issue_name, "
-            "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+            "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST, content_hash DESC, row_id DESC) AS _rn, "
             "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
             f"FROM short_interest WHERE settlement_date = ? AND {clause}"
             ") WHERE _rn = 1 AND _variants = 1 ORDER BY symbol_code",
@@ -191,7 +191,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
         "securities": duckdb.query(
             "SELECT security_id, content_hash, known_at FROM ("
             "SELECT security_id, content_hash, known_at, entity_id, security_type, "
-            "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+            "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST, content_hash DESC, security_id DESC) AS _rn, "
             "count(DISTINCT security_type) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
             f"FROM securities WHERE {clause}"
             ") WHERE _rn = 1 AND _variants = 1 ORDER BY entity_id",
@@ -233,6 +233,15 @@ def materialize_short_interest_screen(
     as_of = _resolve_as_of(as_of)
     rows, conflicting = _snapshot_rows(settlement_date, as_of, data_root)
     if not rows:
+        if conflicting:
+            return {
+                "error": (
+                    f"FINRA short interest exists for settlement date "
+                    f"{settlement_date} knowable on or before {as_of}, but all "
+                    f"{conflicting} version(s) conflict at the same instant "
+                    f"(ambiguous); cannot build an unambiguous leaderboard."
+                )
+            }
         return {
             "error": (
                 f"No normalized FINRA short interest for settlement date "

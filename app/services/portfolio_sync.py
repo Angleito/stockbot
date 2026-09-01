@@ -54,9 +54,10 @@ def resolve_security(
     ``as_of`` (``NULL`` bounds are unbounded; date-only values are midnight,
     so ``valid_to="2026-08-25"`` is expired on the 25th).  Multiple active
     entities for one ticker resolve as ``"ambiguous"`` — never
-    source/order-wins.  Same-instant conflicting rows for one entity
-    (different resolved security ids) also resolve as ``"ambiguous"`` —
-    never an arbitrary row pick.  No mappings are ever invented: unknown
+    source/order-wins.  Rows tied at the newest known_at/retrieved_at instant that carry
+    conflicting resolved security ids for one entity also resolve as
+    ``"ambiguous"`` — never an arbitrary row pick.  Older revisions never
+    create ambiguity; the newest record wins.  No mappings are ever invented: unknown
     tickers resolve to ``resolved=False``.
     """
     del provider_instrument_id
@@ -70,7 +71,9 @@ def resolve_security(
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     rows = duckdb.query(
         "SELECT alias_type, alias_value, entity_id, security_id, source, "
-        "valid_from, valid_to, known_at, retrieved_at FROM entity_aliases "
+        "valid_from, valid_to, known_at, retrieved_at, "
+        "dense_rank() OVER (ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _newest_rank "
+        "FROM entity_aliases "
         "WHERE alias_type = 'ticker' AND alias_value = ? AND "
         f"{clause} "
         "AND (valid_from IS NULL OR CAST(valid_from AS TIMESTAMP) <= CAST(? AS TIMESTAMP)) "
@@ -87,6 +90,8 @@ def resolve_security(
         return SecurityResolution(None, None, ticker, False, "ambiguous")
     material_security_ids = set()
     for row in rows:
+        if row["_newest_rank"] != 1:
+            break  # older instants are historical revisions, not conflicts
         row_security_id = row.get("security_id")
         entity_id = str(row["entity_id"])
         if row_security_id is None and entity_id.startswith("sec:cik:"):

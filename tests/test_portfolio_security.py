@@ -235,3 +235,15 @@ def test_same_instant_null_and_explicit_security_not_conflict(data_root):
     )
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
+
+def test_historical_revision_newer_security_wins(data_root):
+    _seed_entity(data_root)
+    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999")
+    _seed_alias(data_root, known_at="2026-08-25T13:00:00Z", security_id=AMD_SECURITY, source="control")
+    _seed_security(data_root)
+    resolution = resolve_security(
+        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
+    )
+    assert resolution.resolved is True
+    assert resolution.resolution_method == "entity_alias"
+    assert resolution.security_id == AMD_SECURITY
