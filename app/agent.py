@@ -285,6 +285,17 @@ def _request_and_record(
                 "error_category": _model_error_category(exc),
             },
         )
+        recorder.record_model_call(
+            round=state.round,
+            provider=recorder.provider,
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=_model_error_category(exc),
+        )
         raise
     t1 = time.perf_counter()
     choice = data["choices"][0]
@@ -496,6 +507,8 @@ def run_chat(
                     for tc in tool_calls:
                         fn = tc["function"]
                         name = fn["name"]
+                        if not budget.reserve_tool_call():
+                            return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                         try:
                             arguments = json.loads(fn["arguments"] or "{}")
                             malformed = False
@@ -509,9 +522,6 @@ def run_chat(
                             }
                         else:
                             result = None
-                        if not malformed:
-                            if not budget.reserve_tool_call():
-                                return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
                         logger.info("Tool call: %s(%s)", name, redact_value(arguments))
                         if want_trace:
                             tool_trace.append(name)
@@ -586,6 +596,7 @@ def run_chat(
                             ).hexdigest(),
                             source_names=json.dumps(meta.source_names),
                             source_freshness=json.dumps(meta.source_freshness),
+                            as_of=meta.as_of,
                             error_type=error_type,
                             error_message=error_message,
                         )
@@ -605,6 +616,7 @@ def run_chat(
                             result_hash=call.result_hash,
                             source_names=call.source_names,
                             source_freshness=call.source_freshness,
+                            as_of=call.as_of,
                             error_type=error_type,
                             error_message=error_message,
                         )
@@ -646,6 +658,7 @@ def run_chat(
                                 estimated_tokens=len(rendered) // 4,
                                 source_names=call.source_names,
                                 source_freshness=call.source_freshness,
+                                as_of=meta.as_of,
                                 rendered_text=redact_text(rendered),
                             )
                             recorder.record_event(

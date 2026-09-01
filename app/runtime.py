@@ -112,6 +112,7 @@ class ToolCall:
     result_hash: str
     source_names: str
     source_freshness: str
+    as_of: str | None
     error_type: str | None
     error_message: str | None
 

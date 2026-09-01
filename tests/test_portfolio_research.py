@@ -247,7 +247,7 @@ def test_cross_source_integration_enriches_resolved_position(data_root):
 
     freshness = research.research_data_freshness
     assert freshness == {
-        "as_of": date.today().isoformat(),
+        "as_of": datetime.now(timezone.utc).date().isoformat(),
         "sec_latest_filed_at": date(2026, 8, 20),
         "finra_settlement_date": date(2026, 8, 14),
         "finra_known_at": "2026-08-20T12:00:00Z",
@@ -347,7 +347,7 @@ def test_no_data_reports_empty_metrics_without_raising(data_root):
     assert research.latest_sec_metrics == {}
     assert research.latest_finra_metrics == {}
     assert research.research_data_freshness == {
-        "as_of": date.today().isoformat(),
+        "as_of": datetime.now(timezone.utc).date().isoformat(),
         "sec_latest_filed_at": None,
         "finra_settlement_date": None,
         "finra_known_at": None,

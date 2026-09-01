@@ -151,6 +151,24 @@ def _tool_round_multi(tool_specs, usage=None, request_id="req_abc"):
         "usage": usage or _usage(),
     }
 
+def _tool_round_multi_raw(tool_specs, usage=None, request_id="req_abc"):
+    """One response requesting several tools: (name, raw arguments string)."""
+    return {
+        "id": request_id,
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": f"call_{i}", "type": "function",
+                     "function": {"name": name, "arguments": raw}}
+                    for i, (name, raw) in enumerate(tool_specs)
+                ],
+            }
+        }],
+        "usage": usage or _usage(),
+    }
+
 
 def _final(content, usage=None, request_id="req_def"):
     return {
@@ -242,6 +260,39 @@ def test_agent_tool_path_short_interest_leaderboard(monkeypatch, tmp_path):
         < event_types.index("evidence_added")
     )
 
+def test_leaderboard_real_telemetry_envelope(monkeypatch, tmp_path):
+    """Real leaderboard payload through the real dispatcher carries the
+    envelope: row_count is the eligible universe, returned_count the
+    post-LIMIT entries, truncated reflects the cut, and as_of persists on
+    the tool_calls and evidence rows."""
+    screens_module = analytics.screens
+    _seed_leaderboard_data(tmp_path)
+    monkeypatch.setattr(screens_module, "DEFAULT_DATA_ROOT", tmp_path)
+    fake = FakeOpenRouter([
+        _tool_round("get_short_interest_leaderboard", {
+            "settlement_date": "2026-08-14", "as_of": "2026-08-21", "limit": 2,
+        }),
+        _final("ok"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+
+    result = run_chat(
+        [{"role": "user", "content": "Rank the short-interest leaderboard for 2026-08-14."}],
+        model="test",
+        context=_research_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+
+    assert result.answer == "ok"
+    (tc,) = get_tool_calls(result.run_id)
+    assert tc["result_row_count"] == 3
+    assert tc["returned_count"] == 2
+    assert tc["truncated"] == 1
+    assert tc["as_of"] == "2026-08-21"
+    (evidence,) = get_evidence(result.run_id)
+    assert evidence["as_of"] == "2026-08-21"
+
 
 # ---------------------------------------------------------------------------
 # Full stream: typed runtime objects, event ordering, summary row
@@ -293,7 +344,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
         arguments_json="{}", started_at="a", completed_at="b", duration_ms=1.0,
         status="completed", result_row_count=0, returned_count=None, truncated=False,
         result_bytes=2, result_hash="h",
-        source_names="[]", source_freshness="{}", error_type=None, error_message=None,
+        source_names="[]", source_freshness="{}", as_of=None, error_type=None, error_message=None,
     )
     ModelCall(
         model_call_id="m", run_id="run:x", round=0, provider="p", model="m",
@@ -348,6 +399,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert tc["tool_version"] == agent.TOOL_REGISTRY_VERSION
     assert json.loads(tc["source_names"]) == ["SEC EDGAR company facts"]
     assert json.loads(tc["source_freshness"]) == {"SEC EDGAR company facts": "2026-08-29"}
+    assert tc["as_of"] == "2026-08-29"
     assert tc["result_row_count"] == 0
     assert tc["error_type"] is None and tc["error_message"] is None
 
@@ -382,7 +434,7 @@ def test_redaction_enforced(monkeypatch):
         agent,
         "execute_tool",
         lambda name, args, model, **kwargs: {
-            "access_token": "eyJhbGciOiJIUzI1NiJ9.abc.def",
+            "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
             "account_id": "87654321",
             "nested": {"account_number": "11223344"},
             "source": "test",
@@ -407,12 +459,12 @@ def test_redaction_enforced(monkeypatch):
     ]
     assert "[REDACTED]" in requested[0]["arguments"]
 
-    # Raw DB dump of every text column across all four tables leaks nothing.
+    # Raw DB dump of every text column across all five tables leaks nothing.
     db_path = get_runs_db_path(Path("."))
     conn = sqlite3.connect(str(db_path))
     try:
         chunks = []
-        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls"):
+        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls", "evidence"):
             cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
             for col in cols:
                 for row in conn.execute(f"SELECT {col} FROM {table}"):
@@ -426,7 +478,7 @@ def test_redaction_enforced(monkeypatch):
         "12345678",
         "87654321",
         "11223344",
-        "eyJhbGciOiJIUzI1NiJ9.abc.def",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
         "sk-or-v1-abcdefghijklmnop",
     ):
         assert secret not in dump, f"secret leaked in runs DB: {secret}"
@@ -655,12 +707,12 @@ def test_question_redacted_in_store(monkeypatch):
         "What is my balance? Bearer [REDACTED], key sk-or-v1-[REDACTED]"
     )
 
-    # Raw-DB dump of every text column across all four tables leaks nothing.
+    # Raw-DB dump of every text column across all five tables leaks nothing.
     db_path = get_runs_db_path(Path("."))
     conn = sqlite3.connect(str(db_path))
     try:
         chunks = []
-        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls"):
+        for table in ("agent_runs", "agent_events", "tool_calls", "model_calls", "evidence"):
             cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
             for col in cols:
                 for row in conn.execute(f"SELECT {col} FROM {table}"):
@@ -1003,8 +1055,8 @@ def test_tool_result_bounded_by_max_tool_result_bytes(monkeypatch):
 
 
 def test_malformed_tool_arguments_rejected(monkeypatch):
-    """Unparseable tool arguments are rejected before execution: no tool-call
-    slot, no TOOL_STARTED, no dispatcher invocation."""
+    """Unparseable tool arguments are rejected before execution: no
+    TOOL_STARTED, no dispatcher invocation."""
     fake = FakeOpenRouter([
         _tool_round_raw("get_short_interest_leaderboard", "{invalid"),
     ])
@@ -1033,6 +1085,36 @@ def test_malformed_tool_arguments_rejected(monkeypatch):
     assert "tool_requested" in event_types
     assert "tool_failed" in event_types
     assert "tool_started" not in event_types
+
+def test_malformed_call_consumes_tool_budget(monkeypatch):
+    """Every model-requested tool call reserves a budget slot before parsing:
+    with max_tool_calls=1 a valid call followed by a malformed one exhausts
+    the budget (the malformed call is never parsed into a ToolCall row)."""
+    fake = FakeOpenRouter([
+        _tool_round_multi_raw([
+            ("get_fundamentals", '{"ticker": "AAPL"}'),
+            ("get_fundamentals", "{bad"),
+        ]),
+        _final("irrelevant"),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent, "execute_tool",
+        lambda name, args, model, **kwargs: {"ticker": "AAPL", "source": "test"},
+    )
+    result = run_chat(
+        [{"role": "user", "content": "What is AAPL EPS?"}],
+        model="test",
+        context=_research_context(run_limits=RunLimits(max_tool_calls=1)),
+        policy=TEST_POLICY,
+        return_result=True,
+    )
+    assert len(fake.calls) == 1
+    assert result.answer == _BUDGET_EXHAUSTED_RESPONSE
+    assert get_run(result.run_id)["status"] == "budget_exhausted"
+    (call,) = get_tool_calls(result.run_id)
+    assert call["tool_name"] == "get_fundamentals"
+    assert call["status"] == "completed"
 
 
 def test_schema_invalid_tool_arguments_rejected(monkeypatch):
@@ -1106,9 +1188,7 @@ def test_tool_telemetry_envelope(monkeypatch):
     )
     (tc,) = get_tool_calls(result.run_id)
     source = payload["source"]
-    assert tc["result_row_count"] == 2  # entries, not source_records
-    assert tc["returned_count"] == 2
-    assert tc["truncated"] == 1
+    assert tc["as_of"] == "2026-08-21"
     assert json.loads(tc["source_names"]) == [source]
     assert json.loads(tc["source_freshness"]) == {source: "current"}
     assert result.data_freshness == {source: "current"}
@@ -1173,7 +1253,7 @@ def test_groundedness_unverified(monkeypatch):
 
 def test_model_failed_event(monkeypatch):
     """A provider failure surfaces as model_requested -> model_failed ->
-    run_failed, a failed run row, and no model_calls row."""
+    run_failed, a failed run row, and a failed model_calls row."""
     def _boom(*a, **k):
         raise requests.Timeout("boom")
 
@@ -1200,4 +1280,10 @@ def test_model_failed_event(monkeypatch):
     assert failed["duration_ms"] is not None and failed["duration_ms"] >= 0
     assert json.loads(failed["metadata"])["error_category"] == "timeout"
     assert json.loads(failed["metadata"])["error_type"] == "Timeout"
-    assert get_model_calls(run["run_id"]) == []
+    (call,) = get_model_calls(run["run_id"])
+    assert call["status"] == "failed"
+    assert call["error_type"] == "Timeout"
+    assert call["error_category"] == "timeout"
+    assert call["input_tokens"] == 0
+    assert call["estimated_cost"] == 0
+    assert run["model_call_count"] == 1

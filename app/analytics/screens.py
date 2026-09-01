@@ -41,7 +41,7 @@ def _resolve_as_of(as_of: Optional[str]) -> str:
     """
     if as_of:
         return str(as_of)
-    return date.today().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _clamp_limit(limit: Optional[int]) -> int:
@@ -393,6 +393,9 @@ def read_short_interest_screen(
         "data_freshness": freshness,
         "calculation_version": run["calc_version"],
         "environment": run["environment"],
+        "row_count": run["eligible_rows"],
+        "returned_count": len(entries),
+        "truncated": len(entries) < run["eligible_rows"],
         "coverage": {
             "finra_rows": run["finra_rows"],
             "eligible_rows": run["eligible_rows"],

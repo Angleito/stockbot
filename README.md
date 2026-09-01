@@ -21,6 +21,7 @@ Stockbot keeps raw source data and normalized analytical data separate, preserve
 - Python 3.14
 - An SEC EDGAR identity for SEC requests
 - An OpenRouter API key for chat or LLM-generated summaries
+- Bun (task runner) — `package.json` scripts are zero-dependency wrappers around Python tooling; required for `bun run setup`, `bun run test`, `bun run verify`.
 
 ## Local setup
 
