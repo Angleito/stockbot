@@ -238,7 +238,7 @@ def materialize_short_interest_screen(
                 "error": (
                     f"FINRA short interest exists for settlement date "
                     f"{settlement_date} knowable on or before {as_of}, but all "
-                    f"{conflicting} version(s) conflict at the same instant "
+                    f"rows for this settlement conflict at the same instant "
                     f"(ambiguous); cannot build an unambiguous leaderboard."
                 )
             }

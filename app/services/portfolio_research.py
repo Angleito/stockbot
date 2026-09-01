@@ -102,12 +102,13 @@ def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) 
 
 
 def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
-    """Latest knowable short-interest row for a ticker.
+    """Latest knowable short-interest metrics for a ticker's newest
+    eligible settlement cycle.
 
-    Newest source version wins per symbol (mirroring
-    ``screens._snapshot_rows``: ``PARTITION BY symbol_code ORDER BY known_at
-    DESC, retrieved_at DESC``), restricted to settlement cycles knowable on
-    or before ``as_of``.  Same-instant conflicting versions yield no
+    The newest eligible settlement date wins first (``settlement_date <=
+    as_of`` and knowable on or before ``as_of``); within that settlement,
+    the newest source revision wins (mirroring ``screens._snapshot_rows``
+    per-settlement semantics).  Same-instant conflicting versions yield no
     metrics (empty dict -> freshness finra fields None).
     """
     clause, param = duckdb.as_of_clause(as_of)
@@ -116,8 +117,8 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
         "avg_daily_volume, days_to_cover, known_at FROM ("
         "SELECT settlement_date, short_position, prev_position, "
         "avg_daily_volume, days_to_cover, known_at, "
-        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
-        "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
+        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(settlement_date AS DATE) DESC, CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
+        "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(settlement_date AS DATE), CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
         "FROM short_interest "
         "WHERE symbol_code = UPPER(?) "
         "AND CAST(settlement_date AS DATE) <= CAST(? AS DATE) "

@@ -369,6 +369,47 @@ def test_finra_same_instant_conflicting_versions_empty(data_root):
     assert research.latest_finra_metrics == {}
 
 
+def test_finra_older_settlement_correction_does_not_beat_newer_settlement(data_root):
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_200_000,
+        known_at="2026-08-20T12:00:00Z", content_hash="finra-a14-v1-hash",
+    )
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-29", short_position=900_000,
+        known_at="2026-09-02T12:00:00Z", content_hash="finra-a29-v1-hash",
+    )
+    # Correction to the OLDER settlement, learned after the Aug 29 cycle:
+    # must not replace the newer settlement's metrics.
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_150_000,
+        known_at="2026-09-03T12:00:00Z", content_hash="finra-a14-v2-hash",
+    )
+    research = enrich_portfolio_research(
+        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
+    )[0]
+    assert research.latest_finra_metrics["settlement_date"] == "2026-08-29"
+    assert research.latest_finra_metrics["short_position"] == Decimal("900000")
+    assert research.latest_finra_metrics["known_at"] == "2026-09-02T12:00:00Z"
+
+
+def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_root):
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-14", short_position=1_200_000,
+        known_at="2026-09-01T12:00:00Z", content_hash="finra-a14-hash",
+    )
+    _seed_short_interest(
+        data_root, settlement_date="2026-08-29", short_position=900_000,
+        known_at="2026-09-01T12:00:00Z", content_hash="finra-a29-hash",
+    )
+    research = enrich_portfolio_research(
+        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
+    )[0]
+    # Same instant, two different settlements: NOT a conflict — the newer
+    # settlement wins with real metrics.
+    assert research.latest_finra_metrics["settlement_date"] == "2026-08-29"
+    assert research.latest_finra_metrics["short_position"] == Decimal("900000")
+
+
 
 def test_no_data_reports_empty_metrics_without_raising(data_root):
     position = _position(position_id="pos-1", entity_id=None, security_id=None, ticker="NODATA")
