@@ -25,10 +25,17 @@ def test_classify_intent_research_only():
 
 def test_classify_intent_portfolio_phrases():
     cases = [
-        (["How does today's AMD news affect my portfolio?"], True),
-        (["Show my account"], True),
+        # Generic portfolio nouns without first-person context stay research.
+        (["What is AMD's cash balance?"], False),
+        (["What is AMD's competitive position?"], False),
+        (["Show portfolio"], False),
         (["What is AMD EPS?"], False),
+        (["What's the latest AMD news?"], False),
+        # First-person pronoun within 5 tokens of a portfolio noun/verb.
+        (["Show my account"], True),
+        (["How does today's AMD news affect my portfolio?"], True),
         (["What news could affect my AMD position?"], True),
+        (["how does that affect me?"], True),
     ]
     for turns, expected in cases:
         intent = classify_intent(turns)

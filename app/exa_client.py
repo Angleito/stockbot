@@ -83,11 +83,16 @@ def search(
     limit = max(1, min(limit, EXA_MAX_LIMIT))
 
     # Exa returns HTTP 400 for date/domain-exclusion params with
-    # category=company, so those params are silently dropped for it.
-    if category == "company":
-        start_published_date = None
-        end_published_date = None
-        exclude_domains = None
+    # category=company; reject instead of silently dropping filters so the
+    # caller learns the request cannot be honored (include_domains is fine).
+    if (
+        category == "company"
+        and (start_published_date or end_published_date or exclude_domains)
+    ):
+        return _error(
+            "category 'company' does not support start_published_date, "
+            "end_published_date, or exclude_domains"
+        )
 
     payload: dict = {
         "query": query,

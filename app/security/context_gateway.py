@@ -121,26 +121,6 @@ def envelope_for_tool(name: str, result: dict) -> ContextEnvelope:
     return replace(base, content=result, retrieved_at=retrieved_at)
 
 
-def _has_briefing_prose(content: object) -> bool:
-    """FINRA briefing prose (model-generated summary) is free-form text;
-    FINRA records/datapoints are canonical numeric data."""
-    if not isinstance(content, dict):
-        return False
-    briefing = content.get("briefing")
-    if not isinstance(briefing, dict):
-        return False
-    summary = briefing.get("summary")
-    return isinstance(summary, str) and bool(summary.strip())
-
-
-def _needs_scan(envelope: ContextEnvelope) -> bool:
-    if envelope.source_type in (SourceType.WEB, SourceType.FILING):
-        return True
-    if envelope.source == "finra" and _has_briefing_prose(envelope.content):
-        return True
-    return False
-
-
 def _secret_pattern_hits(text: str) -> list[str]:
     return [name for name, pattern in _SECRET_PATTERNS if pattern.search(text)]
 
@@ -150,33 +130,32 @@ def prepare_context(
 ) -> SafeContext | QuarantinedContext:
     """Gateway decision for one context item.
 
-    SECRET never enters model context; free-form text (web evidence, filing
-    sections, FINRA briefing prose) is scanned for injection and credential
-    patterns; canonical numeric-only results pass through.
+    SECRET never enters model context. Every other rendered result — no
+    source, type, or sensitivity exemptions — is scanned for credential and
+    injection patterns; PRIVATE content is allowed only when benign.
     """
     if envelope.sensitivity == Sensitivity.SECRET:
         return QuarantinedContext(
             envelope, "BLOCK", 100, (SECRET_BLOCK_REASON,), ("secret_envelope",)
         )
-    if _needs_scan(envelope):
-        hits = _secret_pattern_hits(rendered)
-        if hits:
-            return QuarantinedContext(
-                envelope,
-                "BLOCK",
-                100,
-                (f"{CREDENTIAL_BLOCK_REASON}: {', '.join(hits)}",),
-                tuple(f"credential_pattern:{name}" for name in hits),
-            )
-        assessment = prompt_injection.assess(rendered)
-        if assessment.verdict != "ALLOW":
-            return QuarantinedContext(
-                envelope,
-                assessment.verdict,
-                assessment.score,
-                assessment.reasons,
-                assessment.matched_rules,
-            )
+    hits = _secret_pattern_hits(rendered)
+    if hits:
+        return QuarantinedContext(
+            envelope,
+            "BLOCK",
+            100,
+            (f"{CREDENTIAL_BLOCK_REASON}: {', '.join(hits)}",),
+            tuple(f"credential_pattern:{name}" for name in hits),
+        )
+    assessment = prompt_injection.assess(rendered)
+    if assessment.verdict != "ALLOW":
+        return QuarantinedContext(
+            envelope,
+            assessment.verdict,
+            assessment.score,
+            assessment.reasons,
+            assessment.matched_rules,
+        )
     return SafeContext(
         envelope=replace(envelope, security_status=SecurityStatus.ALLOWED),
         text=rendered,

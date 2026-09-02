@@ -8,7 +8,7 @@ from dataclasses import replace
 from ..storage.runs import get_current_recorder
 from ..tool_render import render_tool_result
 from . import quarantine_reader
-from .context import RunSecurityContext
+from .context import RunSecurityContext, Sensitivity
 from .context_gateway import (
     QuarantinedContext,
     envelope_for_tool,
@@ -75,6 +75,18 @@ class ContextBuilder:
                 ),
                 reason="; ".join(outcome.reasons) if outcome.reasons else None,
             )
+            # Keep the tool-call protocol intact: the model's tool_call_id
+            # gets a fixed placeholder response instead of being silently
+            # dropped. last_appended_text stays untouched so no evidence row
+            # is created for the withheld content.
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": (
+                    "Tool result withheld by Stockbot security gateway. "
+                    "No usable evidence was provided."
+                ),
+            })
             return False
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": outcome.text}
@@ -82,6 +94,8 @@ class ContextBuilder:
         self.last_appended_text = outcome.text
         if name == "search_web":
             self.run_security.data_labels.add("external")
+        if envelope.sensitivity is Sensitivity.PRIVATE:
+            self.run_security.data_labels.add("private")
         self._record(
             source=envelope.source,
             sha256=hashlib.sha256(outcome.text.encode()).hexdigest(),

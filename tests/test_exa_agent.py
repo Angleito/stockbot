@@ -17,12 +17,13 @@ CAP_CONTEXT = replace(LOCAL_CONTEXT, run_limits=RunLimits(max_exa_searches=2))
 def _claims_transform(model, result):
     """Deterministic reader stand-in: titles become claims, url/highlight map."""
     items = []
-    for item in result.get("evidence") or []:
+    for item_id, item in enumerate(result.get("evidence") or []):
         items.append({
+            "item_id": item_id,
             "claim": f"Claim: {item.get('title')}",
             "source_url": item.get("url"),
             "published_at": item.get("published_at"),
-            "quote_or_evidence": item.get("highlight"),
+            "evidence_summary": item.get("highlight"),
         })
     return {**result, "evidence": items, "claims_processed": True, "quarantined_count": 0}
 
@@ -126,7 +127,7 @@ def test_exa_search_cap_enforced(monkeypatch):
     assert get_run(result.run_id)["status"] == "completed"
     tool_calls = get_tool_calls(result.run_id)
     assert [tc["status"] for tc in tool_calls] == ["completed", "completed", "failed"]
-    assert tool_calls[2]["error_message"] == "Exa search budget exhausted (max 3 per run)"
+    assert tool_calls[2]["error_message"] == "Exa search budget exhausted (max 2 per run)"
 
 
 def test_search_web_evidence_recorded(monkeypatch):

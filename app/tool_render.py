@@ -168,8 +168,8 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
                 meta.append(f"Published: {item['published_at']}")
             if meta:
                 lines.append("  " + " | ".join(meta))
-            if item.get("quote_or_evidence"):
-                lines.append(f"   {item['quote_or_evidence']}")
+            if item.get("evidence_summary"):
+                lines.append(f"   {item['evidence_summary']}")
             continue
         title = _cell(item.get("title")) or item.get("url") or f"Result {index}"
         meta = []

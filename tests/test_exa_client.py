@@ -178,23 +178,32 @@ def test_highlight_truncated_to_max_chars(enabled, monkeypatch):
     assert len(result["evidence"][0]["highlight"]) == exa_client.EXA_HIGHLIGHT_MAX_CHARS
 
 
-def test_company_category_strips_dates_and_exclude_domains(enabled, monkeypatch):
+def test_company_category_rejects_dates_and_exclude_domains(enabled, monkeypatch):
+    def boom(*args, **kwargs):
+        pytest.fail("no HTTP call for an unsupported company-category combo")
+
+    monkeypatch.setattr(exa_client, "_ensure_session", boom)
+    for kwargs in (
+        {"start_published_date": "2026-01-01"},
+        {"end_published_date": "2026-08-01"},
+        {"exclude_domains": ["reddit.com"]},
+    ):
+        result = exa_client.search("AMD", category="company", **kwargs)
+        assert "does not support" in result["error"], kwargs
+        assert result["source"] == "exa"
+
+
+def test_company_category_allows_include_domains(enabled, monkeypatch):
     session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
-    exa_client.search(
+    result = exa_client.search(
         "AMD",
         category="company",
         include_domains=["amd.com"],
-        exclude_domains=["reddit.com"],
-        start_published_date="2026-07-01",
-        end_published_date="2026-08-01",
     )
+    assert "error" not in result
     payload = session.posts[0][1]["json"]
-    assert "startPublishedDate" not in payload
-    assert "endPublishedDate" not in payload
-    assert "excludeDomains" not in payload
-    assert payload["includeDomains"] == ["amd.com"]
     assert payload["category"] == "company"
-    assert payload["type"] == "auto"
+    assert payload["includeDomains"] == ["amd.com"]
 
 
 def test_dates_convert_to_iso_ranges(enabled, monkeypatch):

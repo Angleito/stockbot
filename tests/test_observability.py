@@ -452,9 +452,14 @@ def test_redaction_enforced(monkeypatch):
     )
     # The response DLP strips the leaked credential from the user-facing
     # answer; the whole answer was the leak, so the deterministic fallback
-    # is returned. The strip is logged locally (Q5 override: preview, not
-    # just a hash, for response leaks).
-    assert result.answer == "I couldn't generate a response that meets safety checks."
+    # is returned. Each strip is logged hash-only: sha256 + span length,
+    # never the leaked content itself.
+    assert result.answer.startswith(
+        "I couldn't generate a response that meets safety checks."
+    )
+    assert result.answer.endswith(
+        "\n\nNote: portfolio access is active for this conversation."
+    )
     from app.storage.runs import get_security_events
 
     stripped = [
@@ -462,9 +467,11 @@ def test_redaction_enforced(monkeypatch):
         if e["decision"] == "response_stripped"
     ]
     assert len(stripped) == 2  # the bearer span and the sk-or-v1 span
-    previews = " ".join(e["leaked_preview"] or "" for e in stripped)
-    assert "sk-or-v1-abcdefghijklmnop" in previews
+    assert sorted(e["span_length"] for e in stripped) == [25, 32]
     assert all(e["sha256"] for e in stripped)
+    for event in stripped:
+        for value in event.values():
+            assert "sk-or-v1-abcdefghijklmnop" not in str(value)
 
     # Stored tool row + TOOL_REQUESTED event arguments are redacted.
     tool_calls = get_tool_calls(result.run_id)
@@ -505,9 +512,8 @@ def test_redaction_enforced(monkeypatch):
     ) is None
     # The leaked answer never reached the store: the final answer is the
     # deterministic DLP fallback. No "sk-or-v1-" prefix may survive in the
-    # observability tables; the raw leak exists ONLY in
-    # security_events.leaked_preview (Q5 local-logging override), which the
-    # dump above intentionally excludes.
+    # observability tables; security_events (excluded from the dump loop)
+    # stores only the span's sha256 and length.
     assert "meets safety checks" in dump
     assert "sk-or-v1-" not in dump
 

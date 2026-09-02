@@ -164,15 +164,14 @@ def _cmd_inspect(run_id: str) -> None:
         f"response_stripped={summary['response_stripped']}"
     )
     for event in get_security_events(run_id):
-        preview = event.get("leaked_preview")
         line = (
             f"  {event.get('source') or ''} | score={event.get('score')} | "
             f"{event.get('verdict') or ''} | rules={event.get('rule_ids') or ''} | "
             f"{event.get('decision')} | {event.get('reason') or ''} | "
             f"{event.get('created_at') or ''}"
         )
-        if preview:
-            line += f" | leaked={preview!r}"
+        if event.get("span_length") is not None:
+            line += f" | stripped_span={event['span_length']} chars"
         print(line)
 
 

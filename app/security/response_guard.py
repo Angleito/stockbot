@@ -2,7 +2,8 @@
 
 Leaked spans (credentials, .env paths, account identifiers) are removed
 before the answer is returned and recorded; each strip is logged locally as
-a response_stripped security event with a bounded preview of the leak."""
+a response_stripped security event carrying only the span's sha256 and
+length — never the leaked content itself."""
 
 from __future__ import annotations
 
@@ -66,6 +67,6 @@ def guard_response(text: str, run_security: RunSecurityContext, run_id: str) -> 
                 rule_ids=[name],
                 decision="response_stripped",
                 reason=None,
-                leaked_preview=span[:500],
+                span_length=len(span),
             )
     return cleaned

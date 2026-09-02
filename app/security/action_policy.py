@@ -7,6 +7,7 @@ payload carries credential or portfolio-context patterns."""
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -51,6 +52,7 @@ TOOL_DOMAINS: dict[str, str] = {
 }
 
 EGRESS_INTENT_REASON = "PRIVATE -> EXTERNAL egress"
+EGRESS_AFTER_PRIVATE_REASON = "PRIVATE -> EXTERNAL egress after private context"
 CREDENTIAL_REASON = "credential pattern"
 
 _CREDENTIAL_PATTERNS = (
@@ -104,18 +106,34 @@ def _portfolio_context(query: str) -> bool:
     )
 
 
+def private_pattern_hit(text: str) -> str | None:
+    """First private-data pattern hit in arbitrary text: a credential match
+    wins, then portfolio-context phrasing. None when the text is clean."""
+    for _name, pattern in _CREDENTIAL_PATTERNS:
+        if pattern.search(text):
+            return CREDENTIAL_REASON
+    if _portfolio_context(text):
+        return EGRESS_INTENT_REASON
+    return None
+
+
 def authorize_egress(
     destination: str, payload: object, run_security: RunSecurityContext
 ) -> EgressDecision:
-    """Block private data from leaving Stockbot to external destinations."""
+    """Block private data from leaving Stockbot to external destinations.
+
+    Ordering invariant: once ANY private tool result has been ALLOWED into
+    model context this run, all further egress is blocked regardless of the
+    payload. The full serialized payload (query and every filter) is then
+    scanned for credential and portfolio-context patterns.
+    """
     if destination != "exa":
         return EgressDecision(False, f"unknown egress destination: {destination}")
     if not isinstance(payload, dict) or not isinstance(payload.get("query"), str):
         return EgressDecision(False, "malformed egress payload")
-    query = payload["query"]
-    for _name, pattern in _CREDENTIAL_PATTERNS:
-        if pattern.search(query):
-            return EgressDecision(False, CREDENTIAL_REASON)
-    if _portfolio_context(query):
-        return EgressDecision(False, EGRESS_INTENT_REASON)
+    if "private" in run_security.data_labels:
+        return EgressDecision(False, EGRESS_AFTER_PRIVATE_REASON)
+    hit = private_pattern_hit(json.dumps(payload, sort_keys=True))
+    if hit:
+        return EgressDecision(False, hit)
     return EgressDecision(True, None)

@@ -18,7 +18,12 @@ from .config import (
 from .policy import ChatInputError, ChatPolicy, PUBLIC_CHAT_ROLES, RequestContext
 from .prompts import PROMPT_VERSION, SYSTEM_PROMPT
 from .redact import redact_json, redact_text, redact_value
-from .security.action_policy import TOOL_DOMAINS, authorize_egress, authorize_tool_call
+from .security import prompt_injection
+from .security.action_policy import (
+    authorize_egress,
+    authorize_tool_call,
+    private_pattern_hit,
+)
 from .security.context import RunSecurityContext, classify_intent
 from .security.context_builder import ContextBuilder
 from .security.response_guard import guard_response
@@ -414,14 +419,14 @@ def run_chat(
     # The trusted policy remains the only system message; every tool result
     # passes the security gateway before it may enter model context. Public
     # history has already been normalized to prevent tool metadata or
-    # privileged roles.
+    # privileged roles. Caller-supplied assistant turns are scanned INSIDE
+    # the recorder block below (they need the recorder for security events);
+    # only system + user turns are staged here.
     context_builder = ContextBuilder(run_security=run_security, model=model)
     context_builder.add_system(SYSTEM_PROMPT)
     for message in normalized_messages:
         if message["role"] == "user":
             context_builder.add_user(message["content"])
-        else:
-            context_builder.add_assistant(message["content"])
     msgs = context_builder.render_for_model()
     available_tools = tools_for_capabilities(context.capabilities)
     if context.tool_policy.allowed_tools is not None:
@@ -442,6 +447,8 @@ def run_chat(
         # Response DLP runs on every final answer path (completed, partial,
         # budget_exhausted, unavailable-data). The recorder is active here.
         text = guard_response(text, run_security, state.run_id)
+        if text and "portfolio_read" in run_security.original_intent.permitted_domains:
+            text += "\n\nNote: portfolio access is active for this conversation."
         result = _finish_run(
             recorder, state, text, status,
             error_type=error_type, error_message=error_message,
@@ -475,6 +482,31 @@ def run_chat(
                 round=0,
                 metadata={"question": request.question, "as_of": request.as_of},
             )
+            # Caller-supplied assistant turns are untrusted history: scan
+            # each for prompt injection before it enters model context.
+            for message in normalized_messages:
+                if message["role"] != "assistant":
+                    continue
+                assessment = prompt_injection.assess(message["content"])
+                if assessment.verdict != "ALLOW":
+                    context_builder.add_assistant(
+                        "[Assistant message withheld by Stockbot security gateway.]"
+                    )
+                    recorder.record_security_event(
+                        source="assistant_history",
+                        sha256=hashlib.sha256(
+                            message["content"].encode()
+                        ).hexdigest(),
+                        score=assessment.score,
+                        verdict=assessment.verdict,
+                        rule_ids=list(assessment.matched_rules),
+                        decision=(
+                            "blocked" if assessment.verdict == "BLOCK" else "quarantined"
+                        ),
+                        reason="; ".join(assessment.reasons),
+                    )
+                else:
+                    context_builder.add_assistant(message["content"])
             try:
                 while True:
                     _update_budget(state, budget)
@@ -574,7 +606,10 @@ def run_chat(
                                 }
                             elif name == "search_web" and not budget.reserve_exa_search():
                                 result = {
-                                    "error": "Exa search budget exhausted (max 3 per run)",
+                                    "error": (
+                                        f"Exa search budget exhausted "
+                                        f"(max {context.run_limits.max_exa_searches} per run)"
+                                    ),
                                     "source": "exa",
                                     "soft": True,
                                 }
@@ -628,9 +663,33 @@ def run_chat(
                                             name, arguments, model, context=context
                                         )
                                 else:
-                                    result = execute_tool(
-                                        name, arguments, model, context=context
+                                    hit = private_pattern_hit(
+                                        json.dumps(arguments, sort_keys=True)
                                     )
+                                    if hit:
+                                        result = {
+                                            "error": (
+                                                "Tool arguments contain private data "
+                                                "that must not be transmitted"
+                                            ),
+                                            "error_type": "private_args_denied",
+                                            "soft": True,
+                                        }
+                                        recorder.record_security_event(
+                                            source=name,
+                                            sha256=hashlib.sha256(
+                                                json.dumps(arguments, sort_keys=True).encode()
+                                            ).hexdigest(),
+                                            score=None,
+                                            verdict=None,
+                                            rule_ids=[],
+                                            decision="action_blocked",
+                                            reason=hit,
+                                        )
+                                    else:
+                                        result = execute_tool(
+                                            name, arguments, model, context=context
+                                        )
                             t1 = time.perf_counter()
                         else:
                             t0 = time.perf_counter()
@@ -708,8 +767,6 @@ def run_chat(
                             metadata={"duration_ms": (t1 - t0) * 1000.0},
                         )
                         if not failed:
-                            if TOOL_DOMAINS.get(name) == "portfolio_read":
-                                run_security.data_labels.add("private")
                             # Evidence is what the model actually receives: a
                             # result that would cross the evidence budget is a
                             # hard stop — no evidence record, and the tool

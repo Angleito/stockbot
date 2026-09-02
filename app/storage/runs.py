@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS evidence (
 CREATE TABLE IF NOT EXISTS security_events (
   event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   created_at TEXT NOT NULL, source TEXT, sha256 TEXT, score INTEGER, verdict TEXT,
-  rule_ids TEXT, decision TEXT NOT NULL, reason TEXT, leaked_preview TEXT);
+  rule_ids TEXT, decision TEXT NOT NULL, reason TEXT, span_length INTEGER);
 CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id);
@@ -188,6 +188,9 @@ class RunRecorder:
             ecols = {row[1] for row in conn.execute("PRAGMA table_info(evidence)")}
             if "as_of" not in ecols:
                 conn.execute("ALTER TABLE evidence ADD COLUMN as_of TEXT")
+            scols = {row[1] for row in conn.execute("PRAGMA table_info(security_events)")}
+            if "span_length" not in scols:
+                conn.execute("ALTER TABLE security_events ADD COLUMN span_length INTEGER")
             conn.commit()
             self.started_at = _now()
             conn.execute(
@@ -394,12 +397,11 @@ class RunRecorder:
         rule_ids: Optional[list[str]],
         decision: str,
         reason: Optional[str] = None,
-        leaked_preview: Optional[str] = None,
+        span_length: Optional[int] = None,
     ) -> Optional[str]:
         """Append one security_events row; returns the event_id (None when
-        disabled). Hash-only storage: non-response events never carry full
-        content; leaked_preview is stored ONLY for response_stripped events
-        and truncated to 500 chars (local leak logging only)."""
+        disabled). Hash-only storage: events never carry full content;
+        response_stripped events record only the stripped span's length."""
         if not self.enabled:
             return None
         try:
@@ -410,19 +412,16 @@ class RunRecorder:
                 (self.run_id,),
             ).fetchone()[0]
             event_id = f"{self.run_id}:se:{sequence:04d}"
-            preview = None
-            if decision == "response_stripped" and leaked_preview is not None:
-                preview = str(leaked_preview)[:500]
             self._conn.execute(
                 "INSERT INTO security_events (event_id, run_id, sequence,"
                 " created_at, source, sha256, score, verdict, rule_ids,"
-                " decision, reason, leaked_preview)"
+                " decision, reason, span_length)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event_id, self.run_id, sequence, created, source, sha256,
                     score, verdict,
                     json.dumps(rule_ids) if rule_ids is not None else None,
-                    decision, reason, preview,
+                    decision, reason, span_length,
                 ),
             )
             self._conn.commit()

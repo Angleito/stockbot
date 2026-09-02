@@ -74,9 +74,9 @@ _PORTFOLIO_NOUN_RE = re.compile(
     r"|balance|cash|account|invested|cost\s+basis)\b",
     re.IGNORECASE,
 )
-# First-person possessive/pronoun; "me" is included so personal-impact
+# First-person possessive/pronoun; "me" and "i" are included so personal
 # follow-ups ("how does that affect me?") classify as portfolio interest.
-_PRONOUN_RE = re.compile(r"\b(?:my|mine|me)\b", re.IGNORECASE)
+_PRONOUN_RE = re.compile(r"\b(?:my|mine|me|i)\b", re.IGNORECASE)
 # Personal-impact verbs that make a first-person pronoun portfolio-relevant.
 _IMPACT_VERB_RE = re.compile(r"\b(?:affect\w*|impact\w*)\b", re.IGNORECASE)
 
@@ -84,11 +84,12 @@ _PRONOUN_WINDOW = 5
 
 
 def _portfolio_interest(text: str) -> bool:
-    """True when the turn expresses personal portfolio/financial interest."""
-    if _PORTFOLIO_NOUN_RE.search(text):
-        return True
-    # Possessive/pronoun within 5 whitespace-delimited tokens of a portfolio
-    # noun or a personal-impact verb ("how does that affect me?").
+    """True when the turn expresses personal portfolio/financial interest.
+
+    A generic portfolio noun alone is not enough: it must appear within
+    5 whitespace-delimited tokens of a first-person pronoun, or a first-person
+    pronoun must sit near a personal-impact verb ("how does that affect me?").
+    """
     tokens = text.split()
     for i, token in enumerate(tokens):
         if not _PRONOUN_RE.search(token):

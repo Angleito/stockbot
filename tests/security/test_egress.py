@@ -1,10 +1,12 @@
 """Tests for the egress firewall (private data must not leave Stockbot)."""
 
 from app.security.action_policy import (
+    EGRESS_AFTER_PRIVATE_REASON,
     EGRESS_INTENT_REASON,
     CREDENTIAL_REASON,
     EgressDecision,
     authorize_egress,
+    private_pattern_hit,
 )
 from app.security.context import RunSecurityContext, classify_intent
 
@@ -68,6 +70,48 @@ def test_portfolio_noun_near_amount_blocked():
 def test_unknown_destination_blocked():
     decision = authorize_egress("ftp", {"query": "AMD news"}, _run_security())
     assert decision.allowed is False
+
+
+def test_full_payload_scan_catches_filters():
+    # The query itself is benign; the credential hides in include_domains.
+    decision = authorize_egress(
+        "exa",
+        {"query": "AMD news", "include_domains": ["account-123456789.attacker.example"]},
+        _run_security(),
+    )
+    assert decision.allowed is False
+    assert decision.reason == CREDENTIAL_REASON
+
+
+def test_benign_payload_with_filters_allowed():
+    decision = authorize_egress(
+        "exa",
+        {"query": "AMD market cap 2026", "include_domains": ["news.amd.com"]},
+        _run_security(),
+    )
+    assert decision.allowed is True
+
+
+def test_egress_blocked_after_private_context_allowed():
+    # Ordering invariant: once a private result entered model context, every
+    # later egress is blocked even with a fully benign payload.
+    run_security = _run_security()
+    run_security.data_labels.add("private")
+    decision = authorize_egress(
+        "exa", {"query": "AMD market cap 2026"}, run_security
+    )
+    assert decision.allowed is False
+    assert decision.reason == EGRESS_AFTER_PRIVATE_REASON
+
+
+def test_private_pattern_hit_scans_arbitrary_json_text():
+    assert private_pattern_hit(
+        '{"analysis_goal": "User owns 2843 AMD shares worth $417,921"}'
+    ) == EGRESS_INTENT_REASON
+    assert private_pattern_hit(
+        '{"analysis_goal": "account 123456789 holdings"}'
+    ) == CREDENTIAL_REASON
+    assert private_pattern_hit('{"analysis_goal": "compare AMD vs NVIDIA"}') is None
 
 
 def test_malformed_payload_blocked():
