@@ -14,13 +14,15 @@ comparison.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import duckdb
 import pyarrow.parquet as pq
 
-from . import parquet
+from ..domain.market.securities import TickerAlias
+from . import mappers, parquet
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -107,3 +109,29 @@ def query(
     finally:
         conn.close()
     return [dict(zip(columns, row)) for row in result]
+
+
+def ticker_alias_candidates(
+    ticker: str, as_of: datetime, data_root: Optional[Path] = None
+) -> list[TickerAlias]:
+    """Return ticker alias rows knowable at ``as_of``, newest instant first.
+
+    Retrieval only: the resolution semantics (validity interval, entity and
+    security-id ambiguity, newest-instant selection) live in
+    ``app.domain.market.identity.resolve_ticker_aliases``.  The
+    ``known_at <= as_of`` filter is kept here as an efficiency prune; the
+    resolver applies it again as the authoritative rule.
+    """
+    clause, param = as_of_clause(as_of.isoformat())
+    rows = query(
+        "SELECT alias_type, alias_value, entity_id, security_id, source, "
+        "valid_from, valid_to, known_at, retrieved_at "
+        "FROM entity_aliases "
+        "WHERE alias_type = 'ticker' AND alias_value = ? AND "
+        f"{clause} "
+        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, "
+        "CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST",
+        params=[ticker.strip().upper(), param],
+        data_root=data_root,
+    )
+    return [mappers.ticker_alias_from_row(row) for row in rows]

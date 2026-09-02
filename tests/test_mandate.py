@@ -11,9 +11,10 @@ import pytest
 from cli import _cmd_evaluate_mandate
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
-from app.domain.risk.exposure import UNKNOWN_SECTOR, evaluate_mandate
-from app.domain.risk.mandate import Mandate, RiskLimit, load_mandate
+from app.domain.risk.evaluation import UNKNOWN_SECTOR, EvaluationIssue, evaluate_mandate
+from app.domain.risk.mandate import Mandate, RiskLimit, parse_mandate
 from app.services import risk as risk_service
+from app.services.mandate import load_mandate_file
 from app.services.portfolio_sync import persist_snapshot
 from app.storage import parquet
 
@@ -85,11 +86,11 @@ def _write_mandate(path: Path, payload: dict) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# load_mandate
+# parse_mandate / load_mandate_file
 # ---------------------------------------------------------------------------
 
 
-def test_load_mandate_valid_json_with_defaults(tmp_path):
+def test_load_mandate_file_valid_json_with_defaults(tmp_path):
     path = _write_mandate(tmp_path / "mandate.json", {
         "limits": [
             {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
@@ -99,7 +100,7 @@ def test_load_mandate_valid_json_with_defaults(tmp_path):
         "prohibited_assets": ["GME", "sec:cik:0000320193"],
         "extra_ignored": True,
     })
-    mandate = load_mandate(path)
+    mandate = load_mandate_file(path)
     assert len(mandate.limits) == 3
     assert mandate.limits[0].severity == "warning"
     assert mandate.limits[0].unit == "ratio"
@@ -110,9 +111,9 @@ def test_load_mandate_valid_json_with_defaults(tmp_path):
     assert mandate.prohibited_assets == ("GME", "sec:cik:0000320193")
 
 
-def test_load_mandate_missing_file(tmp_path):
+def test_load_mandate_file_missing_file(tmp_path):
     with pytest.raises(FileNotFoundError):
-        load_mandate(tmp_path / "nope.json")
+        load_mandate_file(tmp_path / "nope.json")
 
 
 @pytest.mark.parametrize("payload", [
@@ -135,19 +136,17 @@ def test_load_mandate_missing_file(tmp_path):
     {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": [""]},
     {"limits": "nope"},
 ])
-def test_load_mandate_rejects_bad_config(tmp_path, payload):
-    path = _write_mandate(tmp_path / "mandate.json", payload)
+def test_parse_mandate_rejects_bad_config(payload):
     with pytest.raises(ValueError):
-        load_mandate(path)
+        parse_mandate(payload)
 
-def test_load_mandate_normalizes_whitespace(tmp_path):
-    path = _write_mandate(tmp_path / "mandate.json", {
+def test_parse_mandate_normalizes_whitespace():
+    mandate = parse_mandate({
         "limits": [
             {"metric": "sector_exposure", "target": "  semiconductors  ", "operator": "<=", "threshold": 0.20},
         ],
         "prohibited_assets": [" GME ", " sec:cik:0000320193 "],
     })
-    mandate = load_mandate(path)
     assert mandate.limits[0].target == "semiconductors"
     assert mandate.prohibited_assets == ("GME", "sec:cik:0000320193")
 
@@ -190,9 +189,11 @@ def test_single_position_weight_none_weight_not_evaluable():
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
     assert evaluation.sector_exposures == {}
-    assert evaluation.not_evaluable == (
-        "single_position_weight: WING (no weight)",
-        "single_position_weight: ZZZZ (no weight)",
+    assert evaluation.issues == (
+        EvaluationIssue("position_weight_unavailable", "single_position_weight",
+                        ticker="WING", position_id="snap-1:acc-1:WING"),
+        EvaluationIssue("position_weight_unavailable", "single_position_weight",
+                        ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"),
     )
 
 
@@ -237,7 +238,7 @@ def test_minimum_cash_unavailable_not_evaluable():
     mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == ("minimum_cash: cash unavailable",)
+    assert evaluation.issues == (EvaluationIssue("cash_unavailable", "minimum_cash"),)
 
 def test_minimum_cash_total_value_unavailable_not_evaluable():
     snapshot = _hand_built_snapshot()
@@ -254,7 +255,7 @@ def test_minimum_cash_total_value_unavailable_not_evaluable():
     mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == ("minimum_cash: total value unavailable",)
+    assert evaluation.issues == (EvaluationIssue("total_value_unavailable", "minimum_cash"),)
 
 
 def test_prohibited_assets_ticker_and_entity_matches():
@@ -278,9 +279,11 @@ def test_sector_exposure_unpriced_position_not_evaluable():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == (
-        "sector_exposure: WING (no weight)",
-        "sector_exposure: ZZZZ (no weight)",
+    assert evaluation.issues == (
+        EvaluationIssue("position_weight_unavailable", "sector_exposure",
+                        ticker="WING", position_id="snap-1:acc-1:WING"),
+        EvaluationIssue("position_weight_unavailable", "sector_exposure",
+                        ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"),
     )
 
 
@@ -299,7 +302,7 @@ def test_minimum_cash_zero_total_value_not_evaluable():
     mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == ("minimum_cash: total value is zero",)
+    assert evaluation.issues == (EvaluationIssue("total_value_zero", "minimum_cash"),)
 
 
 def test_sector_exposure_buckets_unknown_and_breaches():
@@ -327,7 +330,7 @@ def test_sector_exposure_missing_target_sector_is_zero():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
-    assert "sector_exposure: aero (unknown exposure)" in evaluation.not_evaluable
+    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="aero") in evaluation.issues
 
 
 def test_sector_max_known_below_threshold_with_unknown_not_evaluable():
@@ -337,7 +340,7 @@ def test_sector_max_known_below_threshold_with_unknown_not_evaluable():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
-    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
+    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") in evaluation.issues
 
 
 def test_sector_max_known_above_threshold_with_unknown_breaches():
@@ -348,7 +351,7 @@ def test_sector_max_known_above_threshold_with_unknown_breaches():
     )
     assert len(evaluation.breaches) == 1
     assert evaluation.breaches[0].actual == Decimal("0.75")
-    assert "sector_exposure: semiconductors (unknown exposure)" not in evaluation.not_evaluable
+    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") not in evaluation.issues
 
 
 def test_sector_min_known_below_threshold_with_unknown_not_evaluable():
@@ -358,7 +361,7 @@ def test_sector_min_known_below_threshold_with_unknown_not_evaluable():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
-    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
+    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") in evaluation.issues
 
 
 def test_sector_min_known_above_threshold_with_unknown_passes():
@@ -368,7 +371,7 @@ def test_sector_min_known_above_threshold_with_unknown_passes():
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == ()
+    assert evaluation.issues == ()
 
 
 def test_sector_no_unknown_keeps_deterministic_behavior():
@@ -391,20 +394,20 @@ def test_sector_no_unknown_keeps_deterministic_behavior():
         sector_map=sector_map,
     )
     assert below.breaches == ()
-    assert below.not_evaluable == ()
+    assert below.issues == ()
     above = evaluate_mandate(
         snapshot, _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")]),
         sector_map=sector_map,
     )
     assert above.breaches == ()
-    assert above.not_evaluable == ()
+    assert above.issues == ()
     breach = evaluate_mandate(
         snapshot, _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")]),
         sector_map=sector_map,
     )
     assert len(breach.breaches) == 1
     assert breach.breaches[0].actual == Decimal("0.75")
-    assert breach.not_evaluable == ()
+    assert breach.issues == ()
 
 
 def test_empty_sector_map_sector_limits_not_falsely_safe():
@@ -412,14 +415,14 @@ def test_empty_sector_map_sector_limits_not_falsely_safe():
     evaluation = evaluate_mandate(_hand_built_snapshot(), mandate, sector_map={})
     assert evaluation.breaches == ()
     assert evaluation.sector_exposures == {UNKNOWN_SECTOR: Decimal("1.0")}
-    assert "sector_exposure: semiconductors (unknown exposure)" in evaluation.not_evaluable
+    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") in evaluation.issues
 
 
 def test_empty_mandate_zero_breaches():
     mandate = _mandate([])
     evaluation = evaluate_mandate(_hand_built_snapshot(), mandate)
     assert evaluation.breaches == ()
-    assert evaluation.not_evaluable == ()
+    assert evaluation.issues == ()
     assert evaluation.snapshot_id == "portfolio:robinhood:2026-08-25T12:00:00+00:00"
     assert evaluation.created_at == datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -589,5 +592,5 @@ def test_tool_evaluate_mandate_happy_path(data_root):
     assert breach["actual"] == "0.75"
     assert breach["excess"] == "0.55"
     assert all(breach["unit"] == "ratio" for breach in result["breaches"])
-    assert result["not_evaluable"] == []
+    assert result["issues"] == []
     assert result["source"] == "mandate"

@@ -1,11 +1,14 @@
-"""Mandate configuration: limits loaded from a JSON mandate file."""
+"""Mandate configuration: risk limits and prohibited assets.
+
+Validation lives here in the domain, free of file I/O; the storage glue
+loads JSON payloads and hands them to :func:`parse_mandate`.
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from typing import Any, Mapping
 
 SUPPORTED_METRICS = ("single_position_weight", "minimum_cash", "sector_exposure")
 SUPPORTED_OPERATORS = ("<=", ">=")
@@ -39,15 +42,12 @@ def _decimal_threshold(value: object, *, index: int) -> Decimal:
     return threshold
 
 
-def load_mandate(path: Path) -> Mandate:
-    """Load and validate a JSON mandate file.
+def parse_mandate(data: Mapping[str, Any]) -> Mandate:
+    """Validate and build a mandate from a parsed JSON payload.
 
     Raises ``ValueError`` with a clear message on any malformed or
-    unsupported configuration; ``FileNotFoundError`` when the file is
-    missing.  Unknown extra keys are ignored.
+    unsupported configuration.  Unknown extra keys are ignored.
     """
-    with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("mandate: root must be a JSON object")
     raw_limits = data.get("limits")

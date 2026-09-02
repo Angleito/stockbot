@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from app.analytics.portfolio import (
-    largest_positions,
-    portfolio_concentration,
+from app.analytics.portfolio import largest_positions, portfolio_concentration
+from app.domain.market.quotes import Quote
+from app.domain.portfolio.valuation import (
     portfolio_market_value,
     position_market_value,
     position_weight,
@@ -11,7 +11,6 @@ from app.analytics.portfolio import (
     unrealized_gain_pct,
     valuation_price,
 )
-from app.domain.market.quotes import Quote
 
 
 def _snapshot(**overrides) -> Quote:

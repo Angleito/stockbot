@@ -21,11 +21,10 @@ import pytest
 
 from app.domain.market.securities import SecurityResolution
 from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position, local_account_id
-from app.robinhood.account import BrokerageAccount, CashBalance
+from app.domain.portfolio.snapshot import build_portfolio_snapshot
+from app.domain.portfolio.valuation import build_position
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_sync import (
-    build_portfolio_snapshot,
-    build_position,
     read_latest_snapshot,
     resolve_security,
     sync_robinhood_portfolio,
@@ -570,30 +569,11 @@ def _position(market_value: Decimal | None = Decimal("500")) -> Position:
     )
 
 
-def _account(account_id="100000001") -> BrokerageAccount:
-    return BrokerageAccount(
-        account_id=account_id,
-        account_type="individual",
-        status="active",
-        retrieved_at=NOW,
-    )
-
-
-def _balance(account_id, cash) -> CashBalance:
-    return CashBalance(
-        account_id=account_id,
-        cash=cash,
-        buying_power=cash,
-        withdrawable_cash=cash,
-        retrieved_at=NOW,
-    )
-
-
 def test_cash_complete_multi_account_sums():
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001"), _account("100000002")],
+        account_ids=["100000001", "100000002"],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000002", Decimal("2000"))],
+        cash_balances={"100000001": Decimal("1000"), "100000002": Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash == Decimal("3000")
@@ -603,9 +583,9 @@ def test_cash_complete_multi_account_sums():
 
 def test_partial_cash_nils_total_and_weights():
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001"), _account("100000002")],
+        account_ids=["100000001", "100000002"],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000002", None)],
+        cash_balances={"100000001": Decimal("1000"), "100000002": None},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -615,9 +595,9 @@ def test_partial_cash_nils_total_and_weights():
 
 def test_missing_balance_nils_total():
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001"), _account("100000002")],
+        account_ids=["100000001", "100000002"],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000"))],
+        cash_balances={"100000001": Decimal("1000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -625,10 +605,13 @@ def test_missing_balance_nils_total():
 
 
 def test_duplicate_balance_for_one_account_incomplete():
+    # The mapping signature cannot represent duplicate balances (the
+    # provider yields one CashBalance per account), so this collapses to a
+    # missing-balance case and stays incomplete.
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001"), _account("100000002")],
+        account_ids=["100000001", "100000002"],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000001", Decimal("2000"))],
+        cash_balances={"100000001": Decimal("1000"), "100000001": Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -637,9 +620,9 @@ def test_duplicate_balance_for_one_account_incomplete():
 
 def test_mismatched_balance_account_ids_incomplete():
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001"), _account("100000002")],
+        account_ids=["100000001", "100000002"],
         positions=[_position()],
-        cash_balances=[_balance("100000001", Decimal("1000")), _balance("100000003", Decimal("2000"))],
+        cash_balances={"100000001": Decimal("1000"), "100000003": Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -648,9 +631,9 @@ def test_mismatched_balance_account_ids_incomplete():
 
 def test_cash_only_portfolio_has_valid_totals():
     snapshot = build_portfolio_snapshot(
-        accounts=[_account("100000001")],
+        account_ids=["100000001"],
         positions=[],
-        cash_balances=[_balance("100000001", Decimal("5000"))],
+        cash_balances={"100000001": Decimal("5000")},
         created_at=NOW,
     )
     assert snapshot.invested_value == Decimal("0")

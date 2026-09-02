@@ -732,7 +732,15 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
             },
         ],
         "sector_exposures": {"semiconductors": "0.75", "unknown_sector": "0.25"},
-        "not_evaluable": ["single_position_weight: ZZZZ (no weight)"],
+        "issues": [
+            {
+                "code": "position_weight_unavailable",
+                "metric": "single_position_weight",
+                "target": None,
+                "position_id": None,
+                "ticker": "ZZZZ",
+            }
+        ],
         "source": "mandate",
     }
     text = render_tool_result(result)

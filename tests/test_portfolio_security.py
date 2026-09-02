@@ -15,6 +15,8 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from app.domain.market.identity import resolve_ticker_aliases
+from app.domain.market.securities import TickerAlias
 from app.services.portfolio_sync import resolve_security
 from app.storage import parquet
 
@@ -236,14 +238,144 @@ def test_same_instant_null_and_explicit_security_not_conflict(data_root):
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
 
-def test_historical_revision_newer_security_wins(data_root):
-    _seed_entity(data_root)
-    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999")
-    _seed_alias(data_root, known_at="2026-08-25T13:00:00Z", security_id=AMD_SECURITY, source="control")
-    _seed_security(data_root)
-    resolution = resolve_security(
-        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
+# ---------------------------------------------------------------------------
+# Pure resolver (no storage): resolve_ticker_aliases over constructed aliases
+# ---------------------------------------------------------------------------
+
+AS_OF = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+
+
+def _alias(
+    known_at,
+    *,
+    entity_id=AMD_ENTITY,
+    security_id=AMD_SECURITY,
+    source="sec",
+    valid_from=None,
+    valid_to=None,
+    retrieved_at=None,
+) -> TickerAlias:
+    return TickerAlias(
+        alias_type="ticker",
+        alias_value="AMD",
+        entity_id=entity_id,
+        security_id=security_id,
+        source=source,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        known_at=known_at,
+        retrieved_at=retrieved_at or known_at,
+    )
+
+
+def test_pure_future_knowledge_is_invisible():
+    resolution = resolve_ticker_aliases("AMD", [_alias("2026-08-26T00:00:00Z")], as_of=AS_OF)
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "unresolved"
+
+
+def test_pure_expired_alias_is_invisible():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [_alias("2026-08-01T00:00:00Z", valid_from="2026-01-01", valid_to="2026-08-24")],
+        as_of=AS_OF,
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "unresolved"
+
+
+def test_pure_date_only_valid_to_boundary_expired_on_the_25th():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [_alias("2026-08-01T00:00:00Z", valid_from="2026-01-01", valid_to="2026-08-25")],
+        as_of=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc),
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "unresolved"
+
+
+def test_pure_two_simultaneously_valid_entities_ambiguous():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [
+            _alias("2026-01-01T00:00:00Z"),
+            _alias(
+                "2026-01-01T00:00:00Z",
+                entity_id="sec:cik:0000320194",
+                security_id="sec:equity:0000320194",
+                source="control",
+            ),
+        ],
+        as_of=AS_OF,
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "ambiguous"
+    assert resolution.entity_id is None
+    assert resolution.security_id is None
+
+
+def test_pure_same_instant_conflicting_security_ids_ambiguous():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [
+            _alias("2026-08-25T12:00:00Z", security_id=AMD_SECURITY),
+            _alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000999999", source="control"),
+        ],
+        as_of=AS_OF,
+    )
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "ambiguous"
+    assert resolution.entity_id == AMD_ENTITY
+    assert resolution.security_id is None
+
+
+def test_pure_explicit_id_equal_to_derived_sec_cik_id_not_ambiguous():
+    # storage.mappers.ticker_alias_from_row materializes the missing security
+    # id of a sec:cik entity to sec:equity:<cik>, so both rows reach the
+    # resolver with the same id — one distinct value, not a conflict.
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [
+            _alias("2026-08-25T12:00:00Z", security_id=AMD_SECURITY),
+            _alias("2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control"),
+        ],
+        as_of=AS_OF,
     )
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
+    assert resolution.security_id == AMD_SECURITY
+
+
+def test_pure_older_mapping_then_newer_mapping_newer_wins():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [
+            _alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000999999"),
+            _alias("2026-08-25T13:00:00Z", security_id=AMD_SECURITY, source="control"),
+        ],
+        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc),
+    )
+    assert resolution.resolved is True
+    assert resolution.resolution_method == "entity_alias"
+    assert resolution.security_id == AMD_SECURITY
+
+
+def test_pure_nothing_usable_is_unresolved():
+    resolution = resolve_ticker_aliases("AMD", [], as_of=AS_OF)
+    assert resolution.resolved is False
+    assert resolution.resolution_method == "unresolved"
+    assert resolution.ticker == "AMD"
+
+
+def test_pure_timezone_offset_known_at_chronological_not_lexical():
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [
+            # 13:00+01:00 == 12:00Z: sorts first lexically but is older.
+            _alias("2026-08-25T13:00:00+01:00", security_id=None),
+            _alias("2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control"),
+        ],
+        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc),
+    )
+    assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY

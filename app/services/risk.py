@@ -11,9 +11,9 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from ..domain.risk.exposure import RiskEvaluation, evaluate_mandate
-from ..domain.risk.mandate import load_mandate
+from ..domain.risk.evaluation import RiskEvaluation, evaluate_mandate
 from ..storage import duckdb
+from .mandate import load_mandate_file
 from .portfolio_sync import read_latest_snapshot
 
 
@@ -45,7 +45,7 @@ def evaluate_latest_mandate(
     Raises FileNotFoundError (mandate missing, no snapshot) or ValueError
     (bad mandate).
     """
-    mandate = load_mandate(mandate_path)
+    mandate = load_mandate_file(mandate_path)
     snapshot = read_latest_snapshot(data_root=data_root)
     if snapshot is None:
         raise FileNotFoundError(

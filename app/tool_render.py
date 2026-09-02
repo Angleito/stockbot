@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.domain.risk.evaluation import EvaluationIssue
 from app.services.portfolio_research import SEC_CONCEPTS
 
 MAX_TOOL_MESSAGE_BYTES = 64 * 1024
@@ -184,8 +185,23 @@ def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
+def issue_to_prose(issue: EvaluationIssue) -> str:
+    """Render an evaluation issue to its legacy prose form."""
+    if issue.code == "cash_unavailable":
+        return "minimum_cash: cash unavailable"
+    if issue.code == "total_value_unavailable":
+        return "minimum_cash: total value unavailable"
+    if issue.code == "total_value_zero":
+        return "minimum_cash: total value is zero"
+    if issue.code == "position_weight_unavailable":
+        return f"{issue.metric}: {issue.ticker} (no weight)"
+    if issue.code == "unknown_sector_exposure":
+        return f"sector_exposure: {issue.target} (unknown exposure)"
+    return f"{issue.metric}: {issue.code}"
+
+
 def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
-    """Compact mandate report: breaches, sector exposures, not-evaluable."""
+    """Compact mandate report: breaches, sector exposures, issues."""
 
     def value_text(value, metric: str, unit: str) -> str:
         if value is None:
@@ -236,11 +252,12 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
             except (TypeError, ValueError):
                 exposure_parts.append(f"{_cell(sector)} {_cell(weight)}")
         lines.append("Sector exposures: " + ", ".join(exposure_parts))
-    not_evaluable = result.get("not_evaluable") or []
-    if not_evaluable:
+    issues = result.get("issues") or []
+    if issues:
         lines.append("Not evaluable:")
-        for reason in not_evaluable:
-            lines.append(f"  - {_cell(reason)}")
+        for issue in issues:
+            if isinstance(issue, dict):
+                lines.append(f"  - {_cell(issue_to_prose(EvaluationIssue(**issue)))}")
     lines.append("Source: " + str(result.get("source", "mandate")))
     return _truncate_bytes("\n".join(lines), max_bytes)
 

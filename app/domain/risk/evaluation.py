@@ -1,7 +1,8 @@
 """Deterministic mandate evaluation over a portfolio snapshot.
 
 Python calculates; the LLM interprets.  All math is Decimal; a breach
-holds exactly when ``NOT (actual op threshold)``.
+holds exactly when ``NOT actual op threshold``.  Non-evaluable outcomes
+are structured ``EvaluationIssue`` codes; renderers turn them into prose.
 """
 
 from __future__ import annotations
@@ -23,10 +24,19 @@ _OPS = {
 
 
 @dataclass(frozen=True)
+class EvaluationIssue:
+    code: str
+    metric: str
+    target: str | None = None
+    position_id: str | None = None
+    ticker: str | None = None
+
+
+@dataclass(frozen=True)
 class RiskEvaluation:
     breaches: tuple[RiskBreach, ...]
     sector_exposures: dict[str, Decimal]   # sector name -> summed weight; includes "unknown_sector"
-    not_evaluable: tuple[str, ...]         # human-readable reasons
+    issues: tuple[EvaluationIssue, ...]    # structured non-evaluable reasons
     snapshot_id: str
     created_at: datetime                   # = snapshot.created_at (deterministic)
 
@@ -40,7 +50,7 @@ def _evaluate_limit(
     snapshot: PortfolioSnapshot,
     sector_exposures: dict[str, Decimal],
     breaches: list[RiskBreach],
-    not_evaluable: list[str],
+    issues: list[EvaluationIssue],
 ) -> None:
     if limit.metric == "sector_exposure":
         known = sector_exposures.get(limit.target or "", Decimal("0"))
@@ -57,12 +67,14 @@ def _evaluate_limit(
                                            excess=_excess(limit.operator, known, limit.threshold),
                                            unit=limit.unit))
             elif unknown > 0:
-                not_evaluable.append(f"sector_exposure: {limit.target} (unknown exposure)")
+                issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure",
+                                              target=limit.target))
         else:  # ">="
             if known >= limit.threshold:
                 pass
             elif unknown > 0:
-                not_evaluable.append(f"sector_exposure: {limit.target} (unknown exposure)")
+                issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure",
+                                              target=limit.target))
             else:
                 breaches.append(RiskBreach(metric="sector_exposure", target=limit.target,
                                            severity=limit.severity, actual=known,
@@ -73,9 +85,10 @@ def _evaluate_limit(
         for position in snapshot.positions:
             weight = position.portfolio_weight
             if weight is None:
-                not_evaluable.append(
-                    f"single_position_weight: {position.ticker} (no weight)"
-                )
+                issues.append(EvaluationIssue(
+                    "position_weight_unavailable", "single_position_weight",
+                    ticker=position.ticker, position_id=position.position_id,
+                ))
                 continue
             if not _OPS[limit.operator](weight, limit.threshold):
                 breaches.append(
@@ -95,17 +108,17 @@ def _evaluate_limit(
             actual = snapshot.cash
         else:
             if snapshot.cash is None:
-                not_evaluable.append("minimum_cash: cash unavailable")
+                issues.append(EvaluationIssue("cash_unavailable", "minimum_cash"))
                 return
             if snapshot.total_value is None:
-                not_evaluable.append("minimum_cash: total value unavailable")
+                issues.append(EvaluationIssue("total_value_unavailable", "minimum_cash"))
                 return
             if snapshot.total_value == 0:
-                not_evaluable.append("minimum_cash: total value is zero")
+                issues.append(EvaluationIssue("total_value_zero", "minimum_cash"))
                 return
             actual = snapshot.cash / snapshot.total_value
         if actual is None:
-            not_evaluable.append("minimum_cash: cash unavailable")
+            issues.append(EvaluationIssue("cash_unavailable", "minimum_cash"))
             return
         if not _OPS[limit.operator](actual, limit.threshold):
             breaches.append(
@@ -132,7 +145,7 @@ def evaluate_mandate(
     entity is unknown or unmapped bucket to ``UNKNOWN_SECTOR``.
     """
     sector_map = sector_map or {}
-    not_evaluable: list[str] = []
+    issues: list[EvaluationIssue] = []
     sector_exposures: dict[str, Decimal] = {}
     needs_sector_exposure = any(
         limit.metric == "sector_exposure" for limit in mandate.limits
@@ -140,7 +153,10 @@ def evaluate_mandate(
     if needs_sector_exposure:
         for position in snapshot.positions:
             if position.portfolio_weight is None:
-                not_evaluable.append(f"sector_exposure: {position.ticker} (no weight)")
+                issues.append(EvaluationIssue(
+                    "position_weight_unavailable", "sector_exposure",
+                    ticker=position.ticker, position_id=position.position_id,
+                ))
                 continue
             if position.entity_id is not None and position.entity_id in sector_map:
                 sector = sector_map[position.entity_id]
@@ -152,7 +168,7 @@ def evaluate_mandate(
 
     breaches: list[RiskBreach] = []
     for limit in mandate.limits:
-        _evaluate_limit(limit, snapshot, sector_exposures, breaches, not_evaluable)
+        _evaluate_limit(limit, snapshot, sector_exposures, breaches, issues)
     for entry in mandate.prohibited_assets:
         for position in snapshot.positions:
             if (
@@ -173,7 +189,7 @@ def evaluate_mandate(
     return RiskEvaluation(
         breaches=tuple(breaches),
         sector_exposures=sector_exposures,
-        not_evaluable=tuple(dict.fromkeys(not_evaluable)),
+        issues=tuple(dict.fromkeys(issues)),
         snapshot_id=snapshot.snapshot_id,
         created_at=snapshot.created_at,
     )

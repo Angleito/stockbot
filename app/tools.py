@@ -858,7 +858,16 @@ def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = 
             for breach in evaluation.breaches
         ],
         "sector_exposures": {sector: str(weight) for sector, weight in evaluation.sector_exposures.items()},
-        "not_evaluable": list(evaluation.not_evaluable),
+        "issues": [
+            {
+                "code": issue.code,
+                "metric": issue.metric,
+                "target": issue.target,
+                "position_id": issue.position_id,
+                "ticker": issue.ticker,
+            }
+            for issue in evaluation.issues
+        ],
         "source": "mandate",
     }
 

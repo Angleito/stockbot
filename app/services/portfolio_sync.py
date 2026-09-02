@@ -11,23 +11,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
 
-from ..analytics.portfolio import (
-    portfolio_market_value,
-    position_market_value,
-    position_weight,
-    unrealized_gain,
-    unrealized_gain_pct,
-    valuation_price,
-)
-from ..domain.market.securities import SecurityResolution, TickerAlias
-from ..domain.market.quotes import Quote
-from ..domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position, local_account_id
+from ..domain.market.identity import resolve_ticker_aliases
+from ..domain.market.securities import SecurityResolution
+from ..domain.portfolio import PortfolioSnapshot
+from ..domain.portfolio.snapshot import build_portfolio_snapshot
+from ..domain.portfolio.valuation import build_position
 from ..robinhood.account import BrokerageAccount, BrokeragePosition, CashBalance
 from ..robinhood.adapters import to_position_input, to_quote
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
-from ..storage import duckdb, ids, parquet
+from ..storage import duckdb, mappers, parquet
 
 SNAPSHOT_SOURCE = "robinhood_mcp"
 PARSER_VERSION = "robinhood-mcp-account-v1"
@@ -68,158 +61,8 @@ def resolve_security(
     elif as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     as_of = as_of.astimezone(timezone.utc)
-    clause, param = duckdb.as_of_clause(as_of.isoformat())
-    rows = duckdb.query(
-        "SELECT alias_type, alias_value, entity_id, security_id, source, "
-        "valid_from, valid_to, known_at, retrieved_at, "
-        "dense_rank() OVER (ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _newest_rank "
-        "FROM entity_aliases "
-        "WHERE alias_type = 'ticker' AND alias_value = ? AND "
-        f"{clause} "
-        "AND (valid_from IS NULL OR CAST(valid_from AS TIMESTAMP) <= CAST(? AS TIMESTAMP)) "
-        "AND (valid_to IS NULL OR CAST(valid_to AS TIMESTAMP) > CAST(? AS TIMESTAMP)) "
-        "ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, "
-        "CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST",
-        params=[ticker.strip().upper(), param, param, param],
-        data_root=data_root,
-    )
-    if not rows:
-        return SecurityResolution(None, None, ticker, False, "unresolved")
-    entities = list(dict.fromkeys(row["entity_id"] for row in rows))
-    if len(entities) > 1:
-        return SecurityResolution(None, None, ticker, False, "ambiguous")
-    material_security_ids = set()
-    for row in rows:
-        if row["_newest_rank"] != 1:
-            break  # older instants are historical revisions, not conflicts
-        row_security_id = row.get("security_id")
-        entity_id = str(row["entity_id"])
-        if row_security_id is None and entity_id.startswith("sec:cik:"):
-            row_security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
-        material_security_ids.add(str(row_security_id) if row_security_id is not None else None)
-    if len(material_security_ids) > 1:
-        return SecurityResolution(None, entities[0], ticker, False, "ambiguous")
-    newest = rows[0]
-    alias = TickerAlias.from_row(newest)
-    entity_id = alias.entity_id
-    if alias.security_id is not None:
-        security_id = alias.security_id
-    elif entity_id.startswith("sec:cik:"):
-        security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
-    else:
-        security_id = None
-    return SecurityResolution(security_id, entity_id, ticker, True, "entity_alias")
-
-
-def build_position(
-    raw: BrokeragePositionInput,
-    resolution: SecurityResolution,
-    quote: Quote | None,
-) -> Position:
-    """Build a valued position; portfolio_weight is None here (computed by
-    the snapshot builder once the invested total is known)."""
-    valuation = valuation_price(quote) if quote else {"price": None, "price_type": None}
-    market_price = Decimal(valuation["price"]) if valuation["price"] is not None else None
-    market_value = position_market_value(raw.quantity, market_price)
-    gain = unrealized_gain(market_value, raw.average_cost, raw.quantity)
-    cost_basis = raw.average_cost * raw.quantity if raw.average_cost is not None else None
-    return Position(
-        position_id=raw.position_id,
-        account_id=raw.account_id,
-        security_id=resolution.security_id,
-        entity_id=resolution.entity_id,
-        ticker=raw.ticker,
-        quantity=raw.quantity,
-        average_cost=raw.average_cost,
-        market_price=market_price,
-        market_value=market_value,
-        unrealized_gain=gain,
-        unrealized_gain_pct=unrealized_gain_pct(gain, cost_basis),
-        portfolio_weight=None,
-        source=raw.source,
-        retrieved_at=raw.retrieved_at,
-        price_type=valuation["price_type"],
-        quote_retrieved_at=quote.retrieved_at if quote else None,
-        asset_type=raw.asset_type,
-    )
-
-
-def build_portfolio_snapshot(
-    *,
-    accounts: Sequence[BrokerageAccount],
-    positions: Sequence[Position],
-    cash_balances: Sequence[CashBalance],
-    created_at: datetime,
-) -> PortfolioSnapshot:
-    """Assemble the deterministic, immutable portfolio snapshot.
-
-    Position weights use ``total_value`` as the denominator (cash included);
-    weights are ``None`` when total value is unknown.  Weights are ``None``
-    whenever any non-zero position lacks a valuation (total_value is then
-    ``None``; zero-quantity positions never block completeness).  Cash is the
-    sum of all balances, and only when every account has a non-None balance
-    (all-or-nothing completeness); partial or missing balances yield
-    ``None``, never an invented partial sum.
-    """
-    account_ids = {a.account_id for a in accounts}
-    balance_ids = {b.account_id for b in cash_balances}
-    cash_complete = (
-        bool(cash_balances)
-        and len(cash_balances) == len(accounts)
-        and balance_ids == account_ids
-        and all(balance.cash is not None for balance in cash_balances)
-    )
-    cash = sum(balance.cash for balance in cash_balances) if cash_complete else None
-    invested_value = (
-        Decimal("0")
-        if not positions and cash is not None
-        else portfolio_market_value([position.market_value for position in positions])[0]
-    )
-    total_value = invested_value + cash if invested_value is not None and cash is not None else None
-    valuation_complete = all(
-        position.market_value is not None or position.quantity == 0
-        for position in positions
-    )
-    if not valuation_complete:
-        total_value = None
-
-    snapshot_id = f"portfolio:robinhood:{created_at.isoformat()}"
-    account_ids = tuple(local_account_id(account.account_id) for account in accounts)
-    built_positions: list[Position] = []
-    for position in positions:
-        account_id = local_account_id(position.account_id)
-        built_positions.append(
-            Position(
-                position_id=f"{snapshot_id}:{account_id}:{position.ticker}",
-                account_id=account_id,
-                security_id=position.security_id,
-                entity_id=position.entity_id,
-                ticker=position.ticker,
-                quantity=position.quantity,
-                average_cost=position.average_cost,
-                market_price=position.market_price,
-                market_value=position.market_value,
-                unrealized_gain=position.unrealized_gain,
-                unrealized_gain_pct=position.unrealized_gain_pct,
-                portfolio_weight=position_weight(position.market_value, total_value),
-                source=position.source,
-                retrieved_at=position.retrieved_at,
-                price_type=position.price_type,
-                quote_retrieved_at=position.quote_retrieved_at,
-                asset_type=position.asset_type,
-            )
-        )
-    built = tuple(built_positions)
-    return PortfolioSnapshot(
-        snapshot_id=snapshot_id,
-        created_at=created_at,
-        broker="robinhood",
-        account_ids=account_ids,
-        cash=cash,
-        invested_value=invested_value,
-        total_value=total_value,
-        positions=built,
-    )
+    aliases = duckdb.ticker_alias_candidates(ticker, as_of, data_root=data_root)
+    return resolve_ticker_aliases(ticker, aliases, as_of=as_of)
 
 
 def _float(value: Decimal | None) -> float | None:
@@ -284,51 +127,6 @@ def persist_snapshot(
     )
 
 
-def _position_from_row(row: dict, retrieved_at: datetime) -> Position:
-    """Rebuild a position from a persisted row.
-
-    ``retrieved_at`` is not persisted in the position schema; it is
-    reconstructed as the snapshot's ``created_at`` (the position was
-    retrieved during the sync that created the snapshot).
-    """
-    numeric = {
-        key: Decimal(str(row[key])) if row[key] is not None else None
-        for key in (
-            "quantity",
-            "average_cost",
-            "market_price",
-            "market_value",
-            "unrealized_gain",
-            "unrealized_gain_pct",
-            "portfolio_weight",
-        )
-    }
-    quote_retrieved_at = row.get("quote_retrieved_at")
-    asset_type = row.get("asset_type") or "equity"
-    return Position(
-        position_id=str(row["position_id"]),
-        account_id=str(row["account_id"]),
-        security_id=str(row["security_id"]) if row.get("security_id") else None,
-        entity_id=str(row["entity_id"]) if row.get("entity_id") else None,
-        ticker=str(row["ticker"]),
-        quantity=numeric["quantity"],
-        average_cost=numeric["average_cost"],
-        market_price=numeric["market_price"],
-        market_value=numeric["market_value"],
-        unrealized_gain=numeric["unrealized_gain"],
-        unrealized_gain_pct=numeric["unrealized_gain_pct"],
-        portfolio_weight=numeric["portfolio_weight"],
-        source=str(row["source"]),
-        retrieved_at=retrieved_at,
-        price_type=str(row["price_type"]) if row.get("price_type") else None,
-        quote_retrieved_at=(
-            datetime.fromisoformat(quote_retrieved_at.replace("Z", "+00:00"))
-            if quote_retrieved_at else None
-        ),
-        asset_type=asset_type,
-    )
-
-
 def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot | None:
     """Return the newest persisted snapshot, or None when none exists.
 
@@ -354,7 +152,7 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
         data_root=data_root,
     )
     positions = tuple(
-        _position_from_row(position_row, created_at) for position_row in position_rows
+        mappers.position_from_row(position_row, created_at) for position_row in position_rows
     )
     account_ids: list[str] = []
     for position in positions:
@@ -403,9 +201,9 @@ def sync_robinhood_portfolio(
         for raw in raw_positions
     ]
     snapshot = build_portfolio_snapshot(
-        accounts=accounts,
+        account_ids=[account.account_id for account in accounts],
         positions=positions,
-        cash_balances=cash_balances,
+        cash_balances={balance.account_id: balance.cash for balance in cash_balances},
         created_at=created_at,
     )
     persist_snapshot(snapshot, data_root=data_root)

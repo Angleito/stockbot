@@ -9,10 +9,11 @@ from pathlib import Path
 from app.agent import run_chat
 from app.config import get_default_model, get_local_chat_policy
 from app.policy import LOCAL_CONTEXT
-from app.domain.risk.mandate import load_mandate
+from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data
 from app.storage import duckdb
+from app.tool_render import issue_to_prose
 from app.storage.runs import (
     get_events,
     get_model_calls,
@@ -138,7 +139,7 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
     """Evaluate a mandate against the latest persisted snapshot; report or exit 1."""
     try:
         evaluation = evaluate_latest_mandate(mandate_path, data_root=data_root)
-        mandate = load_mandate(mandate_path)
+        mandate = load_mandate_file(mandate_path)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -176,10 +177,10 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
             print(line)
     else:
         print("No breaches.")
-    if evaluation.not_evaluable:
+    if evaluation.issues:
         print("Not evaluable:")
-        for reason in evaluation.not_evaluable:
-            print(f"    - {reason}")
+        for issue in evaluation.issues:
+            print(f"    - {issue_to_prose(issue)}")
 
 
 def main() -> None:
