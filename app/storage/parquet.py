@@ -159,7 +159,7 @@ DATASETS: dict[str, Dataset] = {
         name="portfolio_snapshots",
         schema=pa.schema(_fields(
             ("snapshot_id", TEXT), ("broker", TEXT), ("created_at", TEXT),
-            ("cash", DOUBLE), ("invested_value", DOUBLE), ("total_value", DOUBLE),
+            ("cash", pa.decimal128(38, 14)), ("invested_value", pa.decimal128(38, 14)), ("total_value", pa.decimal128(38, 14)),
             ("account_count", INTEGER), ("position_count", INTEGER),
             ("priced_position_count", INTEGER), ("unresolved_position_count", INTEGER),
             ("source", TEXT), ("parser_version", TEXT), ("calculation_version", TEXT),
@@ -171,9 +171,9 @@ DATASETS: dict[str, Dataset] = {
         schema=pa.schema(_fields(
             ("snapshot_id", TEXT), ("position_id", TEXT), ("account_id", TEXT),
             ("security_id", TEXT), ("entity_id", TEXT), ("ticker", TEXT),
-            ("quantity", DOUBLE), ("average_cost", DOUBLE), ("market_price", DOUBLE),
-            ("price_type", TEXT), ("market_value", DOUBLE), ("unrealized_gain", DOUBLE),
-            ("unrealized_gain_pct", DOUBLE), ("portfolio_weight", DOUBLE),
+            ("quantity", pa.decimal128(38, 8)), ("average_cost", pa.decimal128(38, 6)), ("market_price", pa.decimal128(38, 6)),
+            ("price_type", TEXT), ("market_value", pa.decimal128(38, 14)), ("unrealized_gain", pa.decimal128(38, 14)),
+            ("unrealized_gain_pct", pa.decimal128(38, 28)), ("portfolio_weight", pa.decimal128(38, 28)),
             ("source", TEXT), ("quote_retrieved_at", TEXT), ("asset_type", TEXT),
         )),
         unique_keys=("position_id",),

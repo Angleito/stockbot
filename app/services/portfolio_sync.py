@@ -65,8 +65,20 @@ def resolve_security(
     return resolve_ticker_aliases(ticker, aliases, as_of=as_of)
 
 
-def _float(value: Decimal | None) -> float | None:
-    return float(value) if value is not None else None
+def _ratio_value(value: Decimal | None) -> Decimal | None:
+    """Fit a computed ratio to the decimal128(38, 28) ratio columns.
+
+    Ratios are divided at Python's default context precision (28
+    significant digits), so a ratio below 0.1 can carry 29+ fractional
+    digits (e.g. 0.01207583625166042748460330878).  Rounding those
+    beyond the 28th digit keeps a small position from failing the whole
+    write; the discarded digits are far past any meaningful precision.
+    Money and quantity columns are never rounded here: a value that
+    exceeds their scale is a data error and must fail loudly.
+    """
+    if value is None:
+        return None
+    return value.quantize(Decimal("1e-28"))
 
 
 def persist_snapshot(
@@ -83,9 +95,9 @@ def persist_snapshot(
             "snapshot_id": snapshot.snapshot_id,
             "broker": snapshot.broker,
             "created_at": snapshot.created_at.isoformat(),
-            "cash": _float(snapshot.cash),
-            "invested_value": _float(snapshot.invested_value),
-            "total_value": _float(snapshot.total_value),
+            "cash": snapshot.cash,
+            "invested_value": snapshot.invested_value,
+            "total_value": snapshot.total_value,
             "account_count": len(snapshot.account_ids),
             "position_count": len(snapshot.positions),
             "priced_position_count": sum(
@@ -109,14 +121,14 @@ def persist_snapshot(
             "security_id": position.security_id,
             "entity_id": position.entity_id,
             "ticker": position.ticker,
-            "quantity": float(position.quantity),
-            "average_cost": _float(position.average_cost),
-            "market_price": _float(position.market_price),
+            "quantity": position.quantity,
+            "average_cost": position.average_cost,
+            "market_price": position.market_price,
             "price_type": position.price_type,
-            "market_value": _float(position.market_value),
-            "unrealized_gain": _float(position.unrealized_gain),
-            "unrealized_gain_pct": _float(position.unrealized_gain_pct),
-            "portfolio_weight": _float(position.portfolio_weight),
+            "market_value": position.market_value,
+            "unrealized_gain": position.unrealized_gain,
+            "unrealized_gain_pct": _ratio_value(position.unrealized_gain_pct),
+            "portfolio_weight": _ratio_value(position.portfolio_weight),
             "source": position.source,
             "quote_retrieved_at": (
                 position.quote_retrieved_at.isoformat() if position.quote_retrieved_at else None
@@ -179,9 +191,15 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
         created_at=created_at,
         broker=str(row["broker"]),
         account_ids=tuple(account_ids),
-        cash=Decimal(str(row["cash"])) if row.get("cash") is not None else None,
-        invested_value=Decimal(str(row["invested_value"])) if row.get("invested_value") is not None else None,
-        total_value=Decimal(str(row["total_value"])) if row.get("total_value") is not None else None,
+        cash=mappers.canonical_decimal(
+            Decimal(str(row["cash"])) if row.get("cash") is not None else None
+        ),
+        invested_value=mappers.canonical_decimal(
+            Decimal(str(row["invested_value"])) if row.get("invested_value") is not None else None
+        ),
+        total_value=mappers.canonical_decimal(
+            Decimal(str(row["total_value"])) if row.get("total_value") is not None else None
+        ),
         positions=positions,
     )
 

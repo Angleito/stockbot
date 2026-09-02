@@ -1,6 +1,7 @@
 """Tests for the raw archive, Parquet datasets, and DuckDB query layer."""
 
 import json
+from decimal import Decimal
 
 import pytest
 import pyarrow as pa
@@ -132,8 +133,8 @@ def test_parquet_unknown_dataset_rejected(data_root):
 
 
 def _snapshot_row(snapshot_id="snap-001", broker="robinhood",
-                  created_at="2026-08-25T12:00:00Z", cash=1234.5,
-                  invested_value=23456.78, total_value=24691.28,
+                  created_at="2026-08-25T12:00:00Z", cash=Decimal("1234.5"),
+                  invested_value=Decimal("23456.78"), total_value=Decimal("24691.28"),
                   account_count=2, position_count=5, priced_position_count=4,
                   unresolved_position_count=1, source="robinhood-api",
                   parser_version="portfolio-parser-v1",
@@ -157,9 +158,10 @@ def _snapshot_row(snapshot_id="snap-001", broker="robinhood",
 
 def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc-001",
                   security_id="sec:cik:0000320193", entity_id="sec:cik:0000320193",
-                  ticker="AAPL", quantity=10.0, average_cost=150.25, market_price=160.0,
-                  price_type="last_trade", market_value=1600.0, unrealized_gain=97.5,
-                  unrealized_gain_pct=0.0649, portfolio_weight=0.0648,
+                  ticker="AAPL", quantity=Decimal("10.0"), average_cost=Decimal("150.25"),
+                  market_price=Decimal("160.0"), price_type="last_trade",
+                  market_value=Decimal("1600.0"), unrealized_gain=Decimal("97.5"),
+                  unrealized_gain_pct=Decimal("0.0649"), portfolio_weight=Decimal("0.0648"),
                   source="robinhood-api", quote_retrieved_at="2026-08-25T12:00:00Z",
                   asset_type="equity"):
     return {
@@ -189,7 +191,7 @@ def test_portfolio_snapshot_roundtrip(data_root):
     table = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
     assert table.num_rows == 1
     assert table.column("snapshot_id").to_pylist() == ["snap-001"]
-    assert table.column("total_value").to_pylist() == [24691.28]
+    assert table.column("total_value").to_pylist() == [Decimal("24691.28")]
     assert table.column("created_at").to_pylist() == ["2026-08-25T12:00:00Z"]
 
 
@@ -200,7 +202,7 @@ def test_portfolio_position_roundtrip(data_root):
     assert table.num_rows == 1
     assert table.column("position_id").to_pylist() == ["pos-001"]
     assert table.column("ticker").to_pylist() == ["AAPL"]
-    assert table.column("market_price").to_pylist() == [160.0]
+    assert table.column("market_price").to_pylist() == [Decimal("160.0")]
 
 
 def test_portfolio_snapshot_immutability(data_root):
@@ -249,20 +251,20 @@ def test_portfolio_columns_are_typed(data_root):
     parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet")
     snap = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
     assert snap.schema.field("snapshot_id").type == pa.string()
-    assert snap.schema.field("cash").type == pa.float64()
-    assert snap.schema.field("total_value").type == pa.float64()
+    assert snap.schema.field("cash").type == pa.decimal128(38, 14)
+    assert snap.schema.field("total_value").type == pa.decimal128(38, 14)
     assert snap.schema.field("account_count").type == pa.int64()
     assert snap.schema.field("position_count").type == pa.int64()
     assert snap.column("account_count").to_pylist() == [2]
-    assert snap.column("cash").to_pylist() == [1234.5]
+    assert snap.column("cash").to_pylist() == [Decimal("1234.5")]
     assert snap.column("broker").to_pylist() == ["robinhood"]
     pos = parquet.read_table("portfolio_positions", root=data_root / "parquet")
     assert pos.schema.field("position_id").type == pa.string()
-    assert pos.schema.field("quantity").type == pa.float64()
-    assert pos.schema.field("market_price").type == pa.float64()
-    assert pos.schema.field("unrealized_gain").type == pa.float64()
+    assert pos.schema.field("quantity").type == pa.decimal128(38, 8)
+    assert pos.schema.field("market_price").type == pa.decimal128(38, 6)
+    assert pos.schema.field("unrealized_gain").type == pa.decimal128(38, 14)
     assert pos.schema.field("asset_type").type == pa.string()
-    assert pos.column("quantity").to_pylist() == [10.0]
+    assert pos.column("quantity").to_pylist() == [Decimal("10.0")]
     assert pos.column("ticker").to_pylist() == ["AAPL"]
     assert pos.column("price_type").to_pylist() == ["last_trade"]
 

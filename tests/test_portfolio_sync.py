@@ -256,7 +256,7 @@ def test_snapshot_and_positions_are_persisted_once(data_root):
     assert snapshots.column("position_count").to_pylist() == [5]
     assert snapshots.column("priced_position_count").to_pylist() == [5]
     assert snapshots.column("unresolved_position_count").to_pylist() == [3]
-    assert snapshots.column("total_value").to_pylist() == [6624.8]
+    assert snapshots.column("total_value").to_pylist() == [Decimal("6624.8")]
     assert snapshots.column("parser_version").to_pylist() == ["robinhood-mcp-account-v1"]
     assert snapshots.column("calculation_version").to_pylist() == ["portfolio-snapshot-v1"]
     assert positions.num_rows == 5
@@ -274,8 +274,17 @@ def _assert_position_close(actual, expected):
     assert actual.quote_retrieved_at == expected.quote_retrieved_at
     for field in (
         "quantity", "average_cost", "market_price", "market_value",
-        "unrealized_gain", "unrealized_gain_pct", "portfolio_weight",
+        "unrealized_gain",
     ):
+        # Money and quantity are stored at their exact scale (quantity *
+        # price products fit decimal128(38, 14)); restored values equal
+        # the live Decimals exactly.
+        assert getattr(actual, field) == getattr(expected, field)
+    for field in ("unrealized_gain_pct", "portfolio_weight"):
+        # Ratios are computed at Python's default context precision (28
+        # significant digits) and can carry more fractional digits than
+        # the (38, 28) ratio columns hold; the write boundary rounds the
+        # overflow, so compare approximately.
         assert getattr(actual, field) == pytest.approx(getattr(expected, field))
 
 
@@ -287,9 +296,9 @@ def test_read_latest_snapshot_round_trips(data_root):
     assert restored.created_at == snapshot.created_at
     assert restored.broker == "robinhood"
     assert restored.account_ids == (local_account_id("100000001"), local_account_id("100000002"))
-    assert restored.cash == pytest.approx(snapshot.cash)
-    assert restored.invested_value == pytest.approx(snapshot.invested_value)
-    assert restored.total_value == pytest.approx(snapshot.total_value)
+    assert restored.cash == snapshot.cash
+    assert restored.invested_value == snapshot.invested_value
+    assert restored.total_value == snapshot.total_value
     assert [position.position_id for position in restored.positions] == [
         position.position_id for position in snapshot.positions
     ]
@@ -355,6 +364,50 @@ def test_account_ids_round_trip_preserves_order(data_root):
     restored = read_latest_snapshot(data_root=data_root)
     assert restored is not None
     assert restored.account_ids == snapshot.account_ids
+
+
+def test_decimal_round_trip_is_exact(data_root):
+    # Values chosen to stress column scales: a small fractional quantity
+    # whose price product needs all 14 fractional digits, a large dollar
+    # amount, a repeating-fraction percentage, and non-integral decimals
+    # whose storage-scale artifacts (trailing zeros) must canonicalize
+    # away on read (0.5 -> not 0.5000...).
+    position = Position(
+        position_id="pos-1",
+        account_id="100000001",
+        security_id="sec:equity:0000320193",
+        entity_id="sec:cik:0000320193",
+        ticker="AMD",
+        quantity=Decimal("0.00000001"),
+        average_cost=Decimal("123456789012.34"),
+        market_price=Decimal("123456789012.123456"),
+        market_value=Decimal("1234.56789012123456"),
+        unrealized_gain=Decimal("0.1"),
+        unrealized_gain_pct=Decimal("0.3333333333"),
+        portfolio_weight=None,
+        source="robinhood_mcp",
+        retrieved_at=NOW,
+    )
+    snapshot = build_portfolio_snapshot(
+        broker="robinhood",
+        account_ids=["100000001"],
+        positions=[position],
+        cash_balances={"100000001": Decimal("1234.56789012123456")},
+        created_at=NOW,
+    )
+    persist_snapshot(snapshot, data_root=data_root)
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.cash == snapshot.cash
+    assert restored.invested_value == snapshot.invested_value
+    assert restored.total_value == snapshot.total_value
+    (actual,) = restored.positions
+    (expected,) = snapshot.positions
+    for field in (
+        "quantity", "average_cost", "market_price", "market_value",
+        "unrealized_gain", "unrealized_gain_pct", "portfolio_weight",
+    ):
+        assert getattr(actual, field) == getattr(expected, field)
 
 
 def test_missing_quote_price_degrades_snapshot_but_persists(data_root):

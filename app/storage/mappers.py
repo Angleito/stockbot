@@ -36,6 +36,17 @@ def ticker_alias_from_row(row: Mapping[str, Any]) -> TickerAlias:
     )
 
 
+def canonical_decimal(value: Decimal | None) -> Decimal | None:
+    """Strip storage-scale artifacts: Decimal('1168.40000000000000') -> Decimal('1168.4'),
+    Decimal('10.00000000') -> Decimal('10').  Value-preserving."""
+    if value is None:
+        return None
+    normalized = value.normalize()
+    if normalized == normalized.to_integral_value():
+        return normalized.quantize(Decimal(1))
+    return normalized
+
+
 def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Position:
     """Rebuild a position from a persisted row.
 
@@ -44,7 +55,9 @@ def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Positio
     retrieved during the sync that created the snapshot).
     """
     numeric = {
-        key: Decimal(str(row[key])) if row[key] is not None else None
+        key: canonical_decimal(
+            Decimal(str(row[key])) if row[key] is not None else None
+        )
         for key in (
             "quantity",
             "average_cost",
