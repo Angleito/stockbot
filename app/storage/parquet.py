@@ -178,6 +178,13 @@ DATASETS: dict[str, Dataset] = {
         )),
         unique_keys=("position_id",),
     ),
+    "portfolio_accounts": Dataset(
+        name="portfolio_accounts",
+        schema=pa.schema(_fields(
+            ("snapshot_id", TEXT), ("account_id", TEXT),
+        )),
+        unique_keys=("snapshot_id", "account_id"),
+    ),
     "sector_mappings": Dataset(
         name="sector_mappings",
         schema=pa.schema(_fields(

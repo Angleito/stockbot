@@ -125,17 +125,24 @@ def persist_snapshot(
         } for position in snapshot.positions],
         root=parquet_root,
     )
+    parquet.write_rows(
+        "portfolio_accounts",
+        [{"snapshot_id": snapshot.snapshot_id, "account_id": account_id}
+         for account_id in snapshot.account_ids],
+        root=parquet_root,
+    )
 
 
 def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot | None:
     """Return the newest persisted snapshot, or None when none exists.
 
-    ``account_ids`` is reconstructed from the persisted positions (the
-    snapshot schema carries only account_count) as local opaque
-    identifiers; accounts without positions are not recoverable.
-    Positions are returned in persisted write order: a snapshot's rows
-    are written in one batch, and position_id embeds opaque account ids
-    that do not sort by account.
+    ``account_ids`` comes from ``portfolio_accounts`` in write order (one
+    write batch = one part file); for legacy snapshots predating that
+    dataset it is reconstructed from the persisted positions as local
+    opaque identifiers, in which case accounts without positions are not
+    recoverable.  Positions are returned in persisted write order: a
+    snapshot's rows are written in one batch, and position_id embeds
+    opaque account ids that do not sort by account.
     """
     rows = duckdb.query(
         "SELECT * FROM portfolio_snapshots ORDER BY created_at DESC LIMIT 1",
@@ -154,10 +161,19 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
     positions = tuple(
         mappers.position_from_row(position_row, created_at) for position_row in position_rows
     )
-    account_ids: list[str] = []
-    for position in positions:
-        if position.account_id not in account_ids:
-            account_ids.append(position.account_id)
+    account_rows = duckdb.query(
+        "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ?",
+        params=[snapshot_id],
+        data_root=data_root,
+    )
+    account_ids = [str(row["account_id"]) for row in account_rows]
+    if not account_ids:
+        # Legacy snapshots predate portfolio_accounts: fall back to the
+        # position-derived reconstruction (accounts without positions are
+        # unrecoverable there, same as before this change).
+        for position in positions:
+            if position.account_id not in account_ids:
+                account_ids.append(position.account_id)
     return PortfolioSnapshot(
         snapshot_id=snapshot_id,
         created_at=created_at,

@@ -25,6 +25,7 @@ from app.domain.portfolio.snapshot import build_portfolio_snapshot
 from app.domain.portfolio.valuation import build_position
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_sync import (
+    persist_snapshot,
     read_latest_snapshot,
     resolve_security,
     sync_robinhood_portfolio,
@@ -297,8 +298,63 @@ def test_read_latest_snapshot_round_trips(data_root):
         assert actual.retrieved_at == restored.created_at
 
 
+
 def test_read_latest_snapshot_none_when_empty(data_root):
     assert read_latest_snapshot(data_root=data_root) is None
+
+
+def test_cash_only_account_survives_round_trip(data_root):
+    # Positions only in account A; account B holds cash only.  Before
+    # portfolio_accounts, the read side derived account ids from position
+    # rows and dropped B.
+    snapshot = build_portfolio_snapshot(
+        broker="robinhood",
+        account_ids=["100000001", "100000002"],
+        positions=[_position()],
+        cash_balances={
+            "100000001": Decimal("1000"),
+            "100000002": Decimal("2000"),
+        },
+        created_at=NOW,
+    )
+    persist_snapshot(snapshot, data_root=data_root)
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.account_ids == (
+        local_account_id("100000001"),
+        local_account_id("100000002"),
+    )
+
+
+def test_empty_portfolio_with_cash_round_trips_account_ids(data_root):
+    snapshot = build_portfolio_snapshot(
+        broker="robinhood",
+        account_ids=["100000001"],
+        positions=[],
+        cash_balances={"100000001": Decimal("5000")},
+        created_at=NOW,
+    )
+    persist_snapshot(snapshot, data_root=data_root)
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.account_ids == (local_account_id("100000001"),)
+    assert restored.positions == ()
+
+
+def test_account_ids_round_trip_preserves_order(data_root):
+    account_a = "100000001"
+    account_b = "100000002"
+    snapshot = build_portfolio_snapshot(
+        broker="robinhood",
+        account_ids=[account_a, account_b],
+        positions=[_position(account_id=account_a), _position(account_id=account_b)],
+        cash_balances={account_a: Decimal("1000"), account_b: Decimal("2000")},
+        created_at=NOW,
+    )
+    persist_snapshot(snapshot, data_root=data_root)
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.account_ids == snapshot.account_ids
 
 
 def test_missing_quote_price_degrades_snapshot_but_persists(data_root):
@@ -389,6 +445,7 @@ def test_empty_accounts_still_persists_empty_snapshot(data_root):
     assert snapshot.account_ids == ()
     assert parquet.count_rows("portfolio_snapshots", root=data_root / "parquet") == 1
     assert parquet.count_rows("portfolio_positions", root=data_root / "parquet") == 0
+    assert parquet.count_rows("portfolio_accounts", root=data_root / "parquet") == 0
     assert snapshot.snapshot_id == SNAPSHOT_ID
 
 
@@ -420,7 +477,8 @@ def test_persisted_rows_never_contain_raw_account_ids(data_root):
     _run_sync(data_root)
     snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
     positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
-    for table in (snapshots, positions):
+    accounts = parquet.read_table("portfolio_accounts", root=data_root / "parquet")
+    for table in (snapshots, positions, accounts):
         for column_index in range(table.num_columns):
             for cell in table.column(column_index).to_pylist():
                 if cell is not None:
@@ -432,6 +490,10 @@ def test_persisted_rows_never_contain_raw_account_ids(data_root):
         local_account_id("100000001"),
         local_account_id("100000001"),
         local_account_id("100000002"),
+        local_account_id("100000002"),
+    ]
+    assert accounts.column("account_id").to_pylist() == [
+        local_account_id("100000001"),
         local_account_id("100000002"),
     ]
 
@@ -550,10 +612,14 @@ def test_build_position_passes_asset_type():
     assert position.asset_type == "option"
 
 
-def _position(market_value: Decimal | None = Decimal("500")) -> Position:
+def _position(
+    market_value: Decimal | None = Decimal("500"),
+    *,
+    account_id: str = "100000001",
+) -> Position:
     return Position(
         position_id="pos-1",
-        account_id="100000001",
+        account_id=account_id,
         security_id="sec:equity:0000320193",
         entity_id="sec:cik:0000320193",
         ticker="AMD",
