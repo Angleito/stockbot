@@ -425,6 +425,10 @@ class RunRecorder:
                 ),
             )
             self._conn.commit()
+            logger.info(
+                "security event: run=%s decision=%s source=%s rules=%s reason=%s span_length=%s",
+                self.run_id, decision, source, rule_ids, reason, span_length,
+            )
             return event_id
         except Exception as exc:
             self._disable(exc)

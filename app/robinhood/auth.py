@@ -16,6 +16,7 @@ import threading
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,7 @@ def validate_robinhood_server_url(server_url: str) -> str:
 @dataclass
 class OAuthConfig:
     server_url: str
-    redirect_uri: str = "http://127.0.0.1:8765/callback"
+    redirect_uri: str = "http://127.0.0.1:0/callback"
     scopes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -202,6 +203,32 @@ def load_tokens_for_origin(
     return state
 
 
+def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datetime | None = None) -> bool:
+    """True when persisted state exists for origin and the access token has
+    not expired per its issued_at/expires_in metadata. Corrupt records are
+    invalid (auth_required), not errors. Records without expiry metadata
+    (no issued_at or no expires_in) are treated as valid."""
+    try:
+        state = load_tokens_for_origin(origin, path)
+    except OAuthStoreError:
+        return False
+    if not state:
+        return False
+    tokens = state.get("tokens")
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        return False
+    issued = state.get("issued_at")
+    expires_in = tokens.get("expires_in")
+    if issued is not None and expires_in is not None:
+        try:
+            issued_dt = datetime.fromisoformat(issued)
+        except (TypeError, ValueError):
+            return False
+        if (now if now is not None else datetime.now(timezone.utc)) >= issued_dt + timedelta(seconds=expires_in):
+            return False
+    return True
+
+
 def save_tokens(tokens: dict[str, Any], path: Path = DEFAULT_TOKEN_PATH) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -251,6 +278,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
         async def set_tokens(self, tokens):
             state = state_for_origin()
             state["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            state["issued_at"] = datetime.now(timezone.utc).isoformat()
             save_tokens(state, path)
 
         async def get_client_info(self):

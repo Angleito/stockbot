@@ -2,18 +2,22 @@
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from app.agent import run_chat
-from app.config import get_default_model, get_local_chat_policy
-from app.policy import LOCAL_CONTEXT
+from app.config import broker_enabled, configure_logging, get_default_model, get_local_chat_policy
+from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
+from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
+from app.robinhood.auth import DEFAULT_TOKEN_PATH
 from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data, replay_sec_facts_from_archive
 from app.storage import duckdb
 from app.tool_render import issue_to_prose
+from app.tools import authorize_robinhood_browser
 from app.storage.runs import (
     get_events,
     get_evidence,
@@ -25,11 +29,18 @@ from app.storage.runs import (
     list_runs,
 )
 
+_LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
+_SUBCOMMANDS = ("chat", "runs", "inspect", "refresh-data", "log-server", "robinhood-login")
+
 
 def _chat(model: str) -> None:
     print(f"Stockbot — AI investment research assistant — model: {model}")
     print("Type your question (Ctrl-D or 'quit' to exit).\n")
 
+    # Broker/portfolio tools are only exposed when the broker integration is
+    # enabled; otherwise the session is research-only. Connecting happens
+    # only through the explicit `robinhood-login` command.
+    context = LOCAL_BROKER_CONTEXT if broker_enabled() else LOCAL_CONTEXT
     messages: list = []
     while True:
         try:
@@ -42,7 +53,7 @@ def _chat(model: str) -> None:
         result = run_chat(
             messages,
             model,
-            context=LOCAL_CONTEXT,
+            context=context,
             policy=get_local_chat_policy(),
             return_result=True,
         )
@@ -111,6 +122,21 @@ def _cmd_refresh_obligations(ticker: str) -> None:
 
     result = obligations.get_obligations(ticker, persist=True)
     print(json.dumps(result, indent=2))
+def _cmd_robinhood_login() -> None:
+    print("Starting Robinhood authorization...")
+    if authorize_robinhood_browser():
+        print(f"Robinhood authorized. Tokens stored at {DEFAULT_TOKEN_PATH}")
+    else:
+        print("Robinhood authorization failed or was declined.")
+        raise SystemExit(1)
+
+
+def _cmd_log_server(port: int) -> None:
+    try:
+        run_log_server(port)
+    except OSError as exc:
+        print(f"error: cannot bind port {port}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def _cmd_inspect(run_id: str) -> None:
@@ -223,10 +249,23 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
             print(f"    - {issue_to_prose(issue)}")
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     subparsers = parser.add_subparsers(dest="command")
+    parser.add_argument(
+        "--log-server",
+        nargs="?",
+        const=_LOG_SERVER_DEFAULT_URL,
+        help="stream all logs to this log server URL (default: http://127.0.0.1:8765)",
+    )
     chat_parser = subparsers.add_parser("chat", help="interactive chat (default)")
+    chat_parser.add_argument(
+        "--log-server",
+        nargs="?",
+        const=_LOG_SERVER_DEFAULT_URL,
+        default=argparse.SUPPRESS,
+        help="stream all logs to this log server URL (default: http://127.0.0.1:8765)",
+    )
     chat_parser.add_argument(
         "--model",
         default=get_default_model(),
@@ -245,10 +284,39 @@ def main() -> None:
     obligations_parser.add_argument("ticker", help="ticker, e.g. NVDA")
     mandate_parser = subparsers.add_parser("evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot")
     mandate_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
-    args = parser.parse_args()
+    log_server_parser = subparsers.add_parser(
+        "log-server", help="receive and print log lines from chat/API clients (Ctrl-C to stop)"
+    )
+    log_server_parser.add_argument(
+        "--port", type=int, default=DEFAULT_LOG_SERVER_PORT,
+        help=f"port to listen on (default {DEFAULT_LOG_SERVER_PORT})",
+    )
+    subparsers.add_parser("robinhood-login", help="authorize Robinhood OAuth deliberately (opens browser)")
+    return parser
+
+
+def _rewrite_bare_log_server(argv: list[str]) -> list[str]:
+    """A bare --log-server directly before the subcommand (cli.py --log-server chat)
+    would be consumed by nargs='?' as its value; rewrite it to the explicit default
+    URL so the subcommand still parses and dispatches."""
+    for i, arg in enumerate(argv[:-1]):
+        if arg == "--log-server" and argv[i + 1] in _SUBCOMMANDS:
+            return argv[:i] + [f"--log-server={_LOG_SERVER_DEFAULT_URL}"] + argv[i + 1:]
+    return argv
+
+
+def main() -> None:
+    args = _build_parser().parse_args(_rewrite_bare_log_server(sys.argv[1:]))
+    stream_url = (
+        None if args.command == "log-server"
+        else args.log_server or os.getenv("STOCKBOT_LOG_SERVER") or None
+    )
+    configure_logging(stream_url=stream_url)
 
     if args.command == "runs":
         _cmd_runs(args.limit)
+    elif args.command == "robinhood-login":
+        _cmd_robinhood_login()
     elif args.command == "inspect":
         _cmd_inspect(args.run_id)
     elif args.command == "refresh-data":
@@ -264,6 +332,8 @@ def main() -> None:
             else Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
         )
         _cmd_evaluate_mandate(mandate_path, data_root)
+    elif args.command == "log-server":
+        _cmd_log_server(args.port)
     else:
         model = getattr(args, "model", None) or get_default_model()
         _chat(model)

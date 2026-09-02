@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
-from app.policy import Capability, LOCAL_CONTEXT, RequestContext
+from app.policy import Capability, LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT, RequestContext
 from app.services.portfolio_research import PortfolioResearchPosition
 from app.tool_render import render_tool_result
 
@@ -310,14 +310,37 @@ def test_portfolio_payload_and_rendering_never_expose_account_identifiers(monkey
     assert "snapshot_id" not in result
 
 
-def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch):
+_BROKER_TOOL_NAMES = {
+    "get_market_snapshot", "get_option_chain", "analyze_option_contract",
+    "compare_options", "get_scanner_filter_specs", "get_portfolio_snapshot",
+    "get_scans", "run_scan",
+}
+
+
+def test_research_context_excludes_broker_tools():
+    names = {entry["function"]["name"] for entry in tools.tools_for_capabilities(frozenset({Capability.RESEARCH}))}
+    assert not (names & _BROKER_TOOL_NAMES)
+
+
+def test_broker_context_includes_broker_tools():
+    names = {
+        entry["function"]["name"]
+        for entry in tools.tools_for_capabilities(
+            frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ})
+        )
+    }
+    assert _BROKER_TOOL_NAMES <= names
+
+
+def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch, caplog):
     def fail(arguments, model):
         raise RuntimeError("provider rejected account_number=100000001")
 
     monkeypatch.setitem(tools._ROBINHOOD_HANDLERS, "get_portfolio_snapshot", fail)
-    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=LOCAL_CONTEXT)
+    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=LOCAL_BROKER_CONTEXT)
     assert "100000001" not in result["error"]
     assert "100000001" not in render_tool_result(result)
+    assert "100000001" not in " ".join(record.getMessage() for record in caplog.records)
 
 
 def test_portfolio_snapshot_refresh_flag_controls_sync(monkeypatch):

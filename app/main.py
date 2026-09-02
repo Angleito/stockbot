@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent import run_chat
-from app.config import get_default_model, get_local_chat_policy
+from app.config import configure_logging, get_default_model, get_local_chat_policy
 from app.policy import ChatInputError, LOCAL_CONTEXT, RequestContext
+
+configure_logging(stream_url=os.getenv("STOCKBOT_LOG_SERVER") or None)
 
 app = FastAPI(title="Stockbot", version="0.1.0")
 

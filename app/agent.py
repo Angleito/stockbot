@@ -11,10 +11,7 @@ from datetime import date, datetime, timezone
 import requests
 
 from . import __version__
-from .config import (
-    OPENROUTER_BASE_URL,
-    get_openrouter_api_key,
-)
+from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .policy import ChatInputError, ChatPolicy, PUBLIC_CHAT_ROLES, RequestContext
 from .prompts import PROMPT_VERSION, SYSTEM_PROMPT
 from .redact import redact_json, redact_text, redact_value

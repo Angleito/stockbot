@@ -9,6 +9,7 @@ from pathlib import Path
 
 class Capability(StrEnum):
     RESEARCH = "research"
+    BROKER_MARKET_READ = "broker_market_read"
     PORTFOLIO_READ = "portfolio_read"
 
 
@@ -57,7 +58,12 @@ class RequestContext:
 
 LOCAL_CONTEXT = RequestContext(
     principal_id="local",
-    capabilities=frozenset({Capability.RESEARCH, Capability.PORTFOLIO_READ}),
+    capabilities=frozenset({Capability.RESEARCH}),
+)
+
+LOCAL_BROKER_CONTEXT = RequestContext(
+    principal_id="local-broker",
+    capabilities=frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ}),
 )
 
 PUBLIC_CHAT_ROLES = frozenset({"user", "assistant"})

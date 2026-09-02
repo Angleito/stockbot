@@ -18,6 +18,10 @@ class RobinhoodDependencyError(RuntimeError):
     pass
 
 
+class RobinhoodAuthRequired(RuntimeError):
+    pass
+
+
 class RobinhoodToolError(RuntimeError):
     pass
 

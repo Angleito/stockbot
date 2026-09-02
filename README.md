@@ -79,7 +79,7 @@ bun scripts (smoke-mock, smoke-prod, smoke-robinhood).
 
 ## Optional Robinhood integration
 
-Set `ROBINHOOD_ENABLED=true` and complete the local OAuth login flow before using the integration. OAuth and MCP transport are pinned to `https://agent.robinhood.com/mcp/trading`; persisted tokens/client registration are bound to that HTTPS origin. Stockbot only permits explicitly allowlisted read operations and blocks unknown operations. It blocks order placement, order cancellation/replacement, option exercise, withdrawals, deposits, and transfers. It does not support trading or modifying saved scanners.
+Set `BROKER_ENABLED=true` and complete the local OAuth login flow (`cli.py robinhood-login`) before using the integration. OAuth and MCP transport are pinned to `https://agent.robinhood.com/mcp/trading`; persisted tokens/client registration are bound to that HTTPS origin. Stockbot only permits explicitly allowlisted read operations and blocks unknown operations. It blocks order placement, order cancellation/replacement, option exercise, withdrawals, deposits, and transfers. It does not support trading or modifying saved scanners.
 
 ## Optional Exa integration
 

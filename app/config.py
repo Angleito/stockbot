@@ -4,11 +4,13 @@ edgartools identity configuration lives behind the edgar boundary in
 ``app/edgar_client.py``; this module only validates the env values it needs.
 """
 
+import logging
 import os
 from typing import Optional
 
 from dotenv import load_dotenv
 
+from .log_stream import LogStreamHandler
 from .policy import ChatPolicy
 
 # Default fallback only when the env var is unset. Keep env/CLI overrides
@@ -80,6 +82,20 @@ def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
 
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def configure_logging(*, stream_url: str | None = None) -> None:
+    """Configure root logging: WARNING on stderr by default; when stream_url
+    is given, attach a LogStreamHandler and log everything (DEBUG)."""
+    level = logging.DEBUG if stream_url else logging.WARNING
+    logging.basicConfig(force=True, level=level, format=LOG_FORMAT)
+    if stream_url:
+        handler = LogStreamHandler(stream_url)
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        logging.getLogger().addHandler(handler)
+
+
 def get_local_chat_policy() -> ChatPolicy:
     """Build the single-principal runtime chat policy from local config."""
     configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
@@ -129,8 +145,8 @@ def get_robinhood_mcp_url() -> str:
     ))
 
 
-def robinhood_enabled() -> bool:
-    return _env_bool("ROBINHOOD_ENABLED")
+def broker_enabled() -> bool:
+    return _env_bool("BROKER_ENABLED")
 
 
 def exa_enabled() -> bool:

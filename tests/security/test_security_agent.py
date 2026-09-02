@@ -3,7 +3,7 @@
 import json
 
 from app import agent, exa_client
-from app.policy import LOCAL_CONTEXT
+from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
 from app.security import prompt_injection, quarantine_reader
 from app.security.prompt_injection import InjectionAssessment
 from app.storage.runs import get_evidence, get_run, get_security_events, get_tool_calls
@@ -67,7 +67,7 @@ def test_portfolio_tool_proposal_denied_without_portfolio_intent(monkeypatch):
     result = agent.run_chat(
         [{"role": "user", "content": "Research AMD news."}],
         model="test",
-        context=LOCAL_CONTEXT,
+        context=LOCAL_BROKER_CONTEXT,
         policy=TEST_POLICY,
         return_result=True,
     )
@@ -181,7 +181,7 @@ def test_search_web_blocked_after_allowed_private_snapshot(monkeypatch):
     result = agent.run_chat(
         [{"role": "user", "content": "How does today's AMD news affect my portfolio?"}],
         model="test",
-        context=LOCAL_CONTEXT,
+        context=LOCAL_BROKER_CONTEXT,
         policy=TEST_POLICY,
         return_result=True,
     )

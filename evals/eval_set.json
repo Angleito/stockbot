@@ -244,9 +244,17 @@
     "id": 23,
     "question": "How does recent news affect my AMD thesis?",
     "ticker": "AMD",
+    "context": "broker",
     "expected_behavior": {
-      "required_tools": ["search_web"],
-      "expected_tools": ["get_portfolio_snapshot", "get_xbrl_facts", "get_fundamentals", "get_short_interest"],
+      "required_tools": [
+        "search_web"
+      ],
+      "expected_tools": [
+        "get_portfolio_snapshot",
+        "get_xbrl_facts",
+        "get_fundamentals",
+        "get_short_interest"
+      ],
       "must_contain": [],
       "must_not_contain": []
     }
@@ -267,6 +275,47 @@
     "ticker": "AMD",
     "expected_behavior": {
       "required_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 26,
+    "question": "Why did GPRO shoot up this week?",
+    "ticker": "GPRO",
+    "context": "research",
+    "expected_behavior": {
+      "forbidden_tools": [
+        "get_market_snapshot",
+        "get_option_chain",
+        "analyze_option_contract",
+        "compare_options",
+        "get_scanner_filter_specs",
+        "get_portfolio_snapshot",
+        "get_scans",
+        "run_scan"
+      ],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 27,
+    "question": "What's my Robinhood portfolio worth?",
+    "context": "broker",
+    "expected_behavior": {
+      "expected_tools": ["get_portfolio_snapshot"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 28,
+    "question": "What's GPRO's current Robinhood quote?",
+    "ticker": "GPRO",
+    "context": "broker",
+    "expected_behavior": {
+      "expected_tools": ["get_market_snapshot"],
       "must_contain": [],
       "must_not_contain": []
     }

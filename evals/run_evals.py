@@ -9,8 +9,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agent import run_chat
-from app.config import get_default_model, get_local_chat_policy
-from app.policy import LOCAL_CONTEXT
+from app.config import broker_enabled, get_default_model, get_local_chat_policy
+from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
 
 
 def _is_ordered_subsequence(required: list, trace: list) -> bool:
@@ -32,6 +32,7 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
         print(f"==================================================")
         model_results = {}
         passed_count = 0
+        skipped_count = 0
 
         for case in cases:
             cid = case["id"]
@@ -45,11 +46,17 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
             must_contain = [s.lower() for s in expected.get("must_contain", [])]
             must_not_contain = [s.lower() for s in expected.get("must_not_contain", [])]
 
+            case_context = LOCAL_BROKER_CONTEXT if case.get("context") == "broker" else LOCAL_CONTEXT
+            if case_context is LOCAL_BROKER_CONTEXT and not broker_enabled():
+                print(f"SKIP case {cid} (broker context requires BROKER_ENABLED=true)")
+                skipped_count += 1
+                continue
+
             try:
                 response, detailed = run_chat(
                     [{"role": "user", "content": question}],
                     model=model,
-                    context=LOCAL_CONTEXT,
+                    context=case_context,
                     policy=get_local_chat_policy(),
                     return_detailed_trace=True,
                 )
@@ -139,9 +146,10 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 model_results[cid] = (False, f"Exception: {e}")
 
         results[model] = {
-            "score": f"{passed_count}/{len(cases)}",
+            "score": f"{passed_count}/{len(cases) - skipped_count}",
             "passed_count": passed_count,
-            "total": len(cases),
+            "skipped_count": skipped_count,
+            "total": len(cases) - skipped_count,
             "cases": model_results,
         }
 
@@ -157,7 +165,10 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
         cid = case["id"]
         row = f"Q{cid:<14}"
         for m in models:
-            passed, _ = results[m]["cases"].get(cid, (False, "N/A"))
+            if cid not in results[m]["cases"]:
+                row += f"{'SKIP':<22}"
+                continue
+            passed, _ = results[m]["cases"][cid]
             row += f"{'PASS' if passed else 'FAIL':<22}"
         print(row)
 

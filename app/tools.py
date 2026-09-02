@@ -18,7 +18,7 @@ from . import finra_client
 from . import obligations
 from . import valuation
 from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
-from .config import get_robinhood_mcp_url, robinhood_enabled
+from .config import broker_enabled, get_robinhood_mcp_url
 from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
@@ -26,7 +26,8 @@ from .prompts import READING_PROMPT_TEMPLATE
 from .security import prompt_injection
 from .robinhood import RobinhoodClient
 from .robinhood import capabilities
-from .robinhood.auth import OAuthConfig
+from .robinhood.auth import DEFAULT_TOKEN_PATH, OAuthConfig, has_valid_tokens
+from .robinhood.client import RobinhoodAuthRequired
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services import risk as risk_service
@@ -777,15 +778,32 @@ def _robinhood_client(
     *, account_tools: frozenset[str] = frozenset(),
 ) -> RobinhoodClient:
     """Construct a broker client with only the MCP reads this handler needs."""
-    if not robinhood_enabled():
-        raise RuntimeError("Robinhood integration is disabled; set ROBINHOOD_ENABLED=true")
+    if not broker_enabled():
+        raise RuntimeError("Robinhood integration is disabled; set BROKER_ENABLED=true")
     url = get_robinhood_mcp_url()
+    oauth = OAuthConfig(url)
+    if not has_valid_tokens(oauth.server_origin, DEFAULT_TOKEN_PATH):
+        raise RobinhoodAuthRequired("Robinhood OAuth is not set up or has expired")
     return RobinhoodClient(
         url,
-        oauth=OAuthConfig(url),
+        oauth=oauth,
         market_tools=capabilities.MARKET_READ_TOOLS,
         account_tools=account_tools,
     )
+
+
+def authorize_robinhood_browser() -> bool:
+    """Run the full OAuth flow now (browser + loopback callback), persisting
+    tokens. True on success. Works regardless of BROKER_ENABLED — this is
+    the setup step."""
+    try:
+        url = get_robinhood_mcp_url()
+        client = RobinhoodClient(url, oauth=OAuthConfig(url))
+        client.list_tools()  # SDK performs discovery + OAuth when required
+        return True
+    except Exception:
+        logger.warning("Robinhood authorization failed", exc_info=True)
+        return False
 
 
 def _provider_payload(value):
@@ -1344,6 +1362,9 @@ _ROBINHOOD_HANDLERS = {
 
 # Every model-visible tool has one application-level capability. This is
 # separate from the Robinhood MCP registry, which governs broker operations.
+# Broker/account-connected market reads (Robinhood quotes/options/scans)
+# require BROKER_MARKET_READ so generic research contexts never expose them;
+# portfolio/account tools additionally require PORTFOLIO_READ.
 TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
@@ -1365,11 +1386,11 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,
     "query_finra": Capability.RESEARCH,
-    "get_market_snapshot": Capability.RESEARCH,
-    "get_option_chain": Capability.RESEARCH,
-    "analyze_option_contract": Capability.RESEARCH,
-    "compare_options": Capability.RESEARCH,
-    "get_scanner_filter_specs": Capability.RESEARCH,
+    "get_market_snapshot": Capability.BROKER_MARKET_READ,
+    "get_option_chain": Capability.BROKER_MARKET_READ,
+    "analyze_option_contract": Capability.BROKER_MARKET_READ,
+    "compare_options": Capability.BROKER_MARKET_READ,
+    "get_scanner_filter_specs": Capability.BROKER_MARKET_READ,
     "get_portfolio_snapshot": Capability.PORTFOLIO_READ,
     "get_scans": Capability.PORTFOLIO_READ,
     "run_scan": Capability.PORTFOLIO_READ,
@@ -1434,10 +1455,20 @@ def execute_tool(
         return handler(arguments, model)
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
+    except RobinhoodAuthRequired:
+        logger.info("Robinhood tool '%s' not authorized; soft failure", name)
+        return {
+            "error": "Robinhood data unavailable (not authorized). Run `cli.py robinhood-login` to authorize.",
+            "error_type": "auth_required",
+            "soft": True,
+            "source": "robinhood_mcp",
+        }
     except Exception as e:
-        logger.exception("Tool '%s' failed", name)
         if name in _ROBINHOOD_HANDLERS:
-            # Provider errors can echo request arguments. Do not place those
-            # details in a tool message that is subsequently sent to the LLM.
+            # Provider errors can echo request arguments. Do not log
+            # exception details (no account identifiers in logs) or place
+            # them in a tool message that is subsequently sent to the LLM.
+            logger.warning("Robinhood tool '%s' failed; provider details withheld", name)
             return {"error": f"Robinhood tool '{name}' failed; provider details withheld."}
+        logger.exception("Tool '%s' failed", name)
         return {"error": f"Tool '{name}' failed: {e}"}
