@@ -648,6 +648,18 @@ def test_cash_only_portfolio_has_valid_totals():
     assert snapshot.positions == ()
 
 
+def test_snapshot_builder_is_provider_neutral():
+    snapshot = build_portfolio_snapshot(
+        broker="testbroker",
+        account_ids=["acct"],
+        positions=[],
+        cash_balances={"acct": Decimal("100")},
+        created_at=NOW,
+    )
+    assert snapshot.broker == "testbroker"
+    assert snapshot.snapshot_id == "portfolio:testbroker:2026-08-25T12:00:00+00:00"
+
+
 # ---------------------------------------------------------------------------
 # Provider-level extraction behavior
 # ---------------------------------------------------------------------------

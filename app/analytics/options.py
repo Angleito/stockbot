@@ -7,10 +7,13 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from ..robinhood.options import OptionQuote
-from ..domain.portfolio.valuation import _ratio
-
 ZERO = Decimal("0")
 CONTRACT_MULTIPLIER = Decimal("100")
+
+def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
+    if numerator is None or denominator in (None, ZERO):
+        return None
+    return numerator / denominator
 
 
 def _as_of(value: date | datetime | None) -> date:
