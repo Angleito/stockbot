@@ -15,25 +15,19 @@ from typing import Any
 
 from ..domain.market.securities import TickerAlias
 from ..domain.portfolio import Position
-from . import ids
 
 
 def ticker_alias_from_row(row: Mapping[str, Any]) -> TickerAlias:
     """Rebuild a ticker alias from a persisted entity_aliases row.
 
-    When the row carries no explicit security id but the entity is a SEC
-    entity (``sec:cik:``), the common-equity security id is materialized
-    deterministically here so the pure resolver never depends on storage.
+    Field mapping only, no identity policy: identity derivation is the
+    domain resolver's concern.
     """
-    entity_id = str(row["entity_id"])
-    security_id = row.get("security_id")
-    if security_id is None and entity_id.startswith("sec:cik:"):
-        security_id = ids.sec_security_id(int(entity_id[len("sec:cik:"):]))
     return TickerAlias(
         alias_type=str(row["alias_type"]),
         alias_value=str(row["alias_value"]),
-        entity_id=entity_id,
-        security_id=security_id,
+        entity_id=str(row["entity_id"]),
+        security_id=row.get("security_id"),
         source=row.get("source"),
         valid_from=row.get("valid_from"),
         valid_to=row.get("valid_to"),

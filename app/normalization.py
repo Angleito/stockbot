@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .storage import ids
+from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
 COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v2"

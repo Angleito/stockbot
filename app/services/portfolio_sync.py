@@ -201,6 +201,7 @@ def sync_robinhood_portfolio(
         for raw in raw_positions
     ]
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=[account.account_id for account in accounts],
         positions=positions,
         cash_balances={balance.account_id: balance.cash for balance in cash_balances},

@@ -13,6 +13,7 @@ from .valuation import portfolio_market_value, position_weight
 
 def build_portfolio_snapshot(
     *,
+    broker: str,
     account_ids: Sequence[str],
     positions: Sequence[Position],
     cash_balances: Mapping[str, Decimal | None],
@@ -48,7 +49,7 @@ def build_portfolio_snapshot(
     if not valuation_complete:
         total_value = None
 
-    snapshot_id = f"portfolio:robinhood:{created_at.isoformat()}"
+    snapshot_id = f"portfolio:{broker}:{created_at.isoformat()}"
     local_ids = tuple(local_account_id(account_id) for account_id in account_ids)
     built_positions: list[Position] = []
     for position in positions:
@@ -78,7 +79,7 @@ def build_portfolio_snapshot(
     return PortfolioSnapshot(
         snapshot_id=snapshot_id,
         created_at=created_at,
-        broker="robinhood",
+        broker=broker,
         account_ids=local_ids,
         cash=cash,
         invested_value=invested_value,

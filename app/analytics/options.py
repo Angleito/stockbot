@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from ..robinhood.options import OptionQuote
-from .portfolio import _ratio
+from ..domain.portfolio.valuation import _ratio
 
 ZERO = Decimal("0")
 CONTRACT_MULTIPLIER = Decimal("100")

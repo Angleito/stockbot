@@ -5,7 +5,8 @@ import json
 import pytest
 import pyarrow as pa
 
-from app.storage import duckdb, ids, parquet, raw_archive
+from app.storage import duckdb, parquet, raw_archive
+from app.domain.market import ids
 
 
 @pytest.fixture

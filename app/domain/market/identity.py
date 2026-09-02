@@ -3,8 +3,8 @@
 Reproduces the entity_aliases resolution semantics — visibility, entity
 ambiguity, newest-instant selection, security-id ambiguity — with no
 storage dependency.  Storage hands over candidate rows via
-``ticker_alias_candidates`` and the row mapper materializes fields
-(including derived sec:cik security ids) before the resolver runs.
+``ticker_alias_candidates`` and the row mapper materializes fields; the
+resolver derives sec:cik security ids itself.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Sequence
 
+from .ids import sec_security_id
 from .securities import SecurityResolution, TickerAlias
 
 _NEVER = datetime.min.replace(tzinfo=timezone.utc)
@@ -39,6 +40,15 @@ def _instant(alias: TickerAlias) -> tuple[datetime, datetime]:
     )
 
 
+def _resolved_security_id(alias: TickerAlias) -> str | None:
+    """The alias's effective security id, deriving sec:cik entities."""
+    if alias.security_id is not None:
+        return alias.security_id
+    if alias.entity_id.startswith("sec:cik:"):
+        return sec_security_id(int(alias.entity_id[len("sec:cik:"):]))
+    return None
+
+
 def resolve_ticker_aliases(
     ticker: str,
     aliases: Sequence[TickerAlias],
@@ -55,10 +65,17 @@ def resolve_ticker_aliases(
     entities for one ticker resolve as ``"ambiguous"`` — never
     source/order-wins.  Rows tied at the newest known_at/retrieved_at instant
     that carry conflicting security ids for one entity also resolve as
-    ``"ambiguous"`` — never an arbitrary row pick.  Older revisions never
-    create ambiguity; the newest record wins.  No mappings are ever invented:
-    unknown tickers resolve to ``resolved=False``.
+    ``"ambiguous"`` — never an arbitrary row pick.  A row without an
+    explicit security id inherits the entity's derived common-equity id
+    (``sec:equity:<cik>`` for ``sec:cik:`` entities) before comparison, so
+    explicit and derived ids for the same security never conflict.  Older
+    revisions never create ambiguity; the newest record wins.  No mappings
+    are ever invented: unknown tickers resolve to ``resolved=False``.
     """
+    if not isinstance(as_of, datetime):
+        raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
     as_of = as_of.astimezone(timezone.utc)
     visible = [
         alias for alias in aliases
@@ -74,8 +91,8 @@ def resolve_ticker_aliases(
         return SecurityResolution(None, None, ticker, False, "ambiguous")
     newest_key = max(_instant(alias) for alias in visible)
     newest = [alias for alias in visible if _instant(alias) == newest_key]
-    distinct_security_ids = {alias.security_id for alias in newest}
+    distinct_security_ids = {_resolved_security_id(alias) for alias in newest}
     if len(distinct_security_ids) > 1:
         return SecurityResolution(None, entities[0], ticker, False, "ambiguous")
     first = newest[0]
-    return SecurityResolution(first.security_id, first.entity_id, ticker, True, "entity_alias")
+    return SecurityResolution(_resolved_security_id(first), first.entity_id, ticker, True, "entity_alias")

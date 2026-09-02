@@ -11,7 +11,7 @@ The resolution rules under test:
 - ``provider_instrument_id`` is accepted but does not change the result.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 
 import pytest
 
@@ -330,13 +330,13 @@ def test_pure_same_instant_conflicting_security_ids_ambiguous():
 
 
 def test_pure_explicit_id_equal_to_derived_sec_cik_id_not_ambiguous():
-    # storage.mappers.ticker_alias_from_row materializes the missing security
-    # id of a sec:cik entity to sec:equity:<cik>, so both rows reach the
-    # resolver with the same id — one distinct value, not a conflict.
+    # The resolver derives the missing security id of a sec:cik entity to
+    # sec:equity:<cik>, so both rows resolve to the same id — one distinct
+    # value, not a conflict.
     resolution = resolve_ticker_aliases(
         "AMD",
         [
-            _alias("2026-08-25T12:00:00Z", security_id=AMD_SECURITY),
+            _alias("2026-08-25T12:00:00Z", security_id=None),
             _alias("2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control"),
         ],
         as_of=AS_OF,
@@ -376,6 +376,27 @@ def test_pure_timezone_offset_known_at_chronological_not_lexical():
             _alias("2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control"),
         ],
         as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc),
+    )
+    assert resolution.resolved is True
+    assert resolution.security_id == AMD_SECURITY
+
+
+def test_pure_naive_as_of_rejected():
+    with pytest.raises(ValueError):
+        resolve_ticker_aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=datetime(2026, 8, 25, 12, 0))
+
+
+def test_pure_date_as_of_rejected():
+    with pytest.raises(TypeError):
+        resolve_ticker_aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=date(2026, 8, 25))
+
+
+def test_pure_aware_non_utc_as_of_compares_chronologically():
+    # 13:00+01:00 == 12:00Z: the alias is visible exactly at as_of.
+    resolution = resolve_ticker_aliases(
+        "AMD",
+        [_alias("2026-08-25T12:00:00Z")],
+        as_of=datetime(2026, 8, 25, 13, 0, tzinfo=timezone(timedelta(hours=1))),
     )
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY

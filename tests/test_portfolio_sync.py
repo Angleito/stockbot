@@ -571,6 +571,7 @@ def _position(market_value: Decimal | None = Decimal("500")) -> Position:
 
 def test_cash_complete_multi_account_sums():
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001", "100000002"],
         positions=[_position()],
         cash_balances={"100000001": Decimal("1000"), "100000002": Decimal("2000")},
@@ -583,6 +584,7 @@ def test_cash_complete_multi_account_sums():
 
 def test_partial_cash_nils_total_and_weights():
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001", "100000002"],
         positions=[_position()],
         cash_balances={"100000001": Decimal("1000"), "100000002": None},
@@ -595,6 +597,7 @@ def test_partial_cash_nils_total_and_weights():
 
 def test_missing_balance_nils_total():
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001", "100000002"],
         positions=[_position()],
         cash_balances={"100000001": Decimal("1000")},
@@ -609,6 +612,7 @@ def test_duplicate_balance_for_one_account_incomplete():
     # provider yields one CashBalance per account), so this collapses to a
     # missing-balance case and stays incomplete.
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001", "100000002"],
         positions=[_position()],
         cash_balances={"100000001": Decimal("1000"), "100000001": Decimal("2000")},
@@ -620,6 +624,7 @@ def test_duplicate_balance_for_one_account_incomplete():
 
 def test_mismatched_balance_account_ids_incomplete():
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001", "100000002"],
         positions=[_position()],
         cash_balances={"100000001": Decimal("1000"), "100000003": Decimal("2000")},
@@ -631,6 +636,7 @@ def test_mismatched_balance_account_ids_incomplete():
 
 def test_cash_only_portfolio_has_valid_totals():
     snapshot = build_portfolio_snapshot(
+        broker="robinhood",
         account_ids=["100000001"],
         positions=[],
         cash_balances={"100000001": Decimal("5000")},
