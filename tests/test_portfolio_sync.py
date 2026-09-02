@@ -652,7 +652,6 @@ def test_build_position_passes_asset_type():
         position_id="pos-1",
         account_id="acc-1",
         ticker="WING",
-        provider_instrument_id="instr-1",
         quantity=Decimal("10"),
         average_cost=Decimal("95.50"),
         retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),

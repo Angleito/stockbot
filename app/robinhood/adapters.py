@@ -27,7 +27,6 @@ def to_position_input(raw: BrokeragePosition) -> BrokeragePositionInput:
         position_id=raw.position_id,
         account_id=local_account_id(raw.account_id),
         ticker=raw.ticker,
-        provider_instrument_id=raw.provider_instrument_id,
         quantity=raw.quantity,
         average_cost=raw.average_cost,
         retrieved_at=raw.retrieved_at,

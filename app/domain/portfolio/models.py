@@ -33,7 +33,6 @@ class BrokeragePositionInput:
     position_id: str
     account_id: str
     ticker: str
-    provider_instrument_id: str | None
     quantity: Decimal
     average_cost: Decimal | None
     retrieved_at: datetime
