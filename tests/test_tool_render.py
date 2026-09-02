@@ -299,6 +299,71 @@ def test_oversized_filing_text_truncated_preserves_header(fake_agent):
     assert "Risk factors." in content
 
 
+def test_web_search_claims_shape_renders():
+    result = {
+        "result_type": "web_search",
+        "query": "AMD news",
+        "search_type": "auto",
+        "evidence": [
+            {
+                "claim": "AMD shipped its MI400 accelerator.",
+                "source_url": "https://example.com/amd-news",
+                "published_at": "2026-08-01T10:00:00.000Z",
+                "quote_or_evidence": "AMD announced its MI400 accelerator.",
+            },
+            {
+                "claim": "AMD guided Q3 revenue above consensus.",
+                "source_url": "https://example.com/amd-guidance",
+                "published_at": None,
+                "quote_or_evidence": "",
+            },
+        ],
+        "omitted_count": 0,
+        "row_count": 2,
+        "source": "exa",
+        "retrieved_at": "2026-08-02T00:00:00+00:00",
+    }
+    rendered = render_tool_result(result)
+    assert "- AMD shipped its MI400 accelerator." in rendered
+    assert "Source: https://example.com/amd-news" in rendered
+    assert "Published: 2026-08-01T10:00:00.000Z" in rendered
+    assert "AMD announced its MI400 accelerator." in rendered
+    assert "- AMD guided Q3 revenue above consensus." in rendered
+    assert "Source: https://example.com/amd-guidance" in rendered
+    assert "No evidence" not in rendered
+
+
+def test_web_search_mixed_claims_and_highlights_render():
+    result = {
+        "result_type": "web_search",
+        "query": "AMD news",
+        "search_type": "auto",
+        "evidence": [
+            {
+                "claim": "AMD shipped its MI400 accelerator.",
+                "source_url": "https://example.com/amd-news",
+                "published_at": None,
+                "quote_or_evidence": "",
+            },
+            {
+                "title": "AMD MI400 Launch",
+                "url": "https://example.com/legacy",
+                "source_domain": "example.com",
+                "published_at": "2026-08-01T10:00:00.000Z",
+                "retrieved_at": "2026-08-02T00:00:00+00:00",
+                "highlight": "AMD announced its MI400 accelerator.",
+                "category": None,
+            },
+        ],
+        "source": "exa",
+        "retrieved_at": "2026-08-02T00:00:00+00:00",
+    }
+    rendered = render_tool_result(result)
+    assert "- AMD shipped its MI400 accelerator." in rendered
+    assert "AMD MI400 Launch" in rendered
+    assert "https://example.com/legacy" in rendered
+
+
 def test_error_rendered_as_plaintext_with_next_step(fake_agent):
     result = {
         "error": (

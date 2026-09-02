@@ -18,6 +18,10 @@ from .config import (
 from .policy import ChatInputError, ChatPolicy, PUBLIC_CHAT_ROLES, RequestContext
 from .prompts import PROMPT_VERSION, SYSTEM_PROMPT
 from .redact import redact_json, redact_text, redact_value
+from .security.action_policy import TOOL_DOMAINS, authorize_egress, authorize_tool_call
+from .security.context import RunSecurityContext, classify_intent
+from .security.context_builder import ContextBuilder
+from .security.response_guard import guard_response
 from .runtime import (
     AgentState,
     BudgetRemaining,
@@ -351,6 +355,15 @@ def run_chat(
         raise ChatInputError("requested model is not allowed")
     normalized_messages = _normalize_public_messages(messages, policy)
 
+    # Original intent accumulates over ALL user turns in the run's message
+    # history; it gates every tool call (action firewall).
+    run_security = RunSecurityContext(
+        original_intent=classify_intent(
+            [m["content"] for m in normalized_messages if m["role"] == "user"]
+        ),
+        capabilities=frozenset(cap.name for cap in context.capabilities),
+    )
+
     # The question is redacted before it enters the observability path
     # (agent_runs.question column and RUN_STARTED/RESEARCH_CONTEXT_CREATED
     # metadata); the raw user message stays in the conversation sent to the
@@ -398,9 +411,18 @@ def run_chat(
         max_result_bytes=context.run_limits.max_tool_result_bytes,
     )
 
-    # The trusted policy remains the only system message. Public history has
-    # already been normalized to prevent tool metadata or privileged roles.
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + normalized_messages
+    # The trusted policy remains the only system message; every tool result
+    # passes the security gateway before it may enter model context. Public
+    # history has already been normalized to prevent tool metadata or
+    # privileged roles.
+    context_builder = ContextBuilder(run_security=run_security, model=model)
+    context_builder.add_system(SYSTEM_PROMPT)
+    for message in normalized_messages:
+        if message["role"] == "user":
+            context_builder.add_user(message["content"])
+        else:
+            context_builder.add_assistant(message["content"])
+    msgs = context_builder.render_for_model()
     available_tools = tools_for_capabilities(context.capabilities)
     if context.tool_policy.allowed_tools is not None:
         available_tools = [
@@ -417,6 +439,9 @@ def run_chat(
     detailed_trace = []
 
     def _finish(text: str, status: str, *, error_type=None, error_message=None):
+        # Response DLP runs on every final answer path (completed, partial,
+        # budget_exhausted, unavailable-data). The recorder is active here.
+        text = guard_response(text, run_security, state.run_id)
         result = _finish_run(
             recorder, state, text, status,
             error_type=error_type, error_message=error_message,
@@ -475,10 +500,10 @@ def run_chat(
 
                     if state.round >= context.run_limits.max_rounds:
                         # Cap reached; force a final answer without more tools.
-                        msgs.append({"role": "user", "content": (
+                        context_builder.add_user(
                             "Tool call limit reached. Answer with what you have now, "
                             "or say you don't have the data."
-                        )})
+                        )
                         recorder.current_round = state.round
                         result = _request_and_record(
                             recorder, state, model, msgs, available_tools, policy, budget
@@ -490,7 +515,7 @@ def run_chat(
                         return _finish(text, "partial")
 
                     # Append the assistant message that requested the tools.
-                    msgs.append(message)
+                    context_builder.add_assistant(message)
                     failed_tools: list[tuple[str, dict]] = []
                     if budget.tool_calls_remaining() <= 0:
                         return _finish(_BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted")
@@ -554,7 +579,58 @@ def run_chat(
                                     "soft": True,
                                 }
                             else:
-                                result = execute_tool(name, arguments, model, context=context)
+                                intent_allowed, intent_reason = authorize_tool_call(
+                                    name, arguments, run_security
+                                )
+                                if not intent_allowed:
+                                    result = {
+                                        "error": "Tool call exceeds original user intent",
+                                        "error_type": "intent_denied",
+                                        "soft": True,
+                                    }
+                                    recorder.record_security_event(
+                                        source=name,
+                                        sha256=hashlib.sha256(
+                                            json.dumps(arguments, sort_keys=True).encode()
+                                        ).hexdigest(),
+                                        score=None,
+                                        verdict=None,
+                                        rule_ids=[],
+                                        decision="action_blocked",
+                                        reason=intent_reason,
+                                    )
+                                elif name == "search_web":
+                                    decision = authorize_egress(
+                                        "exa", arguments, run_security
+                                    )
+                                    if not decision.allowed:
+                                        result = {
+                                            "error": (
+                                                "Egress blocked: private data must not "
+                                                "leave Stockbot"
+                                            ),
+                                            "error_type": "egress_denied",
+                                            "soft": True,
+                                        }
+                                        recorder.record_security_event(
+                                            source=name,
+                                            sha256=hashlib.sha256(
+                                                json.dumps(arguments, sort_keys=True).encode()
+                                            ).hexdigest(),
+                                            score=None,
+                                            verdict=None,
+                                            rule_ids=[],
+                                            decision="egress_blocked",
+                                            reason=decision.reason,
+                                        )
+                                    else:
+                                        result = execute_tool(
+                                            name, arguments, model, context=context
+                                        )
+                                else:
+                                    result = execute_tool(
+                                        name, arguments, model, context=context
+                                    )
                             t1 = time.perf_counter()
                         else:
                             t0 = time.perf_counter()
@@ -632,52 +708,63 @@ def run_chat(
                             metadata={"duration_ms": (t1 - t0) * 1000.0},
                         )
                         if not failed:
+                            if TOOL_DOMAINS.get(name) == "portfolio_read":
+                                run_security.data_labels.add("private")
                             # Evidence is what the model actually receives: a
                             # result that would cross the evidence budget is a
                             # hard stop — no evidence record, and the tool
                             # message is never appended to the transcript.
-                            if not budget.add_evidence_tokens(len(rendered) // 4):
-                                return _finish(
-                                    _BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted"
+                            allowed = context_builder.add_tool_result(
+                                name, result, rendered, tc.get("id", "")
+                            )
+                            if allowed:
+                                final_text = (
+                                    context_builder.last_appended_text or rendered
                                 )
-                            evidence_id = (
-                                f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
-                            )
-                            state.evidence.append(evidence_id)
-                            recorder.record_evidence(
-                                evidence_id=evidence_id,
-                                run_id=state.run_id,
-                                tool_call_id=tool_call_id,
-                                round=state.round,
-                                tool_name=name,
-                                rendered_hash=hashlib.sha256(rendered.encode()).hexdigest(),
-                                rendered_bytes=len(rendered.encode("utf-8")),
-                                estimated_tokens=len(rendered) // 4,
-                                source_names=call.source_names,
-                                source_freshness=call.source_freshness,
-                                as_of=meta.as_of,
-                                rendered_text=redact_text(rendered),
-                            )
-                            recorder.record_event(
-                                EventType.EVIDENCE_ADDED,
-                                round=state.round,
-                                tool_name=name,
-                                result_summary=result_summary,
-                                success=True,
-                                evidence_ids=[evidence_id],
-                                metadata={"duration_ms": (t1 - t0) * 1000.0},
-                            )
+                                if not budget.add_evidence_tokens(len(final_text) // 4):
+                                    return _finish(
+                                        _BUDGET_EXHAUSTED_RESPONSE, "budget_exhausted"
+                                    )
+                                evidence_id = (
+                                    f"{state.run_id}:evid:{recorder.next_evidence_seq():04d}"
+                                )
+                                state.evidence.append(evidence_id)
+                                recorder.record_evidence(
+                                    evidence_id=evidence_id,
+                                    run_id=state.run_id,
+                                    tool_call_id=tool_call_id,
+                                    round=state.round,
+                                    tool_name=name,
+                                    rendered_hash=hashlib.sha256(
+                                        final_text.encode()
+                                    ).hexdigest(),
+                                    rendered_bytes=len(final_text.encode("utf-8")),
+                                    estimated_tokens=len(final_text) // 4,
+                                    source_names=call.source_names,
+                                    source_freshness=call.source_freshness,
+                                    as_of=meta.as_of,
+                                    rendered_text=redact_text(final_text),
+                                )
+                                recorder.record_event(
+                                    EventType.EVIDENCE_ADDED,
+                                    round=state.round,
+                                    tool_name=name,
+                                    result_summary=result_summary,
+                                    success=True,
+                                    evidence_ids=[evidence_id],
+                                    metadata={"duration_ms": (t1 - t0) * 1000.0},
+                                )
                         else:
                             if not soft:
                                 state.failures.append(
                                     {"tool": name, "error": result.get("error")}
                                 )
                                 failed_tools.append((name, result))
-                        msgs.append({
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", ""),
-                            "content": rendered,
-                        })
+                            # Error messages still reach the model, through the
+                            # same gateway as successful results.
+                            context_builder.add_tool_result(
+                                name, result, rendered, tc.get("id", "")
+                            )
                     if failed_tools:
                         # Strict failed-tool rule: stop the tool loop before another
                         # model completion can invent, derive, or substitute values.

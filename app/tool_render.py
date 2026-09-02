@@ -158,6 +158,19 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
     for index, item in enumerate(evidence, start=1):
         if not isinstance(item, dict):
             continue
+        if item.get("claim"):
+            # Reader-produced structured claims (quarantined-reader output).
+            lines.append(f"- {_cell(item['claim'])}")
+            meta = []
+            if item.get("source_url"):
+                meta.append(f"Source: {item['source_url']}")
+            if item.get("published_at"):
+                meta.append(f"Published: {item['published_at']}")
+            if meta:
+                lines.append("  " + " | ".join(meta))
+            if item.get("quote_or_evidence"):
+                lines.append(f"   {item['quote_or_evidence']}")
+            continue
         title = _cell(item.get("title")) or item.get("url") or f"Result {index}"
         meta = []
         if item.get("published_at"):

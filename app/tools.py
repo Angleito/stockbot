@@ -23,6 +23,7 @@ from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
 from .prompts import READING_PROMPT_TEMPLATE
+from .security import prompt_injection
 from .robinhood import RobinhoodClient
 from .robinhood import capabilities
 from .robinhood.auth import OAuthConfig
@@ -753,6 +754,15 @@ def get_earnings_summary(ticker: str, model: str) -> dict:
 
     # Truncate very long press releases to keep the nested call bounded.
     text = release["text"][:60000]
+    # The 8-K text is free-form external content entering a model prompt:
+    # gate it before the nested reading completion. A quarantined release
+    # never reaches the LLM and never fills the cache.
+    if prompt_injection.assess(text).verdict != "ALLOW":
+        return {
+            "error": "Filing section quarantined by security policy",
+            "error_type": "security_quarantine",
+            "source": "sec",
+        }
     summary = _llm_complete(model, READING_PROMPT_TEMPLATE.format(section_text=text))
     result = {
         "ticker": ticker,

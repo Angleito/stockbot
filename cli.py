@@ -19,6 +19,8 @@ from app.storage.runs import (
     get_evidence,
     get_model_calls,
     get_run,
+    get_security_events,
+    get_security_summary,
     get_tool_calls,
     list_runs,
 )
@@ -152,6 +154,26 @@ def _cmd_inspect(run_id: str) -> None:
             f"cost={mc['estimated_cost']} finish={mc['finish_reason']} "
             f"req={mc['provider_request_id']}"
         )
+    print()
+    print("SECURITY:")
+    summary = get_security_summary(run_id)
+    print(
+        f"  allowed={summary['allowed']} quarantined={summary['quarantined']} "
+        f"blocked={summary['blocked']} action_blocked={summary['action_blocked']} "
+        f"egress_blocked={summary['egress_blocked']} "
+        f"response_stripped={summary['response_stripped']}"
+    )
+    for event in get_security_events(run_id):
+        preview = event.get("leaked_preview")
+        line = (
+            f"  {event.get('source') or ''} | score={event.get('score')} | "
+            f"{event.get('verdict') or ''} | rules={event.get('rule_ids') or ''} | "
+            f"{event.get('decision')} | {event.get('reason') or ''} | "
+            f"{event.get('created_at') or ''}"
+        )
+        if preview:
+            line += f" | leaked={preview!r}"
+        print(line)
 
 
 def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:

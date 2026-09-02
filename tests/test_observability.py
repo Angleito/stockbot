@@ -450,9 +450,21 @@ def test_redaction_enforced(monkeypatch):
         policy=TEST_POLICY,
         return_result=True,
     )
-    # The raw model answer passes through to the caller unchanged (redaction
-    # applies to observability records, not to the user-facing answer).
-    assert "Bearer sk-or-v1-abcdefghijklmnop" in result.answer
+    # The response DLP strips the leaked credential from the user-facing
+    # answer; the whole answer was the leak, so the deterministic fallback
+    # is returned. The strip is logged locally (Q5 override: preview, not
+    # just a hash, for response leaks).
+    assert result.answer == "I couldn't generate a response that meets safety checks."
+    from app.storage.runs import get_security_events
+
+    stripped = [
+        e for e in get_security_events(result.run_id)
+        if e["decision"] == "response_stripped"
+    ]
+    assert len(stripped) == 2  # the bearer span and the sk-or-v1 span
+    previews = " ".join(e["leaked_preview"] or "" for e in stripped)
+    assert "sk-or-v1-abcdefghijklmnop" in previews
+    assert all(e["sha256"] for e in stripped)
 
     # Stored tool row + TOOL_REQUESTED event arguments are redacted.
     tool_calls = get_tool_calls(result.run_id)
@@ -491,10 +503,12 @@ def test_redaction_enforced(monkeypatch):
     assert re.search(
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", dump
     ) is None
-    # The redaction marker is present (redaction happened, not absence).
-    # Rule 1 masks "Bearer <token>" wholesale, so the stored sk-or form is
-    # "Bearer [REDACTED]" — no "sk-or-v1-" prefix may survive anywhere.
-    assert "Bearer [REDACTED]" in dump
+    # The leaked answer never reached the store: the final answer is the
+    # deterministic DLP fallback. No "sk-or-v1-" prefix may survive in the
+    # observability tables; the raw leak exists ONLY in
+    # security_events.leaked_preview (Q5 local-logging override), which the
+    # dump above intentionally excludes.
+    assert "meets safety checks" in dump
     assert "sk-or-v1-" not in dump
 
 

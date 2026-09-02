@@ -1,0 +1,183 @@
+"""Context gateway: labels every tool result and scans free-form text
+before it may enter model context. stdlib only."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+from ..redact import _BEARER_RE, _JWT_RE, _SK_OR_V1_RE
+from . import prompt_injection
+from .context import (
+    ContextEnvelope,
+    InstructionAuthority,
+    Integrity,
+    SecurityStatus,
+    Sensitivity,
+    SourceType,
+)
+
+SECRET_BLOCK_REASON = "secret data never enters model context"
+CREDENTIAL_BLOCK_REASON = "credential pattern"
+
+_SECRET_PATTERNS = (
+    ("bearer", _BEARER_RE),
+    ("sk_or_v1", _SK_OR_V1_RE),
+    ("jwt", _JWT_RE),
+)
+
+
+@dataclass(frozen=True)
+class SafeContext:
+    envelope: ContextEnvelope
+    text: str
+
+
+@dataclass(frozen=True)
+class QuarantinedContext:
+    envelope: ContextEnvelope
+    verdict: str  # "QUARANTINE" | "BLOCK"
+    score: int
+    reasons: tuple[str, ...]
+    rule_ids: tuple[str, ...] = ()
+
+
+def _envelope(
+    source: str,
+    source_type: SourceType,
+    sensitivity: Sensitivity,
+    integrity: Integrity,
+    *,
+    external: bool = False,
+) -> ContextEnvelope:
+    return ContextEnvelope(
+        content=None,
+        source=source,
+        source_type=source_type,
+        instruction_authority=InstructionAuthority.NONE,
+        sensitivity=sensitivity,
+        integrity=integrity,
+        external=external,
+        retrieved_at=None,
+    )
+
+
+# One base envelope per tool. Tool output never carries instruction
+# authority; private tools stay private even when derived (taint rule R4).
+TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
+    # SEC filing data.
+    "get_fundamentals": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_filing_section": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_earnings_summary": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "diff_risk_factors": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_financial_statements": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_xbrl_facts": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_obligations": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_valuation_metrics": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    # FINRA public market data.
+    "list_finra_datasets": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "describe_finra_dataset": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_finra_datapoints": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "query_finra": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_short_interest": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_short_interest_leaderboard": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_reg_sho_volume": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_threshold_securities": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    # Analyst consensus data.
+    "get_analyst_estimates": _envelope("analyst", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL),
+    "get_sp500_weight": _envelope("analyst", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL),
+    # Exa web evidence.
+    "search_web": _envelope("exa", SourceType.WEB, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    # Robinhood market data (account-connected, public observations).
+    "get_market_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
+    "get_option_chain": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
+    "analyze_option_contract": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
+    "compare_options": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
+    "get_scanner_filter_specs": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
+    # Robinhood portfolio data (private).
+    "get_portfolio_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
+    "get_scans": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
+    "run_scan": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
+}
+
+_FALLBACK_ENVELOPE = _envelope(
+    "unknown", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL
+)
+
+
+def envelope_for_tool(name: str, result: dict) -> ContextEnvelope:
+    """The labeled envelope for a tool result (conservative fallback for
+    unregistered tools)."""
+    base = TOOL_ENVELOPES.get(name, _FALLBACK_ENVELOPE)
+    retrieved_at = None
+    if isinstance(result, dict):
+        retrieved_at = next(
+            (
+                result[key]
+                for key in ("retrieved_at", "as_of", "as_of_date")
+                if isinstance(result.get(key), str)
+            ),
+            None,
+        )
+    return replace(base, content=result, retrieved_at=retrieved_at)
+
+
+def _has_briefing_prose(content: object) -> bool:
+    """FINRA briefing prose (model-generated summary) is free-form text;
+    FINRA records/datapoints are canonical numeric data."""
+    if not isinstance(content, dict):
+        return False
+    briefing = content.get("briefing")
+    if not isinstance(briefing, dict):
+        return False
+    summary = briefing.get("summary")
+    return isinstance(summary, str) and bool(summary.strip())
+
+
+def _needs_scan(envelope: ContextEnvelope) -> bool:
+    if envelope.source_type in (SourceType.WEB, SourceType.FILING):
+        return True
+    if envelope.source == "finra" and _has_briefing_prose(envelope.content):
+        return True
+    return False
+
+
+def _secret_pattern_hits(text: str) -> list[str]:
+    return [name for name, pattern in _SECRET_PATTERNS if pattern.search(text)]
+
+
+def prepare_context(
+    envelope: ContextEnvelope, rendered: str
+) -> SafeContext | QuarantinedContext:
+    """Gateway decision for one context item.
+
+    SECRET never enters model context; free-form text (web evidence, filing
+    sections, FINRA briefing prose) is scanned for injection and credential
+    patterns; canonical numeric-only results pass through.
+    """
+    if envelope.sensitivity == Sensitivity.SECRET:
+        return QuarantinedContext(
+            envelope, "BLOCK", 100, (SECRET_BLOCK_REASON,), ("secret_envelope",)
+        )
+    if _needs_scan(envelope):
+        hits = _secret_pattern_hits(rendered)
+        if hits:
+            return QuarantinedContext(
+                envelope,
+                "BLOCK",
+                100,
+                (f"{CREDENTIAL_BLOCK_REASON}: {', '.join(hits)}",),
+                tuple(f"credential_pattern:{name}" for name in hits),
+            )
+        assessment = prompt_injection.assess(rendered)
+        if assessment.verdict != "ALLOW":
+            return QuarantinedContext(
+                envelope,
+                assessment.verdict,
+                assessment.score,
+                assessment.reasons,
+                assessment.matched_rules,
+            )
+    return SafeContext(
+        envelope=replace(envelope, security_status=SecurityStatus.ALLOWED),
+        text=rendered,
+    )

@@ -81,10 +81,15 @@ CREATE TABLE IF NOT EXISTS evidence (
   round INTEGER, tool_name TEXT, rendered_hash TEXT NOT NULL,
   rendered_bytes INTEGER NOT NULL, estimated_tokens INTEGER NOT NULL,
     source_names TEXT, source_freshness TEXT, as_of TEXT, rendered_text TEXT);
+CREATE TABLE IF NOT EXISTS security_events (
+  event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+  created_at TEXT NOT NULL, source TEXT, sha256 TEXT, score INTEGER, verdict TEXT,
+  rule_ids TEXT, decision TEXT NOT NULL, reason TEXT, leaked_preview TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_security_events_run ON security_events(run_id, sequence);
 """
 
 
@@ -379,6 +384,53 @@ class RunRecorder:
         except Exception as exc:
             self._disable(exc)
 
+    def record_security_event(
+        self,
+        *,
+        source: str,
+        sha256: str,
+        score: Optional[int],
+        verdict: Optional[str],
+        rule_ids: Optional[list[str]],
+        decision: str,
+        reason: Optional[str] = None,
+        leaked_preview: Optional[str] = None,
+    ) -> Optional[str]:
+        """Append one security_events row; returns the event_id (None when
+        disabled). Hash-only storage: non-response events never carry full
+        content; leaked_preview is stored ONLY for response_stripped events
+        and truncated to 500 chars (local leak logging only)."""
+        if not self.enabled:
+            return None
+        try:
+            created = _now()
+            sequence = self._conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM security_events"
+                " WHERE run_id = ?",
+                (self.run_id,),
+            ).fetchone()[0]
+            event_id = f"{self.run_id}:se:{sequence:04d}"
+            preview = None
+            if decision == "response_stripped" and leaked_preview is not None:
+                preview = str(leaked_preview)[:500]
+            self._conn.execute(
+                "INSERT INTO security_events (event_id, run_id, sequence,"
+                " created_at, source, sha256, score, verdict, rule_ids,"
+                " decision, reason, leaked_preview)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id, self.run_id, sequence, created, source, sha256,
+                    score, verdict,
+                    json.dumps(rule_ids) if rule_ids is not None else None,
+                    decision, reason, preview,
+                ),
+            )
+            self._conn.commit()
+            return event_id
+        except Exception as exc:
+            self._disable(exc)
+            return None
+
     def record_model_call(
         self,
         *,
@@ -666,6 +718,39 @@ def get_model_calls(run_id: str) -> list[dict]:
             conn.close()
     except sqlite3.Error:
         return []
+
+
+def get_security_events(run_id: str) -> list[dict]:
+    try:
+        conn = _query_conn()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT * FROM security_events WHERE run_id = ? ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def get_security_summary(run_id: str) -> dict:
+    """Counts of security events grouped by decision."""
+    counts: dict[str, int] = {
+        "allowed": 0,
+        "quarantined": 0,
+        "blocked": 0,
+        "action_blocked": 0,
+        "egress_blocked": 0,
+        "response_stripped": 0,
+    }
+    for event in get_security_events(run_id):
+        decision = event.get("decision") or "unknown"
+        counts[decision] = counts.get(decision, 0) + 1
+    return counts
 
 
 def get_evidence(run_id: str) -> list[dict]:
