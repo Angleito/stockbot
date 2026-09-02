@@ -22,6 +22,8 @@ from ..robinhood.adapters import to_position_input, to_quote
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
 from ..storage import duckdb, mappers, parquet
 
+from .account_identity import local_account_id
+
 SNAPSHOT_SOURCE = "robinhood_mcp"
 PARSER_VERSION = "robinhood-mcp-account-v1"
 CALCULATION_VERSION = "portfolio-snapshot-v1"
@@ -236,9 +238,9 @@ def sync_robinhood_portfolio(
     ]
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=[account.account_id for account in accounts],
+        account_ids=[local_account_id(account.account_id) for account in accounts],
         positions=positions,
-        cash_balances={balance.account_id: balance.cash for balance in cash_balances},
+        cash_balances={local_account_id(balance.account_id): balance.cash for balance in cash_balances},
         created_at=created_at,
     )
     persist_snapshot(snapshot, data_root=data_root)

@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
-from .models import PortfolioSnapshot, Position, local_account_id
+from .models import PortfolioSnapshot, Position
 from .valuation import portfolio_market_value, position_weight
 
 
@@ -20,6 +20,10 @@ def build_portfolio_snapshot(
     created_at: datetime,
 ) -> PortfolioSnapshot:
     """Assemble the deterministic, immutable portfolio snapshot.
+
+    ``account_ids`` and ``position.account_id`` must already be local
+    opaque identifiers (raw broker ids never enter the domain builder);
+    anonymization happens at the services boundary.
 
     Position weights use ``total_value`` as the denominator (cash included);
     weights are ``None`` when total value is unknown.  Weights are ``None``
@@ -50,10 +54,10 @@ def build_portfolio_snapshot(
         total_value = None
 
     snapshot_id = f"portfolio:{broker}:{created_at.isoformat()}"
-    local_ids = tuple(local_account_id(account_id) for account_id in account_ids)
+    local_ids = tuple(account_ids)
     built_positions: list[Position] = []
     for position in positions:
-        account_id = local_account_id(position.account_id)
+        account_id = position.account_id
         built_positions.append(
             Position(
                 position_id=f"{snapshot_id}:{account_id}:{position.ticker}",

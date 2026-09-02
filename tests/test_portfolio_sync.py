@@ -20,10 +20,12 @@ from pathlib import Path
 import pytest
 
 from app.domain.market.securities import SecurityResolution
-from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position, local_account_id
+from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position
 from app.domain.portfolio.snapshot import build_portfolio_snapshot
 from app.domain.portfolio.valuation import build_position
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
+
+from app.services.account_identity import local_account_id
 from app.services.portfolio_sync import (
     persist_snapshot,
     read_latest_snapshot,
@@ -318,11 +320,11 @@ def test_cash_only_account_survives_round_trip(data_root):
     # rows and dropped B.
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
         cash_balances={
-            "100000001": Decimal("1000"),
-            "100000002": Decimal("2000"),
+            local_account_id("100000001"): Decimal("1000"),
+            local_account_id("100000002"): Decimal("2000"),
         },
         created_at=NOW,
     )
@@ -338,9 +340,9 @@ def test_cash_only_account_survives_round_trip(data_root):
 def test_empty_portfolio_with_cash_round_trips_account_ids(data_root):
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001"],
+        account_ids=[local_account_id("100000001")],
         positions=[],
-        cash_balances={"100000001": Decimal("5000")},
+        cash_balances={local_account_id("100000001"): Decimal("5000")},
         created_at=NOW,
     )
     persist_snapshot(snapshot, data_root=data_root)
@@ -351,8 +353,8 @@ def test_empty_portfolio_with_cash_round_trips_account_ids(data_root):
 
 
 def test_account_ids_round_trip_preserves_order(data_root):
-    account_a = "100000001"
-    account_b = "100000002"
+    account_a = local_account_id("100000001")
+    account_b = local_account_id("100000002")
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[account_a, account_b],
@@ -374,7 +376,7 @@ def test_decimal_round_trip_is_exact(data_root):
     # away on read (0.5 -> not 0.5000...).
     position = Position(
         position_id="pos-1",
-        account_id="100000001",
+        account_id=local_account_id("100000001"),
         security_id="sec:equity:0000320193",
         entity_id="sec:cik:0000320193",
         ticker="AMD",
@@ -390,9 +392,9 @@ def test_decimal_round_trip_is_exact(data_root):
     )
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001"],
+        account_ids=[local_account_id("100000001")],
         positions=[position],
-        cash_balances={"100000001": Decimal("1234.56789012123456")},
+        cash_balances={local_account_id("100000001"): Decimal("1234.56789012123456")},
         created_at=NOW,
     )
     persist_snapshot(snapshot, data_root=data_root)
@@ -668,7 +670,7 @@ def test_build_position_passes_asset_type():
 def _position(
     market_value: Decimal | None = Decimal("500"),
     *,
-    account_id: str = "100000001",
+    account_id: str = local_account_id("100000001"),
 ) -> Position:
     return Position(
         position_id="pos-1",
@@ -691,9 +693,9 @@ def _position(
 def test_cash_complete_multi_account_sums():
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={"100000001": Decimal("1000"), "100000002": Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000002"): Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash == Decimal("3000")
@@ -704,9 +706,9 @@ def test_cash_complete_multi_account_sums():
 def test_partial_cash_nils_total_and_weights():
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={"100000001": Decimal("1000"), "100000002": None},
+        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000002"): None},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -717,9 +719,9 @@ def test_partial_cash_nils_total_and_weights():
 def test_missing_balance_nils_total():
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={"100000001": Decimal("1000")},
+        cash_balances={local_account_id("100000001"): Decimal("1000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -732,9 +734,9 @@ def test_duplicate_balance_for_one_account_incomplete():
     # missing-balance case and stays incomplete.
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={"100000001": Decimal("1000"), "100000001": Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000001"): Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -744,9 +746,9 @@ def test_duplicate_balance_for_one_account_incomplete():
 def test_mismatched_balance_account_ids_incomplete():
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001", "100000002"],
+        account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={"100000001": Decimal("1000"), "100000003": Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000003"): Decimal("2000")},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -756,9 +758,9 @@ def test_mismatched_balance_account_ids_incomplete():
 def test_cash_only_portfolio_has_valid_totals():
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
-        account_ids=["100000001"],
+        account_ids=[local_account_id("100000001")],
         positions=[],
-        cash_balances={"100000001": Decimal("5000")},
+        cash_balances={local_account_id("100000001"): Decimal("5000")},
         created_at=NOW,
     )
     assert snapshot.invested_value == Decimal("0")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..domain.market.quotes import Quote
 from ..domain.portfolio import BrokeragePositionInput
+from ..services.account_identity import local_account_id
 from .account import BrokeragePosition
 from .options import MarketSnapshot
 
@@ -24,7 +25,7 @@ def to_quote(snapshot: MarketSnapshot) -> Quote:
 def to_position_input(raw: BrokeragePosition) -> BrokeragePositionInput:
     return BrokeragePositionInput(
         position_id=raw.position_id,
-        account_id=raw.account_id,
+        account_id=local_account_id(raw.account_id),
         ticker=raw.ticker,
         provider_instrument_id=raw.provider_instrument_id,
         quantity=raw.quantity,
