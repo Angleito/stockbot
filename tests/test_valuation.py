@@ -234,13 +234,14 @@ def test_projected_prices_matrix(fake_deps):
     assert pp["multiples"] == [15, 20, 25, 30, 35]
     by_tier = {t["tier"]: t for t in pp["tiers"]}
     worst = by_tier["Worst case FY27"]
-    # Fixture worst-case FY27 EPS = 9.02 - 0.04 (leases) - 5.43 (supply
-    # stranded) - 0.25 (cloud+vendor) - 0.75 (default-triggered) = 2.56.
-    assert worst["eps"] == 2.56
-    assert worst["prices"]["15x"]["price"] == pytest.approx(38.4, abs=0.1)
-    assert worst["prices"]["30x"]["price"] == pytest.approx(76.8, abs=0.1)
-    # pct change vs current: 38.4/213.05 - 1 ≈ -82.0%.
-    assert worst["prices"]["15x"]["pct_change_vs_current"] == pytest.approx(-82.0, abs=0.2)
+    # Fixture worst-case FY27 EPS = 9.02 - 0.02 (leases FY27 0.46) - 3.92
+    # (supply FY27 95.0 stranded) - 0.29 (cloud FY27 6.0 + vendor 1.0) -
+    # 0.75 (default-triggered) = 4.04 (FY-matched; tail 4.8 sits in FY28+).
+    assert worst["eps"] == 4.04
+    assert worst["prices"]["15x"]["price"] == pytest.approx(60.6, abs=0.1)
+    assert worst["prices"]["30x"]["price"] == pytest.approx(121.2, abs=0.1)
+    # pct change vs current: 60.6/213.05 - 1 ≈ -71.6%.
+    assert worst["prices"]["15x"]["pct_change_vs_current"] == pytest.approx(-71.6, abs=0.2)
     # Consensus FY27 at 25x should exceed current price.
     consensus = by_tier["Consensus FY27"]
     assert consensus["prices"]["25x"]["price"] > 213.05

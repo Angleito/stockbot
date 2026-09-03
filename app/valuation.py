@@ -88,6 +88,18 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
     default_triggered_b = 0.0
     revenue_matched_b = 0.0
     per_kind: dict[str, dict] = {}
+    impact_by_fy: dict[str, dict[str, float]] = {}
+    flat: list[tuple[str, float]] = []
+
+    def _add_fy(year: str, bucket: str, amount: float) -> None:
+        year = str(year or "").strip()
+        if not year:
+            return
+        entry = impact_by_fy.setdefault(
+            year, {"contractual": 0.0, "contingent": 0.0, "default_triggered": 0.0, "revenue_matched": 0.0}
+        )
+        entry[bucket] = entry.get(bucket, 0.0) + float(amount or 0.0)
+
     for row in obligations_rows:
         amount_b = row.get("amount_billions")
         if not amount_b:
@@ -134,22 +146,59 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
         }
         if is_revenue_matched:
             revenue_matched_b += annual
+            bucket = "revenue_matched"
         elif is_on_balance_sheet:
             # Already accrued/expensed (leases, debt, deferred revenue):
             # informational only, never a future EPS drag.
             continue
         elif is_contractual:
             contractual_b += annual
+            bucket = "contractual"
         elif is_default_triggered:
             default_triggered_b += annual
+            bucket = "default_triggered"
         else:
             contingent_b += annual
+            bucket = "contingent"
+        if schedule and total > 0:
+            for y in schedule:
+                _add_fy(str(y.get("fiscal_year") or ""), bucket, y.get("amount_billions", 0.0))
+            continue
+        horizon = row.get("payment_horizon") or {}
+        cloud_schedule = horizon.get("schedule") or []
+        if cloud_schedule:
+            for y in cloud_schedule:
+                _add_fy(str(y.get("fiscal_year") or ""), bucket, y.get("amount_billions", 0.0))
+            continue
+        near_b = horizon.get("paid_in_remainder_billions")
+        remainder_year = str(horizon.get("paid_in_remainder_of_fy") or "").strip()
+        if near_b and remainder_year:
+            _add_fy(remainder_year, bucket, near_b)
+            tail_b = horizon.get("paid_after_remainder_billions", 0.0) or 0.0
+            tail_per = tail_b / max(1, years - 1)
+            if tail_per:
+                try:
+                    base = int(remainder_year[:4])
+                except ValueError:
+                    base = None
+                if base is not None:
+                    for i in range(1, years):
+                        _add_fy(str(base + i), bucket, tail_per)
+            continue
+        flat.append((bucket, annual))
+    for year in list(impact_by_fy):
+        for bucket, annual in flat:
+            impact_by_fy[year][bucket] = impact_by_fy[year].get(bucket, 0.0) + annual
     return {
         "contractual_annual_billions": round(contractual_b, 3),
         "contingent_annual_billions": round(contingent_b, 3),
         "default_triggered_annual_billions": round(default_triggered_b, 3),
         "revenue_matched_annual_billions": round(revenue_matched_b, 3),
         "per_kind": per_kind,
+        "impact_by_fiscal_year": {
+            year: {k: round(v, 3) for k, v in buckets.items()}
+            for year, buckets in impact_by_fy.items()
+        },
     }
 
 
@@ -430,48 +479,68 @@ def get_valuation_metrics(ticker: str) -> dict:
         if impact["revenue_matched_annual_billions"]
         else None
     )
+    impact_by_fy = impact.get("impact_by_fiscal_year") or {}
 
+    def _fy_year(period: dict) -> str | None:
+        year = str((period or {}).get("period_end_date") or "")[:4]
+        return year or None
+
+    def _fy_ps(year: str | None, key: str, fallback: float | None) -> float | None:
+        if shares_out and year and year in impact_by_fy:
+            return impact_by_fy[year].get(key, 0.0) / (shares_out / 1e9)
+        return fallback
+
+    year_cur = _fy_year(fy_current)
+    year_next = _fy_year(fy_next)
+    contractual_cur = _fy_ps(year_cur, "contractual", contractual_ps)
+    contingent_cur = _fy_ps(year_cur, "contingent", contingent_ps)
+    default_cur = _fy_ps(year_cur, "default_triggered", default_triggered_ps)
+    revenue_cur = _fy_ps(year_cur, "revenue_matched", revenue_matched_ps)
+    contractual_next = _fy_ps(year_next, "contractual", contractual_ps)
+    contingent_next = _fy_ps(year_next, "contingent", contingent_ps)
+    default_next = _fy_ps(year_next, "default_triggered", default_triggered_ps)
+    revenue_next = _fy_ps(year_next, "revenue_matched", revenue_matched_ps)
     forward_eps = {
             "consensus": _eps_line(eps_current, None, None, "consensus"),
             "adjusted": _eps_line(
-                eps_current, contractual_ps, None,
+                eps_current, contractual_cur, None,
                 "adjusted forward EPS (contractual obligations included)",
             ),
             "scenario": _eps_line(
-                eps_current, contractual_ps, contingent_ps,
+                eps_current, contractual_cur, contingent_cur,
                 "forward EPS incl. contingent obligations (stress scenario, no counterparty default)",
             ),
             "scenario_with_defaults": _eps_line(
                 eps_current,
-                contractual_ps,
-                (contingent_ps or 0.0) + (default_triggered_ps or 0.0),
+                contractual_cur,
+                (contingent_cur or 0.0) + (default_cur or 0.0),
                 "forward EPS incl. contingent obligations AND default-triggered guarantees (e.g. OpenAI insolvency triggers $105B residual-value guarantee)",
             ),
             "worst_case": _eps_line(
                 eps_current,
-                (contractual_ps or 0.0) + (revenue_matched_ps or 0.0),
-                (contingent_ps or 0.0) + (default_triggered_ps or 0.0),
+                (contractual_cur or 0.0) + (revenue_cur or 0.0),
+                (contingent_cur or 0.0) + (default_cur or 0.0),
                 "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)",
             ),
             "consensus_next_fy": _eps_line(eps_next, None, None, "consensus"),
             "adjusted_next_fy": _eps_line(
-                eps_next, contractual_ps, None,
+                eps_next, contractual_next, None,
                 "adjusted forward EPS (contractual obligations included)",
             ),
             "scenario_next_fy": _eps_line(
-                eps_next, contractual_ps, contingent_ps,
+                eps_next, contractual_next, contingent_next,
                 "forward EPS incl. contingent obligations (stress scenario, no counterparty default)",
             ),
             "scenario_with_defaults_next_fy": _eps_line(
                 eps_next,
-                contractual_ps,
-                (contingent_ps or 0.0) + (default_triggered_ps or 0.0),
+                contractual_next,
+                (contingent_next or 0.0) + (default_next or 0.0),
                 "forward EPS incl. contingent obligations AND default-triggered guarantees (e.g. OpenAI insolvency triggers $105B residual-value guarantee)",
             ),
             "worst_case_next_fy": _eps_line(
                 eps_next,
-                (contractual_ps or 0.0) + (revenue_matched_ps or 0.0),
-                (contingent_ps or 0.0) + (default_triggered_ps or 0.0),
+                (contractual_next or 0.0) + (revenue_next or 0.0),
+                (contingent_next or 0.0) + (default_next or 0.0),
                 "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)",
             ),
         }

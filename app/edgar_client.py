@@ -100,6 +100,8 @@ def _quarters_with_derived_q4(quarterly, full_facts, concept) -> Any:
     quarter = quarterly.copy().sort_values("period_end")
     if len(quarter) < 2:
         return quarter.tail(4)
+    ends = pd.to_datetime(quarter["period_end"], errors="coerce")
+    gaps = ends.diff().dt.days
     if len(gaps) >= 2 and gaps.iloc[-1] is not None and float(gaps.iloc[-1]) > _MISSING_QUARTER_GAP_DAYS:
         # One quarter between the last two period_ends is missing (usually
         # Q4, reported only as a full-year fact). The missing quarter ends

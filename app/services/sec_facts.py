@@ -168,7 +168,8 @@ def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> O
             fy.append(row)
     if not fy:
         return None
-    fy_total = float(fy[0]["value"])
+    latest_fy = max(fy, key=lambda r: (str(r.get("filed_at") or ""), str(r.get("accession") or "")))
+    fy_total = float(latest_fy["value"])
     ytd = []
     for row in rows:
         if row.get("concept") != concept:
@@ -185,7 +186,7 @@ def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> O
     if not ytd:
         return None
     ytd_q3 = float(sorted(ytd, key=lambda r: str(r["period_end"]))[-1]["value"])
-    derived = dict(fy[0])
+    derived = dict(latest_fy)
     derived["value"] = fy_total - ytd_q3
     derived["period_end"] = fy_end.isoformat()
     derived["fiscal_period"] = "Q4"

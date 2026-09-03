@@ -29,7 +29,7 @@ from typing import Optional
 
 from . import cache
 from . import edgar_client
-from .domain.events import sec_evidence_id, sec_event_id
+from .domain.events import CorporateEvent, Evidence, sec_evidence_id, sec_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -802,9 +802,11 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
     Returns ``{events_written, evidence_written, skipped_no_filing_date}``;
     a deterministic rerun writes 0 rows (dedup by event/evidence id).
     """
+    from dataclasses import asdict
     from datetime import date
     from pathlib import Path
 
+    from .domain.market.ids import sec_entity_id
     from .services.sec_facts import _resolve_entity
     from .storage import duckdb, parquet, raw_archive
 
@@ -822,28 +824,34 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
         event_id = sec_event_id(ticker, content_hash)
         entity_id = None
         if ticker:
-            entity_id = _resolve_entity(ticker, date.today(), data_root)
-        event_rows.append({
-            "event_id": event_id,
-            "entity_id": entity_id,
-            "security_id": None,
-            "ticker": ticker,
-            "event_type": row.get("type", "other"),
-            "amount_billions": row.get("amount_billions"),
-            "certainty": row.get("certainty"),
-            "status": row.get("status"),
-            "revenue_matched": bool(row.get("revenue_matched")),
-            "default_triggered": bool(row.get("default_triggered")),
-            "fiscal_year": str(row.get("fiscal_year")) if row.get("fiscal_year") is not None else None,
-            "filed_at": filed,
-            "known_at": filed,
-            "retrieved_at": str(row.get("known_at") or ""),
-            "accession": str(row.get("_accession") or "") or None,
-            "source": row.get("source"),
-            "source_url": None,
-            "content_hash": content_hash,
-            "parser_version": row.get("parser_version"),
-        })
+            accession = str(row.get("_accession") or "")
+            m = re.match(r"^(\d{10})-", accession)
+            if m:
+                entity_id = sec_entity_id(m.group(1))
+            else:
+                entity_id = _resolve_entity(ticker, date.fromisoformat(filed[:10]), data_root)
+        event = CorporateEvent(
+            event_id=event_id,
+            entity_id=entity_id,
+            security_id=None,
+            ticker=ticker,
+            event_type=row.get("type", "other"),
+            amount_billions=row.get("amount_billions"),
+            certainty=row.get("certainty"),
+            status=row.get("status"),
+            revenue_matched=bool(row.get("revenue_matched")),
+            default_triggered=bool(row.get("default_triggered")),
+            fiscal_year=str(row.get("fiscal_year")) if row.get("fiscal_year") is not None else None,
+            filed_at=filed,
+            known_at=filed,
+            retrieved_at=str(row.get("known_at") or ""),
+            accession=str(row.get("_accession") or "") or None,
+            source=row.get("source"),
+            source_url=None,
+            content_hash=content_hash,
+            parser_version=row.get("parser_version"),
+        )
+        event_rows.append(asdict(event))
 
         is_xbrl_fact = "concept" in row
         archive_key = str(row.get("_archive_key") or "") or None
@@ -864,18 +872,19 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
                     start = text.find(excerpt)
                     if start >= 0:
                         span_start, span_end = start, start + len(excerpt)
-        evidence_rows.append({
-            "evidence_id": sec_evidence_id(content_hash),
-            "event_id": event_id,
-            "source_type": "xbrl_fact" if is_xbrl_fact else "filing_text",
-            "archive_key": archive_key if not is_xbrl_fact else None,
-            "content_hash": archived_sha,
-            "excerpt": row.get("excerpt"),
-            "span_start": span_start,
-            "span_end": span_end,
-            "retrieved_at": str(row.get("known_at") or ""),
-            "parser_version": row.get("parser_version"),
-        })
+        evidence = Evidence(
+            evidence_id=sec_evidence_id(event_id, content_hash),
+            event_id=event_id,
+            source_type="xbrl_fact" if is_xbrl_fact else "filing_text",
+            archive_key=archive_key if not is_xbrl_fact else None,
+            content_hash=archived_sha,
+            excerpt=row.get("excerpt"),
+            span_start=span_start,
+            span_end=span_end,
+            retrieved_at=str(row.get("known_at") or ""),
+            parser_version=row.get("parser_version"),
+        )
+        evidence_rows.append(asdict(evidence))
     return {
         "events_written": parquet.write_rows("events", event_rows, root=data_root / "parquet"),
         "evidence_written": parquet.write_rows("evidence", evidence_rows, root=data_root / "parquet"),

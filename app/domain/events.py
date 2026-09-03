@@ -71,9 +71,9 @@ def sec_event_id(ticker: str, content_hash: str) -> str:
     return f"sec:event:{ticker}:{content_hash[:16]}"
 
 
-def sec_evidence_id(content_hash: str) -> str:
-    """Deterministic evidence id from the archived payload hash."""
-    return f"sec:evidence:{content_hash[:16]}"
+def sec_evidence_id(event_id: str, content_hash: str) -> str:
+    """Deterministic evidence id scoped to its owning event."""
+    return f"sec:evidence:{event_id}:{content_hash[:16]}"
 
 
 def sec_claim_id(content_hash: str) -> str:
