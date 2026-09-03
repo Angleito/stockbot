@@ -88,19 +88,26 @@ def test_portfolio_tool_proposal_denied_without_portfolio_intent(monkeypatch):
 
 def test_portfolio_notice_appended_to_final_answer(monkeypatch):
     fake = FakeOpenRouter([
+        _tool_round("get_portfolio_snapshot", {"include_positions": True}),
         _final("Here is your portfolio summary."),
     ])
     monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda name, args, model, **kwargs: {"result_type": "portfolio_snapshot", "source": "test"},
+    )
     result = agent.run_chat(
         [{"role": "user", "content": "Show my account"}],
         model="test",
-        context=LOCAL_CONTEXT,
+        context=LOCAL_BROKER_CONTEXT,
         policy=TEST_POLICY,
         return_result=True,
+        approve_portfolio=lambda name, args: True,
     )
     assert result.answer == (
         "Here is your portfolio summary.\n\n"
-        "Note: portfolio access is active for this conversation."
+        "Note: this answer used portfolio data you approved for this session."
     )
 
 
@@ -139,10 +146,7 @@ def test_private_egress_query_blocked(monkeypatch):
         policy=TEST_POLICY,
         return_result=True,
     )
-    assert result.answer.startswith("I could not search for that.")
-    assert result.answer.endswith(
-        "\n\nNote: portfolio access is active for this conversation."
-    )
+    assert result.answer == "I could not search for that."
     assert get_run(result.run_id)["status"] == "completed"
     assert queries == []  # Exa never received the private query
     tool_calls = get_tool_calls(result.run_id)
@@ -184,6 +188,7 @@ def test_search_web_blocked_after_allowed_private_snapshot(monkeypatch):
         context=LOCAL_BROKER_CONTEXT,
         policy=TEST_POLICY,
         return_result=True,
+        approve_portfolio=lambda name, args: True,
     )
     assert queries == []  # Exa never called once private context entered
     events = get_security_events(result.run_id)
@@ -260,10 +265,7 @@ def test_detector_bypass_still_blocked_by_egress(monkeypatch):
     # The injected article passed the (bypassed) detector, but the model's
     # exfiltration query is still blocked by the egress firewall.
     assert queries == ["AMD latest news"]
-    assert result.answer.startswith("Synthesis complete.")
-    assert result.answer.endswith(
-        "\n\nNote: portfolio access is active for this conversation."
-    )
+    assert result.answer == "Synthesis complete."
     events = get_security_events(result.run_id)
     assert any(e["decision"] == "egress_blocked" for e in events)
     tool_calls = get_tool_calls(result.run_id)
@@ -387,15 +389,22 @@ def test_response_dlp_strips_account_id_without_portfolio_intent(monkeypatch):
 
 def test_response_dlp_allows_account_content_with_portfolio_intent(monkeypatch):
     fake = FakeOpenRouter([
+        _tool_round("get_portfolio_snapshot", {"include_positions": True}),
         _final("Your account number 123456789 shows 10 AMD shares."),
     ])
     monkeypatch.setattr(agent, "_call_openrouter", fake)
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda name, args, model, **kwargs: {"result_type": "portfolio_snapshot", "source": "test"},
+    )
     result = agent.run_chat(
         [{"role": "user", "content": "Show my account"}],
         model="test",
-        context=LOCAL_CONTEXT,
+        context=LOCAL_BROKER_CONTEXT,
         policy=TEST_POLICY,
         return_result=True,
+        approve_portfolio=lambda name, args: True,
     )
     assert "123456789" in result.answer
     assert not any(e["decision"] == "response_stripped" for e in get_security_events(result.run_id))

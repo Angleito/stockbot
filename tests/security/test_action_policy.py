@@ -2,6 +2,8 @@
 
 import pytest
 
+from dataclasses import replace
+
 from app.policy import Capability
 from app.security.action_policy import TOOL_DOMAINS, authorize_tool_call
 from app.security.context import RunSecurityContext, classify_intent
@@ -24,31 +26,34 @@ def test_classify_intent_research_only():
 
 
 def test_classify_intent_portfolio_phrases():
-    cases = [
-        # Generic portfolio nouns without first-person context stay research.
-        (["What is AMD's cash balance?"], False),
-        (["What is AMD's competitive position?"], False),
-        (["Show portfolio"], False),
-        (["What is AMD EPS?"], False),
-        (["What's the latest AMD news?"], False),
-        # First-person pronoun within 5 tokens of a portfolio noun/verb.
-        (["Show my account"], True),
-        (["How does today's AMD news affect my portfolio?"], True),
-        (["What news could affect my AMD position?"], True),
-        (["how does that affect me?"], True),
-    ]
-    for turns, expected in cases:
+    # History never authorizes portfolio access — only explicit session
+    # approval adds `portfolio_read`. Even portfolio phrasing stays base-only.
+    for turns in [
+        ["What is AMD's cash balance?"],
+        ["What is AMD's competitive position?"],
+        ["Show portfolio"],
+        ["What is AMD EPS?"],
+        ["What's the latest AMD news?"],
+        ["Show my account"],
+        ["How does today's AMD news affect my portfolio?"],
+        ["What news could affect my AMD position?"],
+        ["how does that affect me?"],
+    ]:
         intent = classify_intent(turns)
-        assert ("portfolio_read" in intent.permitted_domains) is expected, turns
+        assert intent.permitted_domains == {"financial_research", "public_web_research"}, turns
 
 
 def test_classify_intent_accumulates_across_turns():
-    intent = classify_intent(["What's the latest AMD news?", "how does that affect me?"])
-    assert "portfolio_read" in intent.permitted_domains
-    intent = classify_intent(["Show my account", "what is AMD EPS?"])
-    assert "portfolio_read" in intent.permitted_domains
-    intent = classify_intent(["What's the latest AMD news?", "what is AMD EPS?"])
-    assert "portfolio_read" not in intent.permitted_domains
+    # History-alone-grants-nothing: no combination of user turns authorizes
+    # portfolio access.
+    for turns in [
+        ["What's the latest AMD news?", "how does that affect me?"],
+        ["Show my account", "what is AMD EPS?"],
+        ["What's the latest AMD news?", "what is AMD EPS?"],
+        ["Show my portfolio", "Research AMD news"],
+    ]:
+        intent = classify_intent(turns)
+        assert "portfolio_read" not in intent.permitted_domains, turns
 
 
 def test_classify_intent_request_is_last_turn():
@@ -75,14 +80,19 @@ def test_research_intent_denies_portfolio_tools():
         "get_portfolio_snapshot", {}, run_security
     )
     assert allowed is False
-    assert reason == "tool call exceeds original user intent"
 
 
 def test_portfolio_intent_allows_portfolio_tools():
+    # `portfolio_read` enters only via explicit grant, modeled here with
+    # dataclasses.replace — the same mechanism the approval callback uses.
     run_security = _run_security(["How does today's AMD news affect my portfolio?"])
-    allowed, reason = authorize_tool_call(
-        "get_portfolio_snapshot", {}, run_security
+    allowed, _ = authorize_tool_call("get_portfolio_snapshot", {}, run_security)
+    assert allowed is False
+    run_security.original_intent = replace(
+        run_security.original_intent,
+        permitted_domains=run_security.original_intent.permitted_domains | {"portfolio_read"},
     )
+    allowed, reason = authorize_tool_call("get_portfolio_snapshot", {}, run_security)
     assert allowed is True
     assert reason == ""
 

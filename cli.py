@@ -42,6 +42,28 @@ def _chat(model: str) -> None:
     # only through the explicit `robinhood-login` command.
     context = LOCAL_BROKER_CONTEXT if broker_enabled() else LOCAL_CONTEXT
     messages: list = []
+    portfolio_approved = False
+
+    def approve_portfolio(tool_name: str, _args: dict) -> bool:
+        nonlocal portfolio_approved
+        if portfolio_approved:
+            return True
+        try:
+            if not sys.stdin.isatty():
+                return False
+        except Exception:
+            return False
+        try:
+            answer = input(
+                f"Allow '{tool_name}' to access your portfolio for this session? [y/N]: "
+            ).strip().lower()
+        except EOFError:
+            return False
+        if answer in ("y", "yes"):
+            portfolio_approved = True
+            return True
+        return False
+
     while True:
         try:
             user_input = input("you: ").strip()
@@ -56,6 +78,7 @@ def _chat(model: str) -> None:
             context=context,
             policy=get_local_chat_policy(),
             return_result=True,
+            approve_portfolio=approve_portfolio,
         )
         messages.append({"role": "assistant", "content": result.answer})
         print(f"\nassistant: {result.answer}\n")

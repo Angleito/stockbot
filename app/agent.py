@@ -5,7 +5,8 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import requests
@@ -17,6 +18,7 @@ from .prompts import PROMPT_VERSION, SYSTEM_PROMPT
 from .redact import redact_json, redact_text, redact_value
 from .security import prompt_injection
 from .security.action_policy import (
+    TOOL_DOMAINS,
     authorize_egress,
     authorize_tool_call,
     private_pattern_hit,
@@ -331,6 +333,7 @@ def run_chat(
     return_detailed_trace: bool = False,
     return_result: bool = False,
     mode: str = "quick",
+    approve_portfolio: Callable[[str, dict], bool] | None = None,
 ):
     """Run the tool-calling loop until the model returns plain text.
 
@@ -347,6 +350,9 @@ def run_chat(
         return_result: if True, returns the typed ResearchResult. Takes
             precedence over both trace flags.
         mode: "quick" | "research" | "demo" — recorded on the run.
+        approve_portfolio: first-use portfolio approval `(tool_name, args) -> bool`;
+            True grants `portfolio_read` for the rest of the run. None/False or
+            a raised exception denies that call softly.
     Returns:
         The assistant's final text response (or a tuple with the trace,
         or the ResearchResult when return_result is set).
@@ -357,8 +363,9 @@ def run_chat(
         raise ChatInputError("requested model is not allowed")
     normalized_messages = _normalize_public_messages(messages, policy)
 
-    # Original intent accumulates over ALL user turns in the run's message
-    # history; it gates every tool call (action firewall).
+    # Original intent is the last user turn plus base research domains; it
+    # gates every tool call (action firewall). `portfolio_read` enters only
+    # via first-use approval below.
     run_security = RunSecurityContext(
         original_intent=classify_intent(
             [m["content"] for m in normalized_messages if m["role"] == "user"]
@@ -440,7 +447,7 @@ def run_chat(
         # budget_exhausted, unavailable-data). The recorder is active here.
         text = guard_response(text, run_security, state.run_id)
         if text and "portfolio_read" in run_security.original_intent.permitted_domains:
-            text += "\n\nNote: portfolio access is active for this conversation."
+            text += "\n\nNote: this answer used portfolio data you approved for this session."
         result = _finish_run(
             recorder, state, text, status,
             error_type=error_type, error_message=error_message,
@@ -611,6 +618,22 @@ def run_chat(
                                 intent_allowed, intent_reason = authorize_tool_call(
                                     name, arguments, run_security
                                 )
+                                if not intent_allowed and TOOL_DOMAINS.get(name) == "portfolio_read":
+                                    approved = False
+                                    if approve_portfolio is not None:
+                                        try:
+                                            approved = bool(approve_portfolio(name, arguments))
+                                        except Exception:
+                                            approved = False
+                                    if approved:
+                                        run_security.original_intent = replace(
+                                            run_security.original_intent,
+                                            permitted_domains=run_security.original_intent.permitted_domains
+                                            | {"portfolio_read"},
+                                        )
+                                        intent_allowed, intent_reason = authorize_tool_call(
+                                            name, arguments, run_security
+                                        )
                                 if not intent_allowed:
                                     result = {
                                         "error": "Tool call exceeds original user intent",

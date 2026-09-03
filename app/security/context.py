@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Sequence
@@ -62,59 +61,27 @@ class ContextEnvelope:
 
 @dataclass(frozen=True)
 class OriginalIntent:
-    """The user's original research intent, session-sticky: accumulated over all user turns.
+    """The user's original research intent: the last user turn plus base domains.
 
-    Session = the `messages` list passed to `run_chat`; a new session is an
-    empty list / new chat. Once granted, `portfolio_read` stays for the session.
+    Authorization for `portfolio_read` comes only from explicit session
+    approval (the `approve_portfolio` callback in `run_chat`), never from
+    chat history.
     """
 
     request: str
     permitted_domains: frozenset[str]
 
-
-# Portfolio-interest noun alternation (spec §44).
-_PORTFOLIO_NOUN_RE = re.compile(
-    r"\b(?:portfolio|position|positions|holding|holdings|stake|mandate|thesis"
-    r"|balance|cash|account|invested|cost\s+basis)\b",
-    re.IGNORECASE,
-)
-# First-person possessive/pronoun; "me" and "i" are included so personal
-# follow-ups ("how does that affect me?") classify as portfolio interest.
-_PRONOUN_RE = re.compile(r"\b(?:my|mine|me|i)\b", re.IGNORECASE)
-# Personal-impact verbs that make a first-person pronoun portfolio-relevant.
-_IMPACT_VERB_RE = re.compile(r"\b(?:affect\w*|impact\w*)\b", re.IGNORECASE)
-
-_PRONOUN_WINDOW = 5
-
-
-def _portfolio_interest(text: str) -> bool:
-    """True when the turn expresses personal portfolio/financial interest.
-
-    A generic portfolio noun alone is not enough: it must appear within
-    5 whitespace-delimited tokens of a first-person pronoun, or a first-person
-    pronoun must sit near a personal-impact verb ("how does that affect me?").
-    """
-    tokens = text.split()
-    for i, token in enumerate(tokens):
-        if not _PRONOUN_RE.search(token):
-            continue
-        window = tokens[max(0, i - _PRONOUN_WINDOW): i + _PRONOUN_WINDOW + 1]
-        if any(_PORTFOLIO_NOUN_RE.search(w) or _IMPACT_VERB_RE.search(w) for w in window):
-            return True
-    return False
-
-
 def classify_intent(user_turns: Sequence[str]) -> OriginalIntent:
     """Deterministic classifier: the request is the last user turn; permitted
-    domains are financial/public-web research always, plus portfolio_read when
-    ANY user turn expresses portfolio interest (session-sticky: stays until a
-    new session, i.e. an empty `messages` list / new chat)."""
+    domains are always financial/public-web research. `portfolio_read` is
+    never granted here — only explicit session approval adds it.
+    """
     turns = [t for t in user_turns if isinstance(t, str)]
     request = turns[-1] if turns else ""
-    domains = {"financial_research", "public_web_research"}
-    if any(_portfolio_interest(t) for t in turns):
-        domains.add("portfolio_read")
-    return OriginalIntent(request=request, permitted_domains=frozenset(domains))
+    return OriginalIntent(
+        request=request,
+        permitted_domains=frozenset({"financial_research", "public_web_research"}),
+    )
 
 
 @dataclass
