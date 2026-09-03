@@ -170,6 +170,32 @@ def test_eps_store_as_of_gating_excludes_later_restatement(store):
     assert later["ttm_eps_diluted"] == 4.65
 
 
+def test_derive_q4_uses_restated_fy_total():
+    """A restated FY total (later filed_at, accession tiebreak) drives derived Q4."""
+    from datetime import date
+
+    concept = sec_facts.DILUTED_EPS_CONCEPT
+    fy_end = date(2026, 1, 25)
+
+    def _row(start, end, val, filed, accn):
+        return {
+            "concept": concept, "period_start": start, "period_end": end,
+            "value": val, "filed_at": filed, "accession": accn,
+        }
+
+    rows = [
+        _row("2025-01-27", "2025-10-26", 3.14, "2025-11-19", "a5"),
+        _row("2025-01-27", "2026-01-25", 4.90, "2026-02-25", "a7"),
+        _row("2025-01-27", "2026-01-25", 4.95, "2026-03-10", "b1"),
+        _row("2025-01-27", "2026-01-25", 5.00, "2026-03-10", "b2"),
+    ]
+    derived = sec_facts._derive_q4_from_facts(rows, concept, fy_end)
+    assert derived is not None
+    assert derived["value"] == pytest.approx(5.00 - 3.14, abs=1e-9)
+    assert derived["accession"] == "b2"
+    assert derived["fiscal_period"] == "Q4"
+
+
 # ---------------------------------------------------------------------------
 # Live fallback path
 # ---------------------------------------------------------------------------

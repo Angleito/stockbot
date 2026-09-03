@@ -348,3 +348,44 @@ def test_persist_obligation_events_spans_and_skips(tmp_path):
     assert missing["content_hash"] is None
     assert missing["span_start"] is None
     assert missing["span_end"] is None
+
+
+def test_persist_uses_historical_ticker_owner(tmp_path):
+    """A 2024 filing for a reused ticker resolves to the 2024 owner, not the 2026 one."""
+    from app.domain.market.ids import sec_entity_id
+    from app.normalization import normalize_sec_tickers
+    from app.storage import parquet
+
+    for cik, retrieved in [(111, "2024-06-01T00:00:00Z"), (222, "2026-06-01T00:00:00Z")]:
+        datasets = normalize_sec_tickers(
+            {"0": {"cik_str": cik, "ticker": "XYZ", "title": f"Entity {cik}"}},
+            retrieved_at=retrieved, content_hash=f"tickers-{cik}",
+        )
+        for name, rows in datasets.items():
+            parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    row = _obligation_row(
+        ticker="XYZ", filed="2024-08-01", as_of="2024-08-01",
+        known_at="2024-08-10T00:00:00Z", retrieved_at="2024-08-10T00:00:00Z",
+        content_hash="hist1", _accession="0001",
+    )
+    summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
+    assert summary["events_written"] == 1
+    events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    assert events[0]["entity_id"] == sec_entity_id(111)
+
+
+def test_persist_evidence_ids_distinct_across_tickers(tmp_path):
+    """Same content_hash under two tickers yields two events and two distinct evidence_ids."""
+    from app.storage import parquet
+
+    rows = [
+        _obligation_row(ticker="AAA", content_hash="samehash123", _accession="0001"),
+        _obligation_row(ticker="BBB", content_hash="samehash123", _accession="0001"),
+    ]
+    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
+    assert summary["events_written"] == 2
+    assert summary["evidence_written"] == 2
+    assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 2
+    evidence = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
+    assert len(evidence) == 2
+    assert evidence[0]["evidence_id"] != evidence[1]["evidence_id"]

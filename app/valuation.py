@@ -89,7 +89,12 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
     revenue_matched_b = 0.0
     per_kind: dict[str, dict] = {}
     impact_by_fy: dict[str, dict[str, float]] = {}
-    flat: list[tuple[str, float]] = []
+    flat_annual_by_bucket: dict[str, float] = {
+        "contractual": 0.0,
+        "contingent": 0.0,
+        "default_triggered": 0.0,
+        "revenue_matched": 0.0,
+    }
 
     def _add_fy(year: str, bucket: str, amount: float) -> None:
         year = str(year or "").strip()
@@ -185,16 +190,14 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
                     for i in range(1, years):
                         _add_fy(str(base + i), bucket, tail_per)
             continue
-        flat.append((bucket, annual))
-    for year in list(impact_by_fy):
-        for bucket, annual in flat:
-            impact_by_fy[year][bucket] = impact_by_fy[year].get(bucket, 0.0) + annual
+        flat_annual_by_bucket[bucket] += annual
     return {
         "contractual_annual_billions": round(contractual_b, 3),
         "contingent_annual_billions": round(contingent_b, 3),
         "default_triggered_annual_billions": round(default_triggered_b, 3),
         "revenue_matched_annual_billions": round(revenue_matched_b, 3),
         "per_kind": per_kind,
+        "flat_annual_by_bucket": {k: round(v, 3) for k, v in flat_annual_by_bucket.items()},
         "impact_by_fiscal_year": {
             year: {k: round(v, 3) for k, v in buckets.items()}
             for year, buckets in impact_by_fy.items()
@@ -480,26 +483,27 @@ def get_valuation_metrics(ticker: str) -> dict:
         else None
     )
     impact_by_fy = impact.get("impact_by_fiscal_year") or {}
+    flat_map = impact.get("flat_annual_by_bucket") or {}
 
     def _fy_year(period: dict) -> str | None:
         year = str((period or {}).get("period_end_date") or "")[:4]
         return year or None
 
-    def _fy_ps(year: str | None, key: str, fallback: float | None) -> float | None:
-        if shares_out and year and year in impact_by_fy:
-            return impact_by_fy[year].get(key, 0.0) / (shares_out / 1e9)
-        return fallback
+    def _fy_ps(year: str | None, key: str) -> float | None:
+        if shares_out and year:
+            return (impact_by_fy.get(year, {}).get(key, 0.0) + flat_map.get(key, 0.0)) / (shares_out / 1e9)
+        return None
 
     year_cur = _fy_year(fy_current)
     year_next = _fy_year(fy_next)
-    contractual_cur = _fy_ps(year_cur, "contractual", contractual_ps)
-    contingent_cur = _fy_ps(year_cur, "contingent", contingent_ps)
-    default_cur = _fy_ps(year_cur, "default_triggered", default_triggered_ps)
-    revenue_cur = _fy_ps(year_cur, "revenue_matched", revenue_matched_ps)
-    contractual_next = _fy_ps(year_next, "contractual", contractual_ps)
-    contingent_next = _fy_ps(year_next, "contingent", contingent_ps)
-    default_next = _fy_ps(year_next, "default_triggered", default_triggered_ps)
-    revenue_next = _fy_ps(year_next, "revenue_matched", revenue_matched_ps)
+    contractual_cur = _fy_ps(year_cur, "contractual")
+    contingent_cur = _fy_ps(year_cur, "contingent")
+    default_cur = _fy_ps(year_cur, "default_triggered")
+    revenue_cur = _fy_ps(year_cur, "revenue_matched")
+    contractual_next = _fy_ps(year_next, "contractual")
+    contingent_next = _fy_ps(year_next, "contingent")
+    default_next = _fy_ps(year_next, "default_triggered")
+    revenue_next = _fy_ps(year_next, "revenue_matched")
     forward_eps = {
             "consensus": _eps_line(eps_current, None, None, "consensus"),
             "adjusted": _eps_line(

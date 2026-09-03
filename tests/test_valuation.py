@@ -276,3 +276,60 @@ def test_obligation_annual_impact_direct():
     assert impact["revenue_matched_annual_billions"] == pytest.approx(
         expected_matched, abs=0.1
     )
+
+
+def test_fy_schedule_separation_no_blended_fallback(monkeypatch):
+    """A FY absent from impact_by_fiscal_year must not inherit other years' schedule."""
+    scheduled = {
+        "type": "vendor_commitments",
+        "amount_billions": 30.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+        "schedule": [
+            {"fiscal_year": "2028", "amount_billions": 10.0},
+            {"fiscal_year": "2029", "amount_billions": 10.0},
+            {"fiscal_year": "2030", "amount_billions": 10.0},
+        ],
+    }
+    flat_vendor = {
+        "type": "vendor_commitments",
+        "amount_billions": 6.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+    }
+
+    def _run(rows):
+        monkeypatch.setattr(valuation, "cache", FakeCache())
+        monkeypatch.setattr(valuation, "get_live_price", lambda t: 213.05)
+        monkeypatch.setattr(
+            valuation.analyst_client, "get_analyst_estimates", lambda t: _estimates()
+        )
+        monkeypatch.setattr(
+            valuation.edgar_client, "get_fundamentals", lambda t, m: {"ttm_eps_diluted": 6.53}
+        )
+        monkeypatch.setattr(
+            valuation.obligations, "get_obligations", lambda t: {"obligations": rows}
+        )
+        return valuation.get_valuation_metrics("NVDA")
+
+    shares = 24.221  # 24_221_000_000 from _estimates
+    result = _run([scheduled])
+    fe = result["forward_eps"]
+    assert fe["scenario"].get("contingent_drag_per_share", 0.0) == 0.0
+    assert fe["scenario_next_fy"]["contingent_drag_per_share"] == pytest.approx(
+        10.0 / shares, abs=0.01
+    )
+    impact = valuation._obligation_annual_impact([scheduled], years=6)
+    assert "2027" not in impact["impact_by_fiscal_year"]
+    assert impact["flat_annual_by_bucket"]["contingent"] == 0.0
+
+    result = _run([scheduled, flat_vendor])
+    fe = result["forward_eps"]
+    assert fe["scenario"]["contingent_drag_per_share"] == pytest.approx(
+        1.0 / shares, abs=0.01
+    )
+    impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
+    assert impact["impact_by_fiscal_year"].get("2027", {}).get("contingent", 0.0) == 0.0
+    assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)
