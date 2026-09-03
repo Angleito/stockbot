@@ -146,7 +146,9 @@ def get_robinhood_mcp_url() -> str:
 
 
 def broker_enabled() -> bool:
-    return _env_bool("BROKER_ENABLED") or _env_bool("ROBINHOOD_ENABLED")
+    if os.getenv("BROKER_ENABLED") is not None:
+        return _env_bool("BROKER_ENABLED")
+    return _env_bool("ROBINHOOD_ENABLED")
 
 
 def exa_enabled() -> bool:

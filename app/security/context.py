@@ -62,7 +62,11 @@ class ContextEnvelope:
 
 @dataclass(frozen=True)
 class OriginalIntent:
-    """The user's original research intent, accumulated over all user turns."""
+    """The user's original research intent, session-sticky: accumulated over all user turns.
+
+    Session = the `messages` list passed to `run_chat`; a new session is an
+    empty list / new chat. Once granted, `portfolio_read` stays for the session.
+    """
 
     request: str
     permitted_domains: frozenset[str]
@@ -103,7 +107,8 @@ def _portfolio_interest(text: str) -> bool:
 def classify_intent(user_turns: Sequence[str]) -> OriginalIntent:
     """Deterministic classifier: the request is the last user turn; permitted
     domains are financial/public-web research always, plus portfolio_read when
-    ANY user turn expresses portfolio interest."""
+    ANY user turn expresses portfolio interest (session-sticky: stays until a
+    new session, i.e. an empty `messages` list / new chat)."""
     turns = [t for t in user_turns if isinstance(t, str)]
     request = turns[-1] if turns else ""
     domains = {"financial_research", "public_web_research"}

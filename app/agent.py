@@ -416,15 +416,10 @@ def run_chat(
     # The trusted policy remains the only system message; every tool result
     # passes the security gateway before it may enter model context. Public
     # history has already been normalized to prevent tool metadata or
-    # privileged roles. Caller-supplied assistant turns are scanned INSIDE
-    # the recorder block below (they need the recorder for security events);
-    # only system + user turns are staged here.
+    # privileged roles. Full history is staged in order INSIDE the recorder
+    # block below (assistant turns need the recorder for security events).
     context_builder = ContextBuilder(run_security=run_security, model=model)
     context_builder.add_system(SYSTEM_PROMPT)
-    for message in normalized_messages:
-        if message["role"] == "user":
-            context_builder.add_user(message["content"])
-    msgs = context_builder.render_for_model()
     available_tools = tools_for_capabilities(context.capabilities)
     if context.tool_policy.allowed_tools is not None:
         available_tools = [
@@ -479,31 +474,33 @@ def run_chat(
                 round=0,
                 metadata={"question": request.question, "as_of": request.as_of},
             )
-            # Caller-supplied assistant turns are untrusted history: scan
-            # each for prompt injection before it enters model context.
+            # Conversation history keeps its original interleaving; assistant
+            # turns are untrusted history scanned for prompt injection.
             for message in normalized_messages:
-                if message["role"] != "assistant":
-                    continue
-                assessment = prompt_injection.assess(message["content"])
-                if assessment.verdict != "ALLOW":
-                    context_builder.add_assistant(
-                        "[Assistant message withheld by Stockbot security gateway.]"
-                    )
-                    recorder.record_security_event(
-                        source="assistant_history",
-                        sha256=hashlib.sha256(
-                            message["content"].encode()
-                        ).hexdigest(),
-                        score=assessment.score,
-                        verdict=assessment.verdict,
-                        rule_ids=list(assessment.matched_rules),
-                        decision=(
-                            "blocked" if assessment.verdict == "BLOCK" else "quarantined"
-                        ),
-                        reason="; ".join(assessment.reasons),
-                    )
-                else:
-                    context_builder.add_assistant(message["content"])
+                if message["role"] == "user":
+                    context_builder.add_user(message["content"])
+                elif message["role"] == "assistant":
+                    assessment = prompt_injection.assess(message["content"])
+                    if assessment.verdict != "ALLOW":
+                        context_builder.add_assistant(
+                            "[Assistant message withheld by Stockbot security gateway.]"
+                        )
+                        recorder.record_security_event(
+                            source="assistant_history",
+                            sha256=hashlib.sha256(
+                                message["content"].encode()
+                            ).hexdigest(),
+                            score=assessment.score,
+                            verdict=assessment.verdict,
+                            rule_ids=list(assessment.matched_rules),
+                            decision=(
+                                "blocked" if assessment.verdict == "BLOCK" else "quarantined"
+                            ),
+                            reason="; ".join(assessment.reasons),
+                        )
+                    else:
+                        context_builder.add_assistant(message["content"])
+            msgs = context_builder.render_for_model()
             try:
                 while True:
                     _update_budget(state, budget)
