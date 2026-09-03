@@ -2,11 +2,9 @@
 
 import pytest
 
-from dataclasses import replace
-
 from app.policy import Capability
 from app.security.action_policy import TOOL_DOMAINS, authorize_tool_call
-from app.security.context import RunSecurityContext, classify_intent
+from app.security.context import RunSecurityContext, SessionAuthorization, classify_intent
 from app.tools import PORTFOLIO_AUTHORIZED_TOOLS, TOOL_CAPABILITIES
 
 
@@ -83,15 +81,12 @@ def test_research_intent_denies_portfolio_tools():
 
 
 def test_portfolio_intent_allows_portfolio_tools():
-    # `portfolio_read` enters only via explicit grant, modeled here with
-    # dataclasses.replace — the same mechanism the approval callback uses.
+    # `portfolio_read` lives only in the explicit session grant, modeled here
+    # by direct assignment — the same mechanism the approval callback uses.
     run_security = _run_security(["How does today's AMD news affect my portfolio?"])
     allowed, _ = authorize_tool_call("get_portfolio_snapshot", {}, run_security)
     assert allowed is False
-    run_security.original_intent = replace(
-        run_security.original_intent,
-        permitted_domains=run_security.original_intent.permitted_domains | {"portfolio_read"},
-    )
+    run_security.authorization = SessionAuthorization(portfolio_read=True)
     allowed, reason = authorize_tool_call("get_portfolio_snapshot", {}, run_security)
     assert allowed is True
     assert reason == ""

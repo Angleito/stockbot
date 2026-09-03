@@ -6,7 +6,6 @@ import logging
 import subprocess
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import requests
@@ -23,7 +22,7 @@ from .security.action_policy import (
     authorize_tool_call,
     private_pattern_hit,
 )
-from .security.context import RunSecurityContext, classify_intent
+from .security.context import RunSecurityContext, SessionAuthorization, classify_intent
 from .security.context_builder import ContextBuilder
 from .security.response_guard import guard_response
 from .runtime import (
@@ -334,6 +333,7 @@ def run_chat(
     return_result: bool = False,
     mode: str = "quick",
     approve_portfolio: Callable[[str, dict], bool] | None = None,
+    session_authorization: SessionAuthorization | None = None,
 ):
     """Run the tool-calling loop until the model returns plain text.
 
@@ -351,8 +351,11 @@ def run_chat(
             precedence over both trace flags.
         mode: "quick" | "research" | "demo" — recorded on the run.
         approve_portfolio: first-use portfolio approval `(tool_name, args) -> bool`;
-            True grants `portfolio_read` for the rest of the run. None/False or
+            True grants `portfolio_read` for the rest of the run and, when the
+            caller holds the grant, for later runs seeded with it. None/False or
             a raised exception denies that call softly.
+        session_authorization: explicit session grant seeding this run;
+            deny-by-default when None.
     Returns:
         The assistant's final text response (or a tuple with the trace,
         or the ResearchResult when return_result is set).
@@ -364,13 +367,17 @@ def run_chat(
     normalized_messages = _normalize_public_messages(messages, policy)
 
     # Original intent is the last user turn plus base research domains; it
-    # gates every tool call (action firewall). `portfolio_read` enters only
-    # via first-use approval below.
+    # gates every tool call (action firewall) together with the explicit
+    # session grant. `portfolio_read` lives only in `authorization`, never in
+    # `permitted_domains`.
     run_security = RunSecurityContext(
         original_intent=classify_intent(
             [m["content"] for m in normalized_messages if m["role"] == "user"]
         ),
         capabilities=frozenset(cap.name for cap in context.capabilities),
+        authorization=session_authorization
+        if session_authorization is not None
+        else SessionAuthorization(),
     )
 
     # The question is redacted before it enters the observability path
@@ -446,7 +453,7 @@ def run_chat(
         # Response DLP runs on every final answer path (completed, partial,
         # budget_exhausted, unavailable-data). The recorder is active here.
         text = guard_response(text, run_security, state.run_id)
-        if text and "portfolio_read" in run_security.original_intent.permitted_domains:
+        if text and run_security.private_ingress:
             text += "\n\nNote: this answer used portfolio data you approved for this session."
         result = _finish_run(
             recorder, state, text, status,
@@ -626,10 +633,8 @@ def run_chat(
                                         except Exception:
                                             approved = False
                                     if approved:
-                                        run_security.original_intent = replace(
-                                            run_security.original_intent,
-                                            permitted_domains=run_security.original_intent.permitted_domains
-                                            | {"portfolio_read"},
+                                        run_security.authorization = SessionAuthorization(
+                                            portfolio_read=True
                                         )
                                         intent_allowed, intent_reason = authorize_tool_call(
                                             name, arguments, run_security
@@ -792,6 +797,8 @@ def run_chat(
                                 name, result, rendered, tc.get("id", "")
                             )
                             if allowed:
+                                if TOOL_DOMAINS.get(name) == "portfolio_read":
+                                    run_security.private_ingress = True
                                 final_text = (
                                     context_builder.last_appended_text or rendered
                                 )

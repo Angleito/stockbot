@@ -26,7 +26,7 @@ from app.tools import TOOL_CAPABILITIES
 
 def _run_security():
     return RunSecurityContext(
-        original_intent=OriginalIntent(request="q", permitted_domains=frozenset({"financial_research", "public_web_research", "portfolio_read"})),
+        original_intent=OriginalIntent(request="q", permitted_domains=frozenset({"financial_research", "public_web_research"})),
         capabilities=frozenset({"research", "portfolio_read"}),
     )
 

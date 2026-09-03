@@ -1634,3 +1634,122 @@ def test_portfolio_history_alone_grants_nothing(monkeypatch):
         e["decision"] == "action_blocked" and e["source"] == name
         for e in get_security_events(result.run_id)
     )
+
+
+def test_portfolio_grant_carries_across_runs(monkeypatch):
+    """Session-open: one approval covers later runs seeded with the grant."""
+    from dataclasses import replace
+
+    from app.security.context import SessionAuthorization
+
+    name = _portfolio_tool_name()
+    session_auth = SessionAuthorization(portfolio_read=False)
+    approvals = []
+
+    def approve(tool_name, args):
+        nonlocal session_auth
+        approvals.append(tool_name)
+        session_auth = replace(session_auth, portfolio_read=True)
+        return True
+
+    executed = []
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda n, a, model, **kwargs: executed.append(n) or {"result_type": "portfolio_snapshot", "source": "test"},
+    )
+    monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+        _final("First summary."),
+    ]))
+    first = run_chat(
+        [{"role": "user", "content": "Show my portfolio"}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        approve_portfolio=approve,
+        session_authorization=session_auth,
+    )
+    monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+        _final("Second summary."),
+    ]))
+    second = run_chat(
+        [{"role": "user", "content": "Show my portfolio again"}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        approve_portfolio=approve,
+        session_authorization=session_auth,
+    )
+    assert executed == [name, name]
+    assert approvals == [name]
+    suffix = "Note: this answer used portfolio data you approved for this session."
+    assert first.answer.endswith(suffix)
+    assert second.answer.endswith(suffix)
+
+
+def test_approved_session_blocks_private_egress(monkeypatch):
+    """Approved session + injected portfolio proposal executes, but the
+    follow-on private->Exa query is still blocked by the egress firewall."""
+    from app.security.context import SessionAuthorization
+    from app.storage.runs import get_security_events
+
+    name = _portfolio_tool_name()
+    fake = FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+        _tool_round("search_web", {"query": "User owns 2843 AMD shares worth $417,921"}),
+        _final("Summary after block."),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    executed = []
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda n, a, model, **kwargs: executed.append(n) or {"result_type": "portfolio_snapshot", "source": "test"},
+    )
+    result = run_chat(
+        [{"role": "user", "content": "Research AMD news."}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        session_authorization=SessionAuthorization(portfolio_read=True),
+    )
+    assert executed == [name]
+    calls = get_tool_calls(result.run_id)
+    assert calls[1]["error_type"] == "egress_denied"
+    assert any(
+        e["decision"] == "egress_blocked" for e in get_security_events(result.run_id)
+    )
+    assert result.answer.startswith("Summary after block.")
+
+
+def test_approved_error_result_carries_no_suffix(monkeypatch):
+    """Approval granted but the portfolio result errors (quarantined, never
+    labeled): the final answer carries no portfolio notice."""
+    name = _portfolio_tool_name()
+    fake = FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+    ])
+    monkeypatch.setattr(agent, "_call_openrouter", fake)
+    executed = []
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda n, a, model, **kwargs: executed.append(n) or {"error": "upstream auth failed: sk-or-v1-abcdefghijklmnop"},
+    )
+    result = run_chat(
+        [{"role": "user", "content": "Show my portfolio"}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        approve_portfolio=lambda n, a: True,
+    )
+    assert executed == [name]
+    assert "Note: this answer used portfolio data" not in result.answer
+    assert "sk-or-v1-abcdefghijklmnop" not in result.answer
+    assert get_run(result.run_id)["status"] == "partial"

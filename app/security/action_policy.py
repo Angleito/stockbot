@@ -84,8 +84,12 @@ class EgressDecision:
 def authorize_tool_call(
     name: str, arguments: dict, run_security: RunSecurityContext
 ) -> tuple[bool, str]:
-    """Gate one tool call against the original intent's permitted domains."""
+    """Gate one tool call against intent plus the explicit session grant."""
     domain = TOOL_DOMAINS.get(name)
+    if domain == "portfolio_read":
+        if run_security.authorization.portfolio_read:
+            return True, ""
+        return False, "tool call exceeds original user intent"
     if domain is not None and domain in run_security.original_intent.permitted_domains:
         return True, ""
     return False, "tool call exceeds original user intent"

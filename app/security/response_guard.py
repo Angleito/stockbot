@@ -33,9 +33,9 @@ def _find_spans(text: str, run_security: RunSecurityContext) -> list[tuple[str, 
         for name, pattern in _ALWAYS_STRIP
         for match in pattern.finditer(text)
     ]
-    if "portfolio_read" not in run_security.original_intent.permitted_domains:
+    if not run_security.authorization.portfolio_read:
         # Defense in depth: account identifiers are portfolio content, only
-        # legitimate when the user actually asked for portfolio data.
+        # legitimate with an explicit session grant.
         spans.extend(
             ("account_id", match.group(0))
             for match in _ACCOUNT_ID_RE.finditer(text)

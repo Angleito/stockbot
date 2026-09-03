@@ -53,12 +53,14 @@ def run_evals(eval_file: str, models: list[str]) -> dict:
                 continue
 
             try:
+                approval = (lambda name, args: True) if case.get("approve_portfolio") else None
                 response, detailed = run_chat(
                     [{"role": "user", "content": question}],
                     model=model,
                     context=case_context,
                     policy=get_local_chat_policy(),
                     return_detailed_trace=True,
+                    approve_portfolio=approval,
                 )
                 trace = [t["name"] for t in detailed]
                 resp_lower = response.lower()

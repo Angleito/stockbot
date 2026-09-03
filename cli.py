@@ -6,12 +6,14 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from dataclasses import replace
 
 from app.agent import run_chat
 from app.config import broker_enabled, configure_logging, get_default_model, get_local_chat_policy
 from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
 from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
 from app.robinhood.auth import DEFAULT_TOKEN_PATH
+from app.security.context import SessionAuthorization
 from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data, replay_sec_facts_from_archive
@@ -42,12 +44,10 @@ def _chat(model: str) -> None:
     # only through the explicit `robinhood-login` command.
     context = LOCAL_BROKER_CONTEXT if broker_enabled() else LOCAL_CONTEXT
     messages: list = []
-    portfolio_approved = False
+    session_auth = SessionAuthorization(portfolio_read=False)
 
     def approve_portfolio(tool_name: str, _args: dict) -> bool:
-        nonlocal portfolio_approved
-        if portfolio_approved:
-            return True
+        nonlocal session_auth
         try:
             if not sys.stdin.isatty():
                 return False
@@ -60,7 +60,7 @@ def _chat(model: str) -> None:
         except EOFError:
             return False
         if answer in ("y", "yes"):
-            portfolio_approved = True
+            session_auth = replace(session_auth, portfolio_read=True)
             return True
         return False
 
@@ -79,6 +79,7 @@ def _chat(model: str) -> None:
             policy=get_local_chat_policy(),
             return_result=True,
             approve_portfolio=approve_portfolio,
+            session_authorization=session_auth,
         )
         messages.append({"role": "assistant", "content": result.answer})
         print(f"\nassistant: {result.answer}\n")

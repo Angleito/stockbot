@@ -245,6 +245,7 @@
     "question": "How does recent news affect my AMD thesis?",
     "ticker": "AMD",
     "context": "broker",
+    "approve_portfolio": true,
     "expected_behavior": {
       "required_tools": [
         "search_web"
@@ -303,6 +304,7 @@
     "id": 27,
     "question": "What's my Robinhood portfolio worth?",
     "context": "broker",
+    "approve_portfolio": true,
     "expected_behavior": {
       "expected_tools": ["get_portfolio_snapshot"],
       "must_contain": [],
