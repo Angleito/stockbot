@@ -121,6 +121,21 @@ def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict:
     }
 
 
+def _normalize_and_write_company_facts(
+    cik: int, payload: bytes, *, retrieved_at: str, url: str, data_root: Path,
+) -> int:
+    """Shared normalize -> Parquet step behind refresh and archive replay."""
+    content_hash = raw_archive.content_hash(payload)
+    datasets = normalize_sec_company_facts(
+        json.loads(payload), retrieved_at=retrieved_at, content_hash=content_hash,
+        source_url=url, source_record_id=f"cik{cik:010d}",
+    )
+    return sum(
+        parquet.write_rows(name, rows, root=data_root / "parquet")
+        for name, rows in datasets.items()
+    )
+
+
 def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict:
     data_root = Path(data_root or DEFAULT_DATA_ROOT)
     now = _utc_now()
@@ -131,13 +146,8 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
         "sec", f"cik{cik:010d}", "companyfacts", payload,
         url=url, retrieved_at=now, root=data_root / "raw",
     )
-    datasets = normalize_sec_company_facts(
-        json.loads(payload), retrieved_at=now, content_hash=content_hash,
-        source_url=url, source_record_id=f"cik{cik:010d}",
-    )
-    written = sum(
-        parquet.write_rows(name, rows, root=data_root / "parquet")
-        for name, rows in datasets.items()
+    written = _normalize_and_write_company_facts(
+        cik, payload, retrieved_at=now, url=url, data_root=data_root,
     )
     return {
         "source": "sec:companyfacts",
@@ -145,6 +155,48 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
         "written": written,
         "content_hash": content_hash,
         "retrieved_at": now,
+    }
+
+
+def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
+    """Replay archived SEC companyfacts payloads through normalize -> Parquet.
+
+    Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
+    Uses each manifest's ``retrieved_at`` (not the wall clock) so replayed
+    rows are deterministic; existing rows dedup to zero writes.  Failures are
+    isolated per payload and reported, never raised mid-iteration.
+    """
+    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    raw_root = data_root / "raw"
+    archived_payloads = 0
+    written_rows = 0
+    failed: list[dict] = []
+    sec_dir = raw_root / "sec"
+    if sec_dir.is_dir():
+        for cik_dir in sorted(p for p in sec_dir.iterdir() if p.is_dir()):
+            if not (cik_dir / "companyfacts").is_dir():
+                continue
+            for record in raw_archive.iter_archive("sec", cik_dir.name, "companyfacts", root=raw_root):
+                archived_payloads += 1
+                try:
+                    cik = int(str(cik_dir.name).removeprefix("cik"))
+                    written_rows += _normalize_and_write_company_facts(
+                        cik, record.payload_path.read_bytes(),
+                        retrieved_at=record.retrieved_at, url=record.url,
+                        data_root=data_root,
+                    )
+                except Exception as exc:
+                    failed.append({
+                        "cik": cik_dir.name,
+                        "sha256": record.sha256,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+    return {
+        "source": "sec",
+        "kind": "companyfacts",
+        "archived_payloads": archived_payloads,
+        "written_rows": written_rows,
+        "failed": failed,
     }
 
 

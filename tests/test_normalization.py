@@ -13,6 +13,7 @@ from app.normalization import (
     normalize_sec_company_facts,
     normalize_finra_short_interest,
 )
+from app.storage import parquet
 
 RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
@@ -25,6 +26,22 @@ def _facts_payload(cik=1, facts=None):
     return {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
         "EntityCommonStockSharesOutstanding": {"units": {"shares": facts or []}},
     }}}
+
+def _eps_payload(cik=1, diluted=None, basic=None):
+    """Companyfacts payload with us-gaap EPS concepts (USD/shares units)."""
+    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"us-gaap": {}}}
+    if diluted is not None:
+        payload["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {"units": {"USD/shares": diluted}}
+    if basic is not None:
+        payload["facts"]["us-gaap"]["EarningsPerShareBasic"] = {"units": {"USD/shares": basic}}
+    return payload
+
+
+def _normalize(payload):
+    return normalize_sec_company_facts(
+        payload, retrieved_at=RETRIEVED_AT, content_hash="h1",
+        source_url="u", source_record_id="cik0000000001",
+    )
 
 
 def test_ticker_normalization():
@@ -159,3 +176,74 @@ def test_short_interest_corrected_snapshot_is_new_version():
         content_hash="v2-hash", source_url="u", source_record_id="r",
     )
     assert v1["short_interest"][0]["row_id"] != v2["short_interest"][0]["row_id"]
+
+def test_eps_facts_normalized_with_period_metadata():
+    diluted = [{
+        "start": "2025-05-01", "end": "2025-07-31", "val": 1.5, "accn": "a1",
+        "fy": 2025, "fp": "Q2", "filed": "2025-08-28",
+    }]
+    basic = [{
+        "start": "2025-05-01", "end": "2025-07-31", "val": 1.52, "accn": "a2",
+        "fy": 2025, "fp": "Q2", "filed": "2025-08-28",
+    }]
+    datasets = _normalize(_eps_payload(diluted=diluted, basic=basic))
+    facts = {f["concept"]: f for f in datasets["financial_facts"]}
+    assert set(facts) == {"EarningsPerShareDiluted", "EarningsPerShareBasic"}
+    diluted_row = facts["EarningsPerShareDiluted"]
+    assert diluted_row["original_concept"] == "us-gaap:EarningsPerShareDiluted"
+    assert diluted_row["unit"] == "USD/shares"
+    assert diluted_row["value"] == 1.5
+    assert diluted_row["duration_type"] == "duration"
+    assert diluted_row["period_start"] == "2025-05-01"
+    assert diluted_row["period_end"] == "2025-07-31"
+    assert diluted_row["fiscal_year"] == 2025
+    assert diluted_row["fiscal_period"] == "Q2"
+    assert diluted_row["known_at"] == "2025-08-28"
+    assert diluted_row["parser_version"] == "sec-companyfacts-v3"
+    assert diluted_row["parser_version"] == COMPANY_FACTS_PARSER_VERSION
+
+
+def test_eps_instant_fact_without_period_metadata_is_nullable():
+    datasets = _normalize(_eps_payload(diluted=[
+        {"end": "2025-01-31", "val": 0.01, "accn": "a1", "filed": "2025-03-03"},
+    ]))
+    (row,) = datasets["financial_facts"]
+    assert row["duration_type"] == "instant"
+    assert row["period_start"] is None
+    assert row["fiscal_year"] is None
+    assert row["fiscal_period"] is None
+
+
+def test_eps_non_usd_shares_units_are_ignored():
+    payload = _eps_payload()
+    payload["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {
+        "units": {
+            "USD": [{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
+            "shares": [{"end": "2025-07-31", "val": 2, "accn": "a2", "filed": "2025-08-28"}],
+        },
+    }
+    datasets = _normalize(payload)
+    assert datasets["financial_facts"] == []
+
+
+def test_malformed_eps_facts_are_skipped_without_crash():
+    datasets = _normalize(_eps_payload(diluted=[
+        {"end": "2025-07-31", "val": "not-a-number", "accn": "a1", "filed": "2025-08-28"},
+        {"end": "2025-07-31", "val": 1.0, "accn": "a2"},            # missing filed
+        {"end": "2025-07-31", "val": 1.0, "filed": "2025-08-28"},   # missing accn
+        {"val": 1.0, "accn": "a4", "filed": "2025-08-28"},          # missing end
+    ]))
+    assert datasets["financial_facts"] == []
+
+
+def test_eps_rows_dedup_on_rerun(tmp_path):
+    datasets = _normalize(_eps_payload(
+        diluted=[{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
+        basic=[{"end": "2025-07-31", "val": 1.52, "accn": "a2", "filed": "2025-08-28"}],
+    ))
+    root = tmp_path / "parquet"
+    assert parquet.write_rows("financial_facts", datasets["financial_facts"], root=root) == 2
+    assert parquet.write_rows("financial_facts", datasets["financial_facts"], root=root) == 0
+    table = parquet.read_table("financial_facts", root=root)
+    assert table.num_rows == 2
+    assert set(table.column("concept").to_pylist()) == {"EarningsPerShareDiluted", "EarningsPerShareBasic"}

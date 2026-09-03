@@ -11,7 +11,7 @@ from app.config import get_default_model, get_local_chat_policy
 from app.policy import LOCAL_CONTEXT
 from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
-from app.services.research_data import prepare_short_interest_data
+from app.services.research_data import prepare_short_interest_data, replay_sec_facts_from_archive
 from app.storage import duckdb
 from app.tool_render import issue_to_prose
 from app.storage.runs import (
@@ -96,6 +96,18 @@ def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int])
     for fail in summary["failed_enrichments"]:
         print(f"Enrichment failed: ticker={fail['ticker']} cik={fail['cik']} error={fail['error']}")
     print(f"Leaderboard entries: {[e['ticker'] for e in result.get('entries', [])]}")
+
+
+def _cmd_replay_sec_facts() -> None:
+    summary = replay_sec_facts_from_archive()
+    print(json.dumps(summary, indent=2))
+
+
+def _cmd_refresh_obligations(ticker: str) -> None:
+    from app import obligations
+
+    result = obligations.get_obligations(ticker, persist=True)
+    print(json.dumps(result, indent=2))
 
 
 def _cmd_inspect(run_id: str) -> None:
@@ -200,9 +212,11 @@ def main() -> None:
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
     refresh_parser.add_argument("--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)")
     refresh_parser.add_argument("--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)")
+    subparsers.add_parser("replay-sec-facts", help="replay archived SEC companyfacts payloads into the Parquet store (offline)")
+    obligations_parser = subparsers.add_parser("refresh-obligations", help="extract obligations for a ticker and persist events/evidence into the store")
+    obligations_parser.add_argument("ticker", help="ticker, e.g. NVDA")
     mandate_parser = subparsers.add_parser("evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot")
     mandate_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
-    mandate_parser.add_argument("--mandate", default=None, help="mandate JSON file (default: <data-root>/mandate.json)")
     args = parser.parse_args()
 
     if args.command == "runs":
@@ -211,6 +225,10 @@ def main() -> None:
         _cmd_inspect(args.run_id)
     elif args.command == "refresh-data":
         _cmd_refresh_data(args.settlement_date, args.ticker, args.cik)
+    elif args.command == "replay-sec-facts":
+        _cmd_replay_sec_facts()
+    elif args.command == "refresh-obligations":
+        _cmd_refresh_obligations(args.ticker)
     elif args.command == "evaluate-mandate":
         data_root = args.data_root or None
         mandate_path = (

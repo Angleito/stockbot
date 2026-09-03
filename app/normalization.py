@@ -10,10 +10,12 @@ from typing import Any, Optional
 from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
-COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v2"
+COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v3"
 
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
 _ORIGINAL_CONCEPT = "dei:EntityCommonStockSharesOutstanding"
+EPS_UNIT = "USD/shares"
+EPS_CONCEPT_NAMES: tuple[str, ...] = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
 
 CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
     "Revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
@@ -91,9 +93,29 @@ def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     return entries
 
 
+def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+    """Per-share earnings facts, accepted only under the ``USD/shares`` unit."""
+    entries: list[tuple[str, str, str, dict]] = []
+    namespaces = raw.get("facts") or {}
+    if not isinstance(namespaces, dict):
+        return entries
+    for namespace, concepts in namespaces.items():
+        if not isinstance(concepts, dict):
+            continue
+        for tag, payload in concepts.items():
+            if tag not in EPS_CONCEPT_NAMES:
+                continue
+            units = (payload or {}).get("units") or {}
+            for fact in units.get(EPS_UNIT) or []:
+                if isinstance(fact, dict):
+                    entries.append((tag, f"{namespace}:{tag}", EPS_UNIT, fact))
+    return entries
+
+
 def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
     entries.extend(_extract_canonical_facts(raw))
+    entries.extend(_extract_eps_facts(raw))
     return entries
 
 
@@ -137,6 +159,13 @@ def normalize_sec_company_facts(
             continue
         if not period_end or not filed_at or not accession:
             continue
+        start_raw = fact.get("start")
+        period_start = str(start_raw) if start_raw else None
+        try:
+            fiscal_year = int(fact.get("fy"))
+        except (TypeError, ValueError):
+            fiscal_year = None
+        fiscal_period = str(fact.get("fp") or "") or None
         duration_type = "duration" if fact.get("start") else "instant"
         financial_facts.append({
             "fact_id": ids.sec_fact_id(cik, accession, concept, period_end, value),
@@ -148,6 +177,9 @@ def normalize_sec_company_facts(
             "unit": unit,
             "duration_type": duration_type,
             "period_end": period_end,
+            "period_start": period_start,
+            "fiscal_year": fiscal_year,
+            "fiscal_period": fiscal_period,
             "filed_at": filed_at,
             "accession": accession,
             "frame": fact.get("frame"),

@@ -29,12 +29,14 @@ from typing import Optional
 
 from . import cache
 from . import edgar_client
+from .domain.events import sec_evidence_id, sec_event_id
 
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 86400
 
 PARSER_VERSION = "obligations-v2"
+_ARCHIVE_KIND = "filing-note-text"
 
 # ---------------------------------------------------------------------------
 # Layer 1: standardized XBRL obligation concepts
@@ -126,9 +128,9 @@ _CANCEL_LANGUAGE = (
     "in the event of default",
 )
 
-_DEFAULT_TRIGGERED_TYPES = ("8k_guarantees", "facility_lease_guarantees", "guarantees")
+DEFAULT_TRIGGERED_TYPES = ("8k_guarantees", "facility_lease_guarantees", "guarantees")
 
-_REVENUE_MATCHED_KINDS = ("supply",)
+REVENUE_MATCHED_KINDS = ("supply",)
 
 # 8-K material-agreement guarantee language.
 _8K_GUARANTEE_RE = re.compile(
@@ -257,31 +259,75 @@ def _parse_sentence_amounts(note_text: str) -> list[dict]:
     return rows
 
 
+def _parse_table_schedule(note_text: str) -> list[dict] | None:
+    """Per-year schedule from an explicit fiscal-year table, else None."""
+    table = _parse_fiscal_year_table(note_text)
+    if len(table) < 2:
+        return None
+    schedule = []
+    for r in table:
+        m = re.search(r"20\d\d", str(r["fiscal_year"]))
+        if not m:
+            continue
+        schedule.append({"fiscal_year": m.group(0), "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
+    return schedule if len(schedule) >= 2 else None
+
+
+def _parse_prose_schedule(note_text: str) -> list[dict] | None:
+    """Per-year schedule from prose like '$7B, $6B ... paid in FY 2027, 2028 ...'."""
+    for sentence in re.split(r"\.\s+", note_text):
+        if "will be paid in fiscal year" not in sentence.lower():
+            continue
+        amounts_part, _, years_part = sentence.partition("will be paid")
+        if "for which" in amounts_part:
+            amounts_part = amounts_part.split("for which", 1)[1]
+        amounts = [round(_billion(a, u), 3) for a, u in _AMOUNT_RE.findall(amounts_part)]
+        years = re.findall(r"20\d\d", years_part)
+        if len(amounts) >= 2 and len(amounts) == len(years):
+            return [{"fiscal_year": y, "amount_billions": a} for y, a in zip(years, amounts)]
+    return None
+
+
+def _parse_front_horizon(note_text: str, amount_billions: float) -> dict | None:
+    """Front-loaded horizon when text says substantially all/majority paid through FY."""
+    m = re.search(
+        r"(substantially all|majority)[^.]{0,120}?paid through fiscal year\s*(20\d\d)",
+        note_text, re.I,
+    )
+    if not m:
+        return None
+    return {
+        "paid_in_remainder_of_fy": m.group(2),
+        "paid_in_remainder_billions": round(amount_billions, 3),
+        "paid_after_remainder_billions": 0.0,
+    }
+
+
+
+
 def _latest_report(ticker: str, form: str):
     """Latest filing object + metadata for one form (10-Q or 10-K)."""
-    from edgar import Company
-
-    edgar_client._ensure_init()
-    company = Company(ticker)
-    filings = company.get_filings(form=[form])
-    if not filings:
-        return None
-    filing = filings[0]
-    return filing, filing.obj()
+    return edgar_client.get_latest_report(ticker, form)
 
 
 def _xbrl_obligations(ticker: str) -> list[dict]:
     """Layer 1: standardized us-gaap obligation concepts."""
-    from edgar import Company
-
-    edgar_client._ensure_init()
     try:
-        facts = Company(ticker).get_facts().to_dataframe()
+        facts = edgar_client.get_company(ticker).get_facts().to_dataframe()
     except Exception as e:
         logger.warning("xbrl obligations failed for %s: %s", ticker, e)
         return []
     rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    # Company facts aggregate every filing; the facts frame exposes no
+    # per-fact filing date, so the latest 10-K/10-Q filing date stands in
+    # as the row's filed date (never period_end — see persist known_at).
+    filing_date: Optional[str] = None
+    for form in ("10-K", "10-Q"):
+        found = _latest_report(ticker, form)
+        if found is not None:
+            filing_date = str(found[0].filing_date)
+            break
     for concept in facts["concept"].unique():
         for needle, kind in _XBRL_OBLIGATION_CONCEPTS.items():
             if needle not in concept:
@@ -306,7 +352,7 @@ def _xbrl_obligations(ticker: str) -> list[dict]:
                     "revenue_matched": False,
                     "default_triggered": False,
                     "source": f"SEC EDGAR XBRL {concept}",
-                    "filed": period_end,
+                    "filed": filing_date,
                     "as_of": period_end,
                     "excerpt": f"XBRL fact {concept} = {value:,.0f} as of {period_end}",
                     "concept": concept,
@@ -363,7 +409,7 @@ def _targeted_balance_rows(title: str, md: str, filing, present_kinds: set) -> l
     return rows
 
 
-def _note_obligations(ticker: str) -> list[dict]:
+def _note_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
     """Layer 2: note-text extraction from latest 10-Q and 10-K."""
     rows: list[dict] = []
     for form in ("10-Q", "10-K"):
@@ -374,6 +420,7 @@ def _note_obligations(ticker: str) -> list[dict]:
         notes = getattr(doc, "notes", None)
         if notes is None:
             continue
+        start = len(rows)
         notes_md = {}
         for kw, _needles in _NOTE_KEYWORDS.items():
             for note in notes.search(kw)[:2]:
@@ -387,6 +434,8 @@ def _note_obligations(ticker: str) -> list[dict]:
             rows.extend(
                 _targeted_balance_rows(title, md, filing, present_kinds)
             )
+        if notes_md:
+            _annotate_archive(rows[start:], ticker, filing, "\n\n".join(notes_md.values()), archive=archive)
     return rows
 
 
@@ -485,14 +534,30 @@ def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
                     certainty = s["certainty"]
             else:
                 continue
+            payment_horizon = None
+            schedule = None
+            if kind == "cloud":
+                prose = _parse_prose_schedule(md)
+                if prose is not None:
+                    payment_horizon = {"schedule": prose}
+            elif kind in ("supply", "investment"):
+                payment_horizon = _parse_front_horizon(md, s["amount_billions"])
+            elif kind == "operating_leases":
+                table_sched = _parse_table_schedule(md)
+                if table_sched is not None:
+                    total = sum(y["amount_billions"] for y in table_sched)
+                    if total and abs(total - s["amount_billions"]) / total < 0.1:
+                        schedule = table_sched
             rows.append(
                 {
                     "type": kind,
                     "amount_billions": s["amount_billions"],
                     "certainty": certainty,
                     "status": status,
-                    "revenue_matched": kind in _REVENUE_MATCHED_KINDS,
-                    "default_triggered": kind in _DEFAULT_TRIGGERED_TYPES,
+                    "revenue_matched": kind in REVENUE_MATCHED_KINDS,
+                    "default_triggered": kind in DEFAULT_TRIGGERED_TYPES,
+                    "payment_horizon": payment_horizon,
+                    "schedule": schedule,
                     "source": f"SEC EDGAR {filing.filing_date} {title} note",
                     "filed": str(filing.filing_date),
                     "as_of": str(filing.filing_date),
@@ -501,10 +566,8 @@ def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
             )
 
 
-def _balance_sheet_liabilities(ticker: str) -> list[dict]:
+def _balance_sheet_liabilities(ticker: str, *, archive: bool = False) -> list[dict]:
     """Layer 3: balance-sheet liabilities with on-balance-sheet status."""
-    from edgar import Company
-
     rows: list[dict] = []
     try:
         found = _latest_report(ticker, "10-Q")
@@ -515,6 +578,7 @@ def _balance_sheet_liabilities(ticker: str) -> list[dict]:
         filing, doc = found
         bs = doc.financials.balance_sheet()
         md = bs.to_markdown() if hasattr(bs, "to_markdown") else str(bs)
+        start = len(rows)
         for field, label in _BS_LINE_ITEMS:
             match = re.search(
                 rf"{re.escape(label)}[^|]*\|\s*\$?([\d,]+)", md
@@ -537,23 +601,23 @@ def _balance_sheet_liabilities(ticker: str) -> list[dict]:
                     "excerpt": f"Balance sheet line item: {label}",
                 }
             )
+        _annotate_archive(rows[start:], ticker, filing, md, archive=archive)
     except Exception as e:
         logger.warning("balance sheet obligations failed for %s: %s", ticker, e)
     return rows
 
 
-def _scan_8k_obligations(ticker: str) -> list[dict]:
+def _scan_8k_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
     """Recent 8-K material agreements with quantified guarantees."""
-    from edgar import Company
-
     rows: list[dict] = []
     try:
-        company = Company(ticker)
+        company = edgar_client.get_company(ticker)
         filings = company.get_filings(form=["8-K"])
     except Exception as e:
         logger.warning("8-K scan failed for %s: %s", ticker, e)
         return rows
     for filing in filings[:6]:
+        start = len(rows)
         try:
             obj = filing.obj()
             items = getattr(obj, "items", []) or []
@@ -580,6 +644,8 @@ def _scan_8k_obligations(ticker: str) -> list[dict]:
                         "excerpt": _excerpt(text, m.start(), m.end()),
                     }
                 )
+            if len(rows) > start:
+                _annotate_archive(rows[start:], ticker, filing, text, archive=archive)
         except Exception as e:
             logger.warning("8-K %s scan error: %s", filing.accession_no, e)
     return rows
@@ -587,6 +653,40 @@ def _scan_8k_obligations(ticker: str) -> list[dict]:
 
 def _known_at() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _archive_filing_text(ticker: str, filing, text: str, *, archive: bool = False) -> Optional[tuple[str, str]]:
+    """Archive one distinct report text write-once; returns (key, sha256)."""
+    from .storage import raw_archive
+
+    if not archive or not text:
+        return None
+    payload = text.encode("utf-8")
+    sha = raw_archive.content_hash(payload)
+    accession = str(getattr(filing, "accession_no", None) or "")
+    key = (
+        f"filing-text:{ticker}:{getattr(filing, 'filing_date', '')}:"
+        f"{accession or sha[:8]}"
+    )
+    try:
+        record = raw_archive.archive(
+            "sec", _ARCHIVE_KIND, key, payload,
+            url="", retrieved_at=_known_at(),
+        )
+    except OSError:
+        return None
+    return record.key, sha
+
+
+def _annotate_archive(rows: list[dict], ticker: str, filing, text: str, *, archive: bool = False) -> None:
+    """Attach the archived report reference to rows produced from a filing."""
+    archived = _archive_filing_text(ticker, filing, text, archive=archive)
+    if archived is None:
+        return
+    key, sha = archived
+    for row in rows:
+        row["_archive_key"] = key
+        row["_archive_sha"] = sha
+        row["_accession"] = str(getattr(filing, "accession_no", None) or "")
 
 
 def _content_hash(row: dict) -> str:
@@ -600,21 +700,21 @@ def _content_hash(row: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def get_obligations(ticker: str) -> dict:
+def get_obligations(ticker: str, *, persist: bool = False) -> dict:
     """Return the full obligations picture for ANY ticker (cached 24h)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return _no_data("", "empty ticker")
     key = f"obligations:{ticker}"
     hit = cache.get(key, ttl=CACHE_TTL_SECONDS)
-    if hit is not None:
+    if hit is not None and not persist:
         return hit
     try:
         rows: list[dict] = []
         rows.extend(_xbrl_obligations(ticker))
-        rows.extend(_note_obligations(ticker))
-        rows.extend(_balance_sheet_liabilities(ticker))
-        rows.extend(_scan_8k_obligations(ticker))
+        rows.extend(_note_obligations(ticker, archive=persist))
+        rows.extend(_balance_sheet_liabilities(ticker, archive=persist))
+        rows.extend(_scan_8k_obligations(ticker, archive=persist))
     except Exception as e:
         logger.warning("obligations failed for %s: %s", ticker, e)
         return {"error": f"Obligations unavailable for {ticker}: {e}"}
@@ -666,70 +766,121 @@ def get_obligations(ticker: str) -> dict:
         ),
     }
     cache.set(key, value)
-    _maybe_persist(ticker, rows)
+    if persist:
+        try:
+            summary = persist_obligation_events(rows)
+            if summary["events_written"]:
+                logger.info(
+                    "persisted %d obligation events for %s", summary["events_written"], ticker
+                )
+            if summary["skipped_no_filing_date"]:
+                logger.warning(
+                    "skipped %d obligation rows without a filing date for %s",
+                    summary["skipped_no_filing_date"], ticker,
+                )
+        except Exception as e:
+            logger.warning("obligation persistence failed for %s: %s", ticker, e)
+    for row in rows:  # archive annotations are persist-internal, not public
+        row.pop("_archive_key", None)
+        row.pop("_archive_sha", None)
+        row.pop("_accession", None)
     return value
 
 
-def _maybe_persist(ticker: str, rows: list[dict]) -> None:
-    """Persist fresh obligations into the point-in-time warehouse dataset.
+def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None) -> dict:
+    """Write obligations rows as CorporateEvent + Evidence rows.
 
-    Runs only when the real cache is in use (tests swap in a FakeCache, in
-    which case nothing is written). Idempotent by obligation_id.
+    One source row -> one CorporateEvent plus one Evidence row.  Event
+    ``known_at`` is the source filing's ``filed`` date — NEVER the wall clock
+    or a period end — so rows without a filing date are skipped and counted
+    in ``skipped_no_filing_date``.  Filing-text evidence is anchored to the
+    report text archived at fetch time (``raw_archive`` under
+    ``filing-text:{ticker}:{filed}:{accession-or-hash}``); XBRL-fact rows
+    carry no archive.  ``data_root`` is a research data root (parquet/ +
+    raw/ subdirectories; default: the repo data root).
+
+    Returns ``{events_written, evidence_written, skipped_no_filing_date}``;
+    a deterministic rerun writes 0 rows (dedup by event/evidence id).
     """
-    from . import cache as real_cache
-
-    if cache is not real_cache:
-        return
-    try:
-        written = persist_obligations(ticker, rows)
-        if written:
-            logger.info("persisted %d new obligation rows for %s", written, ticker)
-    except Exception as e:
-        logger.warning("obligation persistence failed for %s: %s", ticker, e)
-
-
-def persist_obligations(
-    ticker: str, obligations_rows: list[dict], data_root: Optional[str] = None
-) -> int:
-    """Write obligations into the point-in-time warehouse dataset.
-
-    Returns the number of rows written (0 on deterministic rerun). Each row
-    is keyed by (ticker, type, filed, amount, status) so re-runs are idempotent.
-    """
+    from datetime import date
     from pathlib import Path
 
-    from .storage import parquet
+    from .services.sec_facts import _resolve_entity
+    from .storage import duckdb, parquet, raw_archive
 
-    root = Path(data_root) if data_root else None
-
-    rows = []
-    for row in obligations_rows:
-        rows.append(
-            {
-                "obligation_id": (
-                    f"sec:obligation:{ticker}:{row.get('type', '?')}"
-                    f":{row.get('filed', '')}:{row.get('amount_billions', '')}"
-                    f":{row.get('status', '')}"
-                ),
-                "ticker": ticker,
-                "obligation_type": row.get("type", "other"),
-                "amount_billions": row.get("amount_billions"),
-                "certainty": row.get("certainty"),
-                "status": row.get("status"),
-                "revenue_matched": bool(row.get("revenue_matched")),
-                "default_triggered": bool(row.get("default_triggered")),
-                "fiscal_year": row.get("fiscal_year"),
-                "excerpt": row.get("excerpt", ""),
-                "source": row.get("source", ""),
-                "filed_at": row.get("filed"),
-                "as_of": row.get("as_of"),
-                "known_at": row.get("known_at"),
-                "retrieved_at": row.get("known_at"),
-                "content_hash": row.get("content_hash"),
+    data_root = Path(data_root) if data_root is not None else Path(duckdb.DEFAULT_DATA_ROOT)
+    event_rows: list[dict] = []
+    evidence_rows: list[dict] = []
+    skipped = 0
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip().upper()
+        filed = str(row.get("filed") or "").strip() or None
+        if not filed:
+            skipped += 1
+            continue
+        content_hash = str(row.get("content_hash") or "")
+        event_id = sec_event_id(ticker, content_hash)
+        entity_id = None
+        if ticker:
+            entity_id = _resolve_entity(ticker, date.today(), data_root)
+        event_rows.append({
+            "event_id": event_id,
+            "entity_id": entity_id,
+            "security_id": None,
+            "ticker": ticker,
+            "event_type": row.get("type", "other"),
+            "amount_billions": row.get("amount_billions"),
+            "certainty": row.get("certainty"),
+            "status": row.get("status"),
+            "revenue_matched": bool(row.get("revenue_matched")),
+            "default_triggered": bool(row.get("default_triggered")),
+            "fiscal_year": str(row.get("fiscal_year")) if row.get("fiscal_year") is not None else None,
+            "filed_at": filed,
+            "known_at": filed,
+            "retrieved_at": str(row.get("known_at") or ""),
+            "accession": str(row.get("_accession") or "") or None,
+            "source": row.get("source"),
+            "source_url": None,
+            "content_hash": content_hash,
             "parser_version": row.get("parser_version"),
-        }
-    )
-    return parquet.write_rows("company_obligations", rows, root=root)
+        })
+
+        is_xbrl_fact = "concept" in row
+        archive_key = str(row.get("_archive_key") or "") or None
+        archived_sha: Optional[str] = None
+        span_start: Optional[int] = None
+        span_end: Optional[int] = None
+        if archive_key is not None and not is_xbrl_fact:
+            record = raw_archive.find(
+                "sec", _ARCHIVE_KIND, archive_key, root=data_root / "raw"
+            )
+            if record is not None:
+                archived_sha = record.sha256
+                text = record.payload_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                excerpt = str(row.get("excerpt") or "")
+                if excerpt:
+                    start = text.find(excerpt)
+                    if start >= 0:
+                        span_start, span_end = start, start + len(excerpt)
+        evidence_rows.append({
+            "evidence_id": sec_evidence_id(content_hash),
+            "event_id": event_id,
+            "source_type": "xbrl_fact" if is_xbrl_fact else "filing_text",
+            "archive_key": archive_key if not is_xbrl_fact else None,
+            "content_hash": archived_sha,
+            "excerpt": row.get("excerpt"),
+            "span_start": span_start,
+            "span_end": span_end,
+            "retrieved_at": str(row.get("known_at") or ""),
+            "parser_version": row.get("parser_version"),
+        })
+    return {
+        "events_written": parquet.write_rows("events", event_rows, root=data_root / "parquet"),
+        "evidence_written": parquet.write_rows("evidence", evidence_rows, root=data_root / "parquet"),
+        "skipped_no_filing_date": skipped,
+    }
 
 
-__all__ = ["get_obligations", "persist_obligations", "_DEFAULT_TRIGGERED_TYPES", "_REVENUE_MATCHED_KINDS"]
+__all__ = ["get_obligations", "persist_obligation_events", "DEFAULT_TRIGGERED_TYPES", "REVENUE_MATCHED_KINDS"]

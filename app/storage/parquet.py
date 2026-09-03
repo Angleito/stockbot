@@ -86,6 +86,7 @@ DATASETS: dict[str, Dataset] = {
             ("fact_id", TEXT), ("entity_id", TEXT), ("security_id", TEXT),
             ("concept", TEXT), ("original_concept", TEXT), ("value", DOUBLE),
             ("unit", TEXT), ("duration_type", TEXT), ("period_end", TEXT),
+            ("period_start", TEXT), ("fiscal_year", INTEGER), ("fiscal_period", TEXT),
             ("filed_at", TEXT), ("accession", TEXT), ("frame", TEXT),
             ("known_at", TEXT), ("retrieved_at", TEXT), ("source_url", TEXT),
             ("source_record_id", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
@@ -194,18 +195,30 @@ DATASETS: dict[str, Dataset] = {
         )),
         unique_keys=("entity_id", "sector", "source", "known_at"),
     ),
-    "company_obligations": Dataset(
-        name="company_obligations",
+    "events": Dataset(
+        name="events",
         schema=pa.schema(_fields(
-            ("obligation_id", TEXT), ("ticker", TEXT), ("obligation_type", TEXT),
-            ("amount_billions", DOUBLE), ("certainty", TEXT), ("status", TEXT),
+            ("event_id", TEXT), ("entity_id", TEXT), ("security_id", TEXT),
+            ("ticker", TEXT), ("event_type", TEXT), ("amount_billions", DOUBLE),
+            ("certainty", TEXT), ("status", TEXT),
             ("revenue_matched", pa.bool_()), ("default_triggered", pa.bool_()),
-            ("fiscal_year", TEXT), ("excerpt", TEXT), ("source", TEXT),
-            ("filed_at", TEXT), ("as_of", TEXT), ("known_at", TEXT),
-            ("retrieved_at", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+            ("fiscal_year", TEXT), ("filed_at", TEXT), ("known_at", TEXT),
+            ("retrieved_at", TEXT), ("accession", TEXT), ("source", TEXT),
+            ("source_url", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
         )),
-        unique_keys=("obligation_id",),
+        unique_keys=("event_id",),
         partition_field="filed_at",
+    ),
+    "evidence": Dataset(
+        name="evidence",
+        schema=pa.schema(_fields(
+            ("evidence_id", TEXT), ("event_id", TEXT), ("source_type", TEXT),
+            ("archive_key", TEXT), ("content_hash", TEXT), ("excerpt", TEXT),
+            ("span_start", INTEGER), ("span_end", INTEGER),
+            ("retrieved_at", TEXT), ("parser_version", TEXT),
+        )),
+        unique_keys=("evidence_id",),
+        partition_field="retrieved_at",
     ),
 }
 

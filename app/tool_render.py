@@ -65,6 +65,8 @@ def render_tool_result(
         text = _render_datapoints(result, max_bytes)
     elif "coverage" in result and "metrics" in result:
         text = _render_briefing(result, max_bytes)
+    elif result.get("source") == "sec" and "metric" in result:
+        text = _render_sec_facts(result, max_bytes)
     elif _is_text_result(result):
         text = _render_text_result(result, max_bytes)
     else:
@@ -995,6 +997,80 @@ def _render_pagination(result: dict) -> str:
 # ---------------------------------------------------------------------------
 # SEC filing-style results: header + byte-safe truncated text
 # ---------------------------------------------------------------------------
+def _render_sec_facts(result: dict, max_bytes: int) -> str:
+    """Compact render for the sec_facts envelope (get_fundamentals +
+    get_xbrl_facts): header with provenance, scalar payload fields, then
+    quarterly/matching rows one per line within the byte budget."""
+    lines: list[str] = []
+    used = 0
+    omitted = 0
+
+    def _add(text: str) -> bool:
+        nonlocal used, omitted
+        cost = _utf8_size(text) + 1
+        if used + cost > max_bytes:
+            omitted += 1
+            return False
+        lines.append(text)
+        used += cost
+        return True
+
+    ticker = result.get("ticker", "?")
+    metric = result.get("metric", "fundamentals")
+    data_source = result.get("data_source", "?")
+    _add(f"{ticker} {metric} [{data_source}] as of {result.get('as_of_date', '?')}")
+    if result.get("requested_as_of"):
+        _add(f"requested_as_of: {result['requested_as_of']} (live result: store could not serve that date)")
+    rows_info = []
+    if result.get("row_count") is not None:
+        rows_info.append(f"rows: {result['row_count']}")
+    if result.get("returned_count") is not None and result.get("returned_count") != result.get("row_count"):
+        rows_info.append(f"returned: {result['returned_count']}")
+    if result.get("truncated"):
+        rows_info.append("truncated")
+    if rows_info:
+        _add(" | ".join(rows_info))
+
+    skip = {
+        "source", "metric", "data_source", "as_of_date", "requested_as_of",
+        "row_count", "returned_count", "truncated", "ticker",
+        "quarterly_eps", "matching_concepts", "balance_sheet",
+    }
+    for key, value in result.items():
+        if key in skip or value is None or isinstance(value, (list, dict)):
+            continue
+        _add(f"{key}: {_cell(value)}")
+
+    for row in result.get("quarterly_eps") or []:
+        if not isinstance(row, dict):
+            continue
+        text = (
+            f"- {row.get('fiscal_year', '?')} {row.get('fiscal_period', '?')}"
+            f" (period end {row.get('period_end', '?')}):"
+            f" diluted {row.get('eps_diluted', '?')}"
+        )
+        if row.get("eps_basic") is not None:
+            text += f" | basic {row['eps_basic']}"
+        _add(text)
+
+    for row in result.get("matching_concepts") or []:
+        if not isinstance(row, dict):
+            continue
+        _add(
+            f"- {_cell(row.get('concept'))}: {row.get('value', '?')}"
+            f" (period end {row.get('period_end', '?')}, {row.get('fiscal_period', '?')})"
+        )
+
+    sheet = result.get("balance_sheet")
+    if isinstance(sheet, dict):
+        for key, value in sheet.items():
+            _add(f"- {_cell(key)}: {_table_cell(value)}")
+
+    if omitted:
+        _add(f"{TRUNCATED_MARKER} (Omitted rows: {omitted})")
+    if not lines:
+        return _minimal(result, max_bytes)
+    return "\n".join(lines)
 
 
 def _is_text_result(result: dict) -> bool:

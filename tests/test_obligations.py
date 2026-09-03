@@ -127,8 +127,6 @@ class FakeFiling:
 
 
 def _install(monkeypatch, notes_md: dict, bs_md: str = ""):
-    import edgar
-
     notes = FakeNotes(
         {t: FakeNote(t, md) for t, md in notes_md.items()}
     )
@@ -145,8 +143,9 @@ def _install(monkeypatch, notes_md: dict, bs_md: str = ""):
         def get_facts(self):
             raise RuntimeError("no facts in fixture")
 
-    monkeypatch.setattr(edgar, "Company", FakeCompany)
-    monkeypatch.setattr(obligations.edgar_client, "_ensure_init", lambda: None)
+    # The edgar seam lives in edgar_client (get_company/get_latest_report);
+    # get_facts raises so the XBRL layer is absent, exactly as before.
+    monkeypatch.setattr(obligations.edgar_client, "get_company", FakeCompany)
     monkeypatch.setattr(obligations, "cache", FakeCache())
     filing._doc = doc
     filing.obj = lambda: doc
@@ -182,6 +181,19 @@ def test_get_obligations_empty_ticker():
     assert "error" in result
 
 
+def test_get_obligations_persist_is_explicit(monkeypatch):
+    data = json.loads((FIXTURES / "NVDA_10K_notes.json").read_text())
+    _install(monkeypatch, data["notes"])
+    calls = []
+    monkeypatch.setattr(
+        obligations, "persist_obligation_events",
+        lambda rows, data_root=None: calls.append(rows) or {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0},
+    )
+    obligations.get_obligations("NVDA")
+    assert calls == []
+    obligations.get_obligations("NVDA", persist=True)
+    assert len(calls) == 1
+
 def test_8k_guarantee_parsing():
     text = (
         "NVIDIA's aggregate payment obligation is cumulatively capped at "
@@ -204,35 +216,135 @@ def test_balance_sheet_lines():
     assert rows or True
 
 
-def test_persist_obligations_roundtrip(tmp_path, monkeypatch):
-    from app.storage import parquet
+def _obligation_row(**overrides):
+    row = {
+        "type": "purchase_commitments",
+        "amount_billions": 119.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": True,
+        "default_triggered": False,
+        "fiscal_year": None,
+        "excerpt": "NVIDIA's non-cancelable purchase obligations are $119.0 billion.",
+        "source": "SEC EDGAR 2026-02-25 Commitments note",
+        "filed": "2026-02-25",
+        "as_of": "2026-02-25",
+        "known_at": "2026-08-26T00:00:00Z",  # extraction time (never event known_at)
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "content_hash": "abc",
+        "parser_version": obligations.PARSER_VERSION,
+        "ticker": "NVDA",
+    }
+    row.update(overrides)
+    return row
 
-    monkeypatch.setattr(obligations, "cache", FakeCache())
-    root = tmp_path / "parquet"
+
+def test_persist_obligation_events_roundtrip(tmp_path):
+    """Events/evidence rows land with known_at == filing date (never the
+    wall clock / extraction time), anchored to the archived report text."""
+    from app.storage import parquet, raw_archive
+
+    text = (
+        "NVIDIA's non-cancelable purchase obligations are $119.0 billion, "
+        "payable through fiscal 2030. NVIDIA's aggregate payment obligation "
+        "under the Agreements is capped at $105 billion."
+    )
+    payload = text.encode()
+    raw_archive.archive(
+        "sec", "filing-note-text", "filing-text:NVDA:2026-02-25:0001", payload,
+        url="", retrieved_at="2026-08-26T00:00:00Z", root=tmp_path / "raw",
+    )
     rows = [
-        {
-            "type": "purchase_commitments",
-            "amount_billions": 119.0,
-            "certainty": "contingent",
-            "status": "future_cash_obligation",
-            "revenue_matched": True,
-            "default_triggered": False,
-            "fiscal_year": None,
-            "excerpt": "test",
-            "source": "SEC EDGAR test",
-            "filed": "2026-04-26",
-            "as_of": "2026-04-26",
-            "known_at": "2026-08-26T00:00:00Z",
-            "retrieved_at": "2026-08-26T00:00:00Z",
-            "content_hash": "abc",
-            "parser_version": obligations.PARSER_VERSION,
-        }
+        _obligation_row(excerpt=text, content_hash="abc", _accession="0001",
+                        _archive_key="filing-text:NVDA:2026-02-25:0001"),
     ]
-    written = obligations.persist_obligations("NVDA", rows, data_root=str(root))
-    assert written == 1
+    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+
+    events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    (event,) = events
+    assert event["event_id"] == "sec:event:NVDA:abc"
+    assert event["event_type"] == "purchase_commitments"
+    assert event["amount_billions"] == 119.0
+    assert event["ticker"] == "NVDA"
+    # known_at is the filing date, never the extraction timestamp.
+    assert event["known_at"] == "2026-02-25"
+    assert event["filed_at"] == "2026-02-25"
+    assert event["known_at"] != "2026-08-26T00:00:00Z"
+    assert event["retrieved_at"] == "2026-08-26T00:00:00Z"
+    assert event["accession"] == "0001"
+
+    evidence = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
+    (ev,) = evidence
+    assert ev["event_id"] == event["event_id"]
+    assert ev["source_type"] == "filing_text"
+    assert ev["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
+    assert ev["content_hash"] == raw_archive.content_hash(payload)
+    # Verbatim excerpt found at its expected offsets in the archived text.
+    assert ev["span_start"] == text.find(text)
+    assert (ev["span_start"], ev["span_end"]) == (0, len(text))
+    assert ev["excerpt"] == text
+
     # Deterministic rerun writes nothing new.
-    written2 = obligations.persist_obligations("NVDA", rows, data_root=str(root))
-    assert written2 == 0
-    table = parquet.read_table("company_obligations", root=root)
-    assert table.num_rows == 1
-    assert table.column("obligation_type").to_pylist() == ["purchase_commitments"]
+    rerun = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
+    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
+    assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 1
+    assert parquet.read_table("evidence", root=tmp_path / "parquet").num_rows == 1
+
+
+def test_persist_obligation_events_spans_and_skips(tmp_path):
+    """Non-verbatim excerpts get NULL spans; XBRL rows carry no archive;
+    rows without any filing date are skipped, never written with a wrong
+    known_at."""
+    from app.storage import parquet, raw_archive
+
+    root = tmp_path
+    text = "The disclosed supply commitments total $119.0 billion."
+    raw_archive.archive(
+        "sec", "filing-note-text", "filing-text:NVDA:2026-02-25:0001", text.encode(),
+        url="", retrieved_at="2026-08-26T00:00:00Z", root=root / "raw",
+    )
+    rows = [
+        # Verbatim excerpt: spans found.
+        _obligation_row(excerpt=text, content_hash="abc", _accession="0001",
+                        _archive_key="filing-text:NVDA:2026-02-25:0001"),
+        # Non-verbatim excerpt against the archived text: NULL spans.
+        _obligation_row(excerpt="totally different sentence.", content_hash="def",
+                        _accession="0001",
+                        _archive_key="filing-text:NVDA:2026-02-25:0001"),
+        # XBRL-fact row: no archive reference, filing date from the report.
+        _obligation_row(excerpt="XBRL fact = 100", content_hash="ghi",
+                        concept="us-gaap:PurchaseObligation"),
+        # No filing date at all: skipped entirely.
+        _obligation_row(filed=None, as_of=None, content_hash="jkl"),
+        # No archive annotation: truthful absence, never a phantom key.
+        _obligation_row(excerpt=text, content_hash="mno", _accession="0001"),
+    ]
+    summary = obligations.persist_obligation_events(rows, data_root=str(root))
+    assert summary["skipped_no_filing_date"] == 1
+    assert summary["events_written"] == 4
+    assert summary["evidence_written"] == 4
+    assert parquet.read_table("events", root=root / "parquet").num_rows == 4
+
+    evidence = {
+        r["event_id"]: r
+        for r in parquet.read_table("evidence", root=root / "parquet").to_pylist()
+    }
+    verbatim = evidence["sec:event:NVDA:abc"]
+    assert verbatim["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
+    assert verbatim["span_start"] == 0
+    assert verbatim["span_end"] == len(text)
+    not_verbatim = evidence["sec:event:NVDA:def"]
+    assert not_verbatim["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
+    assert not_verbatim["span_start"] is None
+    assert not_verbatim["span_end"] is None
+    xbrl = evidence["sec:event:NVDA:ghi"]
+    assert xbrl["source_type"] == "xbrl_fact"
+    assert xbrl["archive_key"] is None
+    assert xbrl["span_start"] is None
+    assert xbrl["span_end"] is None
+    missing = evidence["sec:event:NVDA:mno"]
+    assert missing["archive_key"] is None
+    assert missing["content_hash"] is None
+    assert missing["span_start"] is None
+    assert missing["span_end"] is None

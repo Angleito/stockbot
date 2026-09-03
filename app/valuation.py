@@ -27,7 +27,8 @@ from . import analyst_client
 from . import cache
 from . import edgar_client
 from . import obligations
-from .obligations import _DEFAULT_TRIGGERED_TYPES
+from .obligations import DEFAULT_TRIGGERED_TYPES
+from .services import sec_facts
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +92,14 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
         amount_b = row.get("amount_billions")
         if not amount_b:
             continue
+        kind = row.get("type", "other")
         schedule = row.get("schedule") or []
         total = sum(y.get("amount_billions", 0.0) for y in schedule)
         if schedule and total > 0:
             annual = total / max(1, len(schedule))
         else:
             horizon = row.get("payment_horizon") or {}
-            # Cloud-style per-year schedule embedded in the horizon.
+            # ponytail: front-loaded remainder (~0.75yr) + tail spread; flat fallback otherwise
             cloud_schedule = horizon.get("schedule") or []
             if cloud_schedule:
                 annual = sum(
@@ -106,18 +108,11 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
             else:
                 near_b = horizon.get("paid_in_remainder_billions")
                 if near_b:
-                    # Remainder of current FY ≈ 9 months (~0.75 year); the tail
-                    # spans fiscal years beyond, approximated as years - 1.
                     tail_b = horizon.get("paid_after_remainder_billions", 0.0)
                     tail_years = max(1, years - 1)
                     annual = near_b / 0.75 + tail_b / tail_years
                 else:
-                    # Not-yet-commenced leases run 10-20 years; spread the
-                    # disclosed future obligation over ~10 years, not the
-                    # generic 6-year commitment horizon.
-                    if row.get("status") == "off_balance_sheet" and (
-                        "lease" in kind
-                    ):
+                    if row.get("status") == "off_balance_sheet" and "lease" in kind:
                         annual = _annualized(amount_b, 10)
                     else:
                         annual = _annualized(amount_b, years)
@@ -125,10 +120,9 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
         is_revenue_matched = bool(row.get("revenue_matched"))
         is_default_triggered = bool(row.get("default_triggered")) or row.get(
             "type"
-        ) in _DEFAULT_TRIGGERED_TYPES
+        ) in DEFAULT_TRIGGERED_TYPES
         status = row.get("status")
         is_on_balance_sheet = status == "on_balance_sheet"
-        kind = row.get("type", "other")
         per_kind[kind] = {
             "total_billions": round(amount_b, 3),
             "annualized_billions": round(annual, 3),
@@ -205,7 +199,7 @@ def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
     candidates: list[Optional[float]] = []
 
     try:
-        filings = obligations._latest_report(ob_rows.get("ticker", ""), "10-K")
+        filings = edgar_client.get_latest_report(ob_rows.get("ticker", ""), "10-K")
         if filings is not None:
             _filing, doc = filings
             notes = getattr(doc, "notes", None)
@@ -230,10 +224,7 @@ def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
         pass
 
     try:
-        from edgar import Company
-
-        obligations.edgar_client._ensure_init()
-        df = Company(ob_rows.get("ticker", "")).get_facts().to_dataframe()
+        df = edgar_client.get_company(ob_rows.get("ticker", "")).get_facts().to_dataframe()
         tax = df[
             df["concept"].str.contains("IncomeTaxExpenseBenefit", case=False)
             & (df["fiscal_period"] == "FY")
@@ -363,10 +354,10 @@ def get_valuation_metrics(ticker: str) -> dict:
         r["period"]: r for r in estimates.get("forward_estimates", [])
     }
 
-    eps = edgar_client.get_fundamentals(ticker, "eps")
+    eps = sec_facts.get_fundamentals(ticker, "eps")
     if "error" in eps:
         return _no_data(ticker, eps["error"])
-    ttm_eps_diluted = eps.get("ttm_eps_diluted")
+    ttm_eps_diluted = eps.get("ttm_eps_diluted")  # envelope keeps payload keys
     shares_out = estimates.get("shares_outstanding")
 
     ob_rows = obligations.get_obligations(ticker)

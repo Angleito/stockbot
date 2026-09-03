@@ -287,3 +287,93 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
     assert "Eligible screen universe:     2" in out
     assert "Coverage: 50.0%" in out
     assert "Leaderboard entries: ['AAPL', 'AMD']" in out
+
+
+def _replay_facts_payload(cik):
+    """Companyfacts payload with a shares fact plus EPS facts (pre/post-EPS)."""
+    return {
+        "cik": cik,
+        "entityName": f"CIK{cik}",
+        "facts": {
+            "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+                {"end": "2026-08-01", "val": 100, "accn": f"a{cik}", "filed": "2026-08-02"},
+            ]}}},
+            "us-gaap": {
+                "EarningsPerShareDiluted": {"units": {"USD/shares": [
+                    {"end": "2026-08-01", "val": 6.5, "accn": f"a{cik}", "filed": "2026-08-02",
+                     "fy": 2026, "fp": "Q3"},
+                ]}},
+                "EarningsPerShareBasic": {"units": {"USD/shares": [
+                    {"end": "2026-08-01", "val": 6.6, "accn": f"a{cik}", "filed": "2026-08-02",
+                     "fy": 2026, "fp": "Q3"},
+                ]}},
+            },
+        },
+    }
+
+
+def test_replay_sec_facts_adds_eps_rows_deterministically(tmp_path):
+    """Offline replay: pre-EPS store rows stay put, EPS rows appear once,
+    rerun writes zero, retrieved_at comes from the manifest not the clock."""
+    from app.normalization import normalize_sec_company_facts
+    from app.storage import parquet, raw_archive
+
+    payload = json.dumps(_replay_facts_payload(320193)).encode()
+    retrieved_at = "2026-08-10T12:00:00Z"
+    raw_archive.archive(
+        "sec", "cik0000320193", "companyfacts", payload,
+        url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+        retrieved_at=retrieved_at, root=tmp_path / "raw",
+    )
+
+    # Seed the store the way a pre-EPS ingestion would have: shares only.
+    pre_eps = dict(json.loads(payload))
+    del pre_eps["facts"]["us-gaap"]
+    datasets = normalize_sec_company_facts(
+        pre_eps, retrieved_at=retrieved_at, content_hash="seed",
+        source_url="u", source_record_id="cik0000320193",
+    )
+    assert parquet.write_rows("financial_facts", datasets["financial_facts"], root=tmp_path / "parquet") == 1
+
+    first = research_data.replay_sec_facts_from_archive(data_root=tmp_path)
+    assert first["archived_payloads"] == 1
+    assert first["written_rows"] == 4  # 2 EPS facts + documents + securities
+    assert first["failed"] == []
+
+    table = parquet.read_table("financial_facts", root=tmp_path / "parquet")
+    concepts = sorted(table.column("concept").to_pylist())
+    assert concepts == [
+        "EarningsPerShareBasic", "EarningsPerShareDiluted", "EntityCommonStockSharesOutstanding",
+    ]
+    assert table.num_rows == 3
+    eps_rows = [r for r in table.to_pylist() if r["concept"].startswith("EarningsPerShare")]
+    assert all(r["unit"] == "USD/shares" for r in eps_rows)
+    assert all(r["fiscal_year"] == 2026 and r["fiscal_period"] == "Q3" for r in eps_rows)
+    # deterministic: retrieved_at from the archive manifest, not the wall clock
+    assert all(r["retrieved_at"] == retrieved_at for r in eps_rows)
+
+    second = research_data.replay_sec_facts_from_archive(data_root=tmp_path)
+    assert second["written_rows"] == 0
+    assert parquet.read_table("financial_facts", root=tmp_path / "parquet").num_rows == 3
+
+
+def test_replay_sec_facts_isolates_corrupt_payloads(tmp_path):
+    from app.storage import raw_archive
+
+    good = json.dumps(_replay_facts_payload(320193)).encode()
+    raw_archive.archive(
+        "sec", "cik0000320193", "companyfacts", good,
+        url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+        retrieved_at="2026-08-10T12:00:00Z", root=tmp_path / "raw",
+    )
+    raw_archive.archive(
+        "sec", "cik0000000007", "companyfacts", b"{not valid json",
+        url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000000007.json",
+        retrieved_at="2026-08-10T12:00:00Z", root=tmp_path / "raw",
+    )
+    summary = research_data.replay_sec_facts_from_archive(data_root=tmp_path)
+    assert summary["archived_payloads"] == 2
+    assert len(summary["failed"]) == 1
+    assert summary["failed"][0]["cik"] == "cik0000000007"
+    assert "JSONDecodeError" in summary["failed"][0]["error"]
+    assert summary["written_rows"] > 0  # the valid payload still processed

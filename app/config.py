@@ -1,10 +1,13 @@
-"""Configuration: loads .env, fails fast on missing keys, configures edgartools."""
+"""Configuration: loads .env, fails fast on missing keys.
+
+edgartools identity configuration lives behind the edgar boundary in
+``app/edgar_client.py``; this module only validates the env values it needs.
+"""
 
 import os
 from typing import Optional
 
 from dotenv import load_dotenv
-from edgar import set_identity
 
 from .policy import ChatPolicy
 
@@ -39,13 +42,17 @@ def _require_env(name: str) -> str:
 
 
 def init_config() -> None:
-    """Validate env vars and configure edgartools identity.
+    """Validate env vars required by the research/chat tool path.
 
     Raises ValueError if OPENROUTER_API_KEY or SEC_EDGAR_IDENTITY is missing.
     """
-    identity = _require_env("SEC_EDGAR_IDENTITY")
+    _require_env("SEC_EDGAR_IDENTITY")
     _require_env("OPENROUTER_API_KEY")
-    set_identity(identity)
+
+
+def get_sec_edgar_identity() -> str:
+    """The SEC EDGAR identity string (validated, placeholder-rejected)."""
+    return _require_env("SEC_EDGAR_IDENTITY")
 
 
 def get_default_model() -> str:

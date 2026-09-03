@@ -30,6 +30,7 @@ from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services import risk as risk_service
 from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
+from .services import sec_facts
 from .storage import duckdb
 from .storage.runs import (
     model_error_category,
@@ -56,7 +57,8 @@ TOOLS = [
                     "ticker": {"type": "string"},
                     "metric": {"type": "string", "enum": [
                         "eps", "balance_sheet", "shares_outstanding", "overview"
-                    ]}
+                    ]},
+                    "as_of": {"type": "string", "description": "Point-in-time query date YYYY-MM-DD; store-backed for eps/shares_outstanding; live results are labeled data_source=live."}
                 },
                 "required": ["ticker", "metric"]
             }
@@ -1207,8 +1209,8 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price, min_d
 # registry pattern as the FINRA/Robinhood handler maps below.
 _DIRECT_HANDLERS = {
     "evaluate_mandate": lambda args, model: evaluate_mandate(),
-    "get_fundamentals": lambda args, model: edgar_client.get_fundamentals(
-        args["ticker"], args["metric"]
+    "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
+        args["ticker"], args["metric"], as_of=args.get("as_of")
     ),
     "get_filing_section": lambda args, model: edgar_client.get_filing_section(
         args["ticker"], args["form_type"], args["item"]
@@ -1216,7 +1218,7 @@ _DIRECT_HANDLERS = {
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
         args["ticker"], args["statement_type"]
     ),
-    "get_xbrl_facts": lambda args, model: edgar_client.get_xbrl_facts(
+    "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(
         args["ticker"], args["concept"]
     ),
     "get_earnings_summary": lambda args, model: get_earnings_summary(args["ticker"], model),

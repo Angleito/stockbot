@@ -7,7 +7,7 @@ from typing import Any
 from edgar import Company
 
 from . import cache
-from .config import init_config
+from .config import get_sec_edgar_identity, init_config
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,32 @@ def _ensure_init() -> None:
     global _initialized
     if not _initialized:
         init_config()
+        # edgartools identity stays inside this module (the edgar boundary).
+        from edgar import set_identity
+
+        set_identity(get_sec_edgar_identity())
         _initialized = True
 
 
 def _no_data(ticker: str, what: str) -> dict:
     return {"error": f"No data found for {ticker}: {what}"}
+
+def get_company(ticker: str) -> Company:
+    """edgartools Company handle for a ticker (lazy init inside)."""
+    _ensure_init()
+    return Company(ticker)
+
+
+def get_latest_report(ticker: str, form_type: str = "10-K"):
+    """Latest filing object + parsed document for one form, or None.
+
+    The single seam behind the obligations/valuation report reads; keeps the
+    ``edgar`` import boundary inside this module."""
+    filings = get_company(ticker).get_filings(form=[form_type])
+    if not filings:
+        return None
+    filing = filings[0]
+    return filing, filing.obj()
 
 
 def _cached_or_fetch(key: str, fetch):
@@ -38,6 +59,8 @@ def _cached_or_fetch(key: str, fetch):
 _QUARTER_DAYS = (60, 115)
 _YTD_DAYS = (240, 300)
 _FY_DAYS = (330, 400)
+_MISSING_QUARTER_GAP_DAYS = 130
+_DERIVED_Q4_OFFSET_DAYS = 91
 
 
 def _fact_duration_days(frame) -> Any:
@@ -77,13 +100,11 @@ def _quarters_with_derived_q4(quarterly, full_facts, concept) -> Any:
     quarter = quarterly.copy().sort_values("period_end")
     if len(quarter) < 2:
         return quarter.tail(4)
-    ends = pd.to_datetime(quarter["period_end"], errors="coerce")
-    gaps = ends.diff().dt.days
-    if len(gaps) >= 2 and gaps.iloc[-1] is not None and float(gaps.iloc[-1]) > 130:
+    if len(gaps) >= 2 and gaps.iloc[-1] is not None and float(gaps.iloc[-1]) > _MISSING_QUARTER_GAP_DAYS:
         # One quarter between the last two period_ends is missing (usually
         # Q4, reported only as a full-year fact). The missing quarter ends
         # ~91 days before the latest period_end.
-        missing_end = ends.iloc[-1] - pd.Timedelta(days=91)
+        missing_end = ends.iloc[-1] - pd.Timedelta(days=_DERIVED_Q4_OFFSET_DAYS)
         derived = _derive_q4_from_facts(full_facts, concept, missing_end)
         if derived is not None:
             quarter = pd.concat([quarter, derived], ignore_index=True).sort_values("period_end")
@@ -105,7 +126,7 @@ def _derive_q4_from_facts(full_facts, concept, fy_end) -> Any:
     fy_total = float(fy["value"].iloc[0])
     ytd = facts[
         (facts["duration_days"].between(*_YTD_DAYS))
-        & (pd.to_datetime(facts["period_end"]) >= fy_end - pd.Timedelta(days=130))
+        & (pd.to_datetime(facts["period_end"]) >= fy_end - pd.Timedelta(days=_MISSING_QUARTER_GAP_DAYS))
         & (pd.to_datetime(facts["period_end"]) < fy_end)
     ]
     if ytd.empty:

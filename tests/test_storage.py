@@ -344,3 +344,54 @@ def test_as_of_timestamp_granularity(data_root):
     at = _as_of_rows("SELECT * FROM financial_facts", as_of="2026-08-14T09:30:00Z", data_root=data_root)
     assert before == []
     assert [r["value"] for r in at] == [100.0]
+
+def test_events_evidence_registry_roundtrip(data_root):
+    """CorporateEvent/Evidence datasets dedup on rerun."""
+    event_row = {
+        "event_id": "sec:event:NVDA:0123456789abcdef",
+        "entity_id": "sec:cik:0001045810",
+        "security_id": None,
+        "ticker": "NVDA",
+        "event_type": "supply_commitments",
+        "amount_billions": 119.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": True,
+        "default_triggered": False,
+        "fiscal_year": None,
+        "filed_at": "2026-02-25",
+        "known_at": "2026-02-25",
+        "retrieved_at": "2026-08-26T12:00:00Z",
+        "accession": None,
+        "source": "SEC EDGAR test",
+        "source_url": "https://www.sec.gov/",
+        "content_hash": "h1",
+        "parser_version": "obligations-v2",
+    }
+    evidence_row = {
+        "evidence_id": "sec:evidence:abcdef0123456789",
+        "event_id": event_row["event_id"],
+        "source_type": "filing_text",
+        "archive_key": "filing-text:NVDA:2026-02-25:0001",
+        "content_hash": "h1",
+        "excerpt": "supply commitments were $119 billion",
+        "span_start": 10,
+        "span_end": 45,
+        "retrieved_at": "2026-08-26T12:00:00Z",
+        "parser_version": "obligations-v2",
+    }
+    root = data_root / "parquet"
+    assert parquet.write_rows("events", [event_row], root=root) == 1
+    assert parquet.write_rows("events", [event_row], root=root) == 0
+    assert parquet.write_rows("evidence", [evidence_row], root=root) == 1
+    assert parquet.write_rows("evidence", [evidence_row], root=root) == 0
+
+    events = parquet.read_table("events", root=root)
+    assert events.num_rows == 1
+    assert events.column("event_id").to_pylist() == ["sec:event:NVDA:0123456789abcdef"]
+    assert events.column("amount_billions").to_pylist() == [119.0]
+    assert events.column("revenue_matched").to_pylist() == [True]
+    evidence = parquet.read_table("evidence", root=root)
+    assert evidence.num_rows == 1
+    assert evidence.column("span_start").to_pylist() == [10]
+    assert evidence.column("span_end").to_pylist() == [45]

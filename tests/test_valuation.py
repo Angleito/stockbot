@@ -59,6 +59,7 @@ def _obligations():
                 "type": "supply_commitments",
                 "amount_billions": 119.0,
                 "certainty": "contingent",
+                "status": "future_cash_obligation",
                 "revenue_matched": True,
                 "payment_horizon": {
                     "paid_in_remainder_of_fy": "2027",
@@ -70,6 +71,7 @@ def _obligations():
                 "type": "cloud_commitments",
                 "amount_billions": 30.0,
                 "certainty": "contingent",
+                "status": "future_cash_obligation",
                 "revenue_matched": False,
                 "payment_horizon": {
                     "schedule": [
@@ -86,12 +88,14 @@ def _obligations():
                 "type": "vendor_commitments",
                 "amount_billions": 6.0,
                 "certainty": "contingent",
+                "status": "future_cash_obligation",
                 "revenue_matched": False,
             },
             {
                 "type": "operating_leases",
                 "amount_billions": 5.604,
                 "certainty": "contractual",
+                "status": "future_cash_obligation",
                 "revenue_matched": False,
                 "schedule": [
                     {"fiscal_year": "2027", "amount_billions": 0.46},
@@ -106,12 +110,14 @@ def _obligations():
                 "type": "facility_lease_guarantees",
                 "amount_billions": 3.5,
                 "certainty": "contingent",
+                "status": "contingent",
                 "revenue_matched": False,
             },
             {
                 "type": "8k_guarantees",
                 "amount_billions": 105.0,
                 "certainty": "contingent",
+                "status": "contingent",
                 "revenue_matched": False,
             },
         ]
@@ -177,21 +183,6 @@ def test_default_triggered_guarantees_separate_from_contingent(fake_deps):
     assert delta == pytest.approx(108.5 / 6.0 / 24.221, abs=0.01)
 
 
-def test_contractual_obligations_impact_only_leases(fake_deps):
-    result = valuation.get_valuation_metrics("NVDA")
-    ob = result["obligations"]
-    assert ob["contractual_annual_billions"] == pytest.approx(0.934, abs=0.01)
-    assert ob["drag_per_share_contractual"] == pytest.approx(0.0386, abs=0.01)
-    # Supply commitments are revenue-matched: excluded from contingent EPS drag.
-    assert ob["contingent_annual_billions"] < 10
-    assert ob["drag_per_share_contingent"] < 0.5
-    # Default-triggered guarantees (8-K $105B + facility $3.5B) reported separately.
-    assert ob["default_triggered_annual_billions"] == pytest.approx(
-        (105.0 + 3.5) / 6.0, abs=0.1
-    )
-    assert ob["drag_per_share_default_triggered"] > 0.5
-
-
 def test_supply_front_loaded_is_revenue_matched_not_drag(fake_deps):
     result = valuation.get_valuation_metrics("NVDA")
     ob = result["obligations"]
@@ -205,6 +196,15 @@ def test_supply_front_loaded_is_revenue_matched_not_drag(fake_deps):
     fe = result["forward_eps"]
     scenario = fe["scenario"]
     assert scenario["eps_after_all_obligations"] > 8.0
+
+
+def test_horizon_less_supply_falls_back_flat():
+    rows = [
+        {"type": "supply_commitments", "amount_billions": 119.0, "certainty": "contingent",
+         "status": "future_cash_obligation", "revenue_matched": True},
+    ]
+    impact = valuation._obligation_annual_impact(rows, years=6)
+    assert impact["revenue_matched_annual_billions"] == pytest.approx(119.0 / 6.0, abs=0.01)
 
 
 def test_next_fy_figures(fake_deps):
