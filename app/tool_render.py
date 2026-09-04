@@ -55,7 +55,7 @@ def render_tool_result(
         text = _render_analyst_estimates(result, max_bytes)
     elif "weight_pct" in result and "rank" in result:
         text = _render_sp500_weight(result, max_bytes)
-    elif "obligations" in result and "form" in result:
+    elif "obligations" in result and "current_snapshot" in result and "forward_eps" not in result:
         text = _render_obligations(result, max_bytes)
     elif "forward_eps" in result and "obligations" in result:
         text = _render_valuation_metrics(result, max_bytes)
@@ -475,6 +475,8 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
         f"Source: {result.get('source', 'SEC EDGAR notes')}",
     ]
     for row in result.get("obligations") or []:
+        if row.get("schedule_component"):
+            continue
         amount = row.get("amount_billions")
         amount_s = f"${amount}B" if amount is not None else "(schedule only)"
         matched = " | revenue-matched" if row.get("revenue_matched") else ""

@@ -227,6 +227,16 @@ _8K_OBLIGATION_KEYWORDS = (
 _8K_TERMINATION_RE = re.compile(r"terminat\w*", re.I)
 _8K_AMENDMENT_RE = re.compile(r"amend\w*", re.I)
 _8K_AGREEMENT_RE = re.compile(r"agreement|guarant\w*", re.I)
+# Agreement identity: normalized counterparty phrase + agreement-type token.
+# Counterparty is the capitalized entity after with/for/in-favor-of (or the
+# "Agreement X" label); agreement type reuses the _8K_AGREEMENT_RE vocabulary.
+# ponytail: heuristic text match, fail-open (None = unlinkable, never marked).
+_8K_COUNTERPARTY_RE = re.compile(
+    r"(?:with|for|in\s+favor\s+of|issued\s+to|between|by|counterparty)\s+"
+    r"([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,2})"
+)
+_8K_AGREEMENT_LABEL_RE = re.compile(r"[Aa]greement\s+([A-Z0-9][\w-]*)")
+_8K_AGREEMENT_TYPE_RE = re.compile(r"guarant\w*\s+agreement|guarant\w*|agreement", re.I)
 
 _NOTE_KEYWORDS = {
     "debt": ("debt",),
@@ -565,6 +575,7 @@ def _xbrl_obligations(ticker: str, *, manifest: list | None = None) -> list[dict
                         "as_of": period_end,
                         "excerpt": f"XBRL fact {concept} = {value:,.0f} as of {period_end}",
                         "concept": concept,
+                        "provenance": "proxied",
                         "_coverage_warning": (
                             f"XBRL provenance is proxied for {concept}: store has no "
                             f"rows, filed date is the latest {proxy_form} proxy"
@@ -911,6 +922,29 @@ def _balance_sheet_liabilities(ticker: str, *, archive: bool = False, manifest: 
     return rows
 
 
+def _agreement_key(window: str) -> str | None:
+    """Agreement identity for one 8-K guarantee window (fail-open).
+
+    Normalized counterparty phrase + agreement-type token; ``None`` when no
+    identity is extractable (unlinkable rows are never marked by others).
+    """
+    type_m = _8K_AGREEMENT_TYPE_RE.search(window)
+    if not type_m:
+        return None
+    type_norm = re.sub(r"\s+", " ", type_m.group(0)).strip().casefold()
+    label_m = _8K_AGREEMENT_LABEL_RE.search(window)
+    cp_m = _8K_COUNTERPARTY_RE.search(window)
+    if label_m:
+        cp_norm = re.sub(r"\s+", " ", label_m.group(1)).strip().casefold()
+        return f"{cp_norm}||{type_norm}"
+    if cp_m:
+        cp_norm = re.sub(r"\s+", " ", cp_m.group(1)).strip().casefold()
+        # "the Agreements" / bare plurals are not counterparties.
+        if cp_norm not in ("agreement", "agreements", "company", "item"):
+            return f"{cp_norm}||{type_norm}"
+    return type_norm
+
+
 def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list | None = None) -> list[dict]:
     """Recent 8-K material agreements with quantified guarantees."""
     rows: list[dict] = []
@@ -961,6 +995,7 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list |
                         "as_of": str(filing.filing_date),
                         "excerpt": _excerpt(text, m.start(), m.end()),
                         "_lifecycle_event": lifecycle_event,
+                        "agreement_key": _agreement_key(window),
                     }
                 )
             if len(rows) > start:
@@ -1081,12 +1116,12 @@ def _snapshot_layer(row: dict) -> str:
 def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
     """Stamp 8-K guarantee lifecycle status; the ledger keeps every event.
 
-    A guarantee row superseded by a later amendment/termination filing, or
-    coexisting with a termination naming no clear survivor, becomes
+    Amendment/termination marks apply only within the same ``agreement_key``
+    group: a guarantee superseded by a later same-agreement filing becomes
     ``unknown`` (``terminated`` when its own filing explicitly terminates
-    it) and is excluded from summed current exposure. Coexisting unresolved
-    amounts stay additive with a coverage warning. Fail-safe is always
-    toward unknown, never silent summation.
+    it). Rows with no extractable key (``None``) are unlinkable — their
+    marks affect nothing and they are never marked by others — so they stay
+    additive with a coverage warning. Fail-open, never silent summation.
     """
     guarantees = [
         r for r in rows
@@ -1094,17 +1129,28 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
     ]
     if not guarantees:
         return []
-    marks = sorted(
-        str(r.get("filed") or "")
-        for r in guarantees if r.get("_lifecycle_event") in ("amendment", "termination")
-    )
+    groups: dict = {}
     for r in guarantees:
-        if r.get("_lifecycle_event") == "termination":
-            r["lifecycle_status"] = "terminated"
-        elif marks and any(m > str(r.get("filed") or "") for m in marks):
-            r["lifecycle_status"] = "unknown"
-        else:
-            r.pop("lifecycle_status", None)
+        groups.setdefault(r.get("agreement_key"), []).append(r)
+    for key, members in groups.items():
+        if key is None:
+            for r in members:
+                if r.get("_lifecycle_event") == "termination":
+                    r["lifecycle_status"] = "terminated"
+                else:
+                    r.pop("lifecycle_status", None)
+            continue
+        marks = sorted(
+            str(r.get("filed") or "")
+            for r in members if r.get("_lifecycle_event") in ("amendment", "termination")
+        )
+        for r in members:
+            if r.get("_lifecycle_event") == "termination":
+                r["lifecycle_status"] = "terminated"
+            elif marks and any(m > str(r.get("filed") or "") for m in marks):
+                r["lifecycle_status"] = "unknown"
+            else:
+                r.pop("lifecycle_status", None)
     unresolved = [r for r in guarantees if "lifecycle_status" not in r]
     if len(unresolved) > 1:
         return [
@@ -1295,6 +1341,11 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
                     "skipped %d obligation rows without a filing date for %s",
                     summary["skipped_no_filing_date"], ticker,
                 )
+            if summary.get("skipped_proxied"):
+                logger.warning(
+                    "skipped %d proxied XBRL rows (live-only) for %s",
+                    summary["skipped_proxied"], ticker,
+                )
         except Exception as e:
             logger.warning("obligation persistence failed for %s: %s", ticker, e)
     for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
@@ -1302,6 +1353,7 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
         row.pop("_archive_sha", None)
         row.pop("_accession", None)
         row.pop("_lifecycle_event", None)
+        row.pop("agreement_key", None)
     return value
 
 
@@ -1322,8 +1374,9 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
     trigger rides on the existing ``default_triggered`` flag (True only for
     ``counterparty_default``).
 
-    Returns ``{events_written, evidence_written, skipped_no_filing_date}``;
-    a deterministic rerun writes 0 rows (dedup by event/evidence id).
+    Returns ``{events_written, evidence_written, skipped_no_filing_date, skipped_proxied}``;
+    a deterministic rerun writes 0 rows (dedup by event/evidence id). Proxied
+    XBRL rows (``provenance == "proxied"``) are live-only evidence, never persisted.
     """
     from dataclasses import asdict
     from datetime import date
@@ -1337,6 +1390,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
     event_rows: list[dict] = []
     evidence_rows: list[dict] = []
     skipped = 0
+    skipped_proxied = 0
     work = list(rows or [])
     for exp in unquantified or []:
         filed = str(exp.get("filed") or "").strip() or None
@@ -1363,6 +1417,9 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
         norm["content_hash"] = exp.get("content_hash") or _content_hash(norm)
         work.append(norm)
     for row in work:
+        if row.get("provenance") == "proxied":
+            skipped_proxied += 1
+            continue
         ticker = str(row.get("ticker") or "").strip().upper()
         filed = str(row.get("filed") or "").strip() or None
         if not filed:
@@ -1455,6 +1512,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
         "events_written": parquet.write_rows("events", event_rows, root=data_root / "parquet"),
         "evidence_written": parquet.write_rows("evidence", evidence_rows, root=data_root / "parquet"),
         "skipped_no_filing_date": skipped,
+        "skipped_proxied": skipped_proxied,
     }
 
 

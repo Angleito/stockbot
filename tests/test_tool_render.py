@@ -817,3 +817,30 @@ def test_valuation_forward_eps_labels_follow_fiscal_year_metadata():
     assert "Consensus (current FY)" in fallback
     assert "Consensus (next FY)" in fallback
     assert re.search(r"FY\d", fallback) is None
+
+
+def test_obligations_ledger_dispatch_suppresses_schedule_components():
+    """Live-shaped ledger (no `form` key) reaches the obligations renderer;
+    headline + FY lines render once, components never standalone."""
+    headline = {
+        "type": "supply", "amount_billions": 13.3, "certainty": "contingent",
+        "status": "future_cash_obligation", "revenue_matched": True,
+        "filed": "2026-02-01", "accession": "0001",
+        "excerpt": "Supply commitments were $13.3 billion.",
+        "payment_horizon": {},
+        "schedule": [{"fiscal_year": "2027", "amount_billions": 4.0}],
+    }
+    component = {
+        "type": "supply", "amount_billions": 4.0, "schedule_component": True,
+        "headline_type": "supply", "filed": "2026-02-01", "excerpt": "x",
+    }
+    result = {
+        "ticker": "SYN", "filed": "2026-02-01", "source": "SEC EDGAR notes",
+        "obligations": [headline, component], "current_snapshot": [headline],
+    }
+    assert "form" not in result
+    text = render_tool_result(result)
+    assert "contractual obligations" in text
+    assert "- supply: $13.3B" in text
+    assert "FY2027: $4.0B" in text
+    assert "- supply: $4.0B" not in text

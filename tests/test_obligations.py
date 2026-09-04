@@ -262,7 +262,7 @@ def test_persist_obligation_events_roundtrip(tmp_path):
                         _archive_key="filing-text:NVDA:2026-02-25:0001"),
     ]
     summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
 
     events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     (event,) = events
@@ -290,7 +290,7 @@ def test_persist_obligation_events_roundtrip(tmp_path):
 
     # Deterministic rerun writes nothing new.
     rerun = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
+    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 1
     assert parquet.read_table("evidence", root=tmp_path / "parquet").num_rows == 1
 
@@ -620,7 +620,7 @@ def test_persist_unquantified_exposures(tmp_path):
     }
     exp["content_hash"] = obligations._content_hash(exp)
     summary = obligations.persist_obligation_events([], data_root=str(tmp_path), unquantified=[exp])
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     assert event["amount_billions"] is None
     assert event["certainty"] == "contingent"
@@ -794,19 +794,19 @@ def test_three_indemnities_yield_three_rows(monkeypatch):
 
 
 def test_8k_lifecycle_chain_sums_zero(monkeypatch):
-    """Jan $10B + Mar $6B amendment + May (Item 1.02) termination: 3 ledger
-    rows, $0 current exposure — never $16B."""
+    """Jan $10B + Mar $6B amendment + May (Item 1.02) termination, same
+    agreement identity: 3 ledger rows, $0 current exposure — never $16B."""
     _install_with_8k(monkeypatch, {}, [
         ("2026-01-15", ["Item 1.01"],
-         "The company entered into a guarantee agreement, with aggregate payment "
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
          "obligation cumulatively capped at $10 billion under the Agreements.",
          "acc-jan"),
         ("2026-03-10", ["Item 1.01"],
-         "The company amended the guarantee agreement, with aggregate payment "
+         "The company amended the guarantee agreement with Alpha Holdings, with aggregate payment "
          "obligation cumulatively capped at $6 billion under the Agreements.",
          "acc-mar"),
         ("2026-05-20", ["Item 1.02"],
-         "The company terminated the guarantee agreement, under which exposure "
+         "The company terminated the guarantee agreement with Alpha Holdings, under which exposure "
          "was capped at $6 billion.",
          "acc-may"),
     ])
@@ -820,14 +820,14 @@ def test_8k_lifecycle_chain_sums_zero(monkeypatch):
 
 
 def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch):
-    """Two unresolved guarantees stay additive with a coverage warning."""
+    """Two guarantees with distinct agreement identities stay additive."""
     _install_with_8k(monkeypatch, {}, [
         ("2026-01-15", ["Item 1.01"],
-         "The company entered into a guarantee agreement, with aggregate payment "
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
          "obligation cumulatively capped at $10 billion under the Agreements.",
          "acc-jan"),
         ("2026-03-10", ["Item 1.01"],
-         "The company entered into a second guarantee agreement, with aggregate "
+         "The company entered into a second guarantee agreement with Beta Holdings, with aggregate "
          "payment obligation cumulatively capped at $6 billion under the Agreements.",
          "acc-mar"),
     ])
@@ -835,6 +835,34 @@ def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch):
     snap_8k = [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"]
     assert sorted(r["amount_billions"] for r in snap_8k) == [6.0, 10.0]
     assert any("2 unresolved 8-K guarantees" in w for w in result["coverage"]["warnings"])
+
+
+def test_8k_amendment_does_not_kill_unrelated_guarantee(monkeypatch):
+    """Jan A $10B + Feb B $3B + Mar amend-A-to-$6B: snapshot is $6B A + $3B
+    B = $9B — never $6B (B killed by A's amendment)."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-02-10", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Beta Holdings, with aggregate payment "
+         "obligation cumulatively capped at $3 billion under the Agreements.",
+         "acc-feb"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $6 billion under the Agreements.",
+         "acc-mar"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 3
+    by_amount = {r["amount_billions"]: r for r in ledger_8k}
+    assert by_amount[10.0].get("lifecycle_status") == "unknown"
+    assert "lifecycle_status" not in by_amount[3.0]
+    snap_8k = [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert sorted(r["amount_billions"] for r in snap_8k) == [3.0, 6.0]
+    assert sum(r["amount_billions"] for r in snap_8k) == 9.0
 
 
 def test_payment_timing_roundtrip_and_retune(tmp_path):
@@ -850,11 +878,11 @@ def test_payment_timing_roundtrip_and_retune(tmp_path):
     row = _obligation_row(payment_horizon=horizon, schedule=None, amount_billions=119.0)
     row["content_hash"] = obligations._content_hash(row)
     summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     assert json.loads(event["payment_timing_json"]) == horizon
     rerun = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
+    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     corrected = _obligation_row(
         payment_horizon={**horizon, "paid_in_remainder_billions": 90.0,
                          "paid_after_remainder_billions": 29.0},
