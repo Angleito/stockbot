@@ -1,4 +1,4 @@
-"""Terminal client — thin wrapper around app.agent.run_chat."""
+"""Stockbot admin CLI — runs, data refresh, log server, login (no chat; Pi is the harness)."""
 
 import argparse
 import json
@@ -7,12 +7,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from app.agent import run_chat
-from app.config import broker_enabled, configure_logging, get_default_model, get_local_chat_policy
+from app.config import configure_logging
 from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
-from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
 from app.robinhood.auth import DEFAULT_TOKEN_PATH
-from app.security.context import SessionSecurityState
 from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data, replay_sec_facts_from_archive
@@ -30,54 +27,7 @@ from app.storage.runs import (
 )
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
-_SUBCOMMANDS = ("chat", "runs", "inspect", "refresh-data", "log-server", "robinhood-login")
-
-
-def _chat(model: str) -> None:
-    print(f"Stockbot — AI investment research assistant — model: {model}")
-    print("Type your question (Ctrl-D or 'quit' to exit).\n")
-
-    # Broker/portfolio tools are only exposed when the broker integration is
-    # enabled; otherwise the session is research-only. Connecting happens
-    # only through the explicit `robinhood-login` command.
-    context = LOCAL_BROKER_CONTEXT if broker_enabled() else LOCAL_CONTEXT
-    messages: list = []
-    session_state = SessionSecurityState()
-
-    def approve_portfolio(tool_name: str, _args: dict) -> bool:
-        try:
-            if not sys.stdin.isatty():
-                return False
-        except Exception:
-            return False
-        try:
-            answer = input(
-                f"Allow '{tool_name}' to access your portfolio for this session? [y/N]: "
-            ).strip().lower()
-        except EOFError:
-            return False
-        return answer in ("y", "yes")
-
-    while True:
-        try:
-            user_input = input("you: ").strip()
-        except EOFError:
-            break
-        if not user_input or user_input.lower() in ("quit", "exit"):
-            break
-        messages.append({"role": "user", "content": user_input})
-        result = run_chat(
-            messages,
-            model,
-            context=context,
-            policy=get_local_chat_policy(),
-            return_result=True,
-            approve_portfolio=approve_portfolio,
-            session_security=session_state,
-        )
-        messages.append({"role": "assistant", "content": result.answer})
-        print(f"\nassistant: {result.answer}\n")
-        print(f"[run {result.run_id}]")
+_SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -276,19 +226,7 @@ def _build_parser() -> argparse.ArgumentParser:
         const=_LOG_SERVER_DEFAULT_URL,
         help="stream all logs to this log server URL (default: http://127.0.0.1:8765)",
     )
-    chat_parser = subparsers.add_parser("chat", help="interactive chat (default)")
-    chat_parser.add_argument(
-        "--log-server",
-        nargs="?",
-        const=_LOG_SERVER_DEFAULT_URL,
-        default=argparse.SUPPRESS,
-        help="stream all logs to this log server URL (default: http://127.0.0.1:8765)",
-    )
-    chat_parser.add_argument(
-        "--model",
-        default=get_default_model(),
-        help=f"OpenRouter model string (default: {get_default_model()})",
-    )
+
     runs_parser = subparsers.add_parser("runs", help="list recent runs")
     runs_parser.add_argument("--limit", type=int, default=20, help="max rows (default 20)")
     inspect_parser = subparsers.add_parser("inspect", help="show one run's record")
@@ -324,7 +262,8 @@ def _rewrite_bare_log_server(argv: list[str]) -> list[str]:
 
 
 def main() -> None:
-    args = _build_parser().parse_args(_rewrite_bare_log_server(sys.argv[1:]))
+    parser = _build_parser()
+    args = parser.parse_args(_rewrite_bare_log_server(sys.argv[1:]))
     stream_url = (
         None if args.command == "log-server"
         else args.log_server or os.getenv("STOCKBOT_LOG_SERVER") or None
@@ -353,8 +292,10 @@ def main() -> None:
     elif args.command == "log-server":
         _cmd_log_server(args.port)
     else:
-        model = getattr(args, "model", None) or get_default_model()
-        _chat(model)
+        parser.error(
+            "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
+            "refresh-obligations, evaluate-mandate, log-server, robinhood-login)"
+        )
 
 
 if __name__ == "__main__":

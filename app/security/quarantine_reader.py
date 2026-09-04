@@ -9,9 +9,64 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
-from ..tools import _llm_complete
+import requests
+
+from ..config import OPENROUTER_BASE_URL, get_openrouter_api_key
+from ..runtime import BudgetExhaustedError
+from ..storage.runs import (
+    model_error_category,
+    record_model_call_from_current,
+    reserve_model_call_from_current,
+)
 from . import prompt_injection
+
+
+def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
+    """Plain (tool-less) completion for the quarantined reader."""
+    t0_iso = datetime.now(timezone.utc).isoformat()
+    if not reserve_model_call_from_current():
+        raise BudgetExhaustedError("model call budget exhausted")
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {get_openrouter_api_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        record_model_call_from_current(
+            provider="openrouter",
+            model=model,
+            started_at=t0_iso,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            usage=None,
+            status="failed",
+            error_type=type(exc).__name__,
+            error_category=model_error_category(exc),
+        )
+        raise
+    record_model_call_from_current(
+        provider="openrouter",
+        model=model,
+        started_at=t0_iso,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        usage=payload.get("usage"),
+        finish_reason=payload.get("choices", [{}])[0].get("finish_reason"),
+        tool_call_count=0,
+        provider_request_id=payload.get("id"),
+    )
+    return payload["choices"][0]["message"]["content"]
 
 CLAIMS_LIMIT = 20
 FIELD_MAX = 2000
