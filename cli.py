@@ -6,7 +6,6 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from dataclasses import replace
 
 from app.agent import run_chat
 from app.config import broker_enabled, configure_logging, get_default_model, get_local_chat_policy
@@ -57,10 +56,7 @@ def _chat(model: str) -> None:
             ).strip().lower()
         except EOFError:
             return False
-        if answer in ("y", "yes"):
-            session_state.authorization = replace(session_state.authorization, portfolio_read=True)
-            return True
-        return False
+        return answer in ("y", "yes")
 
     while True:
         try:

@@ -126,11 +126,15 @@ def test_tool_domains_portfolio_set_matches_capabilities():
 
 
 def test_portfolio_domain_tools_are_exactly_the_private_tools():
+    from app.security.context import Sensitivity
     from app.security.context_gateway import TOOL_ENVELOPES
 
-    portfolio = {
+    private_tools = {
+        name
+        for name, envelope in TOOL_ENVELOPES.items()
+        if envelope.sensitivity is Sensitivity.PRIVATE
+    }
+    portfolio_tools = {
         name for name, domain in TOOL_DOMAINS.items() if domain == "portfolio_read"
     }
-    for name in portfolio:
-        assert name in TOOL_ENVELOPES
-        assert TOOL_ENVELOPES[name].sensitivity.value == "private"
+    assert private_tools == portfolio_tools

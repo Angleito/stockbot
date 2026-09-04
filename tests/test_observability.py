@@ -1638,8 +1638,6 @@ def test_portfolio_history_alone_grants_nothing(monkeypatch):
 
 def test_portfolio_grant_carries_across_runs(monkeypatch):
     """Session-open: one approval covers later runs seeded with the grant."""
-    from dataclasses import replace
-
     from app.security.context import SessionSecurityState
 
     name = _portfolio_tool_name()
@@ -1648,7 +1646,6 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
 
     def approve(tool_name, args):
         approvals.append(tool_name)
-        session_state.authorization = replace(session_state.authorization, portfolio_read=True)
         return True
 
     executed = []
@@ -1688,6 +1685,36 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
     suffix = "Note: this answer used portfolio data you approved for this session."
     assert first.answer.endswith(suffix)
     assert second.answer.endswith(suffix)
+
+
+def test_approval_persists_without_callback_side_effect(monkeypatch):
+    """run_chat owns the grant write-back: a pure-True callback persists
+    portfolio_read into the caller-held session state."""
+    from app.security.context import SessionSecurityState
+
+    name = _portfolio_tool_name()
+    session = SessionSecurityState()
+    executed = []
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda n, a, model, **kwargs: executed.append(n) or {"result_type": "portfolio_snapshot", "source": "test"},
+    )
+    monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+        _final("Summary."),
+    ]))
+    run_chat(
+        [{"role": "user", "content": "Show my portfolio"}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        approve_portfolio=lambda *_: True,
+        session_security=session,
+    )
+    assert executed == [name]
+    assert session.authorization.portfolio_read is True
 
 
 def test_private_taint_persists_across_runs(monkeypatch):

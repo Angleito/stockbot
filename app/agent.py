@@ -351,9 +351,10 @@ def run_chat(
             precedence over both trace flags.
         mode: "quick" | "research" | "demo" — recorded on the run.
         approve_portfolio: first-use portfolio approval `(tool_name, args) -> bool`;
-            True grants `portfolio_read` for the rest of the run and, when the
-            caller holds the grant, for later runs seeded with it. None/False or
-            a raised exception denies that call softly.
+            True grants `portfolio_read` for the rest of the run; run_chat
+            persists the grant into `session_security.authorization` so later
+            runs sharing the state need no reprompt. None/False or a raised
+            exception denies that call softly.
         session_security: caller-held session state seeding this run;
             deny-by-default and untainted when None.
     Returns:
@@ -635,9 +636,8 @@ def run_chat(
                                         except Exception:
                                             approved = False
                                     if approved:
-                                        run_security.authorization = SessionAuthorization(
-                                            portfolio_read=True
-                                        )
+                                        run_security.authorization = SessionAuthorization(portfolio_read=True)
+                                        session_security.authorization = run_security.authorization
                                         intent_allowed, intent_reason = authorize_tool_call(
                                             name, arguments, run_security
                                         )
