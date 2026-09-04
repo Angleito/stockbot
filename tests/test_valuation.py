@@ -451,3 +451,23 @@ def test_unquantified_only_valuation_caveat(monkeypatch, fake_deps):
     assert result["obligations"]["contingent_annual_billions"] == 0.0
     assert result["obligations"]["contractual_annual_billions"] == 0.0
     assert any("unquantified" in w for w in result["coverage"]["warnings"])
+
+
+def test_valuation_skips_schedule_components():
+    """Reconciled table components never double-count in EPS impact."""
+    headline = {
+        "type": "vendor_commitments", "amount_billions": 13.3,
+        "certainty": "contingent", "status": "future_cash_obligation",
+        "revenue_matched": False, "default_triggered": False,
+    }
+    comps = [
+        {**headline, "amount_billions": 6.0, "fiscal_year": "2027",
+         "schedule_component": True, "headline_type": "vendor_commitments"},
+        {**headline, "amount_billions": 7.3, "fiscal_year": "2028",
+         "schedule_component": True, "headline_type": "vendor_commitments"},
+    ]
+    assert valuation._obligation_annual_impact([headline, *comps], 6) == \
+        valuation._obligation_annual_impact([headline], 6)
+    assert valuation._obligation_annual_impact(
+        [headline, *comps], 6
+    )["contingent_annual_billions"] == pytest.approx(13.3 / 6.0, abs=0.01)

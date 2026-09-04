@@ -480,10 +480,19 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
         matched = " | revenue-matched" if row.get("revenue_matched") else ""
         status = f" | status: {row.get('status', '?')}"
         trigger = f" | trigger: {row['trigger']}" if row.get("trigger") else ""
-        lines.append(
-            f"- {row.get('type', '?')}: {amount_s}"
-            f" | certainty: {row.get('certainty', '?')}{status}{matched}{trigger}"
-        )
+        lifecycle = row.get("lifecycle_status")
+        if lifecycle in ("terminated", "unknown"):
+            label = "terminated" if lifecycle == "terminated" else "currently unknown"
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | lifecycle: {label} (excluded from current exposure)"
+                f"{status}{matched}{trigger}"
+            )
+        else:
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | certainty: {row.get('certainty', '?')}{status}{matched}{trigger}"
+            )
         lines.append(
             f"    filed {row.get('filed') or '?'} | acc {row.get('accession') or 'n/a'}"
             f" | {_table_cell(row.get('excerpt') or '')}"

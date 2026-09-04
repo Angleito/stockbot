@@ -106,6 +106,8 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
         entry[bucket] = entry.get(bucket, 0.0) + float(amount or 0.0)
 
     for row in obligations_rows:
+        if row.get("schedule_component"):
+            continue
         amount_b = row.get("amount_billions")
         if not amount_b:
             continue

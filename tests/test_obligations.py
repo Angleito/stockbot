@@ -527,7 +527,7 @@ def test_snapshot_supersedes_older_filing(monkeypatch):
     assert sorted(o["amount_billions"] for o in result["obligations"]) == [13.0, 20.0]
     assert [s["amount_billions"] for s in result["current_snapshot"]] == [13.0]
     for row in result["current_snapshot"]:
-        assert row["parser_version"] == "obligations-v3"
+        assert row["parser_version"] == "obligations-v4"
         assert row["content_hash"]
     assert result["coverage"]["quantified_count"] == 2
     assert {"2026-04-01", "2026-02-01"} <= set(result["filings_examined"])
@@ -630,3 +630,258 @@ def test_persist_unquantified_exposures(tmp_path):
     (evidence,) = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
     assert evidence["event_id"] == event["event_id"]
     assert evidence["excerpt"] == exp["excerpt"]
+
+
+def _install_with_8k(monkeypatch, notes_by_form, filings_8k):
+    """Form-aware mocked EDGAR plus a canned 8-K stream.
+
+    ``filings_8k``: [(filing_date, items, text, accession)].
+    """
+    class Fake8KObj:
+        def __init__(self, items, document):
+            self.items = items
+            self.document = document
+
+    class Fake8KFiling:
+        def __init__(self, date, items, text, accession):
+            self.filing_date = date
+            self.accession_no = accession
+            self._obj = Fake8KObj(items, text)
+
+        def obj(self):
+            return self._obj
+
+    made_8k = [Fake8KFiling(*spec) for spec in filings_8k]
+
+    def fake_get_company(ticker):
+        class _C:
+            def get_filings(self, form=None):
+                if form == ["8-K"]:
+                    return list(made_8k)
+                out = []
+                for name in (form or []):
+                    if name in notes_by_form:
+                        notes_md, date = notes_by_form[name]
+                        notes = FakeNotes({t: FakeNote(t, md) for t, md in notes_md.items()})
+                        doc = FakeDoc(notes, "")
+                        filing = FakeFiling(date=date)
+                        filing.accession_no = f"acc-{name}"
+                        filing.obj = (lambda d: lambda: d)(doc)
+                        out.append(filing)
+                return out
+
+            def get_facts(self):
+                raise RuntimeError("no facts in fixture")
+
+        return _C()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", fake_get_company)
+    monkeypatch.setattr(obligations, "cache", FakeCache())
+
+
+def test_schedule_table_reconciles_to_headline(monkeypatch):
+    """$13.3B headline + $13.308B table expose ~$13.3B, never ~$26.6B."""
+    md = (
+        "Supply commitments were $13.3 billion as of September 27, 2025. "
+        "Future payments are as follows (in millions):\n"
+        "| 2026 | $4,752 |\n| 2027 | $3,708 |\n| 2028 | $1,981 |\n"
+        "| 2029 | $1,306 |\n| 2030 | $788 |\n| Thereafter | $773 |"
+    )
+    _install_layered(monkeypatch, {
+        "10-K": ({"Commitments and Contingencies": md}, "2026-02-01"),
+    })
+    result = obligations.get_obligations("SYN")
+    assert "error" not in result
+    (headline,) = [
+        r for r in result["obligations"]
+        if r["type"] == "supply" and r["amount_billions"] == 13.3
+    ]
+    assert headline["schedule"]
+    comps = [r for r in result["obligations"] if r.get("schedule_component")]
+    assert len(comps) == 6
+    assert all(c["headline_type"] == "supply" for c in comps)
+    snap_total = sum(r["amount_billions"] for r in result["current_snapshot"])
+    assert snap_total == pytest.approx(13.3, abs=0.05)
+
+
+def test_reconciliation_ambiguity_attaches_closest_and_warns():
+    md = (
+        "Supply commitments were $10.1 billion. Vendor commitments were "
+        "$9.5 billion. Future payments (in millions):\n"
+        "| 2027 | $6,000 |\n| 2028 | $4,000 |"
+    )
+    rows: list[dict] = []
+    obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
+    comps = [r for r in rows if r.get("schedule_component")]
+    assert len(comps) == 2
+    assert all(c["headline_type"] == "supply" for c in comps)
+    warnings = [r.get("_reconciliation_warning") for r in rows if r.get("_reconciliation_warning")]
+    assert len(warnings) == 1 and "ambiguous" in warnings[0]
+
+
+def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch):
+    """An August-filed fact is stamped August, never the February 10-K proxy."""
+    monkeypatch.setattr(obligations, "_xbrl_store_facts", lambda ticker: [{
+        "concept": "PurchaseObligations", "value": 5e9,
+        "period_start": "2026-02-01", "period_end": "2026-05-02",
+        "fiscal_year": 2026, "fiscal_period": "Q1",
+        "filed_at": "2026-08-26", "accession": "000123-26-000001",
+        "known_at": "2026-08-27T00:00:00Z", "source_url": "",
+    }])
+
+    class NoFacts:
+        def to_dataframe(self):
+            raise RuntimeError("no live facts")
+
+    class _C:
+        def get_facts(self):
+            return NoFacts()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", lambda ticker: _C())
+    rows = obligations._xbrl_obligations("SYN")
+    (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
+    assert row["filed"] == "2026-08-26"
+    assert row["known_at"] == "2026-08-27T00:00:00Z"
+    assert row["as_of"] == "2026-05-02"
+    assert row["_accession"] == "000123-26-000001"
+    assert row["concept"] == "PurchaseObligations"
+    assert "_coverage_warning" not in row
+
+
+def test_xbrl_live_fallback_warns_proxied(monkeypatch):
+    """Empty store + live facts: latest-10-K proxy date plus a warning."""
+    import pandas as pd
+
+    monkeypatch.setattr(obligations, "_xbrl_store_facts", lambda ticker: [])
+
+    class _Facts:
+        def to_dataframe(self):
+            return pd.DataFrame([
+                {"concept": "PurchaseObligations", "value": 5e9, "period_end": "2026-05-02"},
+            ])
+
+    class _C:
+        def get_facts(self):
+            return _Facts()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", lambda ticker: _C())
+    monkeypatch.setattr(
+        obligations, "_latest_report",
+        lambda ticker, form: (FakeFiling(date="2026-02-25"), None),
+    )
+    rows = obligations._xbrl_obligations("SYN")
+    (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
+    assert row["filed"] == "2026-02-25"
+    assert "proxied" in row["_coverage_warning"]
+    assert "PurchaseObligations" in row["_coverage_warning"]
+
+
+def test_three_indemnities_yield_three_rows(monkeypatch):
+    """Three distinct indemnity excerpts in one filing: three rows, three hashes."""
+    md = (
+        "The company may indemnify its officers against certain claims. "
+        "The company agreed to indemnify licensors for intellectual property "
+        "infringement claims. The company may indemnify customers for tax "
+        "positions taken in the ordinary course."
+    )
+    _install_layered(monkeypatch, {
+        "10-K": ({"Commitments and Contingencies": md}, "2026-02-01"),
+    })
+    result = obligations.get_obligations("SYN")
+    assert "error" not in result
+    assert len(result["unquantified_exposures"]) == 3
+    assert len({e["content_hash"] for e in result["unquantified_exposures"]}) == 3
+
+
+def test_8k_lifecycle_chain_sums_zero(monkeypatch):
+    """Jan $10B + Mar $6B amendment + May (Item 1.02) termination: 3 ledger
+    rows, $0 current exposure — never $16B."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $6 billion under the Agreements.",
+         "acc-mar"),
+        ("2026-05-20", ["Item 1.02"],
+         "The company terminated the guarantee agreement, under which exposure "
+         "was capped at $6 billion.",
+         "acc-may"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 3
+    assert sorted(r.get("lifecycle_status") for r in ledger_8k) == [
+        "terminated", "unknown", "unknown",
+    ]
+    assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
+
+
+def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch):
+    """Two unresolved guarantees stay additive with a coverage warning."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company entered into a second guarantee agreement, with aggregate "
+         "payment obligation cumulatively capped at $6 billion under the Agreements.",
+         "acc-mar"),
+    ])
+    result = obligations.get_obligations("SYN")
+    snap_8k = [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert sorted(r["amount_billions"] for r in snap_8k) == [6.0, 10.0]
+    assert any("2 unresolved 8-K guarantees" in w for w in result["coverage"]["warnings"])
+
+
+def test_payment_timing_roundtrip_and_retune(tmp_path):
+    """A 95/24 front-loaded horizon round-trips as JSON; correcting it to
+    90/29 retunes identity; reruns write zero rows."""
+    from app.storage import parquet
+
+    horizon = {
+        "paid_in_remainder_of_fy": "2027",
+        "paid_in_remainder_billions": 95.0,
+        "paid_after_remainder_billions": 24.0,
+    }
+    row = _obligation_row(payment_horizon=horizon, schedule=None, amount_billions=119.0)
+    row["content_hash"] = obligations._content_hash(row)
+    summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+    (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    assert json.loads(event["payment_timing_json"]) == horizon
+    rerun = obligations.persist_obligation_events([row], data_root=str(tmp_path))
+    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
+    corrected = _obligation_row(
+        payment_horizon={**horizon, "paid_in_remainder_billions": 90.0,
+                         "paid_after_remainder_billions": 29.0},
+        schedule=None, amount_billions=119.0,
+    )
+    corrected["content_hash"] = obligations._content_hash(corrected)
+    assert corrected["content_hash"] != row["content_hash"]
+    assert obligations.sec_event_id("NVDA", corrected["content_hash"]) != event["event_id"]
+    retune = obligations.persist_obligation_events([corrected], data_root=str(tmp_path))
+    assert retune["events_written"] == 1
+
+
+def test_unquantified_hash_tracks_excerpt_and_trigger():
+    base = {
+        "type": "indemnities", "amount_billions": None, "filed": "2026-02-01",
+        "trigger": "unknown", "excerpt": "The company may indemnify its officers.",
+        "_accession": "acc-10k",
+    }
+    assert obligations._content_hash(dict(base)) == obligations._content_hash(dict(base))
+    assert obligations._content_hash({**base, "excerpt": "  THE company MAY\nindemnify its   officers. "}) == \
+        obligations._content_hash(dict(base))
+    assert obligations._content_hash(
+        {**base, "excerpt": "The company may indemnify its directors."}
+    ) != obligations._content_hash(dict(base))
+    assert obligations._content_hash(
+        {**base, "trigger": "counterparty_default"}
+    ) != obligations._content_hash(dict(base))
+    assert obligations._content_hash(
+        {**base, "_accession": "acc-10q"}
+    ) != obligations._content_hash(dict(base))
