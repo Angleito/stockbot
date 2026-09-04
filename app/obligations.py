@@ -132,6 +132,65 @@ DEFAULT_TRIGGERED_TYPES = ("8k_guarantees", "facility_lease_guarantees", "guaran
 
 REVENUE_MATCHED_KINDS = ("supply",)
 
+# Disclosed-but-unquantified exposures: sentences invoking obligation
+# language with no dollar amount attached. Structured (never estimated)
+# so the agent sees what the quantified totals exclude.
+_UNQUANTIFIED_RE = re.compile(
+    r"([^.\n]{0,160}(indemnif\w*|guarant\w*|share\s+repurchase|buyback|dividend)[^.:\n]{0,160})",
+    re.I,
+)
+_UNQUANTIFIED_KIND = (
+    ("indemnif", "indemnities"),
+    ("guarant", "guarantees"),
+    ("repurchase", "buybacks"),
+    ("buyback", "buybacks"),
+    ("dividend", "dividends"),
+)
+
+
+def _row_trigger(row: dict) -> Optional[str]:
+    """Trigger/condition from the filing's own classifier flags, never inferred."""
+    if bool(row.get("default_triggered")) or row.get("type") in DEFAULT_TRIGGERED_TYPES:
+        return "counterparty_default"
+    if row.get("certainty") == "contingent" or row.get("status") == "contingent":
+        return "conditional"
+    return None
+
+
+def _scan_unquantified_exposures(title: str, md: str, filing, limit: int = 3) -> list[dict]:
+    """Sentences disclosing an exposure with no dollar amount.
+
+    ponytail: first-wins capped scan; quantified ($/million/billion)
+    sentences belong to the numeric rows, never here.
+    """
+    out: list[dict] = []
+    for m in _UNQUANTIFIED_RE.finditer(md):
+        sentence = re.sub(r"\s+", " ", m.group(1)).strip()
+        if not sentence:
+            continue
+        low = sentence.lower()
+        if "$" in sentence or "million" in low or "billion" in low:
+            continue
+        kind = "other_commitments"
+        for needle, name in _UNQUANTIFIED_KIND:
+            if needle in low:
+                kind = name
+                break
+        out.append(
+            {
+                "type": kind,
+                "trigger": "counterparty_default"
+                if kind in ("indemnities", "guarantees")
+                else "board_discretion",
+                "source": f"SEC EDGAR {filing.filing_date} {title} note",
+                "filed": str(filing.filing_date),
+                "reason": "disclosed without a dollar amount; excluded from quantified obligations",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
 # 8-K material-agreement guarantee language.
 _8K_GUARANTEE_RE = re.compile(
     r"(?:cumulatively\s+capped|capped|guarante(?:e|d|es|ing|y))\s*"
@@ -267,13 +326,14 @@ def _parse_table_schedule(note_text: str) -> list[dict] | None:
     schedule = []
     for r in table:
         m = re.search(r"20\d\d", str(r["fiscal_year"]))
-        if not m:
-            continue
-        schedule.append({"fiscal_year": m.group(0), "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
+        if m:
+            schedule.append({"fiscal_year": m.group(0), "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
+        elif str(r["fiscal_year"]).strip().lower() == "thereafter":
+            schedule.append({"fiscal_year": "Thereafter", "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
     return schedule if len(schedule) >= 2 else None
 
 
-def _parse_prose_schedule(note_text: str) -> list[dict] | None:
+def _parse_prose_schedule(note_text: str, amount_billions: float | None = None) -> list[dict] | None:
     """Per-year schedule from prose like '$7B, $6B ... paid in FY 2027, 2028 ...'."""
     for sentence in re.split(r"\.\s+", note_text):
         if "will be paid in fiscal year" not in sentence.lower():
@@ -283,8 +343,19 @@ def _parse_prose_schedule(note_text: str) -> list[dict] | None:
             amounts_part = amounts_part.split("for which", 1)[1]
         amounts = [round(_billion(a, u), 3) for a, u in _AMOUNT_RE.findall(amounts_part)]
         years = re.findall(r"20\d\d", years_part)
+        sched = None
         if len(amounts) >= 2 and len(amounts) == len(years):
-            return [{"fiscal_year": y, "amount_billions": a} for y, a in zip(years, amounts)]
+            sched = [{"fiscal_year": y, "amount_billions": a} for y, a in zip(years, amounts)]
+        elif len(amounts) >= 2 and len(amounts) == len(years) + 1 and "thereafter" in years_part.lower():
+            sched = [{"fiscal_year": y, "amount_billions": a} for y, a in zip(years, amounts)]
+            sched.append({"fiscal_year": "Thereafter", "amount_billions": amounts[-1]})
+        if sched is None:
+            continue
+        if amount_billions is None:
+            return sched
+        total = sum(y["amount_billions"] for y in sched)
+        if total and abs(total - amount_billions) / total < 0.1:
+            return sched
     return None
 
 
@@ -409,9 +480,10 @@ def _targeted_balance_rows(title: str, md: str, filing, present_kinds: set) -> l
     return rows
 
 
-def _note_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
+def _note_obligations(ticker: str, *, archive: bool = False) -> tuple[list[dict], list[dict]]:
     """Layer 2: note-text extraction from latest 10-Q and 10-K."""
     rows: list[dict] = []
+    unquantified: list[dict] = []
     for form in ("10-Q", "10-K"):
         found = _latest_report(ticker, form)
         if found is None:
@@ -429,6 +501,7 @@ def _note_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
                     notes_md[title] = note.to_markdown()
         for title, md in notes_md.items():
             _collect_note_rows(rows, title, md, filing)
+            unquantified.extend(_scan_unquantified_exposures(title, md, filing))
         present_kinds = {r["type"] for r in rows if r.get("filed") == str(filing.filing_date)}
         for title, md in notes_md.items():
             rows.extend(
@@ -436,7 +509,7 @@ def _note_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
             )
         if notes_md:
             _annotate_archive(rows[start:], ticker, filing, "\n\n".join(notes_md.values()), archive=archive)
-    return rows
+    return rows, unquantified
 
 
 def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
@@ -541,7 +614,19 @@ def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
                 if prose is not None:
                     payment_horizon = {"schedule": prose}
             elif kind in ("supply", "investment"):
-                payment_horizon = _parse_front_horizon(md, s["amount_billions"])
+                # ponytail: prose/table schedule match is heuristic; attach only on
+                # 10%-total reconciliation, else keep the front-loaded horizon.
+                sched = _parse_prose_schedule(md, s["amount_billions"])
+                if sched is None:
+                    table_sched = _parse_table_schedule(md)
+                    if table_sched is not None:
+                        total = sum(y["amount_billions"] for y in table_sched)
+                        if total and abs(total - s["amount_billions"]) / total < 0.1:
+                            sched = table_sched
+                if sched is not None:
+                    schedule = sched
+                else:
+                    payment_horizon = _parse_front_horizon(md, s["amount_billions"])
             elif kind == "operating_leases":
                 table_sched = _parse_table_schedule(md)
                 if table_sched is not None:
@@ -679,6 +764,9 @@ def _archive_filing_text(ticker: str, filing, text: str, *, archive: bool = Fals
 
 def _annotate_archive(rows: list[dict], ticker: str, filing, text: str, *, archive: bool = False) -> None:
     """Attach the archived report reference to rows produced from a filing."""
+    # ponytail: accession is filing metadata, set on every path (not only persist)
+    for row in rows:
+        row["_accession"] = str(getattr(filing, "accession_no", None) or "")
     archived = _archive_filing_text(ticker, filing, text, archive=archive)
     if archived is None:
         return
@@ -686,7 +774,6 @@ def _annotate_archive(rows: list[dict], ticker: str, filing, text: str, *, archi
     for row in rows:
         row["_archive_key"] = key
         row["_archive_sha"] = sha
-        row["_accession"] = str(getattr(filing, "accession_no", None) or "")
 
 
 def _content_hash(row: dict) -> str:
@@ -712,7 +799,8 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
     try:
         rows: list[dict] = []
         rows.extend(_xbrl_obligations(ticker))
-        rows.extend(_note_obligations(ticker, archive=persist))
+        note_rows, unquantified = _note_obligations(ticker, archive=persist)
+        rows.extend(note_rows)
         rows.extend(_balance_sheet_liabilities(ticker, archive=persist))
         rows.extend(_scan_8k_obligations(ticker, archive=persist))
     except Exception as e:
@@ -748,12 +836,24 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
         row["content_hash"] = _content_hash(row)
         row["known_at"] = known_at
         row["parser_version"] = PARSER_VERSION
+        row["accession"] = str(row.get("_accession") or "") or None
+        row["trigger"] = _row_trigger(row)
+    # One entry per (type, filing): distinct filings stay distinct, repeats collapse.
+    seen_u: set[tuple] = set()
+    bucket: list[dict] = []
+    for exp in unquantified:
+        key_u = (exp.get("type"), exp.get("filed"))
+        if key_u in seen_u:
+            continue
+        seen_u.add(key_u)
+        bucket.append(exp)
 
     value = {
         "ticker": ticker,
         "as_of": known_at,
         "source": "SEC EDGAR XBRL facts + 10-Q/10-K notes + balance sheet + 8-K material agreements",
         "obligations": rows,
+        "unquantified_exposures": bucket,
         "note": (
             "Status labels: 'on_balance_sheet' items are already accrued or "
             "expensed (informational; never double-counted in EPS). "
@@ -762,7 +862,9 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
             "disclosed outside the balance sheet (e.g. not-yet-commenced "
             "leases). 'contingent' items depend on counterparty default or "
             "other conditions. Certainty reflects the filing's own "
-            "language. No figures are estimated or borrowed across companies."
+            "language. No figures are estimated or borrowed across companies. "
+            "'unquantified_exposures' are disclosed without a dollar amount "
+            "and are excluded from the quantified obligations above."
         ),
     }
     cache.set(key, value)
@@ -821,6 +923,9 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
             skipped += 1
             continue
         content_hash = str(row.get("content_hash") or "")
+        horizon = row.get("payment_horizon") or {}
+        sched = row.get("schedule") or horizon.get("schedule") or []
+        schedule_json = json.dumps(sched) if sched else None
         event_id = sec_event_id(ticker, content_hash)
         entity_id = None
         if ticker:
@@ -842,6 +947,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
             revenue_matched=bool(row.get("revenue_matched")),
             default_triggered=bool(row.get("default_triggered")),
             fiscal_year=str(row.get("fiscal_year")) if row.get("fiscal_year") is not None else None,
+            schedule_json=schedule_json,
             filed_at=filed,
             known_at=filed,
             retrieved_at=str(row.get("known_at") or ""),

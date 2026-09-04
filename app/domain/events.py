@@ -36,6 +36,7 @@ class CorporateEvent:
     source_url: str | None
     content_hash: str | None
     parser_version: str | None
+    schedule_json: str | None = None
 
 
 @dataclass(frozen=True)

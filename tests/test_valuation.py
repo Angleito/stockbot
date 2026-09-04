@@ -333,3 +333,36 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch):
     impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
     assert impact["impact_by_fiscal_year"].get("2027", {}).get("contingent", 0.0) == 0.0
     assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_generic_scheduled_impact_attributes_fys_no_bleed():
+    """Per-year schedules (incl. Thereafter) hit their disclosed FYs only;
+    genuinely unscheduled rows still average into the flat bucket."""
+    scheduled = {
+        "type": "supply_commitments",
+        "amount_billions": 8.0,
+        "certainty": "contractual",
+        "status": "future_cash_obligation",
+        "revenue_matched": True,
+        "schedule": [
+            {"fiscal_year": "2027", "amount_billions": 4.0},
+            {"fiscal_year": "2028", "amount_billions": 3.0},
+            {"fiscal_year": "Thereafter", "amount_billions": 1.0},
+        ],
+    }
+    flat_vendor = {
+        "type": "vendor_commitments",
+        "amount_billions": 6.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+    }
+    impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
+    fy = impact["impact_by_fiscal_year"]
+    assert fy["2027"]["revenue_matched"] == pytest.approx(4.0)
+    assert fy["2028"]["revenue_matched"] == pytest.approx(3.0)
+    assert fy["Thereafter"]["revenue_matched"] == pytest.approx(1.0)
+    assert "2029" not in fy
+    assert "2030" not in fy
+    assert impact["flat_annual_by_bucket"]["revenue_matched"] == 0.0
+    assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)

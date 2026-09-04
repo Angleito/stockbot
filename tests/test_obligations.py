@@ -389,3 +389,97 @@ def test_persist_evidence_ids_distinct_across_tickers(tmp_path):
     evidence = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
     assert len(evidence) == 2
     assert evidence[0]["evidence_id"] != evidence[1]["evidence_id"]
+
+
+def test_table_schedule_keeps_thereafter_bucket():
+    md = _note_md("AAPL", "Commitments")
+    schedule = obligations._parse_table_schedule(md)
+    assert schedule is not None
+    by_year = {y["fiscal_year"]: y["amount_billions"] for y in schedule}
+    assert by_year["2026"] == pytest.approx(4.752)
+    assert by_year["Thereafter"] == pytest.approx(0.773)
+    assert sum(by_year.values()) == pytest.approx(13.308, abs=0.01)
+
+
+def test_prose_schedule_reconciles_to_own_amount():
+    md = (
+        "Supply commitments were $8.0 billion, for which $4.0 billion, "
+        "$3.0 billion and $1.0 billion will be paid in fiscal years 2027, "
+        "2028 and 2029, respectively. Cloud commitments were $27.0 billion, "
+        "for which $14.0 billion and $13.0 billion will be paid in fiscal "
+        "years 2027 and 2028, respectively."
+    )
+    sched = obligations._parse_prose_schedule(md, 8.0)
+    assert [(y["fiscal_year"], y["amount_billions"]) for y in sched] == [
+        ("2027", 4.0), ("2028", 3.0), ("2029", 1.0),
+    ]
+    other = obligations._parse_prose_schedule(md, 27.0)
+    assert [(y["fiscal_year"], y["amount_billions"]) for y in other] == [
+        ("2027", 14.0), ("2028", 13.0),
+    ]
+    assert obligations._parse_prose_schedule(md, 95.2) is None
+
+
+def test_prose_schedule_thereafter_tail():
+    md = (
+        "Investment commitments are $8.0 billion, for which $4.0 billion, "
+        "$3.0 billion and $1.0 billion will be paid in fiscal years 2027 "
+        "and 2028 and thereafter, respectively."
+    )
+    assert obligations._parse_prose_schedule(md, 8.0) == [
+        {"fiscal_year": "2027", "amount_billions": 4.0},
+        {"fiscal_year": "2028", "amount_billions": 3.0},
+        {"fiscal_year": "Thereafter", "amount_billions": 1.0},
+    ]
+
+
+def test_collect_note_rows_supply_schedule_no_bleed():
+    md = (
+        "Supply commitments were $13.3 billion as of September 27, 2025. "
+        "Future payments are as follows (in millions):\n"
+        "| 2026 | $4,752 |\n| 2027 | $3,708 |\n| 2028 | $1,981 |\n"
+        "| 2029 | $1,306 |\n| 2030 | $788 |\n| Thereafter | $773 |"
+    )
+    rows: list[dict] = []
+    obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
+    (headline,) = [r for r in rows if r["type"] == "supply" and r["amount_billions"] == 13.3]
+    assert [y["fiscal_year"] for y in headline["schedule"]] == [
+        "2026", "2027", "2028", "2029", "2030", "Thereafter",
+    ]
+    assert headline["payment_horizon"] is None
+
+
+def test_collect_note_rows_unreconciled_supply_keeps_horizon():
+    md = _note_md("NVDA", "Commitments")
+    rows: list[dict] = []
+    obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
+    supply = [r for r in rows if r["type"] == "supply"]
+    assert supply and all(r["schedule"] is None for r in supply)
+    assert any(
+        (r["payment_horizon"] or {}).get("paid_in_remainder_of_fy") == "2027"
+        for r in supply
+    )
+
+
+def test_persist_obligation_events_schedule_json(tmp_path):
+    """Per-year schedules persist per event; rows without one store NULL."""
+    from app.storage import parquet
+
+    rows = [
+        _obligation_row(content_hash="sched1", schedule=[
+            {"fiscal_year": "2027", "amount_billions": 4.0},
+            {"fiscal_year": "Thereafter", "amount_billions": 1.0},
+        ]),
+        _obligation_row(content_hash="flat1", type="vendor_commitments", revenue_matched=False),
+    ]
+    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
+    assert summary["events_written"] == 2
+    events = {
+        e["event_id"]: e
+        for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    }
+    assert json.loads(events["sec:event:NVDA:sched1"]["schedule_json"]) == [
+        {"fiscal_year": "2027", "amount_billions": 4.0},
+        {"fiscal_year": "Thereafter", "amount_billions": 1.0},
+    ]
+    assert events["sec:event:NVDA:flat1"]["schedule_json"] is None
