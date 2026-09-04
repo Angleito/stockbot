@@ -37,6 +37,38 @@ CACHE_TTL_SECONDS = 86400
 
 PARSER_VERSION = "obligations-v4"
 _ARCHIVE_KIND = "filing-note-text"
+_PICTURE_SOURCE = "SEC EDGAR XBRL facts + 10-Q/10-K notes + balance sheet + 8-K material agreements"
+_PICTURE_NOTE = (
+    "Status labels: 'on_balance_sheet' items are already accrued or "
+    "expensed (informational; never double-counted in EPS). "
+    "'future_cash_obligation' items are disclosed commitments not "
+    "yet on the balance sheet. 'off_balance_sheet' items are "
+    "disclosed outside the balance sheet (e.g. not-yet-commenced "
+    "leases). 'contingent' items depend on counterparty default or "
+    "other conditions. Certainty reflects the filing's own "
+    "language. No figures are estimated or borrowed across companies. "
+    "'unquantified_exposures' are disclosed without a dollar amount "
+    "and are excluded from the quantified obligations above. "
+    "'capital_allocation' (buybacks, dividends) is discretionary, "
+    "not an obligation. 'current_snapshot' holds the latest filing "
+    "per obligation type; 'obligations' retains the full history."
+)
+
+
+def _publish_lifecycle(rows: list[dict], bucket: list[dict], capital: list[dict]) -> None:
+    """Strip persist-internal keys; publish underscore lifecycle as public."""
+    for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
+        row.pop("_archive_key", None)
+        row.pop("_archive_sha", None)
+        row.pop("_accession", None)
+        if _snapshot_layer(row) == "8k":
+            row["lifecycle_event"] = row.pop("_lifecycle_event", None)
+            row.setdefault("agreement_key", None)
+        else:
+            row.pop("_lifecycle_event", None)
+            row["agreement_key"] = None
+            row["lifecycle_event"] = None
+            row["lifecycle_status"] = None
 
 # ---------------------------------------------------------------------------
 # Layer 1: standardized XBRL obligation concepts
@@ -1441,7 +1473,7 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
     value = {
         "ticker": ticker,
         "as_of": known_at,
-        "source": "SEC EDGAR XBRL facts + 10-Q/10-K notes + balance sheet + 8-K material agreements",
+        "source": _PICTURE_SOURCE,
         "obligations": rows,
         "current_snapshot": snapshot,
         "unquantified_exposures": bucket,
@@ -1451,26 +1483,12 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
         or sorted({str(r.get("filed")) for r in rows if r.get("filed")}),
         "sections_examined": sorted({str(s) for m in manifest for s in (m.get("sections_examined") or []) if s})
         or sorted({str(r.get("source")) for r in rows if r.get("source")}),
-        "note": (
-            "Status labels: 'on_balance_sheet' items are already accrued or "
-            "expensed (informational; never double-counted in EPS). "
-            "'future_cash_obligation' items are disclosed commitments not "
-            "yet on the balance sheet. 'off_balance_sheet' items are "
-            "disclosed outside the balance sheet (e.g. not-yet-commenced "
-            "leases). 'contingent' items depend on counterparty default or "
-            "other conditions. Certainty reflects the filing's own "
-            "language. No figures are estimated or borrowed across companies. "
-            "'unquantified_exposures' are disclosed without a dollar amount "
-            "and are excluded from the quantified obligations above. "
-            "'capital_allocation' (buybacks, dividends) is discretionary, "
-            "not an obligation. 'current_snapshot' holds the latest filing "
-            "per obligation type; 'obligations' retains the full history."
-        ),
+        "note": _PICTURE_NOTE,
     }
     cache.set(key, value)
     if persist:
         try:
-            summary = persist_obligation_events(rows, unquantified=bucket)
+            summary = persist_obligation_events(rows, unquantified=bucket, capital=capital)
             if summary["events_written"]:
                 logger.info(
                     "persisted %d obligation events for %s", summary["events_written"], ticker
@@ -1487,22 +1505,11 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
                 )
         except Exception as e:
             logger.warning("obligation persistence failed for %s: %s", ticker, e)
-    for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
-        row.pop("_archive_key", None)
-        row.pop("_archive_sha", None)
-        row.pop("_accession", None)
-        if _snapshot_layer(row) == "8k":
-            row["lifecycle_event"] = row.pop("_lifecycle_event", None)
-            row.setdefault("agreement_key", None)
-        else:
-            row.pop("_lifecycle_event", None)
-            row["agreement_key"] = None
-            row["lifecycle_event"] = None
-            row["lifecycle_status"] = None
+    _publish_lifecycle(rows, bucket, capital)
     return value
 
 
-def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None, *, unquantified: list[dict] | None = None) -> dict:
+def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None, *, unquantified: list[dict] | None = None, capital: list[dict] | None = None) -> dict:
     """Write obligations rows as CorporateEvent + Evidence rows.
 
     One source row -> one CorporateEvent plus one Evidence row.  Event
@@ -1522,6 +1529,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
     Returns ``{events_written, evidence_written, skipped_no_filing_date, skipped_proxied}``;
     a deterministic rerun writes 0 rows (dedup by event/evidence id). Proxied
     XBRL rows (``provenance == "proxied"``) are live-only evidence, never persisted.
+    Status is derived by ``_resolve_8k_lifecycle`` at read time and is never stored.
     """
     from dataclasses import asdict
     from datetime import date
@@ -1533,6 +1541,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
 
     data_root = Path(data_root) if data_root is not None else Path(duckdb.DEFAULT_DATA_ROOT)
     event_rows: list[dict] = []
+    capital_rows: list[dict] = []
     evidence_rows: list[dict] = []
     skipped = 0
     skipped_proxied = 0
@@ -1561,15 +1570,21 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
         }
         norm["content_hash"] = exp.get("content_hash") or _content_hash(norm)
         work.append(norm)
-    for row in work:
+    capital_work: list[dict] = []
+    for entry in capital or []:
+        if not entry.get("content_hash"):
+            entry = {**entry, "content_hash": _content_hash(entry)}
+        capital_work.append(entry)
+    def _build(row: dict, event_target: list[dict]) -> None:
+        nonlocal skipped, skipped_proxied
         if row.get("provenance") == "proxied":
             skipped_proxied += 1
-            continue
+            return
         ticker = str(row.get("ticker") or "").strip().upper()
         filed = str(row.get("filed") or "").strip() or None
         if not filed:
             skipped += 1
-            continue
+            return
         content_hash = str(row.get("content_hash") or "")
         horizon = row.get("payment_horizon") or {}
         sched = row.get("schedule") or horizon.get("schedule") or []
@@ -1620,10 +1635,8 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
             parser_version=row.get("parser_version"),
             agreement_key=row.get("agreement_key"),
             lifecycle_event=row.get("_lifecycle_event", row.get("lifecycle_event")),
-            lifecycle_status=row.get("lifecycle_status"),
         )
-        event_rows.append(asdict(event))
-
+        event_target.append(asdict(event))
         is_xbrl_fact = "concept" in row
         archive_key = str(row.get("_archive_key") or "") or None
         archived_sha: Optional[str] = None
@@ -1656,12 +1669,140 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
             parser_version=row.get("parser_version"),
         )
         evidence_rows.append(asdict(evidence))
+    for row in work:
+        _build(row, event_rows)
+    for row in capital_work:
+        _build(row, capital_rows)
     return {
         "events_written": parquet.write_rows("events", event_rows, root=data_root / "parquet"),
+        "capital_events_written": parquet.write_rows("capital_events", capital_rows, root=data_root / "parquet"),
         "evidence_written": parquet.write_rows("evidence", evidence_rows, root=data_root / "parquet"),
         "skipped_no_filing_date": skipped,
         "skipped_proxied": skipped_proxied,
     }
 
 
-__all__ = ["get_obligations", "persist_obligation_events", "DEFAULT_TRIGGERED_TYPES", "REVENUE_MATCHED_KINDS"]
+def get_obligations_as_of(ticker: str, as_of: str, data_root: Optional[str] = None) -> dict:
+    """Replay the full obligations picture from stored events as of a date."""
+    from pathlib import Path
+
+    from .storage import duckdb, parquet
+
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return _no_data("", "empty ticker")
+    data_root = Path(data_root) if data_root is not None else Path(duckdb.DEFAULT_DATA_ROOT)
+    parquet_root = data_root / "parquet"
+    stored = parquet.read_table("events", root=parquet_root).to_pylist()
+    try:
+        stored_capital = parquet.read_table("capital_events", root=parquet_root).to_pylist()
+    except Exception:
+        stored_capital = []
+    stored_evidence = parquet.read_table("evidence", root=parquet_root).to_pylist()
+    evidence_by_event: dict[str, dict] = {}
+    for ev in stored_evidence:
+        eid = str(ev.get("event_id") or "")
+        if eid and eid not in evidence_by_event:
+            evidence_by_event[eid] = ev
+    kept: list[dict] = []
+    for e in stored:
+        if str(e.get("ticker") or "").strip().upper() != ticker:
+            continue
+        if str(e.get("filed_at") or "")[:10] > as_of:
+            continue
+        kept.append(e)
+    kept_capital: list[dict] = []
+    for e in stored_capital:
+        if str(e.get("ticker") or "").strip().upper() != ticker:
+            continue
+        if str(e.get("filed_at") or "")[:10] > as_of:
+            continue
+        kept_capital.append(e)
+    event_ids = {str(e.get("event_id") or "") for e in kept + kept_capital}
+    event_ids |= {sec_event_id(ticker, str(e.get("content_hash") or "")) for e in kept + kept_capital}
+    def _rebuild(e: dict) -> dict:
+        content_hash = str(e.get("content_hash") or "")
+        eid = str(e.get("event_id") or "") or sec_event_id(ticker, content_hash)
+        ev = evidence_by_event.get(eid) or evidence_by_event.get(sec_event_id(ticker, content_hash))
+        try:
+            schedule = json.loads(e.get("schedule_json")) if e.get("schedule_json") else None
+        except Exception:
+            schedule = None
+        payment_horizon = None
+        if e.get("payment_timing_json"):
+            try:
+                parsed = json.loads(e.get("payment_timing_json"))
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                payment_horizon = {"schedule": parsed}
+            elif isinstance(parsed, dict):
+                payment_horizon = parsed
+        row: dict = {
+            "type": e.get("event_type"),
+            "amount_billions": e.get("amount_billions"),
+            "filed": e.get("filed_at"),
+            "known_at": e.get("known_at"),
+            "certainty": e.get("certainty"),
+            "status": e.get("status"),
+            "revenue_matched": e.get("revenue_matched"),
+            "default_triggered": e.get("default_triggered"),
+            "fiscal_year": e.get("fiscal_year"),
+            "schedule": schedule,
+            "payment_horizon": payment_horizon,
+            "agreement_key": e.get("agreement_key"),
+            "_lifecycle_event": e.get("lifecycle_event"),
+            "source": e.get("source"),
+            "accession": e.get("accession"),
+            "_accession": e.get("accession"),
+            "excerpt": (ev or {}).get("excerpt"),
+            "ticker": ticker,
+            "content_hash": content_hash,
+            "parser_version": e.get("parser_version"),
+        }
+        if (ev or {}).get("source_type") == "xbrl_fact":
+            row["concept"] = True
+        return row
+    rows: list[dict] = []
+    bucket: list[dict] = []
+    for e in kept:
+        row = _rebuild(e)
+        if row.get("amount_billions") is None and row.get("_lifecycle_event") not in ("amendment", "termination"):
+            row["trigger"] = _row_trigger(row)
+            bucket.append(row)
+        else:
+            row["trigger"] = _row_trigger(row)
+            rows.append(row)
+    capital: list[dict] = []
+    for e in kept_capital:
+        row = _rebuild(e)
+        row["trigger"] = "board_discretion"
+        capital.append(row)
+    # Ignore evidence without a matching event (never joined above).
+    _ = {ev.get("event_id") for ev in stored_evidence if str(ev.get("event_id") or "") not in event_ids}
+    if not rows and not bucket and not capital:
+        return _no_data(ticker, f"no stored obligation events as of {as_of}")
+    snapshot, snap_warnings = _current_snapshot(rows)
+    _publish_lifecycle(rows, bucket, capital)
+    coverage = {
+        "scan_manifest": [],
+        "quantified_count": len(rows),
+        "unquantified_count": len(bucket),
+        "warnings": list(snap_warnings),
+    }
+    return {
+        "ticker": ticker,
+        "as_of": as_of,
+        "source": f"{_PICTURE_SOURCE} (replayed from stored events as of {as_of})",
+        "obligations": rows,
+        "current_snapshot": snapshot,
+        "unquantified_exposures": bucket,
+        "capital_allocation": capital,
+        "coverage": coverage,
+        "filings_examined": sorted({str(r.get("filed")) for r in rows + bucket + capital if r.get("filed")}),
+        "sections_examined": sorted({str(r.get("source")) for r in rows + bucket + capital if r.get("source")}),
+        "note": _PICTURE_NOTE,
+    }
+
+
+__all__ = ["get_obligations", "get_obligations_as_of", "persist_obligation_events", "DEFAULT_TRIGGERED_TYPES", "REVENUE_MATCHED_KINDS"]

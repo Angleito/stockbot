@@ -262,7 +262,7 @@ def test_persist_obligation_events_roundtrip(tmp_path):
                         _archive_key="filing-text:NVDA:2026-02-25:0001"),
     ]
     summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert summary == {"events_written": 1, "capital_events_written": 0, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
 
     events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     (event,) = events
@@ -290,7 +290,7 @@ def test_persist_obligation_events_roundtrip(tmp_path):
 
     # Deterministic rerun writes nothing new.
     rerun = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert rerun == {"events_written": 0, "capital_events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 1
     assert parquet.read_table("evidence", root=tmp_path / "parquet").num_rows == 1
 
@@ -620,7 +620,7 @@ def test_persist_unquantified_exposures(tmp_path):
     }
     exp["content_hash"] = obligations._content_hash(exp)
     summary = obligations.persist_obligation_events([], data_root=str(tmp_path), unquantified=[exp])
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert summary == {"events_written": 1, "capital_events_written": 0, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     assert event["amount_billions"] is None
     assert event["certainty"] == "contingent"
@@ -967,9 +967,73 @@ def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch):
     assert any("canceled amount unknown" in w for w in result["coverage"]["warnings"])
 
 
-def test_8k_lifecycle_persist_roundtrip(monkeypatch, tmp_path):
-    """Retention-fixture lifecycle key/event/status persist with stable ids."""
+def test_8k_lifecycle_staggered_ingestion(monkeypatch, tmp_path):
+    """Jan persists status-less; Mar amendment dedups Jan, never mutates it."""
     from app.storage import parquet
+
+    jan = (
+        "2026-01-15", ["Item 1.01"],
+        "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+        "obligation cumulatively capped at $10 billion under the Agreements.",
+        "acc-jan",
+    )
+    mar = (
+        "2026-03-10", ["Item 1.01"],
+        "The company amended the Guarantee Agreement with Alpha Holdings.",
+        "acc-mar",
+    )
+    _install_with_8k(monkeypatch, {}, [jan])
+    jan_only = [r for r in obligations.get_obligations("SYN")["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(jan_only) == 1
+    first = obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
+    assert first["events_written"] == 1
+    jan_snapshot = dict({e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}["2026-01-15"])
+    _install_with_8k(monkeypatch, {}, [jan, mar])
+    both = [r for r in obligations.get_obligations("SYN")["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(both) == 2
+    second = obligations.persist_obligation_events(both, data_root=str(tmp_path))
+    assert second["events_written"] == 1
+    events = {e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
+    assert set(events) == {"2026-01-15", "2026-03-10"}
+    assert events["2026-01-15"] == jan_snapshot
+    assert "lifecycle_status" not in events["2026-01-15"]
+    assert events["2026-01-15"]["amount_billions"] == 10.0
+    assert events["2026-03-10"]["amount_billions"] is None
+    assert events["2026-03-10"]["lifecycle_event"] == "amendment"
+    assert events["2026-01-15"]["agreement_key"] == events["2026-03-10"]["agreement_key"]
+    rebuilt = [
+        {"type": "8k_guarantees", "amount_billions": e["amount_billions"], "filed": e["filed_at"],
+         "_lifecycle_event": e["lifecycle_event"], "agreement_key": e["agreement_key"]}
+        for e in events.values()
+    ]
+    obligations._resolve_8k_lifecycle(rebuilt)
+    by_filed = {r["filed"]: r for r in rebuilt}
+    assert by_filed["2026-01-15"]["amount_billions"] == 10.0
+    assert by_filed["2026-01-15"].get("lifecycle_status") == "amended"
+
+
+def test_obligations_as_of_before_amendment(monkeypatch, tmp_path):
+    """Jan-only store replayed in Feb: $10B unamended, no retained warning."""
+    from app.storage import parquet  # noqa: F401
+
+    _install_with_8k(monkeypatch, {}, [(
+        "2026-01-15", ["Item 1.01"],
+        "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+        "obligation cumulatively capped at $10 billion under the Agreements.",
+        "acc-jan",
+    )])
+    jan_only = [r for r in obligations.get_obligations("SYN")["obligations"] if r["type"] == "8k_guarantees"]
+    obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
+    replay = obligations.get_obligations_as_of("SYN", "2026-02-01", data_root=str(tmp_path))
+    snap = [r for r in replay["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert len(snap) == 1 and snap[0]["amount_billions"] == 10.0
+    assert "lifecycle_status" not in snap[0]
+    assert not any("did not disclose a replacement amount" in w for w in replay["coverage"]["warnings"])
+
+
+def test_obligations_as_of_retains_amended(monkeypatch, tmp_path):
+    """Jan+Mar store replayed in Apr: Jan amended $10B with retained warning."""
+    from app.storage import parquet  # noqa: F401
 
     _install_with_8k(monkeypatch, {}, [
         ("2026-01-15", ["Item 1.01"],
@@ -980,20 +1044,42 @@ def test_8k_lifecycle_persist_roundtrip(monkeypatch, tmp_path):
          "The company amended the Guarantee Agreement with Alpha Holdings.",
          "acc-mar"),
     ])
+    both = [r for r in obligations.get_obligations("SYN")["obligations"] if r["type"] == "8k_guarantees"]
+    obligations.persist_obligation_events(both, data_root=str(tmp_path))
+    replay = obligations.get_obligations_as_of("SYN", "2026-04-01", data_root=str(tmp_path))
+    snap = [r for r in replay["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert len(snap) == 1 and snap[0]["amount_billions"] == 10.0
+    assert snap[0].get("lifecycle_status") == "amended"
+    assert any("did not disclose a replacement amount" in w for w in replay["coverage"]["warnings"])
+
+
+def test_obligations_as_of_empty(monkeypatch, tmp_path):
+    """Pre-history replay returns the _no_data error shape."""
+    _install_with_8k(monkeypatch, {}, [(
+        "2026-01-15", ["Item 1.01"],
+        "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+        "obligation cumulatively capped at $10 billion under the Agreements.",
+        "acc-jan",
+    )])
+    jan_only = [r for r in obligations.get_obligations("SYN")["obligations"] if r["type"] == "8k_guarantees"]
+    obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
+    replay = obligations.get_obligations_as_of("SYN", "2025-01-01", data_root=str(tmp_path))
+    assert "error" in replay and "2025-01-01" in replay["error"]
+
+
+def test_capital_persist_replay_roundtrip(monkeypatch, tmp_path):
+    """Dollar-less buyback persists to capital_events and replays as capital only."""
+    _install_layered(monkeypatch, {
+        "10-K": ({"Stock Compensation": "The board authorized a share repurchase program."}, "2026-02-01"),
+    })
     result = obligations.get_obligations("SYN")
-    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
-    summary = obligations.persist_obligation_events(ledger_8k, data_root=str(tmp_path))
-    assert summary == {"events_written": 2, "evidence_written": 2, "skipped_no_filing_date": 0, "skipped_proxied": 0}
-    events = {e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
-    assert set(events) == {"2026-01-15", "2026-03-10"}
-    assert "agreement_key" in events["2026-01-15"] and "lifecycle_event" in events["2026-01-15"]
-    assert events["2026-01-15"]["lifecycle_status"] == "amended"
-    assert events["2026-01-15"]["amount_billions"] == 10.0
-    assert events["2026-03-10"]["amount_billions"] is None
-    assert events["2026-03-10"]["lifecycle_event"] == "amendment"
-    assert events["2026-01-15"]["agreement_key"] == events["2026-03-10"]["agreement_key"]
-    rerun = obligations.persist_obligation_events(ledger_8k, data_root=str(tmp_path))
-    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert result["capital_allocation"]
+    summary = obligations.persist_obligation_events([], data_root=str(tmp_path), capital=result["capital_allocation"])
+    assert summary["capital_events_written"] == 1 and summary["events_written"] == 0
+    replay = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
+    assert len(replay["capital_allocation"]) == 1
+    assert replay["capital_allocation"][0]["trigger"] == "board_discretion"
+    assert replay["obligations"] == [] and replay["current_snapshot"] == []
 
 
 def test_payment_timing_roundtrip_and_retune(tmp_path):
@@ -1009,11 +1095,11 @@ def test_payment_timing_roundtrip_and_retune(tmp_path):
     row = _obligation_row(payment_horizon=horizon, schedule=None, amount_billions=119.0)
     row["content_hash"] = obligations._content_hash(row)
     summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert summary == {"events_written": 1, "capital_events_written": 0, "evidence_written": 1, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
     assert json.loads(event["payment_timing_json"]) == horizon
     rerun = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    assert rerun == {"events_written": 0, "capital_events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
     corrected = _obligation_row(
         payment_horizon={**horizon, "paid_in_remainder_billions": 90.0,
                          "paid_after_remainder_billions": 29.0},

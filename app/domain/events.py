@@ -40,7 +40,6 @@ class CorporateEvent:
     payment_timing_json: str | None = None
     agreement_key: str | None = None
     lifecycle_event: str | None = None
-    lifecycle_status: str | None = None
 
 
 @dataclass(frozen=True)
