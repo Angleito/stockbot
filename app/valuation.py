@@ -660,6 +660,8 @@ def get_valuation_metrics(ticker: str) -> dict:
     value = {
         "ticker": ticker,
         "as_of": estimates.get("as_of"),
+        "fiscal_year_current": year_cur,
+        "fiscal_year_next": year_next,
         "source": "live price (Yahoo Finance quote) + SEC EDGAR EPS + Yahoo consensus + SEC 10-Q/10-K notes",
         "price": {
             "last": round(price, 2) if price is not None else None,

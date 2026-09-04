@@ -541,6 +541,14 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
     price = result.get("price") or {}
     fe = result.get("forward_eps") or {}
     ob = result.get("obligations") or {}
+    year_cur = str(result.get("fiscal_year_current") or "").strip() or None
+    year_next = str(result.get("fiscal_year_next") or "").strip() or None
+
+    def _fy(cur: bool) -> str:
+        y = year_cur if cur else year_next
+        return f"FY{y}" if y else ("(current FY)" if cur else "(next FY)")
+
+    fy_cur, fy_next = _fy(True), _fy(False)
 
     def _pe(value: Any) -> str:
         return f"{value}x" if value is not None else "unavailable (no live price)"
@@ -587,59 +595,59 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
             else f"- {label}: EPS ${eps} | P/E {pe} | after obligations"
         )
 
-    _line("Consensus FY27", fe.get("consensus"))
+    _line(f"Consensus {fy_cur}", fe.get("consensus"))
     adj = fe.get("adjusted") or {}
     if adj.get("eps_after_contractual") is not None:
         lines.append(
-            f"- Adjusted FY27 (contractual incl.): EPS ${adj['eps_after_contractual']}"
+            f"- Adjusted {fy_cur} (contractual incl.): EPS ${adj['eps_after_contractual']}"
             f" | P/E {_pe(adj.get('pe_after_contractual'))}"
             f" | drag ${adj.get('obligation_drag_per_share')}/sh"
         )
     scn = fe.get("scenario") or {}
     if scn.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY27 (+contingent, no default): EPS ${scn['eps_after_all_obligations']}"
+            f"- Scenario {fy_cur} (+contingent, no default): EPS ${scn['eps_after_all_obligations']}"
             f" | P/E {_pe(scn.get('pe_after_all_obligations'))}"
             f" | drag ${scn.get('contingent_drag_per_share')}/sh"
         )
     scn_d = fe.get("scenario_with_defaults") or {}
     if scn_d.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY27 (counterparty default): EPS ${scn_d['eps_after_all_obligations']}"
+            f"- Scenario {fy_cur} (counterparty default): EPS ${scn_d['eps_after_all_obligations']}"
             f" | P/E {_pe(scn_d.get('pe_after_all_obligations'))}"
             f" | drag ${scn_d.get('contingent_drag_per_share')}/sh"
         )
-    _line("Consensus FY28", fe.get("consensus_next_fy"))
+    _line(f"Consensus {fy_next}", fe.get("consensus_next_fy"))
     adj2 = fe.get("adjusted_next_fy") or {}
     if adj2.get("eps_after_contractual") is not None:
         lines.append(
-            f"- Adjusted FY28 (contractual incl.): EPS ${adj2['eps_after_contractual']}"
+            f"- Adjusted {fy_next} (contractual incl.): EPS ${adj2['eps_after_contractual']}"
             f" | P/E {_pe(adj2.get('pe_after_contractual'))}"
         )
     scn2 = fe.get("scenario_next_fy") or {}
     if scn2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY28 (+contingent, no default): EPS ${scn2['eps_after_all_obligations']}"
+            f"- Scenario {fy_next} (+contingent, no default): EPS ${scn2['eps_after_all_obligations']}"
             f" | P/E {_pe(scn2.get('pe_after_all_obligations'))}"
             f" | drag ${scn2.get('contingent_drag_per_share')}/sh contingent"
         )
     scn_d2 = fe.get("scenario_with_defaults_next_fy") or {}
     if scn_d2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY28 (counterparty default): EPS ${scn_d2['eps_after_all_obligations']}"
+            f"- Scenario {fy_next} (counterparty default): EPS ${scn_d2['eps_after_all_obligations']}"
             f" | P/E {_pe(scn_d2.get('pe_after_all_obligations'))}"
         )
     worst = fe.get("worst_case") or {}
     if worst.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- WORST CASE FY27 (all obligations incl. supply stranded):"
+            f"- WORST CASE {fy_cur} (all obligations incl. supply stranded):"
             f" EPS ${worst['eps_after_all_obligations']}"
             f" | P/E {_pe(worst.get('pe_after_all_obligations'))}"
         )
     worst2 = fe.get("worst_case_next_fy") or {}
     if worst2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- WORST CASE FY28 (all obligations incl. supply stranded):"
+            f"- WORST CASE {fy_next} (all obligations incl. supply stranded):"
             f" EPS ${worst2['eps_after_all_obligations']}"
             f" | P/E {_pe(worst2.get('pe_after_all_obligations'))}"
         )
