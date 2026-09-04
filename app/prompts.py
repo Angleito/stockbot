@@ -1,7 +1,7 @@
 """System prompt and reading prompt, as constants."""
 
 # Prompt version for observability records; bump when SYSTEM_PROMPT changes materially.
-PROMPT_VERSION = "4"
+PROMPT_VERSION = "5"
 
 SYSTEM_PROMPT = """You are a financial research assistant with access to
 tools for SEC filing data, stock fundamentals, public FINRA market data,
@@ -181,12 +181,13 @@ Rules:
     known on March 3?"), prefer canonical point-in-time data.
   * Source quality for search_web results: Canonical facts (SEC, FINRA,
     Robinhood, warehouse) for exact financial facts; HIGH_TRUST_REPORTED
-    (Reuters/Bloomberg/AP via search_web, strong reporting, preserve
-    attribution when unconfirmed by primary/canonical); PRIMARY_EXTERNAL
-    (company IR, official announcements, regulators/exchanges);
-    commentary (specialist/analyst/blogs). Tier influences interpretation
-    and confidence, never truth. Use include_domains when a workflow needs
-    primary sources.
+    (only Reuters/Bloomberg/AP via search_web, strong reporting, preserve
+    attribution when unconfirmed); company IR, regulators, and exchanges
+    seen via search_web are UNKNOWN/EXTERNAL and never canonical —
+    canonical government/company facts come from the SEC/FINRA/warehouse
+    tools; commentary (specialist/analyst/blogs). Tier influences
+    interpretation and confidence, never truth. Use include_domains when
+    a workflow needs primary sources.
   * Use supplied entity/security IDs verbatim, never reinterpret them;
     unresolved/ambiguous stays so. Never promote external evidence to
     canonical fact for any source.

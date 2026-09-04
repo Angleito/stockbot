@@ -7,11 +7,19 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from app.domain.evidence.claims import build_claim, claim_content_hash
-from app.domain.evidence.models import EvidenceClaim
+from app.domain.evidence.models import EvidenceClaim, ResolutionStatus
 from app.domain.evidence.source_quality import classify_source
 from app.domain.market.securities import TickerAlias
 
 from .evidence_resolution import resolve_subject
+
+
+def _resolution(res) -> ResolutionStatus:
+    if res.resolved:
+        return ResolutionStatus.RESOLVED
+    if res.resolution_method == "ambiguous":
+        return ResolutionStatus.AMBIGUOUS
+    return ResolutionStatus.UNRESOLVED
 
 
 def _domain(url: str | None) -> str | None:
@@ -76,12 +84,10 @@ def build_evidence_claims(
             build_claim(
                 entity_id=subj.entity_id,
                 security_id=subj.security_id,
-                ticker=(subj.ticker if subj.resolved else None)
-                or (
-                    subject_ticker.strip().upper()
-                    if isinstance(subject_ticker, str) and subject_ticker.strip()
-                    else None
-                ),
+                ticker=subj.ticker if subj.resolved else None,
+                reported_ticker=(subject_ticker.strip().upper() if isinstance(subject_ticker, str) and subject_ticker.strip() else None),
+                subject_resolution=_resolution(subj),
+                object_resolution=_resolution(obj),
                 subject_name=subject_name if isinstance(subject_name, str) else None,
                 claim_type=item.get("claim_type") or "other",
                 text=text if isinstance(text, str) else "",
@@ -114,6 +120,9 @@ def claim_to_enriched_dict(claim: EvidenceClaim) -> dict:
         "entity_id": claim.entity_id,
         "security_id": claim.security_id,
         "ticker": claim.ticker,
+        "reported_ticker": claim.reported_ticker,
+        "subject_resolution": claim.subject_resolution.value,
+        "object_resolution": claim.object_resolution.value,
         "subject_name": claim.subject_name,
         "claim_type": claim.claim_type.value,
         "object_entity_id": claim.object_entity_id,

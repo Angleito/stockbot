@@ -62,18 +62,41 @@ class ContextBuilder:
             transformed = quarantine_reader.process_web_evidence(self.model, result)
             if transformed.get("claims_processed") and isinstance(transformed.get("evidence"), list) and transformed["evidence"]:
                 from ..services.evidence_claims import build_evidence_claims, claim_to_enriched_dict
+                from ..storage import parquet
 
                 _now = datetime.now(timezone.utc)
                 _fallback = transformed.get("retrieved_at") or result.get("retrieved_at") or _now.isoformat()
+                _reader_items = transformed["evidence"]
                 try:
                     _claims = build_evidence_claims(
-                        reader_items=transformed["evidence"],
+                        reader_items=_reader_items,
                         as_of=_now,
                         retrieved_fallback=_fallback,
                     )
                     transformed["evidence"] = [claim_to_enriched_dict(c) for c in _claims]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._record(
+                        source="exa",
+                        sha256=hashlib.sha256(f"{type(exc).__name__}:{len(_reader_items)}".encode()).hexdigest(),
+                        score=None,
+                        verdict=None,
+                        rule_ids=["exa", "ontology", "enrichment_failed"],
+                        decision="ontology_enrichment_failed",
+                        reason=f"{type(exc).__name__} enriching {len(_reader_items)} items",
+                    )
+                else:
+                    try:
+                        parquet.write_rows("evidence_claims", transformed["evidence"])
+                    except Exception as exc:
+                        self._record(
+                            source="exa",
+                            sha256=hashlib.sha256(f"{type(exc).__name__}:{len(transformed['evidence'])}".encode()).hexdigest(),
+                            score=None,
+                            verdict=None,
+                            rule_ids=["exa", "ontology", "enrichment_failed"],
+                            decision="ontology_persist_failed",
+                            reason=f"{type(exc).__name__} persisting {len(transformed['evidence'])} items",
+                        )
             envelope = replace(envelope, content=transformed)
             rendered = render_tool_result(transformed)
         outcome = prepare_context(envelope, rendered)

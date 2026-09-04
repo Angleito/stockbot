@@ -230,6 +230,7 @@ DATASETS: dict[str, Dataset] = {
             ("source_url", TEXT), ("source_domain", TEXT), ("publisher", TEXT),
             ("source_tier", TEXT), ("integrity", TEXT), ("evidence_summary", TEXT),
             ("confidence", TEXT), ("content_hash", TEXT),
+            ("reported_ticker", TEXT), ("subject_resolution", TEXT), ("object_resolution", TEXT),
         )),
         unique_keys=("claim_id",),
         partition_field="retrieved_at",

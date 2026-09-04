@@ -7,7 +7,7 @@ import re
 
 from app.security.context import Integrity
 
-from .models import ClaimType, EvidenceClaim, SourceTier, coerce_claim_type
+from .models import ClaimType, EvidenceClaim, ResolutionStatus, SourceTier, coerce_claim_type
 
 
 def _claim_type_value(claim_type: ClaimType | str) -> str:
@@ -56,6 +56,9 @@ def build_claim(
     integrity: Integrity = Integrity.EXTERNAL,
     evidence_summary: str | None = None,
     confidence: str | None = None,
+    reported_ticker: str | None = None,
+    subject_resolution: ResolutionStatus = ResolutionStatus.UNRESOLVED,
+    object_resolution: ResolutionStatus = ResolutionStatus.UNRESOLVED,
 ) -> EvidenceClaim:
     ctype = claim_type if isinstance(claim_type, ClaimType) else coerce_claim_type(claim_type)
     return EvidenceClaim(
@@ -78,4 +81,7 @@ def build_claim(
         integrity=integrity,
         evidence_summary=evidence_summary,
         confidence=confidence,
+        reported_ticker=reported_ticker,
+        subject_resolution=subject_resolution,
+        object_resolution=object_resolution,
     )

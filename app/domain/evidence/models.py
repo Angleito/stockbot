@@ -21,6 +21,10 @@ class SourceTier(StrEnum):
     COMMUNITY = "community"
     UNKNOWN = "unknown"
 
+class ResolutionStatus(StrEnum):
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    AMBIGUOUS = "ambiguous"
 
 class ClaimType(StrEnum):
     CORPORATE_EVENT = "corporate_event"
@@ -74,6 +78,9 @@ class EvidenceClaim:
     integrity: Integrity = Integrity.EXTERNAL
     evidence_summary: str | None = None
     confidence: str | None = None
+    reported_ticker: str | None = None
+    subject_resolution: ResolutionStatus = ResolutionStatus.UNRESOLVED
+    object_resolution: ResolutionStatus = ResolutionStatus.UNRESOLVED
 
 
 def coerce_claim_type(v: object) -> ClaimType:

@@ -14,13 +14,6 @@ _HIGH_TRUST = {
     "apnews.com": "Associated Press",
 }
 
-_PRIMARY_GOV = frozenset({
-    "sec.gov",
-    "justice.gov",
-    "ftc.gov",
-    "federalreserve.gov",
-})
-
 
 def _host(url: str) -> str | None:
     try:
@@ -37,8 +30,12 @@ def _suffix_match(host: str, domain: str) -> bool:
 def classify_source(url: str) -> SourceClassification:
     """Classify a source URL to (publisher, tier, integrity).
 
-    Suffix-match on label boundaries so spoofs (evil-reuters.com,
-    reuters.com.evil.com) never match. Malformed URL → UNKNOWN/EXTERNAL.
+    Only reuters.com, bloomberg.com, and apnews.com elevate to
+    HIGH_TRUST_NEWS/HIGH_TRUST_REPORTED. Everything else is
+    UNKNOWN/EXTERNAL. Future company domains join via explicit-map
+    edit, never label inference. Suffix-match on label boundaries
+    so spoofs (evil-reuters.com, reuters.com.evil.com) never match.
+    Malformed URL → UNKNOWN/EXTERNAL.
     """
     host = _host(url) if isinstance(url, str) else None
     if not host:
@@ -46,9 +43,4 @@ def classify_source(url: str) -> SourceClassification:
     for domain, publisher in _HIGH_TRUST.items():
         if _suffix_match(host, domain):
             return SourceClassification(publisher, SourceTier.HIGH_TRUST_NEWS, Integrity.HIGH_TRUST_REPORTED)
-    if any(_suffix_match(host, gov) for gov in _PRIMARY_GOV):
-        return SourceClassification(host, SourceTier.PRIMARY_SOURCE, Integrity.PRIMARY_EXTERNAL)
-    labels = host.split(".")
-    if "investor" in labels or "ir" in labels:
-        return SourceClassification(host, SourceTier.PRIMARY_SOURCE, Integrity.PRIMARY_EXTERNAL)
     return SourceClassification(host, SourceTier.UNKNOWN, Integrity.EXTERNAL)

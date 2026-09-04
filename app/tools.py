@@ -1276,15 +1276,14 @@ def plan_public_search_queries(
     primary_name: str | None = None,
     primary_ticker: str | None = None,
     related_names: Any = (),
-    portfolio_tickers: Any = (),
-    include_portfolio: bool = False,
 ) -> list[dict]:
     """PUBLIC search targets → search_web args (planning only, no numbers).
 
-    Targets are primary + single-hop related names + (portfolio questions
-    only) other snapshot tickers. Queries carry names only — never
-    quantities/weights/cost basis/account IDs (`authorize_egress` +
-    `private_pattern_hit` remain the gate, unchanged).
+    Targets come only from the user request, canonical/public
+    relationships, public screens, or explicitly named companies.
+    Queries carry names only — never quantities/weights/cost
+    basis/account IDs (`authorize_egress` + `private_pattern_hit`
+    remain the gate, unchanged).
     """
     # ponytail: names-only mapping, no query-builder lib for 3 strings
     targets: list[str] = []
@@ -1305,10 +1304,6 @@ def plan_public_search_queries(
         _add(primary_ticker.strip().upper())
     for name in related_names or ():
         _add(name)
-    if include_portfolio:
-        for ticker in portfolio_tickers or ():
-            if isinstance(ticker, str) and ticker.strip():
-                _add(ticker.strip().upper())
     return [{"query": f"{name} recent announcements"} for name in targets[:3]]
 
 
@@ -1318,10 +1313,8 @@ def suggest_public_search_queries(
     primary_ticker: str | None,
     relationships: Any = (),
     names_by_entity: Any = None,
-    include_portfolio: bool = False,
-    data_root: Any = None,
 ) -> list[dict]:
-    """Warehouse-aware wrapper: single-hop EntityRelationships + snapshot tickers."""
+    """Warehouse-aware wrapper: single-hop EntityRelationships."""
     related: list[str] = []
     if primary_entity_id:
         for rel in relationships or ():
@@ -1335,20 +1328,7 @@ def suggest_public_search_queries(
                 continue
             if other and isinstance(names_by_entity, dict) and other in names_by_entity:
                 related.append(names_by_entity[other])
-    tickers: list[str] = []
-    if include_portfolio:
-        try:
-            snapshot = read_latest_snapshot(data_root=data_root)
-            if snapshot is not None:
-                for position in snapshot.positions:
-                    ticker = getattr(position, "ticker", None)
-                    if isinstance(ticker, str) and ticker.strip() and ticker.strip().upper() != (primary_ticker or "").strip().upper():
-                        tickers.append(ticker.strip().upper())
-        except Exception:
-            tickers = []
-    return plan_public_search_queries(
-        primary_name, primary_ticker, related, tickers, include_portfolio
-    )
+    return plan_public_search_queries(primary_name, primary_ticker, related)
 
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.

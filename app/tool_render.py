@@ -173,6 +173,10 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
             provenance = _cell(item.get("source_url")) or _cell(item.get("url"))
             lines.append(f"Claim {index}")
             lines.append(f"Entity: {subject} [{entity}]")
+            lines.append(f"Resolution: {_cell(item.get('subject_resolution')) or 'unresolved'}")
+            reported = _cell(item.get('reported_ticker'))
+            if reported:
+                lines.append(f"Reported as: {reported}")
             lines.append(f"Type: {ctype}")
             lines.append(f"Source: {source} [{tier}/{integrity}]")
             lines.append(f"Published: {published} | Retrieved: {retrieved}")
