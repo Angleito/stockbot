@@ -907,12 +907,17 @@ def _reconcile_schedule_components(rows: list[dict], start: int) -> None:
 
 def _apply_legacy_component_flags(rows: list[dict]) -> None:
     """Backfill component flags for events stored before flags existed."""
-    by_filed: dict[str, list[dict]] = {}
+    by_window: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
         if r.get("schedule_component") is not None:
             continue
-        by_filed.setdefault(str(r.get("filed") or ""), []).append(r)
-    for group in by_filed.values():
+        src = str(r.get("source") or "")
+        if not src.endswith(" note") and not src.endswith("note table"):
+            continue
+        filed = str(r.get("filed") or "")
+        note_key = src[:-len(" table")] if src.endswith(" table") else src
+        by_window.setdefault((filed, note_key), []).append(r)
+    for group in by_window.values():
         table_rows = [r for r in group if _is_fiscal_component_row(r)]
         headlines = [
             r for r in group

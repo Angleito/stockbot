@@ -803,6 +803,72 @@ def test_schedule_components_legacy_null_flags_replay(tmp_path):
     assert all(c["headline_type"] == "supply" for c in comps)
     assert sum(r["amount_billions"] for r in replayed["current_snapshot"]) == pytest.approx(13.3, abs=0.05)
 
+def test_schedule_components_legacy_mixed_notes_replay(tmp_path):
+    """Same filing, two notes: supply table replays flagged, lease table stays independent."""
+    from app.domain.events import sec_event_id
+    from app.storage import parquet
+
+    supply_table = [
+        ("2026", 4.752), ("2027", 3.708), ("2028", 1.981),
+        ("2029", 1.306), ("2030", 0.788), ("Thereafter", 0.773),
+    ]
+    lease_table = [
+        ("2026", 1.5), ("2027", 1.4), ("2028", 1.1), ("2029", 0.6), ("Thereafter", 0.4),
+    ]
+    store_rows = [
+        {
+            "event_id": sec_event_id("SYN", "mixed-head"),
+            "ticker": "SYN", "event_type": "supply", "amount_billions": 13.3,
+            "certainty": "contractual", "status": "future_cash_obligation",
+            "revenue_matched": False, "default_triggered": False,
+            "fiscal_year": None,
+            "schedule_json": json.dumps([
+                {"fiscal_year": fy, "amount_billions": amt} for fy, amt in supply_table
+            ]),
+            "filed_at": "2026-02-01", "known_at": "2026-02-01",
+            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note",
+            "content_hash": "mixed-head", "parser_version": obligations.PARSER_VERSION,
+        },
+    ]
+    for i, (fy, amt) in enumerate(supply_table):
+        ch = f"mixed-supply-c{i}"
+        store_rows.append({
+            "event_id": sec_event_id("SYN", ch),
+            "ticker": "SYN", "event_type": "purchase_commitments", "amount_billions": amt,
+            "certainty": "contractual", "status": "future_cash_obligation",
+            "revenue_matched": False, "default_triggered": False,
+            "fiscal_year": fy, "filed_at": "2026-02-01", "known_at": "2026-02-01",
+            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note table",
+            "content_hash": ch, "parser_version": obligations.PARSER_VERSION,
+        })
+    for i, (fy, amt) in enumerate(lease_table):
+        ch = f"mixed-lease-c{i}"
+        store_rows.append({
+            "event_id": sec_event_id("SYN", ch),
+            "ticker": "SYN", "event_type": "operating_leases", "amount_billions": amt,
+            "certainty": "contractual", "status": "future_cash_obligation",
+            "revenue_matched": False, "default_triggered": False,
+            "fiscal_year": fy, "filed_at": "2026-02-01", "known_at": "2026-02-01",
+            "source": "SEC EDGAR 2026-02-01 Leases note table",
+            "content_hash": ch, "parser_version": obligations.PARSER_VERSION,
+        })
+    assert parquet.write_rows("events", store_rows, root=tmp_path / "parquet") == 12
+    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
+    assert "error" not in replayed
+    assert len(replayed["obligations"]) == 12
+    comps = [r for r in replayed["obligations"] if r.get("schedule_component")]
+    assert len(comps) == 6
+    assert all(c["headline_type"] == "supply" for c in comps)
+    lease_rows = [r for r in replayed["obligations"] if r.get("type") == "operating_leases"]
+    assert len(lease_rows) == 5
+    assert all(r.get("schedule_component") is None for r in lease_rows)
+    snap = replayed["current_snapshot"]
+    assert sum(r["amount_billions"] for r in snap if r.get("type") == "supply") == pytest.approx(13.3, abs=0.05)
+    lease_snap = [r for r in snap if r.get("type") == "operating_leases"]
+    assert sum(r["amount_billions"] for r in lease_snap) == pytest.approx(5.0, abs=0.05)
+    assert all(r.get("schedule_component") is None for r in lease_snap)
+    assert not [r for r in snap if r.get("type") == "purchase_commitments"]
+
 
 def test_reconciliation_ambiguity_attaches_closest_and_warns():
     md = (
