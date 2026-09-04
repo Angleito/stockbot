@@ -435,7 +435,7 @@ def run_chat(
     # history has already been normalized to prevent tool metadata or
     # privileged roles. Full history is staged in order INSIDE the recorder
     # block below (assistant turns need the recorder for security events).
-    context_builder = ContextBuilder(run_security=run_security, model=model)
+    context_builder = ContextBuilder(run_security=run_security, model=model, data_root=context.data_root)
     context_builder.add_system(SYSTEM_PROMPT)
     available_tools = tools_for_capabilities(context.capabilities)
     if context.tool_policy.allowed_tools is not None:

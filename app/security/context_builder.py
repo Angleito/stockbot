@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..storage.runs import get_current_recorder
 from ..tool_render import render_tool_result
@@ -26,9 +27,10 @@ class ContextBuilder:
     recorded as a security event against the active recorder (if any).
     """
 
-    def __init__(self, run_security: RunSecurityContext, model: str) -> None:
+    def __init__(self, run_security: RunSecurityContext, model: str, data_root: Path | None = None) -> None:
         self.run_security = run_security
         self.model = model
+        self._data_root = data_root
         self.messages: list[dict] = []
         # The exact text of the most recently appended tool message (used by
         # the agent loop for evidence accounting).
@@ -58,6 +60,7 @@ class ContextBuilder:
         quarantined reader.
         """
         envelope = envelope_for_tool(name, result)
+        _enriched_evidence: list[dict] | None = None
         if name == "search_web":
             transformed = quarantine_reader.process_web_evidence(self.model, result)
             if transformed.get("claims_processed") and isinstance(transformed.get("evidence"), list) and transformed["evidence"]:
@@ -71,9 +74,11 @@ class ContextBuilder:
                     _claims = build_evidence_claims(
                         reader_items=_reader_items,
                         as_of=_now,
+                        data_root=self._data_root,
                         retrieved_fallback=_fallback,
                     )
                     transformed["evidence"] = [claim_to_enriched_dict(c) for c in _claims]
+                    _enriched_evidence = transformed["evidence"]
                 except Exception as exc:
                     self._record(
                         source="exa",
@@ -84,19 +89,6 @@ class ContextBuilder:
                         decision="ontology_enrichment_failed",
                         reason=f"{type(exc).__name__} enriching {len(_reader_items)} items",
                     )
-                else:
-                    try:
-                        parquet.write_rows("evidence_claims", transformed["evidence"])
-                    except Exception as exc:
-                        self._record(
-                            source="exa",
-                            sha256=hashlib.sha256(f"{type(exc).__name__}:{len(transformed['evidence'])}".encode()).hexdigest(),
-                            score=None,
-                            verdict=None,
-                            rule_ids=["exa", "ontology", "enrichment_failed"],
-                            decision="ontology_persist_failed",
-                            reason=f"{type(exc).__name__} persisting {len(transformed['evidence'])} items",
-                        )
             envelope = replace(envelope, content=transformed)
             rendered = render_tool_result(transformed)
         outcome = prepare_context(envelope, rendered)
@@ -126,6 +118,19 @@ class ContextBuilder:
                 ),
             })
             return False
+        if _enriched_evidence:
+            try:
+                parquet.write_rows("evidence_claims", _enriched_evidence, root=self._data_root / "parquet" if self._data_root is not None else None)
+            except Exception as exc:
+                self._record(
+                    source="exa",
+                    sha256=hashlib.sha256(f"{type(exc).__name__}:{len(_enriched_evidence)}".encode()).hexdigest(),
+                    score=None,
+                    verdict=None,
+                    rule_ids=["exa", "ontology", "enrichment_failed"],
+                    decision="ontology_persist_failed",
+                    reason=f"{type(exc).__name__} persisting {len(_enriched_evidence)} items",
+                )
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": outcome.text}
         )

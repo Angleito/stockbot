@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -40,6 +41,7 @@ def build_evidence_claims(
     aliases_by_ticker: Callable[[str], Sequence[TickerAlias]] | None = None,
     name_to_ticker: Callable[[str], str | None] | None = None,
     as_of: datetime | None = None,
+    data_root: Path | None = None,
     retrieved_fallback: str,
 ) -> list[EvidenceClaim]:
     """Classify + link each reader item; never guesses identity."""
@@ -50,8 +52,8 @@ def build_evidence_claims(
     if aliases_by_ticker is None or name_to_ticker is None:
         from .evidence_resolution import warehouse_aliases_fn, warehouse_name_to_ticker
 
-        aliases_by_ticker = aliases_by_ticker or warehouse_aliases_fn(instant)
-        name_to_ticker = name_to_ticker or (lambda n: warehouse_name_to_ticker(n))
+        aliases_by_ticker = aliases_by_ticker or warehouse_aliases_fn(instant, data_root)
+        name_to_ticker = name_to_ticker or (lambda n: warehouse_name_to_ticker(n, data_root))
 
     def _resolve(ticker: str | None, name: str | None):
         if resolve is not None:
