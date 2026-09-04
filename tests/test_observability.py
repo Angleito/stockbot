@@ -375,7 +375,7 @@ def test_runtime_objects_and_full_stream(monkeypatch):
     assert run["total_tokens"] == 30
     assert run["estimated_total_cost"] == pytest.approx(0.00024)
     assert run["agent_version"] == "0.1.0"
-    assert run["prompt_version"] == "3"
+    assert run["prompt_version"] == "4"
     assert run["tool_registry_version"] == agent.TOOL_REGISTRY_VERSION
     assert run["duration_ms"] is not None and run["duration_ms"] >= 0
     assert run["final_answer_hash"] is not None

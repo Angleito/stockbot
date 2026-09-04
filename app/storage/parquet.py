@@ -220,6 +220,20 @@ DATASETS: dict[str, Dataset] = {
         unique_keys=("evidence_id",),
         partition_field="retrieved_at",
     ),
+    "evidence_claims": Dataset(
+        name="evidence_claims",
+        schema=pa.schema(_fields(
+            ("claim_id", TEXT), ("entity_id", TEXT), ("security_id", TEXT),
+            ("ticker", TEXT), ("subject_name", TEXT), ("claim_type", TEXT),
+            ("object_entity_id", TEXT), ("object_name", TEXT), ("text", TEXT),
+            ("event_at", TEXT), ("published_at", TEXT), ("retrieved_at", TEXT),
+            ("source_url", TEXT), ("source_domain", TEXT), ("publisher", TEXT),
+            ("source_tier", TEXT), ("integrity", TEXT), ("evidence_summary", TEXT),
+            ("confidence", TEXT), ("content_hash", TEXT),
+        )),
+        unique_keys=("claim_id",),
+        partition_field="retrieved_at",
+    ),
 }
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from ..storage.runs import get_current_recorder
 from ..tool_render import render_tool_result
@@ -59,6 +60,20 @@ class ContextBuilder:
         envelope = envelope_for_tool(name, result)
         if name == "search_web":
             transformed = quarantine_reader.process_web_evidence(self.model, result)
+            if transformed.get("claims_processed") and isinstance(transformed.get("evidence"), list) and transformed["evidence"]:
+                from ..services.evidence_claims import build_evidence_claims, claim_to_enriched_dict
+
+                _now = datetime.now(timezone.utc)
+                _fallback = transformed.get("retrieved_at") or result.get("retrieved_at") or _now.isoformat()
+                try:
+                    _claims = build_evidence_claims(
+                        reader_items=transformed["evidence"],
+                        as_of=_now,
+                        retrieved_fallback=_fallback,
+                    )
+                    transformed["evidence"] = [claim_to_enriched_dict(c) for c in _claims]
+                except Exception:
+                    pass
             envelope = replace(envelope, content=transformed)
             rendered = render_tool_result(transformed)
         outcome = prepare_context(envelope, rendered)

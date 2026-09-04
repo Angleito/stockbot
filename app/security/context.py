@@ -22,6 +22,8 @@ class Sensitivity(StrEnum):
 class Integrity(StrEnum):
     CANONICAL = "canonical"
     AUTHENTICATED = "authenticated"
+    HIGH_TRUST_REPORTED = "high_trust_reported"
+    PRIMARY_EXTERNAL = "primary_external"
     EXTERNAL = "external"
     DERIVED = "derived"
 

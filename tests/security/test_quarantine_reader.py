@@ -267,8 +267,8 @@ def test_claims_render_in_web_search_output():
         }],
     }
     rendered = render_tool_result(result)
-    assert "- AMD shipped its MI400 accelerator." in rendered
-    assert "Source: https://example.com/amd-news" in rendered
+    assert "Claim: AMD shipped its MI400 accelerator." in rendered
+    assert "Provenance: https://example.com/amd-news" in rendered
     assert "Published: 2026-08-01T10:00:00.000Z" in rendered
     assert "AMD announced its MI400 accelerator." in rendered
 

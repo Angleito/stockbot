@@ -150,7 +150,7 @@ def _render_option_comparison(result: dict, max_bytes: int) -> str:
 
 def _render_web_search(result: dict, max_bytes: int) -> str:
     lines = [
-        f"Web search: {result.get('query') or '?'} (mode: {result.get('search_type') or 'auto'})"
+        f"CURRENT EXTERNAL EVIDENCE (search: {result.get('query') or '?'})"
     ]
     evidence = result.get("evidence") or []
     if not evidence:
@@ -158,18 +158,27 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
     for index, item in enumerate(evidence, start=1):
         if not isinstance(item, dict):
             continue
-        if item.get("claim"):
-            # Reader-produced structured claims (quarantined-reader output).
-            lines.append(f"- {_cell(item['claim'])}")
-            meta = []
-            if item.get("source_url"):
-                meta.append(f"Source: {item['source_url']}")
-            if item.get("published_at"):
-                meta.append(f"Published: {item['published_at']}")
-            if meta:
-                lines.append("  " + " | ".join(meta))
-            if item.get("evidence_summary"):
-                lines.append(f"   {item['evidence_summary']}")
+        if item.get("claim") or item.get("text"):
+            # Typed EvidenceClaim block; raw title/highlight never rendered here.
+            subject = _cell(item.get("subject_name")) or "?"
+            entity = _cell(item.get("entity_id")) or "unresolved"
+            ctype = _cell(item.get("claim_type")) or "other"
+            source = _cell(item.get("publisher")) or _cell(item.get("source_domain")) or "unknown"
+            tier = _cell(item.get("source_tier")) or "unknown"
+            integrity = _cell(item.get("integrity")) or "external"
+            published = _cell(item.get("published_at")) or "unknown"
+            retrieved = _cell(item.get("retrieved_at")) or "unknown"
+            text = _cell(item.get("text")) or _cell(item.get("claim"))
+            summary = _cell(item.get("evidence_summary"))
+            provenance = _cell(item.get("source_url")) or _cell(item.get("url"))
+            lines.append(f"Claim {index}")
+            lines.append(f"Entity: {subject} [{entity}]")
+            lines.append(f"Type: {ctype}")
+            lines.append(f"Source: {source} [{tier}/{integrity}]")
+            lines.append(f"Published: {published} | Retrieved: {retrieved}")
+            lines.append(f"Claim: {text}")
+            lines.append(f"Evidence: {summary}")
+            lines.append(f"Provenance: {provenance}")
             continue
         title = _cell(item.get("title")) or item.get("url") or f"Result {index}"
         meta = []

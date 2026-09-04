@@ -324,12 +324,12 @@ def test_web_search_claims_shape_renders():
         "retrieved_at": "2026-08-02T00:00:00+00:00",
     }
     rendered = render_tool_result(result)
-    assert "- AMD shipped its MI400 accelerator." in rendered
-    assert "Source: https://example.com/amd-news" in rendered
+    assert "Claim: AMD shipped its MI400 accelerator." in rendered
+    assert "Provenance: https://example.com/amd-news" in rendered
     assert "Published: 2026-08-01T10:00:00.000Z" in rendered
     assert "AMD announced its MI400 accelerator." in rendered
-    assert "- AMD guided Q3 revenue above consensus." in rendered
-    assert "Source: https://example.com/amd-guidance" in rendered
+    assert "Claim: AMD guided Q3 revenue above consensus." in rendered
+    assert "Provenance: https://example.com/amd-guidance" in rendered
     assert "No evidence" not in rendered
 
 
@@ -359,7 +359,7 @@ def test_web_search_mixed_claims_and_highlights_render():
         "retrieved_at": "2026-08-02T00:00:00+00:00",
     }
     rendered = render_tool_result(result)
-    assert "- AMD shipped its MI400 accelerator." in rendered
+    assert "Claim: AMD shipped its MI400 accelerator." in rendered
     assert "AMD MI400 Launch" in rendered
     assert "https://example.com/legacy" in rendered
 

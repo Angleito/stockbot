@@ -41,6 +41,8 @@ def test_envelope_enums_exist():
     assert list(Integrity) == [
         Integrity.CANONICAL,
         Integrity.AUTHENTICATED,
+        Integrity.HIGH_TRUST_REPORTED,
+        Integrity.PRIMARY_EXTERNAL,
         Integrity.EXTERNAL,
         Integrity.DERIVED,
     ]
