@@ -73,10 +73,10 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
       the stress scenario, never in "adjusted".
     * ``revenue_matched`` — spend that buys inventory/COGS for products
       sold at gross margin (supply commitments). This is NOT a separate
-      EPS drag: consensus revenue and COGS already embed it (NVDA FY27
-      revenue ~$395.7B at ~75% gross margin => ~$99B COGS, matching the
-      ~$95B supply payment in FY27). Counting it again would double-count
-      the cost. Reported separately with implied revenue coverage.
+      EPS drag: consensus revenue and COGS already embed it (the spend
+      buys inventory sold at a margin; counting it again would
+      double-count the cost). Reported separately with implied revenue
+      coverage at the company's own gross margin.
 
     Annualization honors the filing's disclosed payment horizon when
     present: a front-loaded commitment ($95B paid in the remainder of the
@@ -106,6 +106,8 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
         entry[bucket] = entry.get(bucket, 0.0) + float(amount or 0.0)
 
     for row in obligations_rows:
+        if row.get("schedule_component"):
+            continue
         amount_b = row.get("amount_billions")
         if not amount_b:
             continue
@@ -211,7 +213,7 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
 PROJECTION_MULTIPLES = (15, 20, 25, 30, 35)
 
 
-def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: float) -> dict:
+def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: Optional[float]) -> dict:
     """Share price per scenario EPS under a set of assumed P/E multiples.
 
     projected_price = scenario EPS x assumed P/E multiple. Each cell also
@@ -226,12 +228,8 @@ def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: float) -> 
         cells: dict[str, dict] = {}
         for multiple in PROJECTION_MULTIPLES:
             projected = round(eps * multiple, 2)
-            cells[f"{multiple}x"] = {
-                "price": projected,
-                "pct_change_vs_current": round(
-                    (projected / price - 1) * 100, 1
-                ),
-            }
+            pct = round((projected / price - 1) * 100, 1) if price is not None else None
+            cells[f"{multiple}x"] = {"price": projected, "pct_change_vs_current": pct}
         tiers.append({"tier": tier, "eps": round(eps, 2), "prices": cells})
     return {
         "assumption": (
@@ -239,15 +237,15 @@ def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: float) -> 
             "pct_change is vs the current live price"
         ),
         "multiples": list(PROJECTION_MULTIPLES),
-        "current_price": round(price, 2),
+        "current_price": round(price, 2) if price is not None else None,
         "tiers": tiers,
     }
 
 
 def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
     """Company's own effective tax rate from its 10-K (income tax expense /
-    pre-tax income), falling back to XBRL annual facts, then a conservative
-    default. Rates outside a sane band (5%-35%) are rejected."""
+    pre-tax income), falling back to XBRL annual facts, else None. Rates
+    outside a sane band (5%-35%) are rejected."""
     candidates: list[Optional[float]] = []
 
     try:
@@ -301,6 +299,46 @@ def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
     return None
 
 
+def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
+    """Company's own gross margin from latest FY XBRL facts (GrossProfit /
+    Revenue), else None with a reason (never an invented default).
+
+    Mirrors _effective_tax_rate: same company-facts frame, same defensive
+    pattern (any failure -> None, never an exception). The source tag
+    ("company_facts" vs "unavailable: ...") rides along so coverage can
+    caveat it.
+    """
+    try:
+        df = edgar_client.get_company(ticker).get_facts().to_dataframe()
+        gp = df[
+            df["concept"].str.fullmatch(r"(us-gaap:)?GrossProfit", case=False)
+            & (df["fiscal_period"] == "FY")
+        ].sort_values("period_end")
+        rev = df.iloc[0:0]
+        for concept in (
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "SalesRevenueNet",
+        ):
+            hit = df[
+                df["concept"].str.fullmatch(rf"(us-gaap:)?{concept}", case=False)
+                & (df["fiscal_period"] == "FY")
+            ].sort_values("period_end")
+            if not hit.empty:
+                rev = hit
+                break
+        if not gp.empty and not rev.empty:
+            gross = float(gp.iloc[-1]["value"])
+            revenue = float(rev.iloc[-1]["value"])
+            if revenue:
+                margin = gross / revenue
+                if 0.05 <= margin <= 0.95:
+                    return round(margin, 3), "company_facts"
+    except Exception:
+        pass
+    return None, "unavailable: gross margin fact missing"
+
+
 def _obligation_eps_scenarios(
     ob_rows: dict, shares_out: Optional[int], tax_rate: Optional[float]
 ) -> dict:
@@ -310,14 +348,43 @@ def _obligation_eps_scenarios(
     an after-tax EPS hit using the company's own effective tax rate and
     diluted shares. One-time items (write-downs, settlements, guarantee
     calls) are shown as one-time hits; recurring items are annualized.
+    No invented inputs: an unknown tax rate yields after_tax None, unknown
+    shares yield eps_impact None, each with a reason (never 0.15/1-share).
     """
-    rate = tax_rate if tax_rate is not None else 0.15
-    shares = shares_out or 1
     rows: list[dict] = []
+    snapshot = ob_rows.get("current_snapshot", ob_rows.get("obligations", [])) or []
 
     def _hit(name, pretax_billions, one_time, note=""):
-        after_tax = pretax_billions * (1 - rate)
-        eps = after_tax / (shares / 1e9)
+        if tax_rate is None:
+            rows.append(
+                {
+                    "scenario": name,
+                    "pretax_billions": round(pretax_billions, 3),
+                    "after_tax_billions": None,
+                    "eps_impact": None,
+                    "one_time": one_time,
+                    "tax_rate": None,
+                    "reason": "effective tax rate unavailable",
+                    "note": note,
+                }
+            )
+            return
+        after_tax = pretax_billions * (1 - tax_rate)
+        if not shares_out:
+            rows.append(
+                {
+                    "scenario": name,
+                    "pretax_billions": round(pretax_billions, 3),
+                    "after_tax_billions": round(after_tax, 3),
+                    "eps_impact": None,
+                    "one_time": one_time,
+                    "tax_rate": round(tax_rate, 3),
+                    "reason": "diluted shares unavailable",
+                    "note": note,
+                }
+            )
+            return
+        eps = after_tax / (shares_out / 1e9)
         rows.append(
             {
                 "scenario": name,
@@ -325,13 +392,14 @@ def _obligation_eps_scenarios(
                 "after_tax_billions": round(after_tax, 3),
                 "eps_impact": round(-eps, 3),
                 "one_time": one_time,
-                "tax_rate": round(rate, 3),
+                "tax_rate": round(tax_rate, 3),
+                "reason": None,
                 "note": note,
             }
         )
 
     purchase = None
-    for row in ob_rows.get("obligations", []):
+    for row in snapshot:
         if row.get("type") in ("purchase_commitments", "supply_commitments"):
             purchase = row.get("amount_billions")
             break
@@ -346,7 +414,7 @@ def _obligation_eps_scenarios(
 
     total_commitments = sum(
         row.get("amount_billions") or 0
-        for row in ob_rows.get("obligations", [])
+        for row in snapshot
         if row.get("status") in ("future_cash_obligation", "off_balance_sheet")
         and row.get("type") != "supply_commitments"
     )
@@ -358,7 +426,7 @@ def _obligation_eps_scenarios(
             "disclosed future-cash and off-balance-sheet commitments spread over 6 years",
         )
 
-    for row in ob_rows.get("obligations", []):
+    for row in snapshot:
         if row.get("default_triggered"):
             _hit(
                 f"{row.get('type')}_call",
@@ -377,10 +445,11 @@ def _obligation_eps_scenarios(
     return {
         "assumption": (
             "after-tax EPS impact = pretax exposure x (1 - effective tax "
-            f"rate {round(rate,3)}) / diluted shares; one-time items are "
+            f"rate {round(tax_rate, 3) if tax_rate is not None else 'unavailable; no rate used'})"
+            " / diluted shares; one-time items are "
             "shown per event, recurring items annualized"
         ),
-        "effective_tax_rate": round(rate, 3),
+        "effective_tax_rate": round(tax_rate, 3) if tax_rate is not None else None,
         "scenarios": rows,
     }
 
@@ -396,8 +465,14 @@ def get_valuation_metrics(ticker: str) -> dict:
         return hit
 
     price = get_live_price(ticker)
-    if price is None:
-        return _no_data(ticker, "no live price available")
+    price_gap = (
+        f"No live price for {ticker}: price-anchored multiples (trailing "
+        "P/E, forward P/E) and projected-price moves vs current are "
+        "unavailable; EPS and obligation figures below carry no price, "
+        "and no price is estimated."
+        if price is None
+        else None
+    )
 
     estimates = analyst_client.get_analyst_estimates(ticker)
     if "error" in estimates:
@@ -415,7 +490,7 @@ def get_valuation_metrics(ticker: str) -> dict:
     ob_rows = obligations.get_obligations(ticker)
     if "error" in ob_rows:
         return _no_data(ticker, ob_rows["error"])
-    impact = _obligation_annual_impact(ob_rows.get("obligations", []), years=6)
+    impact = _obligation_annual_impact(ob_rows.get("current_snapshot", ob_rows.get("obligations", [])), years=6)
     tax_rate = _effective_tax_rate(ob_rows)
     eps_scenarios = _obligation_eps_scenarios(ob_rows, shares_out, tax_rate)
 
@@ -429,8 +504,10 @@ def get_valuation_metrics(ticker: str) -> dict:
             return None
         line = {
             "eps": round(eps_value, 2),
-            "price": round(price, 2),
-            "pe": round(price / eps_value, 1) if eps_value else None,
+            "price": round(price, 2) if price is not None else None,
+            "pe": round(price / eps_value, 1)
+            if (price is not None and eps_value)
+            else None,
             "label": label,
         }
         if contractual:
@@ -438,7 +515,7 @@ def get_valuation_metrics(ticker: str) -> dict:
             line["eps_after_contractual"] = round(eps_value - contractual, 2)
             line["pe_after_contractual"] = (
                 round(price / max(0.01, eps_value - contractual), 1)
-                if (eps_value - contractual) > 0
+                if (price is not None and (eps_value - contractual) > 0)
                 else None
             )
         if contingent:
@@ -448,7 +525,7 @@ def get_valuation_metrics(ticker: str) -> dict:
             )
             line["pe_after_all_obligations"] = (
                 round(price / max(0.01, eps_value - contractual - contingent), 1)
-                if (eps_value - contractual - contingent) > 0
+                if (price is not None and (eps_value - contractual - contingent) > 0)
                 else None
             )
         return line
@@ -476,10 +553,10 @@ def get_valuation_metrics(ticker: str) -> dict:
         if shares_out
         else None
     )
-    gross_margin = 0.75  # NVDA guided ~75% non-GAAP gross margin.
+    gross_margin, margin_source = _revenue_matched_margin(ticker)
     implied_coverage_b = (
         impact["revenue_matched_annual_billions"] / (1 - gross_margin)
-        if impact["revenue_matched_annual_billions"]
+        if (impact["revenue_matched_annual_billions"] and gross_margin is not None)
         else None
     )
     impact_by_fy = impact.get("impact_by_fiscal_year") or {}
@@ -518,7 +595,7 @@ def get_valuation_metrics(ticker: str) -> dict:
                 eps_current,
                 contractual_cur,
                 (contingent_cur or 0.0) + (default_cur or 0.0),
-                "forward EPS incl. contingent obligations AND default-triggered guarantees (e.g. OpenAI insolvency triggers $105B residual-value guarantee)",
+                "forward EPS incl. contingent obligations AND counterparty-default-triggered guarantees (pay only on counterparty default)",
             ),
             "worst_case": _eps_line(
                 eps_current,
@@ -539,7 +616,7 @@ def get_valuation_metrics(ticker: str) -> dict:
                 eps_next,
                 contractual_next,
                 (contingent_next or 0.0) + (default_next or 0.0),
-                "forward EPS incl. contingent obligations AND default-triggered guarantees (e.g. OpenAI insolvency triggers $105B residual-value guarantee)",
+                "forward EPS incl. contingent obligations AND counterparty-default-triggered guarantees (pay only on counterparty default)",
             ),
             "worst_case_next_fy": _eps_line(
                 eps_next,
@@ -549,18 +626,55 @@ def get_valuation_metrics(ticker: str) -> dict:
             ),
         }
 
+    rows = ob_rows.get("obligations", [])
+    ob_coverage = ob_rows.get("coverage") or {}
+    manifest = ob_coverage.get("scan_manifest") or []
+    coverage = {
+        "scan_manifest": manifest,
+        "filings_examined": ob_rows.get("filings_examined")
+        or sorted({str(m.get("filing_date")) for m in manifest if m.get("filing_date")})
+        or sorted({str(r.get("filed")) for r in rows if r.get("filed")}),
+        "sections_examined": ob_rows.get("sections_examined")
+        or sorted({str(s) for m in manifest for s in (m.get("sections_examined") or []) if s})
+        or sorted({str(r.get("source")) for r in rows if r.get("source")}),
+        "quantified_count": ob_coverage.get("quantified_count", len(rows)),
+        "unquantified_count": ob_coverage.get(
+            "unquantified_count",
+            len(
+                ob_rows.get("unquantified_exposures")
+                or ob_rows.get("unquantified")
+                or ob_rows.get("unquantified_items")
+                or []
+            ),
+        ),
+        "warnings": list(ob_coverage.get("warnings") or ob_rows.get("warnings") or []),
+    }
+    if coverage["unquantified_count"] and not rows:
+        coverage["warnings"].append(
+            f"{coverage['unquantified_count']} unquantified exposure(s) disclosed "
+            "without dollar amounts; excluded from quantified obligations."
+        )
+    if price_gap is not None:
+        coverage["warnings"].append(price_gap)
+
     value = {
         "ticker": ticker,
         "as_of": estimates.get("as_of"),
+        "fiscal_year_current": year_cur,
+        "fiscal_year_next": year_next,
         "source": "live price (Yahoo Finance quote) + SEC EDGAR EPS + Yahoo consensus + SEC 10-Q/10-K notes",
         "price": {
-            "last": round(price, 2),
+            "last": round(price, 2) if price is not None else None,
             "retrieved_as_of": estimates.get("as_of"),
         },
+        "price_gap": price_gap,
+        "coverage": coverage,
         "shares_outstanding": shares_out,
         "ttm_gaap_eps": ttm_eps_diluted,
         "trailing_pe": (
-            round(price / ttm_eps_diluted, 1) if ttm_eps_diluted else None
+            round(price / ttm_eps_diluted, 1)
+            if (price is not None and ttm_eps_diluted)
+            else None
         ),
         "obligations": {
             "contractual_annual_billions": impact["contractual_annual_billions"],
@@ -574,35 +688,37 @@ def get_valuation_metrics(ticker: str) -> dict:
             "revenue_matched_implied_revenue_billions": round(implied_coverage_b, 1)
             if implied_coverage_b is not None
             else None,
+            "revenue_matched_gross_margin": gross_margin,
+            "revenue_matched_margin_source": margin_source,
             "per_kind": impact["per_kind"],
         },
         "obligation_eps_scenarios": eps_scenarios,
         "forward_eps": forward_eps,
         "projected_prices": _projected_prices(
             {
-                "Consensus FY27": (forward_eps["consensus"] or {}).get("eps"),
-                "Adjusted FY27": (forward_eps["adjusted"] or {}).get(
+                f"Consensus FY{year_cur}" if year_cur else "Consensus (current FY)": (forward_eps["consensus"] or {}).get("eps"),
+                f"Adjusted FY{year_cur}" if year_cur else "Adjusted (current FY)": (forward_eps["adjusted"] or {}).get(
                     "eps_after_contractual"
                 ),
-                "Scenario FY27 (no default)": (forward_eps["scenario"] or {}).get(
+                f"Scenario FY{year_cur} (no default)" if year_cur else "Scenario (current FY, no default)": (forward_eps["scenario"] or {}).get(
                     "eps_after_all_obligations"
                 ),
-                "Scenario FY27 (OpenAI defaults)": (forward_eps["scenario_with_defaults"] or {}).get(
+                f"Scenario FY{year_cur} (counterparty default)" if year_cur else "Scenario (current FY, counterparty default)": (forward_eps["scenario_with_defaults"] or {}).get(
                     "eps_after_all_obligations"
                 ),
-                "Worst case FY27": (forward_eps["worst_case"] or {}).get(
+                f"Worst case FY{year_cur}" if year_cur else "Worst case (current FY)": (forward_eps["worst_case"] or {}).get(
                     "eps_after_all_obligations"
                 ),
-                "Consensus FY28": (forward_eps["consensus_next_fy"] or {}).get(
+                f"Consensus FY{year_next}" if year_next else "Consensus (next FY)": (forward_eps["consensus_next_fy"] or {}).get(
                     "eps"
                 ),
-                "Scenario FY28 (no default)": (forward_eps["scenario_next_fy"] or {}).get(
+                f"Scenario FY{year_next} (no default)" if year_next else "Scenario (next FY, no default)": (forward_eps["scenario_next_fy"] or {}).get(
                     "eps_after_all_obligations"
                 ),
-                "Scenario FY28 (OpenAI defaults)": (forward_eps["scenario_with_defaults_next_fy"] or {}).get(
+                f"Scenario FY{year_next} (counterparty default)" if year_next else "Scenario (next FY, counterparty default)": (forward_eps["scenario_with_defaults_next_fy"] or {}).get(
                     "eps_after_all_obligations"
                 ),
-                "Worst case FY28": (forward_eps["worst_case_next_fy"] or {}).get(
+                f"Worst case FY{year_next}" if year_next else "Worst case (next FY)": (forward_eps["worst_case_next_fy"] or {}).get(
                     "eps_after_all_obligations"
                 ),
             },
@@ -614,16 +730,17 @@ def get_valuation_metrics(ticker: str) -> dict:
             "'Scenario' adds contingent obligations that are cancellable / "
             "reducible / terminable per the filing (cloud, vendor, supply "
             "commitments) — no counterparty default assumed. "
-            "'Scenario (OpenAI defaults)' also adds default-triggered "
-            "guarantees (the $105B SB Energy residual-value guarantee pays "
-            "only on OpenAI insolvency or lease payment failure; facility "
-            "lease guarantees pay only on partner default). 'Worst case' "
-            "additionally treats revenue-matched supply commitments as "
-            "stranded costs (demand fails). Revenue-matched spend is NOT "
-            "subtracted from consensus EPS (already embedded); it is "
-            "reported separately with implied revenue coverage. Buybacks, "
-            "dividends, and unquantifiable indemnities are excluded."
+            "'Scenario (counterparty default)' also adds default-triggered "
+            "guarantees, which pay only if a named counterparty defaults "
+            "or becomes insolvent. 'Worst case' additionally treats "
+            "revenue-matched supply commitments as stranded costs (demand "
+            "fails). Revenue-matched spend is NOT subtracted from consensus "
+            "EPS (already embedded); it is reported separately with implied "
+            "revenue coverage at the company's own gross margin (None when "
+            "the filed gross-margin fact is missing). Buybacks, dividends, "
+            "and unquantifiable indemnities are excluded."
         ),
     }
-    cache.set(key, value)
+    if price_gap is None:  # never cache a quote gap; retry fresh next call
+        cache.set(key, value)
     return value

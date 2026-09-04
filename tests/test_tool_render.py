@@ -7,6 +7,7 @@ unit tests. Offline and deterministic.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -827,3 +828,84 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
     assert "Source: mandate" in text
     assert "{" not in text
     assert len(text.encode("utf-8")) <= MAX_TOOL_MESSAGE_BYTES
+
+
+def _valuation_result(**kwargs) -> dict:
+    row = {
+        "eps": 5.0,
+        "pe": 20.0,
+        "eps_after_contractual": 4.9,
+        "pe_after_contractual": 19.6,
+        "eps_after_all_obligations": 4.8,
+        "pe_after_all_obligations": 19.2,
+        "obligation_drag_per_share": 0.1,
+        "contingent_drag_per_share": 0.1,
+    }
+    result = {
+        "ticker": "AAPL",
+        "price": {"last": 100.0},
+        "as_of": "2026-09-01",
+        "source": "test",
+        "ttm_gaap_eps": 6.0,
+        "trailing_pe": 16.7,
+        "obligations": {},
+        "forward_eps": {
+            k: dict(row)
+            for k in (
+                "consensus",
+                "adjusted",
+                "scenario",
+                "scenario_with_defaults",
+                "worst_case",
+                "consensus_next_fy",
+                "adjusted_next_fy",
+                "scenario_next_fy",
+                "scenario_with_defaults_next_fy",
+                "worst_case_next_fy",
+            )
+        },
+    }
+    result.update(kwargs)
+    return result
+
+
+def test_valuation_forward_eps_labels_follow_fiscal_year_metadata():
+    text = render_tool_result(
+        _valuation_result(fiscal_year_current="2026", fiscal_year_next="2027")
+    )
+    assert "Consensus FY2026" in text
+    assert "Consensus FY2027" in text
+    assert "Adjusted FY2026 (contractual incl.)" in text
+    assert "WORST CASE FY2027 (all obligations incl. supply stranded)" in text
+    assert "FY26" not in text and "FY27" not in text
+    fallback = render_tool_result(_valuation_result())
+    assert "Consensus (current FY)" in fallback
+    assert "Consensus (next FY)" in fallback
+    assert re.search(r"FY\d", fallback) is None
+
+
+def test_obligations_ledger_dispatch_suppresses_schedule_components():
+    """Live-shaped ledger (no `form` key) reaches the obligations renderer;
+    headline + FY lines render once, components never standalone."""
+    headline = {
+        "type": "supply", "amount_billions": 13.3, "certainty": "contingent",
+        "status": "future_cash_obligation", "revenue_matched": True,
+        "filed": "2026-02-01", "accession": "0001",
+        "excerpt": "Supply commitments were $13.3 billion.",
+        "payment_horizon": {},
+        "schedule": [{"fiscal_year": "2027", "amount_billions": 4.0}],
+    }
+    component = {
+        "type": "supply", "amount_billions": 4.0, "schedule_component": True,
+        "headline_type": "supply", "filed": "2026-02-01", "excerpt": "x",
+    }
+    result = {
+        "ticker": "SYN", "filed": "2026-02-01", "source": "SEC EDGAR notes",
+        "obligations": [headline, component], "current_snapshot": [headline],
+    }
+    assert "form" not in result
+    text = render_tool_result(result)
+    assert "contractual obligations" in text
+    assert "- supply: $13.3B" in text
+    assert "FY2027: $4.0B" in text
+    assert "- supply: $4.0B" not in text

@@ -202,9 +202,11 @@ DATASETS: dict[str, Dataset] = {
             ("ticker", TEXT), ("event_type", TEXT), ("amount_billions", DOUBLE),
             ("certainty", TEXT), ("status", TEXT),
             ("revenue_matched", pa.bool_()), ("default_triggered", pa.bool_()),
-            ("fiscal_year", TEXT), ("filed_at", TEXT), ("known_at", TEXT),
+            ("fiscal_year", TEXT), ("schedule_json", TEXT), ("payment_timing_json", TEXT), ("filed_at", TEXT), ("known_at", TEXT),
             ("retrieved_at", TEXT), ("accession", TEXT), ("source", TEXT),
             ("source_url", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+            ("agreement_key", TEXT), ("lifecycle_event", TEXT),
+            ("schedule_component", pa.bool_()), ("headline_type", TEXT),
         )),
         unique_keys=("event_id",),
         partition_field="filed_at",
@@ -236,6 +238,7 @@ DATASETS: dict[str, Dataset] = {
         partition_field="retrieved_at",
     ),
 }
+DATASETS["capital_events"] = Dataset(name="capital_events", schema=DATASETS["events"].schema, unique_keys=("event_id",), partition_field="filed_at")
 
 
 def dataset(name: str) -> Dataset:

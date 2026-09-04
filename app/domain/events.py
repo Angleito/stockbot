@@ -1,9 +1,8 @@
-"""Corporate-event, evidence, and claim domain models (provider-free).
+"""Corporate-event and evidence domain models (provider-free).
 
 A ``CorporateEvent`` is a material, filing-disclosed fact about a company
 (e.g. a supply commitment, an 8-K guarantee); ``Evidence`` anchors an event
-to archived filing text or an XBRL fact; ``Claim`` is a higher-order
-assertion built from evidence (schema defined here; no writer yet).
+to archived filing text or an XBRL fact.
 
 Fields are kept as strings/None exactly as the storage datasets persist them;
 no storage, HTTP, or LLM imports — deterministic id builders only, matching
@@ -36,6 +35,12 @@ class CorporateEvent:
     source_url: str | None
     content_hash: str | None
     parser_version: str | None
+    schedule_json: str | None = None
+    payment_timing_json: str | None = None
+    agreement_key: str | None = None
+    lifecycle_event: str | None = None
+    schedule_component: bool | None = None
+    headline_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,20 +57,6 @@ class Evidence:
     parser_version: str | None
 
 
-@dataclass(frozen=True)
-class Claim:
-    claim_id: str
-    entity_id: str | None
-    ticker: str | None
-    claim_type: str | None
-    statement: str | None
-    known_at: str | None
-    retrieved_at: str | None
-    source: str | None
-    content_hash: str | None
-    parser_version: str | None
-
-
 def sec_event_id(ticker: str, content_hash: str) -> str:
     """Deterministic event id from the source row's content hash."""
     return f"sec:event:{ticker}:{content_hash[:16]}"
@@ -74,8 +65,3 @@ def sec_event_id(ticker: str, content_hash: str) -> str:
 def sec_evidence_id(event_id: str, content_hash: str) -> str:
     """Deterministic evidence id scoped to its owning event."""
     return f"sec:evidence:{event_id}:{content_hash[:16]}"
-
-
-def sec_claim_id(content_hash: str) -> str:
-    """Deterministic claim id from the claim content hash."""
-    return f"sec:claim:{content_hash[:16]}"

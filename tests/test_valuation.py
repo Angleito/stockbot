@@ -141,6 +141,9 @@ def fake_deps(monkeypatch):
     monkeypatch.setattr(
         valuation.obligations, "get_obligations", lambda t: _obligations()
     )
+    monkeypatch.setattr(
+        valuation, "_revenue_matched_margin", lambda t: (0.75, "company_facts")
+    )
 
 
 def test_trailing_pe_from_live_price(fake_deps):
@@ -233,7 +236,7 @@ def test_projected_prices_matrix(fake_deps):
     assert pp["current_price"] == 213.05
     assert pp["multiples"] == [15, 20, 25, 30, 35]
     by_tier = {t["tier"]: t for t in pp["tiers"]}
-    worst = by_tier["Worst case FY27"]
+    worst = by_tier["Worst case FY2027"]
     # Fixture worst-case FY27 EPS = 9.02 - 0.02 (leases FY27 0.46) - 3.92
     # (supply FY27 95.0 stranded) - 0.29 (cloud FY27 6.0 + vendor 1.0) -
     # 0.75 (default-triggered) = 4.04 (FY-matched; tail 4.8 sits in FY28+).
@@ -242,8 +245,8 @@ def test_projected_prices_matrix(fake_deps):
     assert worst["prices"]["30x"]["price"] == pytest.approx(121.2, abs=0.1)
     # pct change vs current: 60.6/213.05 - 1 ≈ -71.6%.
     assert worst["prices"]["15x"]["pct_change_vs_current"] == pytest.approx(-71.6, abs=0.2)
-    # Consensus FY27 at 25x should exceed current price.
-    consensus = by_tier["Consensus FY27"]
+    # Consensus FY2027 at 25x should exceed current price.
+    consensus = by_tier["Consensus FY2027"]
     assert consensus["prices"]["25x"]["price"] > 213.05
 
 
@@ -333,3 +336,138 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch):
     impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
     assert impact["impact_by_fiscal_year"].get("2027", {}).get("contingent", 0.0) == 0.0
     assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_generic_scheduled_impact_attributes_fys_no_bleed():
+    """Per-year schedules (incl. Thereafter) hit their disclosed FYs only;
+    genuinely unscheduled rows still average into the flat bucket."""
+    scheduled = {
+        "type": "supply_commitments",
+        "amount_billions": 8.0,
+        "certainty": "contractual",
+        "status": "future_cash_obligation",
+        "revenue_matched": True,
+        "schedule": [
+            {"fiscal_year": "2027", "amount_billions": 4.0},
+            {"fiscal_year": "2028", "amount_billions": 3.0},
+            {"fiscal_year": "Thereafter", "amount_billions": 1.0},
+        ],
+    }
+    flat_vendor = {
+        "type": "vendor_commitments",
+        "amount_billions": 6.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+    }
+    impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
+    fy = impact["impact_by_fiscal_year"]
+    assert fy["2027"]["revenue_matched"] == pytest.approx(4.0)
+    assert fy["2028"]["revenue_matched"] == pytest.approx(3.0)
+    assert fy["Thereafter"]["revenue_matched"] == pytest.approx(1.0)
+    assert "2029" not in fy
+    assert "2030" not in fy
+    assert impact["flat_annual_by_bucket"]["revenue_matched"] == 0.0
+    assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)
+
+
+def _snap_obligations():
+    old = {
+        "type": "vendor_commitments", "amount_billions": 20.0,
+        "certainty": "contingent", "status": "future_cash_obligation",
+        "revenue_matched": False, "filed": "2026-02-01",
+    }
+    new = {**old, "amount_billions": 13.0, "filed": "2026-04-01"}
+    return {
+        "obligations": [old, new],
+        "current_snapshot": [new],
+        "coverage": {"scan_manifest": [], "quantified_count": 2,
+                     "unquantified_count": 0, "warnings": []},
+    }
+
+
+def test_valuation_uses_snapshot_not_ledger(monkeypatch, fake_deps):
+    """A superseded $20B + current $13B values at $13B, never $33B."""
+    monkeypatch.setattr(
+        valuation.obligations, "get_obligations", lambda t: _snap_obligations()
+    )
+    result = valuation.get_valuation_metrics("SYN")
+    assert result["obligations"]["contingent_annual_billions"] == pytest.approx(
+        13.0 / 6.0, abs=0.01
+    )
+
+
+def test_eps_scenarios_missing_inputs_yield_none_with_reason():
+    ob = {"obligations": [{
+        "type": "vendor_commitments", "amount_billions": 6.0,
+        "certainty": "contingent", "status": "future_cash_obligation",
+        "revenue_matched": False,
+    }]}
+    out = valuation._obligation_eps_scenarios(ob, None, None)
+    assert out["effective_tax_rate"] is None
+    assert out["scenarios"]
+    for s in out["scenarios"]:
+        assert s["after_tax_billions"] is None
+        assert s["eps_impact"] is None
+        assert s["reason"] == "effective tax rate unavailable"
+    out2 = valuation._obligation_eps_scenarios(ob, None, 0.2)
+    assert out2["effective_tax_rate"] == pytest.approx(0.2)
+    for s in out2["scenarios"]:
+        assert s["after_tax_billions"] is not None
+        assert s["eps_impact"] is None
+        assert s["reason"] == "diluted shares unavailable"
+
+
+def test_missing_margin_yields_none_with_reason(monkeypatch, fake_deps):
+    monkeypatch.setattr(
+        valuation, "_revenue_matched_margin",
+        lambda t: (None, "unavailable: gross margin fact missing"),
+    )
+    result = valuation.get_valuation_metrics("NVDA")
+    ob = result["obligations"]
+    assert ob["revenue_matched_gross_margin"] is None
+    assert ob["revenue_matched_margin_source"] == "unavailable: gross margin fact missing"
+    assert ob["revenue_matched_implied_revenue_billions"] is None
+
+
+def test_dynamic_fy_labels(fake_deps):
+    result = valuation.get_valuation_metrics("NVDA")
+    by_tier = {t["tier"]: t for t in result["projected_prices"]["tiers"]}
+    assert "Consensus FY2027" in by_tier
+    assert "Consensus FY2028" in by_tier
+    assert "Worst case FY2027" in by_tier
+    assert "Worst case FY2028" in by_tier
+    assert all("FY27" not in t and "FY28" not in t for t in by_tier)
+
+
+def test_unquantified_only_valuation_caveat(monkeypatch, fake_deps):
+    monkeypatch.setattr(valuation.obligations, "get_obligations", lambda t: {
+        "obligations": [], "current_snapshot": [],
+        "unquantified_exposures": [{"type": "indemnities", "trigger": "unknown"}],
+        "coverage": {"scan_manifest": [], "quantified_count": 0,
+                     "unquantified_count": 1, "warnings": []},
+    })
+    result = valuation.get_valuation_metrics("NVDA")
+    assert result["obligations"]["contingent_annual_billions"] == 0.0
+    assert result["obligations"]["contractual_annual_billions"] == 0.0
+    assert any("unquantified" in w for w in result["coverage"]["warnings"])
+
+
+def test_valuation_skips_schedule_components():
+    """Reconciled table components never double-count in EPS impact."""
+    headline = {
+        "type": "vendor_commitments", "amount_billions": 13.3,
+        "certainty": "contingent", "status": "future_cash_obligation",
+        "revenue_matched": False, "default_triggered": False,
+    }
+    comps = [
+        {**headline, "amount_billions": 6.0, "fiscal_year": "2027",
+         "schedule_component": True, "headline_type": "vendor_commitments"},
+        {**headline, "amount_billions": 7.3, "fiscal_year": "2028",
+         "schedule_component": True, "headline_type": "vendor_commitments"},
+    ]
+    assert valuation._obligation_annual_impact([headline, *comps], 6) == \
+        valuation._obligation_annual_impact([headline], 6)
+    assert valuation._obligation_annual_impact(
+        [headline, *comps], 6
+    )["contingent_annual_billions"] == pytest.approx(13.3 / 6.0, abs=0.01)

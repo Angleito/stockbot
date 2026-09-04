@@ -55,7 +55,7 @@ def render_tool_result(
         text = _render_analyst_estimates(result, max_bytes)
     elif "weight_pct" in result and "rank" in result:
         text = _render_sp500_weight(result, max_bytes)
-    elif "obligations" in result and "form" in result:
+    elif "obligations" in result and "current_snapshot" in result and "forward_eps" not in result:
         text = _render_obligations(result, max_bytes)
     elif "forward_eps" in result and "obligations" in result:
         text = _render_valuation_metrics(result, max_bytes)
@@ -531,13 +531,36 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
         f"Source: {result.get('source', 'SEC EDGAR notes')}",
     ]
     for row in result.get("obligations") or []:
+        if row.get("schedule_component"):
+            continue
         amount = row.get("amount_billions")
         amount_s = f"${amount}B" if amount is not None else "(schedule only)"
         matched = " | revenue-matched" if row.get("revenue_matched") else ""
         status = f" | status: {row.get('status', '?')}"
+        trigger = f" | trigger: {row['trigger']}" if row.get("trigger") else ""
+        lifecycle = row.get("lifecycle_status")
+        if lifecycle == "amended":
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | lifecycle: amended — amount unresolved, last disclosed {amount_s} retained"
+                f" (included in current exposure)"
+                f"{status}{matched}{trigger}"
+            )
+        elif lifecycle in ("terminated", "unknown"):
+            label = "terminated" if lifecycle == "terminated" else "currently unknown"
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | lifecycle: {label} (excluded from current exposure)"
+                f"{status}{matched}{trigger}"
+            )
+        else:
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | certainty: {row.get('certainty', '?')}{status}{matched}{trigger}"
+            )
         lines.append(
-            f"- {row.get('type', '?')}: {amount_s}"
-            f" | certainty: {row.get('certainty', '?')}{status}{matched}"
+            f"    filed {row.get('filed') or '?'} | acc {row.get('accession') or 'n/a'}"
+            f" | {_table_cell(row.get('excerpt') or '')}"
         )
         horizon = row.get("payment_horizon") or {}
         if horizon.get("paid_in_remainder_billions"):
@@ -554,6 +577,25 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
             lines.append(
                 f"    FY{y.get('fiscal_year')}: ${y.get('amount_billions')}B"
             )
+    exposures = result.get("unquantified_exposures") or []
+    if exposures:
+        lines.append("Unquantified exposures (excluded from totals):")
+        for exp in exposures:
+            lines.append(
+                f"- {exp.get('type', '?')}: unquantified"
+                f" | trigger: {exp.get('trigger', '?')} | filed {exp.get('filed', '?')}"
+                f" | {exp.get('reason', 'excluded from quantified totals')}"
+                f" | {_table_cell(exp.get('excerpt') or '')}"
+            )
+    capital = result.get("capital_allocation") or []
+    if capital:
+        lines.append("Capital allocation (discretionary, not obligations):")
+        for entry in capital:
+            lines.append(
+                f"- {entry.get('type', '?')}: discretionary, not an obligation"
+                f" | filed {entry.get('filed', '?')}"
+                f" | {_table_cell(entry.get('excerpt') or '')}"
+            )
     if result.get("note"):
         lines.append("Note: " + str(result["note"]))
     return _truncate_bytes("\n".join(lines), max_bytes)
@@ -564,11 +606,24 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
     price = result.get("price") or {}
     fe = result.get("forward_eps") or {}
     ob = result.get("obligations") or {}
+    year_cur = str(result.get("fiscal_year_current") or "").strip() or None
+    year_next = str(result.get("fiscal_year_next") or "").strip() or None
+
+    def _fy(cur: bool) -> str:
+        y = year_cur if cur else year_next
+        return f"FY{y}" if y else ("(current FY)" if cur else "(next FY)")
+
+    fy_cur, fy_next = _fy(True), _fy(False)
+
+    def _pe(value: Any) -> str:
+        return f"{value}x" if value is not None else "unavailable (no live price)"
+
+    last = price.get("last")
+    price_s = f"${last}" if last is not None else "unavailable (live-quote gap)"
     lines = [
-        f"{ticker} valuation (live price ${price.get('last')}, as of {result.get('as_of', '?')})",
+        f"{ticker} valuation (live price {price_s}, as of {result.get('as_of', '?')})",
         f"Source: {result.get('source', '')}",
-        f"Trailing P/E (GAAP TTM EPS ${result.get('ttm_gaap_eps')}): "
-        f"{result.get('trailing_pe')}x",
+        f"Trailing P/E (GAAP TTM EPS ${result.get('ttm_gaap_eps')}): {_pe(result.get('trailing_pe'))}",
         f"Obligation drag per share: contractual ${ob.get('drag_per_share_contractual')}"
         f" | contingent ${ob.get('drag_per_share_contingent')}"
         f" | default-triggered ${ob.get('drag_per_share_default_triggered')}"
@@ -576,110 +631,135 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
         f" ${ob.get('contingent_annual_billions')}B contingent,"
         f" ${ob.get('default_triggered_annual_billions')}B default-triggered)",
     ]
+    if result.get("price_gap"):
+        lines.append("Live-quote gap: " + str(result["price_gap"]))
     if ob.get("revenue_matched_annual_billions"):
+        margin = ob.get("revenue_matched_gross_margin")
+        margin_s = (
+            f"~{margin:.0%} gross margin"
+            if isinstance(margin, (int, float))
+            else "gross margin unavailable"
+        )
+        if ob.get("revenue_matched_margin_source") != "company_facts":
+            margin_s += f" ({ob.get('revenue_matched_margin_source') or 'company margin undisclosed'})"
         lines.append(
             f"Revenue-matched (supply) commitments: "
             f"${ob.get('revenue_matched_annual_billions')}B/yr"
-            f" | NOT an EPS drag (inventory sold at ~75% GM)"
+            f" | NOT an EPS drag (inventory sold at {margin_s})"
             f" | implied revenue coverage ~${ob.get('revenue_matched_implied_revenue_billions')}B/yr"
         )
 
     def _line(label: str, row: Optional[dict], scenario: bool = False) -> None:
         if not row:
             return
-        pe = row.get("pe")
+        pe = _pe(row.get("pe"))
         eps = row.get("eps")
         lines.append(
-            f"- {label}: EPS ${eps} | P/E {pe}x"
+            f"- {label}: EPS ${eps} | P/E {pe}"
             if not scenario
-            else f"- {label}: EPS ${eps} | P/E {pe}x | after obligations"
+            else f"- {label}: EPS ${eps} | P/E {pe} | after obligations"
         )
 
-    _line("Consensus FY27", fe.get("consensus"))
+    _line(f"Consensus {fy_cur}", fe.get("consensus"))
     adj = fe.get("adjusted") or {}
     if adj.get("eps_after_contractual") is not None:
         lines.append(
-            f"- Adjusted FY27 (contractual incl.): EPS ${adj['eps_after_contractual']}"
-            f" | P/E {adj.get('pe_after_contractual')}x"
+            f"- Adjusted {fy_cur} (contractual incl.): EPS ${adj['eps_after_contractual']}"
+            f" | P/E {_pe(adj.get('pe_after_contractual'))}"
             f" | drag ${adj.get('obligation_drag_per_share')}/sh"
         )
     scn = fe.get("scenario") or {}
     if scn.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY27 (+contingent, no default): EPS ${scn['eps_after_all_obligations']}"
-            f" | P/E {scn.get('pe_after_all_obligations')}x"
+            f"- Scenario {fy_cur} (+contingent, no default): EPS ${scn['eps_after_all_obligations']}"
+            f" | P/E {_pe(scn.get('pe_after_all_obligations'))}"
             f" | drag ${scn.get('contingent_drag_per_share')}/sh"
         )
     scn_d = fe.get("scenario_with_defaults") or {}
     if scn_d.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY27 (OpenAI/partner default): EPS ${scn_d['eps_after_all_obligations']}"
-            f" | P/E {scn_d.get('pe_after_all_obligations')}x"
+            f"- Scenario {fy_cur} (counterparty default): EPS ${scn_d['eps_after_all_obligations']}"
+            f" | P/E {_pe(scn_d.get('pe_after_all_obligations'))}"
             f" | drag ${scn_d.get('contingent_drag_per_share')}/sh"
         )
-    _line("Consensus FY28", fe.get("consensus_next_fy"))
+    _line(f"Consensus {fy_next}", fe.get("consensus_next_fy"))
     adj2 = fe.get("adjusted_next_fy") or {}
     if adj2.get("eps_after_contractual") is not None:
         lines.append(
-            f"- Adjusted FY28 (contractual incl.): EPS ${adj2['eps_after_contractual']}"
-            f" | P/E {adj2.get('pe_after_contractual')}x"
+            f"- Adjusted {fy_next} (contractual incl.): EPS ${adj2['eps_after_contractual']}"
+            f" | P/E {_pe(adj2.get('pe_after_contractual'))}"
         )
     scn2 = fe.get("scenario_next_fy") or {}
     if scn2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY28 (+contingent, no default): EPS ${scn2['eps_after_all_obligations']}"
-            f" | P/E {scn2.get('pe_after_all_obligations')}x"
+            f"- Scenario {fy_next} (+contingent, no default): EPS ${scn2['eps_after_all_obligations']}"
+            f" | P/E {_pe(scn2.get('pe_after_all_obligations'))}"
             f" | drag ${scn2.get('contingent_drag_per_share')}/sh contingent"
         )
     scn_d2 = fe.get("scenario_with_defaults_next_fy") or {}
     if scn_d2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- Scenario FY28 (OpenAI/partner default): EPS ${scn_d2['eps_after_all_obligations']}"
-            f" | P/E {scn_d2.get('pe_after_all_obligations')}x"
+            f"- Scenario {fy_next} (counterparty default): EPS ${scn_d2['eps_after_all_obligations']}"
+            f" | P/E {_pe(scn_d2.get('pe_after_all_obligations'))}"
         )
     worst = fe.get("worst_case") or {}
     if worst.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- WORST CASE FY27 (all obligations incl. supply stranded):"
+            f"- WORST CASE {fy_cur} (all obligations incl. supply stranded):"
             f" EPS ${worst['eps_after_all_obligations']}"
-            f" | P/E {worst.get('pe_after_all_obligations')}x"
+            f" | P/E {_pe(worst.get('pe_after_all_obligations'))}"
         )
     worst2 = fe.get("worst_case_next_fy") or {}
     if worst2.get("eps_after_all_obligations") is not None:
         lines.append(
-            f"- WORST CASE FY28 (all obligations incl. supply stranded):"
+            f"- WORST CASE {fy_next} (all obligations incl. supply stranded):"
             f" EPS ${worst2['eps_after_all_obligations']}"
-            f" | P/E {worst2.get('pe_after_all_obligations')}x"
+            f" | P/E {_pe(worst2.get('pe_after_all_obligations'))}"
         )
     projected = result.get("projected_prices") or {}
     tiers = projected.get("tiers") or []
     if tiers:
-        lines.append(
-            "Projected share price by assumed P/E (vs live "
-            f"${projected.get('current_price')}):"
-        )
+        cur = projected.get("current_price")
+        vs = f"(vs live ${cur})" if cur is not None else "(live price unavailable; moves vs current n/a)"
+        lines.append("Projected share price by assumed P/E " + vs + ":")
         for t in tiers:
             cells = []
             for m, c in t.get("prices", {}).items():
-                cells.append(
-                    f"{m} ${c.get('price')} ({c.get('pct_change_vs_current'):+}%)"
-                )
+                pct = c.get("pct_change_vs_current")
+                pct_s = f"{pct:+}%" if pct is not None else "n/a (no live price)"
+                cells.append(f"{m} ${c.get('price')} ({pct_s})")
             lines.append(
                 f"  {t['tier']} (EPS ${t['eps']}): " + " | ".join(cells)
             )
     scenarios = result.get("obligation_eps_scenarios") or {}
     scenario_rows = scenarios.get("scenarios") or []
     if scenario_rows:
+        rate = scenarios.get("effective_tax_rate")
         lines.append(
             "Obligation EPS-impact scenarios (after-tax, "
-            f"tax rate {scenarios.get('effective_tax_rate')}):"
+            f"tax rate {rate if rate is not None else 'unavailable'}):"
         )
         for s in scenario_rows:
+            eps_impact = s.get("eps_impact")
+            reason_s = f" ({s['reason']})" if s.get("reason") else ""
             lines.append(
-                f"  {s['scenario']}: EPS {s['eps_impact']}"
+                f"  {s['scenario']}: EPS {eps_impact if eps_impact is not None else 'unavailable'}"
                 f" ({'one-time' if s['one_time'] else 'annual'})"
-                f" — {s.get('note', '')}"
+                f" — {s.get('note', '')}{reason_s}"
             )
+    cov = result.get("coverage") or {}
+    if cov:
+        filings = [str(f) for f in (cov.get("filings_examined") or [])]
+        sections = cov.get("sections_examined") or []
+        lines.append(
+            f"Coverage: {cov.get('quantified_count', '?')} quantified / "
+            f"{cov.get('unquantified_count', '?')} unquantified"
+            f" | filings: {', '.join(filings) if filings else 'none with quantified rows'}"
+            f" | sections examined: {len(sections)}"
+        )
+        warnings = [str(w) for w in (cov.get("warnings") or []) if str(w).strip()]
+        if warnings:
+            lines.append("Warnings: " + "; ".join(warnings))
     if result.get("note"):
         lines.append("Note: " + str(result["note"]))
     return _truncate_bytes("\n".join(lines), max_bytes)
