@@ -483,7 +483,14 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
         status = f" | status: {row.get('status', '?')}"
         trigger = f" | trigger: {row['trigger']}" if row.get("trigger") else ""
         lifecycle = row.get("lifecycle_status")
-        if lifecycle in ("terminated", "unknown"):
+        if lifecycle == "amended":
+            lines.append(
+                f"- {row.get('type', '?')}: {amount_s}"
+                f" | lifecycle: amended — amount unresolved, last disclosed {amount_s} retained"
+                f" (included in current exposure)"
+                f"{status}{matched}{trigger}"
+            )
+        elif lifecycle in ("terminated", "unknown"):
             label = "terminated" if lifecycle == "terminated" else "currently unknown"
             lines.append(
                 f"- {row.get('type', '?')}: {amount_s}"

@@ -205,6 +205,7 @@ DATASETS: dict[str, Dataset] = {
             ("fiscal_year", TEXT), ("schedule_json", TEXT), ("payment_timing_json", TEXT), ("filed_at", TEXT), ("known_at", TEXT),
             ("retrieved_at", TEXT), ("accession", TEXT), ("source", TEXT),
             ("source_url", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+            ("agreement_key", TEXT), ("lifecycle_event", TEXT), ("lifecycle_status", TEXT),
         )),
         unique_keys=("event_id",),
         partition_field="filed_at",

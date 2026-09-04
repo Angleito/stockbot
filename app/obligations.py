@@ -1153,10 +1153,13 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
     """Stamp 8-K guarantee lifecycle status; the ledger keeps every event.
 
     Amendment/termination marks apply only within the same ``agreement_key``
-    group: a guarantee superseded by a later same-agreement filing becomes
-    ``unknown`` (``terminated`` when its own filing explicitly terminates
-    it). Rows with no extractable key (``None``) are unlinkable — their
-    marks affect nothing and they are never marked by others — so they stay
+    group. A termination zeroes every earlier same-key row (``unknown``,
+    own row ``terminated``). A quantified amendment supersedes earlier
+    quantified rows (``unknown``). An amount-less amendment retains the last
+    quantified exposure (earlier quantified rows become ``amended`` — still
+    summed in the snapshot) until a new amount or termination supersedes it.
+    Rows with no extractable key (``None``) are unlinkable — their marks
+    affect nothing and they are never marked by others — so they stay
     additive with a coverage warning. Fail-open, never silent summation.
     """
     guarantees = [
@@ -1179,17 +1182,35 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
                 else:
                     r.pop("lifecycle_status", None)
             continue
-        marks = sorted(
+        term_marks = sorted(
             str(r.get("filed") or "")
-            for r in members if r.get("_lifecycle_event") in ("amendment", "termination")
+            for r in members if r.get("_lifecycle_event") == "termination"
+        )
+        quant_amend_marks = sorted(
+            str(r.get("filed") or "")
+            for r in members
+            if r.get("_lifecycle_event") == "amendment" and (r.get("amount_billions") or 0) > 0
+        )
+        amountless_amend_marks = sorted(
+            str(r.get("filed") or "")
+            for r in members
+            if r.get("_lifecycle_event") == "amendment" and r.get("amount_billions") is None
         )
         for r in members:
             if r.get("_lifecycle_event") == "termination":
                 r["lifecycle_status"] = "terminated"
-            elif marks and any(m > str(r.get("filed") or "") for m in marks):
-                r["lifecycle_status"] = "unknown"
-            else:
+            elif r.get("amount_billions") is None:
                 r.pop("lifecycle_status", None)
+            else:
+                filed = str(r.get("filed") or "")
+                if any(m > filed for m in term_marks):
+                    r["lifecycle_status"] = "unknown"
+                elif any(m > filed for m in quant_amend_marks):
+                    r["lifecycle_status"] = "unknown"
+                elif any(m > filed for m in amountless_amend_marks):
+                    r["lifecycle_status"] = "amended"
+                else:
+                    r.pop("lifecycle_status", None)
     warnings: list[str] = []
     unresolved = [r for r in guarantees if "lifecycle_status" not in r and (r.get("amount_billions") or 0) > 0]
     if len(unresolved) > 1:
@@ -1197,6 +1218,56 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
             f"{len(unresolved)} unresolved 8-K guarantees are summed without "
             "lifecycle resolution"
         )
+    seen_retained: set[tuple] = set()
+    for key, members in groups.items():
+        if key is None:
+            continue
+        if not any((m.get("amount_billions") or 0) > 0 for m in members):
+            continue
+        for m in members:
+            if m.get("amount_billions") is None and m.get("_lifecycle_event") == "amendment":
+                rk = (m.get("agreement_key"), m.get("filed"))
+                if rk in seen_retained:
+                    continue
+                seen_retained.add(rk)
+                warnings.append(
+                    "A later amendment was found but did not disclose a replacement amount. "
+                    "The last quantified exposure is retained for downside analysis until "
+                    "superseded by a new amount or termination."
+                )
+    seen_stale_term: set[tuple] = set()
+    for key, members in groups.items():
+        if key is None:
+            continue
+        terms = [m for m in members if m.get("_lifecycle_event") == "termination"]
+        if not terms:
+            continue
+        for t in terms:
+            t_filed = str(t.get("filed") or "")
+            prior_quant = [
+                str(m.get("filed") or "") for m in members
+                if (m.get("amount_billions") or 0) > 0 and str(m.get("filed") or "") < t_filed
+            ]
+            if not prior_quant:
+                continue
+            last_quant = max(prior_quant)
+            intervening = [
+                m for m in members
+                if last_quant < str(m.get("filed") or "") < t_filed
+                and m.get("_lifecycle_event") in ("amendment", "termination")
+            ]
+            if not intervening:
+                continue
+            latest = max(intervening, key=lambda m: str(m.get("filed") or ""))
+            if latest.get("_lifecycle_event") == "amendment" and latest.get("amount_billions") is None:
+                sk = (key, t_filed)
+                if sk in seen_stale_term:
+                    continue
+                seen_stale_term.add(sk)
+                warnings.append(
+                    "Agreement terminated after an amendment that disclosed no replacement amount; "
+                    "canceled amount unknown, defaulting to zero until further news."
+                )
     seen_dangling: set[tuple] = set()
     for key, members in groups.items():
         if any((m.get("amount_billions") or 0) > 0 for m in members):
@@ -1420,8 +1491,14 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
         row.pop("_archive_key", None)
         row.pop("_archive_sha", None)
         row.pop("_accession", None)
-        row.pop("_lifecycle_event", None)
-        row.pop("agreement_key", None)
+        if _snapshot_layer(row) == "8k":
+            row["lifecycle_event"] = row.pop("_lifecycle_event", None)
+            row.setdefault("agreement_key", None)
+        else:
+            row.pop("_lifecycle_event", None)
+            row["agreement_key"] = None
+            row["lifecycle_event"] = None
+            row["lifecycle_status"] = None
     return value
 
 
@@ -1541,6 +1618,9 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
             source_url=None,
             content_hash=content_hash,
             parser_version=row.get("parser_version"),
+            agreement_key=row.get("agreement_key"),
+            lifecycle_event=row.get("_lifecycle_event", row.get("lifecycle_event")),
+            lifecycle_status=row.get("lifecycle_status"),
         )
         event_rows.append(asdict(event))
 

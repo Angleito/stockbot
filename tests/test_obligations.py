@@ -915,6 +915,87 @@ def test_8k_amountless_termination_zeroes_exposure(monkeypatch):
     assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
 
 
+def test_8k_amountless_amendment_retains_last_quantified(monkeypatch):
+    """Jan Alpha $10B + Mar amount-less amendment: Jan stays `amended`,
+    snapshot retains $10B — never $0."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the Guarantee Agreement with Alpha Holdings.",
+         "acc-mar"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 2
+    by_filed = {r["filed"]: r for r in ledger_8k}
+    assert by_filed["2026-01-15"]["amount_billions"] == 10.0
+    assert by_filed["2026-01-15"].get("lifecycle_status") == "amended"
+    assert by_filed["2026-03-10"]["amount_billions"] is None
+    assert "lifecycle_status" not in by_filed["2026-03-10"]
+    snap_8k = [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert len(snap_8k) == 1 and snap_8k[0]["amount_billions"] == 10.0
+    assert snap_8k[0].get("lifecycle_status") == "amended"
+    assert any("did not disclose a replacement amount" in w for w in result["coverage"]["warnings"])
+
+
+def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch):
+    """Jan $10B + Mar amount-less amendment + May amount-less termination:
+    $0 snapshot with an unknown-canceled-amount notice."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the Guarantee Agreement with Alpha Holdings.",
+         "acc-mar"),
+        ("2026-05-20", ["Item 1.02"],
+         "The company terminated the Guarantee Agreement with Alpha Holdings.",
+         "acc-may"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 3
+    by_filed = {r["filed"]: r for r in ledger_8k}
+    assert by_filed["2026-01-15"].get("lifecycle_status") == "unknown"
+    assert by_filed["2026-05-20"]["amount_billions"] is None
+    assert by_filed["2026-05-20"].get("lifecycle_status") == "terminated"
+    assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
+    assert any("canceled amount unknown" in w for w in result["coverage"]["warnings"])
+
+
+def test_8k_lifecycle_persist_roundtrip(monkeypatch, tmp_path):
+    """Retention-fixture lifecycle key/event/status persist with stable ids."""
+    from app.storage import parquet
+
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the Guarantee Agreement with Alpha Holdings.",
+         "acc-mar"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    summary = obligations.persist_obligation_events(ledger_8k, data_root=str(tmp_path))
+    assert summary == {"events_written": 2, "evidence_written": 2, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+    events = {e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
+    assert set(events) == {"2026-01-15", "2026-03-10"}
+    assert "agreement_key" in events["2026-01-15"] and "lifecycle_event" in events["2026-01-15"]
+    assert events["2026-01-15"]["lifecycle_status"] == "amended"
+    assert events["2026-01-15"]["amount_billions"] == 10.0
+    assert events["2026-03-10"]["amount_billions"] is None
+    assert events["2026-03-10"]["lifecycle_event"] == "amendment"
+    assert events["2026-01-15"]["agreement_key"] == events["2026-03-10"]["agreement_key"]
+    rerun = obligations.persist_obligation_events(ledger_8k, data_root=str(tmp_path))
+    assert rerun == {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0, "skipped_proxied": 0}
+
+
 def test_payment_timing_roundtrip_and_retune(tmp_path):
     """A 95/24 front-loaded horizon round-trips as JSON; correcting it to
     90/29 retunes identity; reruns write zero rows."""
