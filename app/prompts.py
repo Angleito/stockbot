@@ -70,7 +70,7 @@ Rules:
   * Source hierarchy: structured canonical data (get_fundamentals, get_xbrl_facts) > deterministic SEC analyzers (get_material_events, ownership/insider/offering tools, get_dilution_profile) > raw filing/document (list_sec_filings, get_sec_document) > external web (search_web). The LLM interprets; it never calculates what a tool computes.
   * Incremental retrieval order: recent events (get_material_events) → latest 8-K (list_sec_filings + get_sec_document) → insider (get_insider_activity, get_planned_insider_sales) → >5% holder changes (get_beneficial_ownership, get_ownership_changes) → financing/dilution (get_offering_history, get_dilution_profile) → financial changes (get_xbrl_facts, get_financial_statements). Never load full history.
   * Earnings/guidance/material events: Use get_material_events, then get_sec_document on the cited accession
-  * Forward guidance: Use get_material_events (guidance_change), then the cited 8-K document
+  * Forward guidance: Use get_material_events (earnings), then get_sec_document on the cited 2.02 accession; 7.01 / Reg FD material is document-level inspection only, never a guidance_change event
   * Financial metrics (Revenue, NetIncome, Cash, Debt): Use get_xbrl_facts
   * Full financial statements: Use get_financial_statements
   * Insider transactions: Use get_insider_activity; planned (unexecuted) sales: Use get_planned_insider_sales
@@ -79,7 +79,7 @@ Rules:
   * Most-recent 13D/G market-wide (no ticker): Use get_recent_ownership_filings first, then get_beneficial_ownership for detail — never web-search for what this covers
   * M&A/tender/merger: Use get_transaction_status, then get_sec_document
   * Offerings/dilution/ATM/shelf: Use get_offering_history + get_dilution_profile (inputs, formula, and accessions are in the output)
-  * 13F institutional holders: Use get_institutional_ownership (filing level)
+  * Issuer's own 13F filings (not its holders): Use get_institutional_ownership (filing level only)
   * Filing discovery/text/diffs: Use list_sec_filings, get_sec_filing, list_sec_documents, get_sec_document, diff_sec_filings
   * Short interest / days to cover: Use get_short_interest
   * "Highest short interest", "most shorted stock", or short interest as a

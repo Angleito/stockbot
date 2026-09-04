@@ -48,7 +48,7 @@ def _history(ticker_or_cik, forms, *, as_of=None, start_date=None, limit=20) -> 
 
 
 def get_institutional_ownership(ticker_or_cik, *, as_of=None, limit=10) -> dict:
-    """13F filing pointers (holdings detail deferred to the 13F follow-up)."""
+    """These are the issuer's own 13F-HR/13F-NT filings, not the set of managers holding the issuer; ticker-to-holders position lookup is deferred."""
     filings = _history(ticker_or_cik, INSTITUTIONAL_FORMS, as_of=as_of, limit=limit)
     return {
         "ticker": str(ticker_or_cik).upper(),
@@ -56,7 +56,7 @@ def get_institutional_ownership(ticker_or_cik, *, as_of=None, limit=10) -> dict:
         "filing_level_only": True,
         "count": len(filings),
         "filings": [_filing_pointer(f) for f in filings],
-        "note": "Filing-level 13F access only; position-level holdings arrive in the 13F follow-up.",
+        "note": "These are the issuer's own 13F-HR/13F-NT filings, not the set of managers holding the issuer; ticker-to-holders position lookup is deferred.",
     }
 
 

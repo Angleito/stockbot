@@ -8,6 +8,14 @@ FORMULAS = {
 
 _NQ = "not_quantifiable"
 
+from .offerings import REGISTRATION_FORMS
+
+_ISSUED_424B_FORMS = frozenset(
+    {"424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8"})
+
+_REGISTERED_CAPACITY_FORMS = frozenset(
+    {f.strip().upper() for f in REGISTRATION_FORMS} | {"EFFECT", "RW"})
+
 
 def get_offering_history(*args, **kwargs):
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
@@ -95,11 +103,14 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
             existing = int(float(raw))
     except (ValueError, TypeError):
         existing = None
-    new_total = 0
-    accessions = []
-    known = False
+    issued_total = 0
+    registered_total = 0
+    issued_accessions = []
+    registration_accessions = []
+    issued_known = False
     for offering in history or []:
         try:
+            form = getattr(offering, "form", None)
             shares = getattr(offering, "shares", None)
             accession = getattr(offering, "accession_no", None)
         except Exception:
@@ -110,11 +121,26 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
             value = int(shares)
         except (ValueError, TypeError):
             continue
-        if value > 0:
-            new_total += value
-            known = True
+        if value <= 0:
+            continue
+        norm = form.strip().upper() if isinstance(form, str) else ""
+        if norm in _ISSUED_424B_FORMS:
+            issued_total += value
+            issued_known = True
             if accession:
-                accessions.append(accession)
-    return dilution_profile(existing_shares=existing,
-                            new_shares=new_total if known else None,
-                            source_accessions=tuple(accessions))
+                issued_accessions.append(accession)
+        elif norm in _REGISTERED_CAPACITY_FORMS:
+            registered_total += value
+            if accession:
+                registration_accessions.append(accession)
+    out = dilution_profile(existing_shares=existing,
+                           new_shares=issued_total if issued_known else None,
+                           source_accessions=tuple(issued_accessions))
+    out["issued_shares"] = issued_total if issued_known else None
+    out["registered_capacity"] = registered_total or None
+    out["registration_accessions"] = tuple(registration_accessions)
+    out["note"] = ("Conservative: only 424B takedowns count as issued shares; "
+                   "S-1/S-3/F-1/F-3/S-8/EFFECT/RW count as registered capacity, "
+                   "never as new issued shares; multiple 424B supplements for one "
+                   "financing are not deduplicated.")
+    return out

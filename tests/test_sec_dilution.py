@@ -37,14 +37,19 @@ def test_inputs_formulas_accessions_echoed():
 
 
 def test_profile_sums_known_shares_only(monkeypatch):
-    history = [SimpleNamespace(shares=100, accession_no="a1"),
-               SimpleNamespace(shares=None, accession_no="a2"),
-               SimpleNamespace(shares=50, accession_no="a3")]
+    history = [SimpleNamespace(form="424B5", shares=100, accession_no="a1"),
+               SimpleNamespace(form="S-3", shares=1000, accession_no="a2"),
+               SimpleNamespace(form="424B5", shares=50, accession_no="a3"),
+               SimpleNamespace(form="S-8", shares=999, accession_no="a4"),
+               SimpleNamespace(form="424B5", shares=None, accession_no="a5")]
     monkeypatch.setattr(dilution, "get_offering_history",
                         lambda *a, **k: history)
     monkeypatch.setattr(dilution, "get_fundamentals",
                         lambda t, m, as_of=None: {"shares_outstanding": 850.0})
     out = dilution.get_dilution_profile("ACME")
+    assert out["issued_shares"] == 150
+    assert out["registered_capacity"] == 1999
     assert out["inputs"]["new_shares"] == 150
     assert out["source_accessions"] == ("a1", "a3")
+    assert out["registration_accessions"] == ("a2", "a4")
     assert out["dilution_pct"] == 150 / 1000 * 100

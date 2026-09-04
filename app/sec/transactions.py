@@ -102,7 +102,7 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
         tender_expiry=expiry.group(0).strip() if expiry else None,
         expected_close=None,
         competing_offer=False,
-        status="announced" if "/A" not in form else "pending",
+        status="unknown",
         accession_no=accession_no,
         source_accessions=(accession_no,),
     )

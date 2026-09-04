@@ -212,7 +212,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_institutional_ownership",
-            "description": "13F filing pointers (filing level only until the 13F holdings follow-up). For holder/entry questions when position detail is unavailable.",
+            "description": "Issuer's own 13F-HR/13F-NT filing pointers only (filing level). Does not answer who holds the issuer; ticker-to-holders position lookup is deferred.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
