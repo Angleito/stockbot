@@ -13,7 +13,7 @@ from app.config import broker_enabled, configure_logging, get_default_model, get
 from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
 from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
 from app.robinhood.auth import DEFAULT_TOKEN_PATH
-from app.security.context import SessionAuthorization
+from app.security.context import SessionSecurityState
 from app.services.mandate import load_mandate_file
 from app.services.risk import evaluate_latest_mandate
 from app.services.research_data import prepare_short_interest_data, replay_sec_facts_from_archive
@@ -23,7 +23,6 @@ from app.tools import authorize_robinhood_browser
 from app.storage.runs import (
     get_events,
     get_evidence,
-    get_model_calls,
     get_run,
     get_security_events,
     get_security_summary,
@@ -44,10 +43,9 @@ def _chat(model: str) -> None:
     # only through the explicit `robinhood-login` command.
     context = LOCAL_BROKER_CONTEXT if broker_enabled() else LOCAL_CONTEXT
     messages: list = []
-    session_auth = SessionAuthorization(portfolio_read=False)
+    session_state = SessionSecurityState()
 
     def approve_portfolio(tool_name: str, _args: dict) -> bool:
-        nonlocal session_auth
         try:
             if not sys.stdin.isatty():
                 return False
@@ -60,7 +58,7 @@ def _chat(model: str) -> None:
         except EOFError:
             return False
         if answer in ("y", "yes"):
-            session_auth = replace(session_auth, portfolio_read=True)
+            session_state.authorization = replace(session_state.authorization, portfolio_read=True)
             return True
         return False
 
@@ -79,7 +77,7 @@ def _chat(model: str) -> None:
             policy=get_local_chat_policy(),
             return_result=True,
             approve_portfolio=approve_portfolio,
-            session_authorization=session_auth,
+            session_security=session_state,
         )
         messages.append({"role": "assistant", "content": result.answer})
         print(f"\nassistant: {result.answer}\n")

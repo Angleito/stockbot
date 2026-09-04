@@ -94,6 +94,7 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "compare_options": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
     "get_scanner_filter_specs": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
     # Robinhood portfolio data (private).
+    "evaluate_mandate": _envelope("mandate", SourceType.TOOL_RESULT, Sensitivity.PRIVATE, Integrity.DERIVED),
     "get_portfolio_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
     "get_scans": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
     "run_scan": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),

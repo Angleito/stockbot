@@ -65,6 +65,14 @@ class SessionAuthorization:
     only first-use approval creates it."""
     portfolio_read: bool = False
 
+@dataclass
+class SessionSecurityState:
+    """Caller-held session state: the explicit grant plus whether PRIVATE
+    content has entered session model context. Taint clears only when the
+    process ends; there is no mid-process reset."""
+    authorization: SessionAuthorization = field(default_factory=SessionAuthorization)
+    private_context_seen: bool = False
+
 
 @dataclass(frozen=True)
 class OriginalIntent:

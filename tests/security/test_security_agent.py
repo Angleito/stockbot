@@ -75,11 +75,11 @@ def test_portfolio_tool_proposal_denied_without_portfolio_intent(monkeypatch):
     assert get_run(result.run_id)["status"] == "completed"
     assert executed == []  # the tool never ran (no robinhood client constructed)
     tool_calls = get_tool_calls(result.run_id)
-    assert tool_calls[0]["error_type"] == "intent_denied"
+    assert tool_calls[0]["error_type"] == "authorization_denied"
     events = get_security_events(result.run_id)
     assert any(
         e["decision"] == "action_blocked" and e["source"] == "get_portfolio_snapshot"
-        and e["reason"] == "tool call exceeds original user intent"
+        and e["reason"] == "portfolio access is not authorized for this session"
         for e in events
     )
 

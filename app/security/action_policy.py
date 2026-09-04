@@ -46,6 +46,7 @@ TOOL_DOMAINS: dict[str, str] = {
     # Exa web research.
     "search_web": "public_web_research",
     # Robinhood portfolio data (private).
+    "evaluate_mandate": "portfolio_read",
     "get_portfolio_snapshot": "portfolio_read",
     "get_scans": "portfolio_read",
     "run_scan": "portfolio_read",
@@ -89,7 +90,7 @@ def authorize_tool_call(
     if domain == "portfolio_read":
         if run_security.authorization.portfolio_read:
             return True, ""
-        return False, "tool call exceeds original user intent"
+        return False, "portfolio access is not authorized for this session"
     if domain is not None and domain in run_security.original_intent.permitted_domains:
         return True, ""
     return False, "tool call exceeds original user intent"

@@ -1562,7 +1562,7 @@ def test_portfolio_deny_soft_fails_and_blocks(monkeypatch):
     assert executed == []
     assert result.answer == "I cannot access your portfolio without approval."
     (call,) = get_tool_calls(result.run_id)
-    assert call["error_type"] == "intent_denied"
+    assert call["error_type"] == "authorization_denied"
     assert any(
         e["decision"] == "action_blocked" and e["source"] == name
         for e in get_security_events(result.run_id)
@@ -1594,7 +1594,7 @@ def test_portfolio_no_callback_denies(monkeypatch):
     assert executed == []
     assert result.answer == "I cannot access your portfolio without approval."
     (call,) = get_tool_calls(result.run_id)
-    assert call["error_type"] == "intent_denied"
+    assert call["error_type"] == "authorization_denied"
     assert any(
         e["decision"] == "action_blocked" and e["source"] == name
         for e in get_security_events(result.run_id)
@@ -1629,7 +1629,7 @@ def test_portfolio_history_alone_grants_nothing(monkeypatch):
     assert executed == []
     assert result.answer == "Research summary."
     (call,) = get_tool_calls(result.run_id)
-    assert call["error_type"] == "intent_denied"
+    assert call["error_type"] == "authorization_denied"
     assert any(
         e["decision"] == "action_blocked" and e["source"] == name
         for e in get_security_events(result.run_id)
@@ -1640,16 +1640,15 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
     """Session-open: one approval covers later runs seeded with the grant."""
     from dataclasses import replace
 
-    from app.security.context import SessionAuthorization
+    from app.security.context import SessionSecurityState
 
     name = _portfolio_tool_name()
-    session_auth = SessionAuthorization(portfolio_read=False)
+    session_state = SessionSecurityState()
     approvals = []
 
     def approve(tool_name, args):
-        nonlocal session_auth
         approvals.append(tool_name)
-        session_auth = replace(session_auth, portfolio_read=True)
+        session_state.authorization = replace(session_state.authorization, portfolio_read=True)
         return True
 
     executed = []
@@ -1669,7 +1668,7 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
         policy=TEST_POLICY,
         return_result=True,
         approve_portfolio=approve,
-        session_authorization=session_auth,
+        session_security=session_state,
     )
     monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
         _tool_round(name, {"include_positions": True}),
@@ -1682,7 +1681,7 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
         policy=TEST_POLICY,
         return_result=True,
         approve_portfolio=approve,
-        session_authorization=session_auth,
+        session_security=session_state,
     )
     assert executed == [name, name]
     assert approvals == [name]
@@ -1691,10 +1690,74 @@ def test_portfolio_grant_carries_across_runs(monkeypatch):
     assert second.answer.endswith(suffix)
 
 
+def test_private_taint_persists_across_runs(monkeypatch):
+    """Cross-run taint: private ingress in run 1 blocks Exa egress in run 2,
+    even for an innocuous query with full conversation history."""
+    from dataclasses import replace
+
+    from app.security.context import SessionSecurityState
+    from app.storage.runs import get_security_events, get_tool_calls
+
+    name = _portfolio_tool_name()
+    session_state = SessionSecurityState()
+
+    def approve(tool_name, args):
+        session_state.authorization = replace(session_state.authorization, portfolio_read=True)
+        return True
+
+    executed = []
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda n, a, model, **kwargs: executed.append(n) or {"result_type": "portfolio_snapshot", "source": "test"},
+    )
+    monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
+        _tool_round(name, {"include_positions": True}),
+        _final("First summary."),
+    ]))
+    first = run_chat(
+        [{"role": "user", "content": "Show my portfolio"}],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        approve_portfolio=approve,
+        session_security=session_state,
+    )
+    assert executed == [name]
+    assert session_state.private_context_seen
+    monkeypatch.setattr(agent, "_call_openrouter", FakeOpenRouter([
+        _tool_round("search_web", {"query": "AMD latest news"}),
+        _final("Summary after block."),
+    ]))
+    second = run_chat(
+        [
+            {"role": "user", "content": "Show my portfolio"},
+            {"role": "assistant", "content": first.answer},
+            {"role": "user", "content": "What is the latest AMD news?"},
+        ],
+        model="test",
+        context=_broker_context(),
+        policy=TEST_POLICY,
+        return_result=True,
+        session_security=session_state,
+    )
+    assert executed == [name]  # Exa was never called
+    assert "search_web" not in executed
+    (call,) = get_tool_calls(second.run_id)
+    assert call["error_type"] == "egress_denied"
+    assert any(
+        e["decision"] == "egress_blocked"
+        and e["reason"] == "PRIVATE -> EXTERNAL egress after private context"
+        for e in get_security_events(second.run_id)
+    )
+    assert second.answer.startswith("Summary after block.")
+
+
 def test_approved_session_blocks_private_egress(monkeypatch):
     """Approved session + injected portfolio proposal executes, but the
     follow-on private->Exa query is still blocked by the egress firewall."""
-    from app.security.context import SessionAuthorization
+    from app.security.context import SessionAuthorization, SessionSecurityState
     from app.storage.runs import get_security_events
 
     name = _portfolio_tool_name()
@@ -1716,7 +1779,7 @@ def test_approved_session_blocks_private_egress(monkeypatch):
         context=_broker_context(),
         policy=TEST_POLICY,
         return_result=True,
-        session_authorization=SessionAuthorization(portfolio_read=True),
+        session_security=SessionSecurityState(authorization=SessionAuthorization(portfolio_read=True)),
     )
     assert executed == [name]
     calls = get_tool_calls(result.run_id)

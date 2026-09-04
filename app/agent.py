@@ -22,7 +22,7 @@ from .security.action_policy import (
     authorize_tool_call,
     private_pattern_hit,
 )
-from .security.context import RunSecurityContext, SessionAuthorization, classify_intent
+from .security.context import RunSecurityContext, SessionAuthorization, SessionSecurityState, classify_intent
 from .security.context_builder import ContextBuilder
 from .security.response_guard import guard_response
 from .runtime import (
@@ -333,7 +333,7 @@ def run_chat(
     return_result: bool = False,
     mode: str = "quick",
     approve_portfolio: Callable[[str, dict], bool] | None = None,
-    session_authorization: SessionAuthorization | None = None,
+    session_security: SessionSecurityState | None = None,
 ):
     """Run the tool-calling loop until the model returns plain text.
 
@@ -354,8 +354,8 @@ def run_chat(
             True grants `portfolio_read` for the rest of the run and, when the
             caller holds the grant, for later runs seeded with it. None/False or
             a raised exception denies that call softly.
-        session_authorization: explicit session grant seeding this run;
-            deny-by-default when None.
+        session_security: caller-held session state seeding this run;
+            deny-by-default and untainted when None.
     Returns:
         The assistant's final text response (or a tuple with the trace,
         or the ResearchResult when return_result is set).
@@ -370,15 +370,17 @@ def run_chat(
     # gates every tool call (action firewall) together with the explicit
     # session grant. `portfolio_read` lives only in `authorization`, never in
     # `permitted_domains`.
+    if session_security is None:
+        session_security = SessionSecurityState()
     run_security = RunSecurityContext(
         original_intent=classify_intent(
             [m["content"] for m in normalized_messages if m["role"] == "user"]
         ),
         capabilities=frozenset(cap.name for cap in context.capabilities),
-        authorization=session_authorization
-        if session_authorization is not None
-        else SessionAuthorization(),
+        authorization=session_security.authorization,
     )
+    if session_security.private_context_seen:
+        run_security.data_labels.add("private")
 
     # The question is redacted before it enters the observability path
     # (agent_runs.question column and RUN_STARTED/RESEARCH_CONTEXT_CREATED
@@ -640,11 +642,18 @@ def run_chat(
                                             name, arguments, run_security
                                         )
                                 if not intent_allowed:
-                                    result = {
-                                        "error": "Tool call exceeds original user intent",
-                                        "error_type": "intent_denied",
-                                        "soft": True,
-                                    }
+                                    if TOOL_DOMAINS.get(name) == "portfolio_read":
+                                        result = {
+                                            "error": "Portfolio access is not authorized for this session",
+                                            "error_type": "authorization_denied",
+                                            "soft": True,
+                                        }
+                                    else:
+                                        result = {
+                                            "error": "Tool call exceeds original user intent",
+                                            "error_type": "intent_denied",
+                                            "soft": True,
+                                        }
                                     recorder.record_security_event(
                                         source=name,
                                         sha256=hashlib.sha256(
@@ -799,6 +808,7 @@ def run_chat(
                             if allowed:
                                 if TOOL_DOMAINS.get(name) == "portfolio_read":
                                     run_security.private_ingress = True
+                                    session_security.private_context_seen = True
                                 final_text = (
                                     context_builder.last_appended_text or rendered
                                 )
