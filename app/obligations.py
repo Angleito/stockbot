@@ -926,7 +926,9 @@ def _agreement_key(window: str) -> str | None:
     """Agreement identity for one 8-K guarantee window (fail-open).
 
     Normalized counterparty phrase + agreement-type token; ``None`` when no
-    identity is extractable (unlinkable rows are never marked by others).
+    identity is extractable. A label or usable counterparty is required —
+    a bare agreement-type phrase never links. Unlinkable rows are never
+    marked by others.
     """
     type_m = _8K_AGREEMENT_TYPE_RE.search(window)
     if not type_m:
@@ -938,11 +940,11 @@ def _agreement_key(window: str) -> str | None:
         cp_norm = re.sub(r"\s+", " ", label_m.group(1)).strip().casefold()
         return f"{cp_norm}||{type_norm}"
     if cp_m:
-        cp_norm = re.sub(r"\s+", " ", cp_m.group(1)).strip().casefold()
+        cp_norm = re.sub(r"\s+", " ", cp_m.group(1)).strip().casefold().rstrip(".,;:")
         # "the Agreements" / bare plurals are not counterparties.
         if cp_norm not in ("agreement", "agreements", "company", "item"):
             return f"{cp_norm}||{type_norm}"
-    return type_norm
+    return None
 
 
 def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list | None = None) -> list[dict]:
@@ -972,6 +974,7 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list |
                 if manifest is not None:
                     manifest.append(_manifest_entry("8-K", filing, sections, 0, 0, "scanned"))
                 continue
+            quantified_windows: list[tuple[int, int]] = []
             for m in _8K_GUARANTEE_RE.finditer(text):
                 amount_b = _billion(m.group(1), m.group(2))
                 if amount_b < 0.1:
@@ -982,6 +985,7 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list |
                     lifecycle_event = "termination"
                 elif _8K_AMENDMENT_RE.search(window) and _8K_AGREEMENT_RE.search(window):
                     lifecycle_event = "amendment"
+                quantified_windows.append((m.start() - 500, m.end() + 500))
                 rows.append(
                     {
                         "type": "8k_guarantees",
@@ -995,6 +999,38 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list |
                         "as_of": str(filing.filing_date),
                         "excerpt": _excerpt(text, m.start(), m.end()),
                         "_lifecycle_event": lifecycle_event,
+                        "agreement_key": _agreement_key(window),
+                    }
+                )
+            # Lifecycle-only mentions (e.g. amount-less Item 1.02 termination):
+            # one row per trigger site outside any quantified window.
+            lifecycle_windows: list[tuple[int, int]] = []
+            for trig, event in (
+                [(t, "termination") for t in _8K_TERMINATION_RE.finditer(text)]
+                + [(a, "amendment") for a in _8K_AMENDMENT_RE.finditer(text)]
+            ):
+                pos = trig.start()
+                if any(lo <= pos <= hi for lo, hi in quantified_windows):
+                    continue
+                if any(lo <= pos <= hi for lo, hi in lifecycle_windows):
+                    continue
+                window = text[max(0, trig.start() - 500):trig.end() + 500]
+                if not _8K_AGREEMENT_RE.search(window):
+                    continue
+                lifecycle_windows.append((trig.start() - 500, trig.end() + 500))
+                rows.append(
+                    {
+                        "type": "8k_guarantees",
+                        "amount_billions": None,
+                        "certainty": "contingent",
+                        "status": "contingent",
+                        "revenue_matched": False,
+                        "default_triggered": True,
+                        "source": f"SEC EDGAR 8-K {filing.filing_date} material agreement",
+                        "filed": str(filing.filing_date),
+                        "as_of": str(filing.filing_date),
+                        "excerpt": _excerpt(text, trig.start(), trig.end()),
+                        "_lifecycle_event": event,
                         "agreement_key": _agreement_key(window),
                     }
                 )
@@ -1125,7 +1161,10 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
     """
     guarantees = [
         r for r in rows
-        if _snapshot_layer(r) == "8k" and (r.get("amount_billions") or 0) > 0
+        if _snapshot_layer(r) == "8k" and (
+            (r.get("amount_billions") or 0) > 0
+            or (r.get("amount_billions") is None and r.get("_lifecycle_event") in ("amendment", "termination"))
+        )
     ]
     if not guarantees:
         return []
@@ -1151,13 +1190,28 @@ def _resolve_8k_lifecycle(rows: list[dict], filings=None) -> list[str]:
                 r["lifecycle_status"] = "unknown"
             else:
                 r.pop("lifecycle_status", None)
-    unresolved = [r for r in guarantees if "lifecycle_status" not in r]
+    warnings: list[str] = []
+    unresolved = [r for r in guarantees if "lifecycle_status" not in r and (r.get("amount_billions") or 0) > 0]
     if len(unresolved) > 1:
-        return [
+        warnings.append(
             f"{len(unresolved)} unresolved 8-K guarantees are summed without "
             "lifecycle resolution"
-        ]
-    return []
+        )
+    seen_dangling: set[tuple] = set()
+    for key, members in groups.items():
+        if any((m.get("amount_billions") or 0) > 0 for m in members):
+            continue
+        for m in members:
+            if m.get("amount_billions") is None and m.get("_lifecycle_event") in ("amendment", "termination"):
+                dk = (m.get("agreement_key"), m.get("_lifecycle_event"), m.get("filed"))
+                if dk in seen_dangling:
+                    continue
+                seen_dangling.add(dk)
+                warnings.append(
+                    f"8-K {m.get('_lifecycle_event')} on {m.get('filed')} matches no known "
+                    "agreement and was recorded without effect"
+                )
+    return warnings
 
 
 def _current_snapshot(rows: list[dict]) -> tuple[list[dict], list[str]]:
@@ -1189,6 +1243,8 @@ def _current_snapshot(rows: list[dict]) -> tuple[list[dict], list[str]]:
             continue
         layer = _snapshot_layer(row)
         if layer == "8k":
+            if row.get("amount_billions") is None:
+                continue
             if row.get("lifecycle_status") in ("terminated", "unknown"):
                 continue
             snapshot.append(row)
@@ -1234,6 +1290,18 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
     cleaned: list[dict] = []
     for row in rows:
         amount = row.get("amount_billions")
+        if amount is None and row.get("_lifecycle_event") in ("amendment", "termination"):
+            dedup_key = (
+                row.get("type"),
+                row.get("filed"),
+                row.get("agreement_key"),
+                row.get("_lifecycle_event"),
+            )
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            cleaned.append(row)
+            continue
         if amount is None or amount <= 0:
             continue
         dedup_key = (

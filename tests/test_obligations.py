@@ -865,6 +865,56 @@ def test_8k_amendment_does_not_kill_unrelated_guarantee(monkeypatch):
     assert sum(r["amount_billions"] for r in snap_8k) == 9.0
 
 
+def test_8k_bare_guarantees_stay_additive(monkeypatch):
+    """Jan $10B + Feb $3B + Mar amend-to-$6B with no counterparty/label:
+    3 ledger rows, none marked, snapshot $19B — never $6B."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $10 billion.",
+         "acc-jan"),
+        ("2026-02-10", ["Item 1.01"],
+         "The company entered into a guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $3 billion.",
+         "acc-feb"),
+        ("2026-03-10", ["Item 1.01"],
+         "The company amended the guarantee agreement, with aggregate payment "
+         "obligation cumulatively capped at $6 billion.",
+         "acc-mar"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 3
+    assert all("lifecycle_status" not in r for r in ledger_8k)
+    snap_8k = [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"]
+    assert sorted(r["amount_billions"] for r in snap_8k) == [3.0, 6.0, 10.0]
+    assert sum(r["amount_billions"] for r in snap_8k) == 19.0
+    assert any("3 unresolved 8-K guarantees" in w for w in result["coverage"]["warnings"])
+
+
+def test_8k_amountless_termination_zeroes_exposure(monkeypatch):
+    """Jan Alpha $10B + May Item 1.02 termination with no dollar figure:
+    2 ledger rows (May amount-None terminated), $0 current exposure."""
+    _install_with_8k(monkeypatch, {}, [
+        ("2026-01-15", ["Item 1.01"],
+         "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
+         "obligation cumulatively capped at $10 billion under the Agreements.",
+         "acc-jan"),
+        ("2026-05-20", ["Item 1.02"],
+         "The company terminated the Guarantee Agreement with Alpha Holdings.",
+         "acc-may"),
+    ])
+    result = obligations.get_obligations("SYN")
+    ledger_8k = [r for r in result["obligations"] if r["type"] == "8k_guarantees"]
+    assert len(ledger_8k) == 2
+    by_filed = {r["filed"]: r for r in ledger_8k}
+    assert by_filed["2026-01-15"]["amount_billions"] == 10.0
+    assert by_filed["2026-01-15"].get("lifecycle_status") == "unknown"
+    assert by_filed["2026-05-20"]["amount_billions"] is None
+    assert by_filed["2026-05-20"].get("lifecycle_status") == "terminated"
+    assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
+
+
 def test_payment_timing_roundtrip_and_retune(tmp_path):
     """A 95/24 front-loaded horizon round-trips as JSON; correcting it to
     90/29 retunes identity; reruns write zero rows."""
