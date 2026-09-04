@@ -19,7 +19,6 @@ TOOL_DOMAINS: dict[str, str] = {
     # SEC filing data.
     "get_fundamentals": "financial_research",
     "get_filing_section": "financial_research",
-    "get_earnings_summary": "financial_research",
     "diff_risk_factors": "financial_research",
     "get_financial_statements": "financial_research",
     "get_xbrl_facts": "financial_research",

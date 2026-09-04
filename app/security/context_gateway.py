@@ -67,7 +67,6 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     # SEC filing data.
     "get_fundamentals": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_filing_section": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
-    "get_earnings_summary": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "diff_risk_factors": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_financial_statements": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_xbrl_facts": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
