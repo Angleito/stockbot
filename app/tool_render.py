@@ -511,6 +511,16 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
                 f"- {exp.get('type', '?')}: unquantified"
                 f" | trigger: {exp.get('trigger', '?')} | filed {exp.get('filed', '?')}"
                 f" | {exp.get('reason', 'excluded from quantified totals')}"
+                f" | {_table_cell(exp.get('excerpt') or '')}"
+            )
+    capital = result.get("capital_allocation") or []
+    if capital:
+        lines.append("Capital allocation (discretionary, not obligations):")
+        for entry in capital:
+            lines.append(
+                f"- {entry.get('type', '?')}: discretionary, not an obligation"
+                f" | filed {entry.get('filed', '?')}"
+                f" | {_table_cell(entry.get('excerpt') or '')}"
             )
     if result.get("note"):
         lines.append("Note: " + str(result["note"]))
@@ -548,8 +558,8 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
             if isinstance(margin, (int, float))
             else "gross margin unavailable"
         )
-        if ob.get("revenue_matched_margin_source") == "fallback":
-            margin_s += " (fallback; company margin undisclosed)"
+        if ob.get("revenue_matched_margin_source") != "company_facts":
+            margin_s += f" ({ob.get('revenue_matched_margin_source') or 'company margin undisclosed'})"
         lines.append(
             f"Revenue-matched (supply) commitments: "
             f"${ob.get('revenue_matched_annual_billions')}B/yr"
@@ -642,15 +652,18 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
     scenarios = result.get("obligation_eps_scenarios") or {}
     scenario_rows = scenarios.get("scenarios") or []
     if scenario_rows:
+        rate = scenarios.get("effective_tax_rate")
         lines.append(
             "Obligation EPS-impact scenarios (after-tax, "
-            f"tax rate {scenarios.get('effective_tax_rate')}):"
+            f"tax rate {rate if rate is not None else 'unavailable'}):"
         )
         for s in scenario_rows:
+            eps_impact = s.get("eps_impact")
+            reason_s = f" ({s['reason']})" if s.get("reason") else ""
             lines.append(
-                f"  {s['scenario']}: EPS {s['eps_impact']}"
+                f"  {s['scenario']}: EPS {eps_impact if eps_impact is not None else 'unavailable'}"
                 f" ({'one-time' if s['one_time'] else 'annual'})"
-                f" — {s.get('note', '')}"
+                f" — {s.get('note', '')}{reason_s}"
             )
     cov = result.get("coverage") or {}
     if cov:

@@ -113,12 +113,15 @@ class FakeDoc:
 
     @property
     def financials(self):
+        bs_md = self._bs
+
         class _FS:
             def balance_sheet(self):
-                return MagicMock(to_markdown=lambda: self._bs)
+                m = MagicMock()
+                m.to_markdown = lambda: bs_md
+                return m
 
         return _FS()
-
 
 class FakeFiling:
     def __init__(self, date="2026-02-25"):
@@ -187,7 +190,7 @@ def test_get_obligations_persist_is_explicit(monkeypatch):
     calls = []
     monkeypatch.setattr(
         obligations, "persist_obligation_events",
-        lambda rows, data_root=None: calls.append(rows) or {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0},
+        lambda rows, data_root=None, **kw: calls.append((rows, kw)) or {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0},
     )
     obligations.get_obligations("NVDA")
     assert calls == []
@@ -483,3 +486,147 @@ def test_persist_obligation_events_schedule_json(tmp_path):
         {"fiscal_year": "Thereafter", "amount_billions": 1.0},
     ]
     assert events["sec:event:NVDA:flat1"]["schedule_json"] is None
+
+
+def _install_layered(monkeypatch, notes_by_form):
+    """Form-aware mocked EDGAR: {form: ({title: md}, filing_date)}; 8-K -> none."""
+    def fake_get_company(ticker):
+        class _C:
+            def get_filings(self, form=None):
+                out = []
+                for name in (form or []):
+                    if name in notes_by_form:
+                        notes_md, date = notes_by_form[name]
+                        notes = FakeNotes({t: FakeNote(t, md) for t, md in notes_md.items()})
+                        doc = FakeDoc(notes, "")
+                        filing = FakeFiling(date=date)
+                        filing.accession_no = f"acc-{name}"
+                        filing.obj = (lambda d: lambda: d)(doc)
+                        out.append(filing)
+                return out
+
+            def get_facts(self):
+                raise RuntimeError("no facts in fixture")
+
+        return _C()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", fake_get_company)
+    monkeypatch.setattr(obligations, "cache", FakeCache())
+
+
+def test_snapshot_supersedes_older_filing(monkeypatch):
+    """10-K $20B superseded by 10-Q $13B: ledger keeps both, snapshot $13B."""
+    _install_layered(monkeypatch, {
+        "10-Q": ({"Commitments and Contingencies":
+                  "Supply commitments were $13.0 billion as of March 31, 2026."}, "2026-04-01"),
+        "10-K": ({"Commitments and Contingencies":
+                  "Supply commitments were $20.0 billion as of December 31, 2025."}, "2026-02-01"),
+    })
+    result = obligations.get_obligations("SYN")
+    assert "error" not in result
+    assert sorted(o["amount_billions"] for o in result["obligations"]) == [13.0, 20.0]
+    assert [s["amount_billions"] for s in result["current_snapshot"]] == [13.0]
+    for row in result["current_snapshot"]:
+        assert row["parser_version"] == "obligations-v3"
+        assert row["content_hash"]
+    assert result["coverage"]["quantified_count"] == 2
+    assert {"2026-04-01", "2026-02-01"} <= set(result["filings_examined"])
+
+
+def test_unquantified_only_returns_buckets_not_error(monkeypatch):
+    _install_layered(monkeypatch, {
+        "10-K": ({"Commitments and Contingencies":
+                  "The company may indemnify its officers against certain claims."}, "2026-02-01"),
+    })
+    result = obligations.get_obligations("SYN")
+    assert "error" not in result
+    assert result["obligations"] == []
+    assert result["current_snapshot"] == []
+    assert len(result["unquantified_exposures"]) == 1
+    assert result["coverage"]["quantified_count"] == 0
+    assert result["coverage"]["unquantified_count"] == 1
+
+
+def test_unquantified_triggers_from_sentence_words():
+    filing = FakeFiling(date="2026-02-01")
+    (unknown,) = obligations._scan_unquantified_exposures(
+        "Guarantees", "The company may indemnify its officers against certain claims.", filing)[0]
+    assert unknown["trigger"] == "unknown"
+    assert unknown["excerpt"]
+    (defaulted,) = obligations._scan_unquantified_exposures(
+        "Guarantees", "The guarantees pay only upon counterparty default.", filing)[0]
+    assert defaulted["trigger"] == "counterparty_default"
+    (cond,) = obligations._scan_unquantified_exposures(
+        "Guarantees", "The guarantee is conditional upon regulatory approval.", filing)[0]
+    assert cond["trigger"] == "conditional"
+
+
+def test_buybacks_and_dividends_are_capital_not_exposures():
+    filing = FakeFiling(date="2026-02-01")
+    exps, caps = obligations._scan_unquantified_exposures(
+        "Equity", "The board authorized a share repurchase program.", filing)
+    assert exps == []
+    assert [c["type"] for c in caps] == ["buybacks"]
+    assert caps[0]["trigger"] == "board_discretion"
+    exps, caps = obligations._scan_unquantified_exposures(
+        "Equity", "The company declared quarterly dividends.", filing)
+    assert exps == []
+    assert [c["type"] for c in caps] == ["dividends"]
+
+
+def test_zero_finding_filing_appears_in_scan_manifest(monkeypatch):
+    _install_layered(monkeypatch, {
+        "10-K": ({"Commitments and Contingencies":
+                  "The company may indemnify its officers against certain claims."}, "2026-02-01"),
+    })
+    result = obligations.get_obligations("SYN")
+    scanned = [m for m in result["coverage"]["scan_manifest"] if m["status"] == "scanned"]
+    assert any(m["quantified_count"] == 0 for m in scanned)
+    assert any(m["form"] == "10-K" and m["filing_date"] == "2026-02-01" for m in scanned)
+
+
+def test_schedule_change_changes_content_hash():
+    base = {
+        "type": "supply", "amount_billions": 13.3, "filed": "2026-02-01",
+        "certainty": "contingent", "status": "future_cash_obligation",
+        "revenue_matched": True, "default_triggered": False, "fiscal_year": None,
+        "schedule": [
+            {"fiscal_year": "2027", "amount_billions": 4.0},
+            {"fiscal_year": "2028", "amount_billions": 3.0},
+        ],
+    }
+    same = {**base, "schedule": [dict(y) for y in base["schedule"]]}
+    assert obligations._content_hash(base) == obligations._content_hash(same)
+    changed = {**base, "schedule": [
+        {"fiscal_year": "2027", "amount_billions": 5.0},
+        {"fiscal_year": "2028", "amount_billions": 3.0},
+    ]}
+    assert obligations._content_hash(base) != obligations._content_hash(changed)
+    nosched = {k: v for k, v in base.items() if k != "schedule"}
+    assert obligations._content_hash(base) != obligations._content_hash(nosched)
+
+
+def test_persist_unquantified_exposures(tmp_path):
+    """Unquantified exposures persist as amount-None contingent events."""
+    from app.storage import parquet
+
+    exp = {
+        "ticker": "SYN", "type": "indemnities", "trigger": "unknown",
+        "filed": "2026-02-01", "known_at": "2026-08-26T00:00:00Z",
+        "parser_version": obligations.PARSER_VERSION,
+        "source": "SEC EDGAR 2026-02-01 Guarantees note",
+        "excerpt": "The company may indemnify its officers.",
+        "_accession": "0001",
+    }
+    exp["content_hash"] = obligations._content_hash(exp)
+    summary = obligations.persist_obligation_events([], data_root=str(tmp_path), unquantified=[exp])
+    assert summary == {"events_written": 1, "evidence_written": 1, "skipped_no_filing_date": 0}
+    (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    assert event["amount_billions"] is None
+    assert event["certainty"] == "contingent"
+    assert event["filed_at"] == "2026-02-01"
+    assert event["known_at"] == "2026-02-01"
+    assert event["schedule_json"] is None
+    (evidence,) = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
+    assert evidence["event_id"] == event["event_id"]
+    assert evidence["excerpt"] == exp["excerpt"]

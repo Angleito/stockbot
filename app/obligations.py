@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 86400
 
-PARSER_VERSION = "obligations-v2"
+PARSER_VERSION = "obligations-v3"
 _ARCHIVE_KIND = "filing-note-text"
 
 # ---------------------------------------------------------------------------
@@ -157,13 +157,18 @@ def _row_trigger(row: dict) -> Optional[str]:
     return None
 
 
-def _scan_unquantified_exposures(title: str, md: str, filing, limit: int = 3) -> list[dict]:
+def _scan_unquantified_exposures(title: str, md: str, filing, limit: int = 3) -> tuple[list[dict], list[dict]]:
     """Sentences disclosing an exposure with no dollar amount.
+
+    Returns ``(exposures, capital_allocation)``: buyback/dividend sentences
+    are discretionary capital returns, never obligations. Triggers come from
+    the sentence's own words, never inferred (``unknown`` when unstated).
 
     ponytail: first-wins capped scan; quantified ($/million/billion)
     sentences belong to the numeric rows, never here.
     """
-    out: list[dict] = []
+    exposures: list[dict] = []
+    capital: list[dict] = []
     for m in _UNQUANTIFIED_RE.finditer(md):
         sentence = re.sub(r"\s+", " ", m.group(1)).strip()
         if not sentence:
@@ -176,20 +181,28 @@ def _scan_unquantified_exposures(title: str, md: str, filing, limit: int = 3) ->
             if needle in low:
                 kind = name
                 break
-        out.append(
-            {
-                "type": kind,
-                "trigger": "counterparty_default"
-                if kind in ("indemnities", "guarantees")
-                else "board_discretion",
-                "source": f"SEC EDGAR {filing.filing_date} {title} note",
-                "filed": str(filing.filing_date),
-                "reason": "disclosed without a dollar amount; excluded from quantified obligations",
-            }
-        )
-        if len(out) >= limit:
+        entry = {
+            "type": kind,
+            "source": f"SEC EDGAR {filing.filing_date} {title} note",
+            "filed": str(filing.filing_date),
+            "excerpt": sentence,
+        }
+        if kind in ("buybacks", "dividends"):
+            entry["trigger"] = "board_discretion"
+            entry["reason"] = "discretionary capital return; not an obligation"
+            capital.append(entry)
+        else:
+            if any(k in low for k in ("default", "insolven", "fail to pay", "counterparty")):
+                entry["trigger"] = "counterparty_default"
+            elif any(k in low for k in ("condition", "contingen", "subject to")):
+                entry["trigger"] = "conditional"
+            else:
+                entry["trigger"] = "unknown"
+            entry["reason"] = "disclosed without a dollar amount; excluded from quantified obligations"
+            exposures.append(entry)
+        if len(exposures) + len(capital) >= limit:
             break
-    return out
+    return exposures, capital
 
 # 8-K material-agreement guarantee language.
 _8K_GUARANTEE_RE = re.compile(
@@ -235,6 +248,19 @@ _TAX_BENEFITS_RE = re.compile(
 
 def _no_data(ticker: str, what: str) -> dict:
     return {"error": f"No obligations data for {ticker}: {what}"}
+
+def _manifest_entry(form, filing, sections, q_count, u_count, status, warning=None) -> dict:
+    """One per-filing scan record: what was examined, what it yielded."""
+    return {
+        "form": form,
+        "filing_date": str(getattr(filing, "filing_date", "") or "") or None,
+        "accession": str(getattr(filing, "accession_no", "") or "") or None,
+        "status": status,
+        "sections_examined": list(sections),
+        "quantified_count": q_count,
+        "unquantified_count": u_count,
+        "warning": warning,
+    }
 
 
 def _billion(value: str, unit: str) -> float:
@@ -381,12 +407,14 @@ def _latest_report(ticker: str, form: str):
     return edgar_client.get_latest_report(ticker, form)
 
 
-def _xbrl_obligations(ticker: str) -> list[dict]:
+def _xbrl_obligations(ticker: str, *, manifest: list | None = None) -> list[dict]:
     """Layer 1: standardized us-gaap obligation concepts."""
     try:
         facts = edgar_client.get_company(ticker).get_facts().to_dataframe()
     except Exception as e:
         logger.warning("xbrl obligations failed for %s: %s", ticker, e)
+        if manifest is not None:
+            manifest.append(_manifest_entry("XBRL", None, ["xbrl_facts"], 0, 0, "failed", str(e)))
         return []
     rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -394,10 +422,14 @@ def _xbrl_obligations(ticker: str) -> list[dict]:
     # per-fact filing date, so the latest 10-K/10-Q filing date stands in
     # as the row's filed date (never period_end — see persist known_at).
     filing_date: Optional[str] = None
+    proxy_form = "XBRL"
+    proxy_filing = None
     for form in ("10-K", "10-Q"):
         found = _latest_report(ticker, form)
         if found is not None:
-            filing_date = str(found[0].filing_date)
+            proxy_filing = found[0]
+            filing_date = str(proxy_filing.filing_date)
+            proxy_form = form
             break
     for concept in facts["concept"].unique():
         for needle, kind in _XBRL_OBLIGATION_CONCEPTS.items():
@@ -429,6 +461,8 @@ def _xbrl_obligations(ticker: str) -> list[dict]:
                     "concept": concept,
                 }
             )
+    if manifest is not None:
+        manifest.append(_manifest_entry(proxy_form, proxy_filing, ["xbrl_facts"], len(rows), 0, "scanned"))
     return rows
 
 
@@ -480,10 +514,11 @@ def _targeted_balance_rows(title: str, md: str, filing, present_kinds: set) -> l
     return rows
 
 
-def _note_obligations(ticker: str, *, archive: bool = False) -> tuple[list[dict], list[dict]]:
+def _note_obligations(ticker: str, *, archive: bool = False, manifest: list | None = None) -> tuple[list[dict], list[dict], list[dict]]:
     """Layer 2: note-text extraction from latest 10-Q and 10-K."""
     rows: list[dict] = []
     unquantified: list[dict] = []
+    capital: list[dict] = []
     for form in ("10-Q", "10-K"):
         found = _latest_report(ticker, form)
         if found is None:
@@ -491,8 +526,10 @@ def _note_obligations(ticker: str, *, archive: bool = False) -> tuple[list[dict]
         filing, doc = found
         notes = getattr(doc, "notes", None)
         if notes is None:
+            if manifest is not None:
+                manifest.append(_manifest_entry(form, filing, [], 0, 0, "parser_warning", "filing notes unavailable"))
             continue
-        start = len(rows)
+        start, u_start, c_start = len(rows), len(unquantified), len(capital)
         notes_md = {}
         for kw, _needles in _NOTE_KEYWORDS.items():
             for note in notes.search(kw)[:2]:
@@ -501,15 +538,25 @@ def _note_obligations(ticker: str, *, archive: bool = False) -> tuple[list[dict]
                     notes_md[title] = note.to_markdown()
         for title, md in notes_md.items():
             _collect_note_rows(rows, title, md, filing)
-            unquantified.extend(_scan_unquantified_exposures(title, md, filing))
+            exps, caps = _scan_unquantified_exposures(title, md, filing)
+            unquantified.extend(exps)
+            capital.extend(caps)
         present_kinds = {r["type"] for r in rows if r.get("filed") == str(filing.filing_date)}
         for title, md in notes_md.items():
             rows.extend(
                 _targeted_balance_rows(title, md, filing, present_kinds)
             )
+        joined = "\n\n".join(notes_md.values())
         if notes_md:
-            _annotate_archive(rows[start:], ticker, filing, "\n\n".join(notes_md.values()), archive=archive)
-    return rows, unquantified
+            _annotate_archive(rows[start:], ticker, filing, joined, archive=archive)
+        _annotate_archive(unquantified[u_start:], ticker, filing, joined, archive=archive)
+        _annotate_archive(capital[c_start:], ticker, filing, joined, archive=archive)
+        if manifest is not None:
+            manifest.append(_manifest_entry(
+                form, filing, sorted(notes_md),
+                len(rows) - start, len(unquantified) - u_start, "scanned",
+            ))
+    return rows, unquantified, capital
 
 
 def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
@@ -651,13 +698,17 @@ def _collect_note_rows(rows: list[dict], title: str, md: str, filing) -> None:
             )
 
 
-def _balance_sheet_liabilities(ticker: str, *, archive: bool = False) -> list[dict]:
+def _balance_sheet_liabilities(ticker: str, *, archive: bool = False, manifest: list | None = None) -> list[dict]:
     """Layer 3: balance-sheet liabilities with on-balance-sheet status."""
     rows: list[dict] = []
+    form: str | None = None
+    filing = None
     try:
         found = _latest_report(ticker, "10-Q")
+        form = "10-Q"
         if found is None:
             found = _latest_report(ticker, "10-K")
+            form = "10-K"
         if found is None:
             return rows
         filing, doc = found
@@ -687,12 +738,16 @@ def _balance_sheet_liabilities(ticker: str, *, archive: bool = False) -> list[di
                 }
             )
         _annotate_archive(rows[start:], ticker, filing, md, archive=archive)
+        if manifest is not None:
+            manifest.append(_manifest_entry(form, filing, ["balance_sheet"], len(rows) - start, 0, "scanned"))
     except Exception as e:
         logger.warning("balance sheet obligations failed for %s: %s", ticker, e)
+        if manifest is not None:
+            manifest.append(_manifest_entry(form or "10-Q/10-K", filing, ["balance_sheet"], 0, 0, "failed", str(e)))
     return rows
 
 
-def _scan_8k_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
+def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list | None = None) -> list[dict]:
     """Recent 8-K material agreements with quantified guarantees."""
     rows: list[dict] = []
     try:
@@ -700,16 +755,24 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
         filings = company.get_filings(form=["8-K"])
     except Exception as e:
         logger.warning("8-K scan failed for %s: %s", ticker, e)
+        if manifest is not None:
+            manifest.append(_manifest_entry("8-K", None, [], 0, 0, "failed", str(e)))
         return rows
     for filing in filings[:6]:
         start = len(rows)
+        sections: list = []
         try:
             obj = filing.obj()
             items = getattr(obj, "items", []) or []
+            sections = [str(i) for i in items]
             if not any(i in items for i in ("Item 1.01", "Item 2.03", "Item 7.01")):
+                if manifest is not None:
+                    manifest.append(_manifest_entry("8-K", filing, sections, 0, 0, "scanned"))
                 continue
             text = str(getattr(obj, "document", ""))
             if not any(kw in text.lower() for kw in _8K_OBLIGATION_KEYWORDS):
+                if manifest is not None:
+                    manifest.append(_manifest_entry("8-K", filing, sections, 0, 0, "scanned"))
                 continue
             for m in _8K_GUARANTEE_RE.finditer(text):
                 amount_b = _billion(m.group(1), m.group(2))
@@ -731,8 +794,12 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False) -> list[dict]:
                 )
             if len(rows) > start:
                 _annotate_archive(rows[start:], ticker, filing, text, archive=archive)
+            if manifest is not None:
+                manifest.append(_manifest_entry("8-K", filing, sections, len(rows) - start, 0, "scanned"))
         except Exception as e:
             logger.warning("8-K %s scan error: %s", filing.accession_no, e)
+            if manifest is not None:
+                manifest.append(_manifest_entry("8-K", filing, sections, len(rows) - start, 0, "failed", str(e)))
     return rows
 
 
@@ -777,14 +844,78 @@ def _annotate_archive(rows: list[dict], ticker: str, filing, text: str, *, archi
 
 
 def _content_hash(row: dict) -> str:
+    sched = row.get("schedule") or (row.get("payment_horizon") or {}).get("schedule") or []
+    try:
+        norm = sorted(
+            [[str(y.get("fiscal_year")), float(y.get("amount_billions") or 0)] for y in sched],
+            key=lambda p: (p[0], p[1]),
+        )
+    except Exception:
+        norm = []
     payload = json.dumps(
-        {k: row.get(k) for k in (
-            "type", "amount_billions", "filed", "certainty", "status",
-            "revenue_matched", "default_triggered", "fiscal_year",
-        )},
+        {
+            **{k: row.get(k) for k in (
+                "type", "amount_billions", "filed", "certainty", "status",
+                "revenue_matched", "default_triggered", "fiscal_year",
+            )},
+            "schedule": norm,
+        },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _snapshot_layer(row: dict) -> str:
+    if "concept" in row:
+        return "xbrl"
+    kind = str(row.get("type") or "")
+    source = str(row.get("source") or "")
+    if kind.startswith("8k_") or "8-K" in source:
+        return "8k"
+    if "balance sheet" in source.lower():
+        return "balance"
+    return "note"
+
+
+def _current_snapshot(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Latest filing per (type, layer); 8-K events are additive, never supersede.
+
+    Rows sharing (type, layer, filed) are all kept (same-filing schedule
+    siblings); only strictly older filings are superseded. Rows without a
+    filing date stay in the ledger but are excluded here, with a warning.
+    Snapshot rows are references to the already-stamped ledger rows.
+    Returns (snapshot, warnings).
+    """
+    best: dict[tuple, str] = {}
+    for row in rows:
+        if _snapshot_layer(row) == "8k":
+            continue
+        filed = str(row.get("filed") or "").strip()
+        if not filed:
+            continue
+        key = (row.get("type"), _snapshot_layer(row))
+        if key not in best or filed > best[key]:
+            best[key] = filed
+    snapshot: list[dict] = []
+    warnings: list[str] = []
+    warned: set = set()
+    for row in rows:
+        layer = _snapshot_layer(row)
+        if layer == "8k":
+            snapshot.append(row)
+            continue
+        filed = str(row.get("filed") or "").strip()
+        if not filed:
+            if row.get("type") not in warned:
+                warned.add(row.get("type"))
+                warnings.append(
+                    f"excluded from current snapshot (no filing date): "
+                    f"{row.get('type')} {row.get('amount_billions')}B"
+                )
+            continue
+        if filed == best.get((row.get("type"), layer)):
+            snapshot.append(row)
+    return snapshot, warnings
 
 
 def get_obligations(ticker: str, *, persist: bool = False) -> dict:
@@ -796,19 +927,17 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
     hit = cache.get(key, ttl=CACHE_TTL_SECONDS)
     if hit is not None and not persist:
         return hit
+    manifest: list[dict] = []
     try:
         rows: list[dict] = []
-        rows.extend(_xbrl_obligations(ticker))
-        note_rows, unquantified = _note_obligations(ticker, archive=persist)
+        rows.extend(_xbrl_obligations(ticker, manifest=manifest))
+        note_rows, unquantified, capital_raw = _note_obligations(ticker, archive=persist, manifest=manifest)
         rows.extend(note_rows)
-        rows.extend(_balance_sheet_liabilities(ticker, archive=persist))
-        rows.extend(_scan_8k_obligations(ticker, archive=persist))
+        rows.extend(_balance_sheet_liabilities(ticker, archive=persist, manifest=manifest))
+        rows.extend(_scan_8k_obligations(ticker, archive=persist, manifest=manifest))
     except Exception as e:
         logger.warning("obligations failed for %s: %s", ticker, e)
         return {"error": f"Obligations unavailable for {ticker}: {e}"}
-
-    if not rows:
-        return _no_data(ticker, "no quantified obligations found in filings")
 
     # Dedup: identical (type, amount, filed) rows appear from both the
     # 10-Q and 10-K or from table + sentence paths; drop negatives.
@@ -847,13 +976,44 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
             continue
         seen_u.add(key_u)
         bucket.append(exp)
+    seen_c: set[tuple] = set()
+    capital: list[dict] = []
+    for entry in capital_raw:
+        key_c = (entry.get("type"), entry.get("filed"))
+        if key_c in seen_c:
+            continue
+        seen_c.add(key_c)
+        capital.append(entry)
+    for exp in bucket + capital:
+        exp["ticker"] = ticker
+        exp["content_hash"] = _content_hash(exp)
+        exp["known_at"] = known_at
+        exp["parser_version"] = PARSER_VERSION
+        exp["accession"] = str(exp.get("_accession") or "") or None
+    snapshot, snap_warnings = _current_snapshot(rows)
+    coverage = {
+        "scan_manifest": manifest,
+        "quantified_count": len(rows),
+        "unquantified_count": len(bucket),
+        "warnings": list(snap_warnings),
+    }
+
+    if not rows and not bucket and not capital:
+        return _no_data(ticker, "no quantified obligations found in filings")
 
     value = {
         "ticker": ticker,
         "as_of": known_at,
         "source": "SEC EDGAR XBRL facts + 10-Q/10-K notes + balance sheet + 8-K material agreements",
         "obligations": rows,
+        "current_snapshot": snapshot,
         "unquantified_exposures": bucket,
+        "capital_allocation": capital,
+        "coverage": coverage,
+        "filings_examined": sorted({str(m.get("filing_date")) for m in manifest if m.get("filing_date")})
+        or sorted({str(r.get("filed")) for r in rows if r.get("filed")}),
+        "sections_examined": sorted({str(s) for m in manifest for s in (m.get("sections_examined") or []) if s})
+        or sorted({str(r.get("source")) for r in rows if r.get("source")}),
         "note": (
             "Status labels: 'on_balance_sheet' items are already accrued or "
             "expensed (informational; never double-counted in EPS). "
@@ -864,13 +1024,16 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
             "other conditions. Certainty reflects the filing's own "
             "language. No figures are estimated or borrowed across companies. "
             "'unquantified_exposures' are disclosed without a dollar amount "
-            "and are excluded from the quantified obligations above."
+            "and are excluded from the quantified obligations above. "
+            "'capital_allocation' (buybacks, dividends) is discretionary, "
+            "not an obligation. 'current_snapshot' holds the latest filing "
+            "per obligation type; 'obligations' retains the full history."
         ),
     }
     cache.set(key, value)
     if persist:
         try:
-            summary = persist_obligation_events(rows)
+            summary = persist_obligation_events(rows, unquantified=bucket)
             if summary["events_written"]:
                 logger.info(
                     "persisted %d obligation events for %s", summary["events_written"], ticker
@@ -882,14 +1045,14 @@ def get_obligations(ticker: str, *, persist: bool = False) -> dict:
                 )
         except Exception as e:
             logger.warning("obligation persistence failed for %s: %s", ticker, e)
-    for row in rows:  # archive annotations are persist-internal, not public
+    for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
         row.pop("_archive_key", None)
         row.pop("_archive_sha", None)
         row.pop("_accession", None)
     return value
 
 
-def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None) -> dict:
+def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None, *, unquantified: list[dict] | None = None) -> dict:
     """Write obligations rows as CorporateEvent + Evidence rows.
 
     One source row -> one CorporateEvent plus one Evidence row.  Event
@@ -900,6 +1063,11 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
     ``filing-text:{ticker}:{filed}:{accession-or-hash}``); XBRL-fact rows
     carry no archive.  ``data_root`` is a research data root (parquet/ +
     raw/ subdirectories; default: the repo data root).
+
+    ``unquantified`` exposures persist as amount-None contingent events with
+    evidence (excerpt/archive span) via the same path. No schema change: the
+    trigger rides on the existing ``default_triggered`` flag (True only for
+    ``counterparty_default``).
 
     Returns ``{events_written, evidence_written, skipped_no_filing_date}``;
     a deterministic rerun writes 0 rows (dedup by event/evidence id).
@@ -916,7 +1084,31 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None)
     event_rows: list[dict] = []
     evidence_rows: list[dict] = []
     skipped = 0
-    for row in rows:
+    work = list(rows or [])
+    for exp in unquantified or []:
+        filed = str(exp.get("filed") or "").strip() or None
+        norm = {
+            "ticker": exp.get("ticker"),
+            "type": exp.get("type", "other"),
+            "amount_billions": None,
+            "certainty": "contingent",
+            "status": "contingent",
+            "revenue_matched": False,
+            "default_triggered": exp.get("trigger") == "counterparty_default",
+            "fiscal_year": None,
+            "schedule": None,
+            "payment_horizon": None,
+            "filed": filed,
+            "known_at": exp.get("known_at"),
+            "parser_version": exp.get("parser_version"),
+            "_accession": exp.get("_accession"),
+            "_archive_key": exp.get("_archive_key"),
+            "excerpt": exp.get("excerpt"),
+            "source": exp.get("source"),
+        }
+        norm["content_hash"] = exp.get("content_hash") or _content_hash(norm)
+        work.append(norm)
+    for row in work:
         ticker = str(row.get("ticker") or "").strip().upper()
         filed = str(row.get("filed") or "").strip() or None
         if not filed:
