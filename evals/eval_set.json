@@ -34,7 +34,7 @@
     "question": "Summarize AAPL's latest earnings",
     "ticker": "AAPL",
     "expected_behavior": {
-      "expected_tools": ["get_earnings_summary"],
+      "expected_tools": ["get_filing_section", "get_financial_statements", "get_xbrl_facts"],
       "must_contain": [],
       "must_not_contain": []
     }
@@ -84,7 +84,7 @@
     "question": "How's FAKEZZZXY99 doing?",
     "ticker": "FAKEZZZXY99",
     "expected_behavior": {
-      "expected_tools": ["get_fundamentals", "get_filing_section", "get_earnings_summary"],
+      "expected_tools": ["get_fundamentals", "get_filing_section"],
       "must_contain": ["no data", "not found", "unable to find", "could not find", "does not exist", "no information"],
       "must_not_contain": ["$"]
     }
@@ -318,6 +318,16 @@
     "context": "broker",
     "expected_behavior": {
       "expected_tools": ["get_market_snapshot"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 29,
+    "question": "Is AAPL cheap or expensive on earnings multiples?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_valuation_metrics"],
       "must_contain": [],
       "must_not_contain": []
     }

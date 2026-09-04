@@ -50,3 +50,4 @@ data/*
 htmlcov/
 .DS_Store
 .omp/
+node_modules/

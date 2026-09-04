@@ -1,9 +1,9 @@
 """No unprompted Robinhood OAuth: token pre-check soft errors in
 execute_tool, expiry validation, and the explicit login path.
 
-Offline: execute_tool paths never construct a client; agent runs use
-scripted models with execute_tool recorded; authorize_robinhood_browser
-uses a fake client; the CLI login handler is monkeypatched.
+Offline: execute_tool paths never construct a client;
+authorize_robinhood_browser uses a fake client; the CLI login handler is
+monkeypatched.
 """
 
 import webbrowser
@@ -11,11 +11,8 @@ import webbrowser
 import pytest
 
 import cli
-from app import agent
 from app import tools
-from app.policy import LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT
-from app.storage.runs import get_run, get_tool_calls
-from tests.test_observability import TEST_POLICY, FakeOpenRouter, _final, _tool_round
+from app.policy import LOCAL_BROKER_CONTEXT
 
 
 def _no_tokens(*args, **kwargs):
@@ -160,48 +157,6 @@ def test_corrupt_state_is_invalid(tmp_path):
     path = _token_path(tmp_path)
     path.write_bytes(b"not json")
     assert tools.has_valid_tokens(origin, path) is False
-
-
-# -- run-level soft failure regression ---------------------------------------
-
-def test_soft_auth_failure_does_not_kill_research_run(monkeypatch):
-    monkeypatch.setenv("BROKER_ENABLED", "true")
-    monkeypatch.setattr(tools, "has_valid_tokens", _invalid_tokens)
-    fake = FakeOpenRouter([
-        _tool_round("get_market_snapshot", {"ticker": "GPRO"}),
-        _tool_round("get_fundamentals", {"ticker": "GPRO", "metric": "eps"}),
-        _final("Per the latest 10-Q, GPRO's story is driven by fundamentals."),
-    ])
-    monkeypatch.setattr(agent, "_call_openrouter", fake)
-    real_execute_tool = tools.execute_tool
-
-    def passthrough(name, args, model, **kwargs):
-        if name in tools._ROBINHOOD_HANDLERS:
-            return real_execute_tool(name, args, model, context=LOCAL_BROKER_CONTEXT)
-        return {"result_type": "fundamentals", "eps": "6.3", "source": "sec"}
-
-    monkeypatch.setattr(agent, "execute_tool", passthrough)
-    result = agent.run_chat(
-        [{"role": "user", "content": "Why did GPRO shoot up this week?"}],
-        model="test",
-        context=LOCAL_BROKER_CONTEXT,
-        policy=TEST_POLICY,
-        return_result=True,
-    )
-    assert get_run(result.run_id)["status"] == "completed"
-    tool_calls = get_tool_calls(result.run_id)
-    assert [tc["tool_name"] for tc in tool_calls] == [
-        "get_market_snapshot", "get_fundamentals",
-    ]
-    assert tool_calls[0]["status"] == "failed"  # soft broker auth failure
-    assert tool_calls[0]["error_type"] == "auth_required"
-    assert tool_calls[1]["status"] == "completed"
-    # The answer is the model's research synthesis, not the deterministic
-    # unavailable-data boilerplate, and evidence from the sibling tool run
-    # is retained.
-    assert result.answer == "Per the latest 10-Q, GPRO's story is driven by fundamentals."
-    assert not result.answer.startswith("The requested data is unavailable")
-    assert len(result.evidence_refs) == 1
 
 
 # -- authorize_robinhood_browser ---------------------------------------------

@@ -1,8 +1,7 @@
 """Logging configuration: default WARNING, DEBUG+ streaming to a log server,
 and the INFO security-event line at the recorder choke point.
 
-Offline: the chat-run test uses a scripted model and no network. Root
-handlers are detached before each configure_logging call so handler
+Root handlers are detached before each configure_logging call so handler
 assertions see only what configure_logging attached (test collection
 imports app.main, which calls configure_logging() at import time).
 """
@@ -78,26 +77,3 @@ def test_security_event_logged_at_info(monkeypatch, tmp_path, caplog):
     assert "decision=allowed" in matches[0]
     assert "source=sec" in matches[0]
 
-
-def test_chat_run_logs_tool_call(monkeypatch, caplog):
-    from app import agent
-    from app.policy import LOCAL_CONTEXT
-    from tests.test_observability import TEST_POLICY, FakeOpenRouter, _final, _tool_round
-
-    fake = FakeOpenRouter([
-        _tool_round("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}),
-        _final("AAPL EPS is 6.3."),
-    ])
-    monkeypatch.setattr(agent, "_call_openrouter", fake)
-    monkeypatch.setattr(
-        agent, "execute_tool",
-        lambda name, args, model, **kwargs: {"ticker": "AAPL", "metric": "eps"},
-    )
-    with caplog.at_level(logging.INFO):
-        agent.run_chat(
-            [{"role": "user", "content": "AAPL EPS?"}],
-            model="test",
-            context=LOCAL_CONTEXT,
-            policy=TEST_POLICY,
-        )
-    assert any("Tool call:" in r.getMessage() for r in caplog.records)

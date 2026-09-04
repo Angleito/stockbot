@@ -57,27 +57,27 @@ def test_cmd_log_server_bind_error_exits(monkeypatch, capsys):
 
 def test_parser_log_server_flag_positions():
     parser = cli._build_parser()
-    assert parser.parse_args(["chat", "--log-server"]).log_server == "http://127.0.0.1:8765"
+    assert parser.parse_args(["--log-server"]).log_server == "http://127.0.0.1:8765"
     assert (
-        parser.parse_args(["--log-server", "http://x:1", "chat"]).log_server == "http://x:1"
+        parser.parse_args(["--log-server", "http://x:1", "runs"]).log_server == "http://x:1"
     )
-    assert parser.parse_args(["chat"]).log_server is None
+    assert parser.parse_args(["runs"]).log_server is None
     assert parser.parse_args(["log-server", "--port", "9999"]).port == 9999
     assert parser.parse_args(["log-server"]).port == DEFAULT_LOG_SERVER_PORT
 
 
 def test_bare_log_server_before_subcommand_keeps_subcommand():
-    # nargs="?" would consume "chat" as the URL value; the rewrite must
+    # nargs="?" would consume "runs" as the URL value; the rewrite must
     # recognize the subcommand and fall back to the default URL.
-    rewritten = cli._rewrite_bare_log_server(["--log-server", "chat"])
-    assert rewritten == ["--log-server=http://127.0.0.1:8765", "chat"]
+    rewritten = cli._rewrite_bare_log_server(["--log-server", "runs"])
+    assert rewritten == ["--log-server=http://127.0.0.1:8765", "runs"]
     args = cli._build_parser().parse_args(rewritten)
-    assert args.command == "chat"
+    assert args.command == "runs"
     assert args.log_server == "http://127.0.0.1:8765"
     # explicit URL, bare flag after the subcommand, and trailing bare flag
     # are all left untouched.
     assert cli._rewrite_bare_log_server(
-        ["--log-server", "http://x:1", "chat"]
-    ) == ["--log-server", "http://x:1", "chat"]
-    assert cli._rewrite_bare_log_server(["chat", "--log-server"]) == ["chat", "--log-server"]
+        ["--log-server", "http://x:1", "runs"]
+    ) == ["--log-server", "http://x:1", "runs"]
+    assert cli._rewrite_bare_log_server(["runs", "--log-server"]) == ["runs", "--log-server"]
     assert cli._rewrite_bare_log_server(["--log-server"]) == ["--log-server"]
