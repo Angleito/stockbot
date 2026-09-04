@@ -297,22 +297,20 @@ def _fetch_filing_section(ticker: str, form_type: str, item: str) -> dict:
         return {"error": f"Invalid item '{item}'"}
     if form_type not in ("10-K", "10-Q", "8-K", "4", "DEF 14A"):
         return {"error": f"Invalid form_type '{form_type}'"}
-    
+
     try:
         company = Company(ticker)
         filings = company.get_filings(form=[form_type])
         if not filings:
             return _no_data(ticker, f"no {form_type} filings found")
-        
+
         filing = filings[0]
         doc = filing.obj()
-        
+
+
         # Map item name to attribute name for lookup
         attr_name = _SECTION_ATTRS.get(item, item)
-        
-        # Try to get the section from the document
         section = getattr(doc, attr_name, None)
-
         # 10-Q MD&A is not exposed as an attribute; retrieve the Part I
         # Item 2 section text via the filing's section map.
         if section is None and form_type == "10-Q" and item == "mda":

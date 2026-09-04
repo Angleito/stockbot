@@ -3,12 +3,10 @@
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from decimal import Decimal
 from typing import Any
-
-import requests
 
 from . import analytics
 from . import analyst_client
@@ -17,13 +15,10 @@ from . import exa_client
 from . import finra_client
 from . import obligations
 from . import valuation
-from .config import OPENROUTER_BASE_URL, get_openrouter_api_key
 from .config import broker_enabled, get_robinhood_mcp_url
 from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
-from .prompts import READING_PROMPT_TEMPLATE
-from .security import prompt_injection
 from .robinhood import RobinhoodClient
 from .robinhood import capabilities
 from .robinhood.auth import DEFAULT_TOKEN_PATH, OAuthConfig, has_valid_tokens
@@ -35,12 +30,6 @@ from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 from .services import sec_facts
 from .storage import duckdb
-from .storage.runs import (
-    model_error_category,
-    record_model_call_from_current,
-    reserve_model_call_from_current,
-)
-from .runtime import BudgetExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -89,20 +78,6 @@ TOOLS = [
                     ]}
                 },
                 "required": ["ticker", "form_type", "item"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_earnings_summary",
-            "description": "Returns an analyst-style read of the most "
-                "recent earnings data from SEC filings (8-K Item 2.02 or 10-Q MD&A). "
-                "Call for 'how did [company] do' or 'summarize earnings' questions.",
-            "parameters": {
-                "type": "object",
-                "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
             }
         }
     },
@@ -690,90 +665,6 @@ TOOLS = [
 TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
 
 
-def _llm_complete(model: str, prompt: str, max_tokens: int = 2000) -> str:
-    """Plain (tool-less) completion — used only by get_earnings_summary."""
-    t0_iso = datetime.now(timezone.utc).isoformat()
-    if not reserve_model_call_from_current():
-        raise BudgetExhaustedError("model call budget exhausted")
-    try:
-        resp = requests.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {get_openrouter_api_key()}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
-        record_model_call_from_current(
-            provider="openrouter",
-            model=model,
-            started_at=t0_iso,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            usage=None,
-            status="failed",
-            error_type=type(exc).__name__,
-            error_category=model_error_category(exc),
-        )
-        raise
-    record_model_call_from_current(
-        provider="openrouter",
-        model=model,
-        started_at=t0_iso,
-        completed_at=datetime.now(timezone.utc).isoformat(),
-        usage=payload.get("usage"),
-        finish_reason=payload.get("choices", [{}])[0].get("finish_reason"),
-        tool_call_count=0,
-        provider_request_id=payload.get("id"),
-    )
-    return payload["choices"][0]["message"]["content"]
-
-
-def get_earnings_summary(ticker: str, model: str) -> dict:
-    """Fetch the latest 8-K press release and summarize it with the reading prompt.
-
-    The only tool that itself calls the LLM (nested call). The summary is
-    cached per ticker+model so we don't re-run the reading prompt twice.
-    """
-    from . import cache
-
-    release = edgar_client.get_latest_earnings_release(ticker)
-    if "error" in release:
-        return release
-
-    cache_key = f"earnings_summary:{model}:{ticker}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    # Truncate very long press releases to keep the nested call bounded.
-    text = release["text"][:60000]
-    # The 8-K text is free-form external content entering a model prompt:
-    # gate it before the nested reading completion. A quarantined release
-    # never reaches the LLM and never fills the cache.
-    if prompt_injection.assess(text).verdict != "ALLOW":
-        return {
-            "error": "Filing section quarantined by security policy",
-            "error_type": "security_quarantine",
-            "source": "sec",
-        }
-    summary = _llm_complete(model, READING_PROMPT_TEMPLATE.format(section_text=text))
-    result = {
-        "ticker": ticker,
-        "summary": summary,
-        "source": release["source"],
-    }
-    cache.set(cache_key, result)
-    return result
-
-
 def _robinhood_client(
     *, account_tools: frozenset[str] = frozenset(),
 ) -> RobinhoodClient:
@@ -1346,7 +1237,6 @@ _DIRECT_HANDLERS = {
     "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(
         args["ticker"], args["concept"]
     ),
-    "get_earnings_summary": lambda args, model: get_earnings_summary(args["ticker"], model),
     "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(args["ticker"]),
     "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(args["ticker"]),
     "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(args["ticker"]),
@@ -1427,7 +1317,6 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
     "get_filing_section": Capability.RESEARCH,
-    "get_earnings_summary": Capability.RESEARCH,
     "diff_risk_factors": Capability.RESEARCH,
     "get_financial_statements": Capability.RESEARCH,
     "get_xbrl_facts": Capability.RESEARCH,

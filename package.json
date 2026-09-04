@@ -11,6 +11,10 @@
     "smoke-robinhood": "RUN_ROBINHOOD_SMOKE=1 venv/bin/pytest -m robinhood_smoke -q",
     "smoke": "bun run smoke-mock && bun run smoke-prod",
     "clean-env": "rm -rf venv",
-    "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck"
+    "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck",
+    "stockbot": "pi --no-builtin-tools --extension .pi/extensions/stockbot.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.0"
   }
 }
