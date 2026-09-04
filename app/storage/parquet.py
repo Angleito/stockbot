@@ -206,6 +206,7 @@ DATASETS: dict[str, Dataset] = {
             ("retrieved_at", TEXT), ("accession", TEXT), ("source", TEXT),
             ("source_url", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
             ("agreement_key", TEXT), ("lifecycle_event", TEXT),
+            ("schedule_component", pa.bool_()), ("headline_type", TEXT),
         )),
         unique_keys=("event_id",),
         partition_field="filed_at",

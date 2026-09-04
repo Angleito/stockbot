@@ -905,6 +905,36 @@ def _reconcile_schedule_components(rows: list[dict], start: int) -> None:
         )
 
 
+def _apply_legacy_component_flags(rows: list[dict]) -> None:
+    """Backfill component flags for events stored before flags existed."""
+    by_filed: dict[str, list[dict]] = {}
+    for r in rows:
+        if r.get("schedule_component") is not None:
+            continue
+        by_filed.setdefault(str(r.get("filed") or ""), []).append(r)
+    for group in by_filed.values():
+        table_rows = [r for r in group if _is_fiscal_component_row(r)]
+        headlines = [
+            r for r in group
+            if str(r.get("source") or "").endswith(" note") and (r.get("amount_billions") or 0) > 0
+        ]
+        if not table_rows or not headlines:
+            continue
+        total = sum(r.get("amount_billions") or 0 for r in table_rows)
+        if not total:
+            continue
+        matches = [
+            h for h in headlines
+            if abs(total - (h.get("amount_billions") or 0)) / total < 0.1
+        ]
+        if not matches:
+            continue
+        best = min(matches, key=lambda h: abs(total - (h.get("amount_billions") or 0)))
+        for r in table_rows:
+            r["schedule_component"] = True
+            r["headline_type"] = best.get("type")
+
+
 def _balance_sheet_liabilities(ticker: str, *, archive: bool = False, manifest: list | None = None) -> list[dict]:
     """Layer 3: balance-sheet liabilities with on-balance-sheet status."""
     rows: list[dict] = []
@@ -1530,6 +1560,7 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
     a deterministic rerun writes 0 rows (dedup by event/evidence id). Proxied
     XBRL rows (``provenance == "proxied"``) are live-only evidence, never persisted.
     Status is derived by ``_resolve_8k_lifecycle`` at read time and is never stored.
+    Reconciled fiscal-year components persist with their flags and are excluded from snapshots at read time.
     """
     from dataclasses import asdict
     from datetime import date
@@ -1635,6 +1666,8 @@ def persist_obligation_events(rows: list[dict], data_root: Optional[str] = None,
             parser_version=row.get("parser_version"),
             agreement_key=row.get("agreement_key"),
             lifecycle_event=row.get("_lifecycle_event", row.get("lifecycle_event")),
+            schedule_component=row.get("schedule_component"),
+            headline_type=row.get("headline_type"),
         )
         event_target.append(asdict(event))
         is_xbrl_fact = "concept" in row
@@ -1752,6 +1785,8 @@ def get_obligations_as_of(ticker: str, as_of: str, data_root: Optional[str] = No
             "payment_horizon": payment_horizon,
             "agreement_key": e.get("agreement_key"),
             "_lifecycle_event": e.get("lifecycle_event"),
+            "schedule_component": e.get("schedule_component"),
+            "headline_type": e.get("headline_type"),
             "source": e.get("source"),
             "accession": e.get("accession"),
             "_accession": e.get("accession"),
@@ -1782,6 +1817,7 @@ def get_obligations_as_of(ticker: str, as_of: str, data_root: Optional[str] = No
     _ = {ev.get("event_id") for ev in stored_evidence if str(ev.get("event_id") or "") not in event_ids}
     if not rows and not bucket and not capital:
         return _no_data(ticker, f"no stored obligation events as of {as_of}")
+    _apply_legacy_component_flags(rows)
     snapshot, snap_warnings = _current_snapshot(rows)
     _publish_lifecycle(rows, bucket, capital)
     coverage = {

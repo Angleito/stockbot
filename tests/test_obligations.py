@@ -704,6 +704,106 @@ def test_schedule_table_reconciles_to_headline(monkeypatch):
     assert snap_total == pytest.approx(13.3, abs=0.05)
 
 
+def test_schedule_components_roundtrip_flag_and_replay(monkeypatch, tmp_path):
+    """Component flags survive persist -> replay; snapshot stays ~$13.3B."""
+    from app.storage import parquet
+
+    md = (
+        "Supply commitments were $13.3 billion as of September 27, 2025. "
+        "Future payments are as follows (in millions):\n"
+        "| 2026 | $4,752 |\n| 2027 | $3,708 |\n| 2028 | $1,981 |\n"
+        "| 2029 | $1,306 |\n| 2030 | $788 |\n| Thereafter | $773 |"
+    )
+    _install_layered(monkeypatch, {
+        "10-K": ({"Commitments and Contingencies": md}, "2026-02-01"),
+    })
+    live = obligations.get_obligations("SYN")
+    assert "error" not in live
+    assert len(live["obligations"]) == 7
+    (live_headline,) = [
+        r for r in live["obligations"]
+        if r["type"] == "supply" and r["amount_billions"] == 13.3
+    ]
+    assert live_headline["schedule"]
+    assert len([r for r in live["obligations"] if r.get("schedule_component")]) == 6
+    assert sum(r["amount_billions"] for r in live["current_snapshot"]) == pytest.approx(13.3, abs=0.05)
+    summary = obligations.persist_obligation_events(live["obligations"], data_root=str(tmp_path))
+    assert summary["events_written"] == 7
+    stored = {
+        e["event_id"]: e
+        for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
+    }
+    assert len(stored) == 7
+    stored_comps = [e for e in stored.values() if e.get("schedule_component") is True]
+    assert len(stored_comps) == 6
+    assert all(e["headline_type"] == "supply" for e in stored_comps)
+    (stored_headline,) = [e for e in stored.values() if e.get("schedule_component") is not True]
+    assert stored_headline["amount_billions"] == 13.3
+    assert stored_headline["schedule_component"] is None
+    assert stored_headline["headline_type"] is None
+    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
+    assert "error" not in replayed
+    assert len(replayed["obligations"]) == 7
+    assert len([r for r in replayed["obligations"] if r.get("schedule_component")]) == 6
+    assert all(
+        r["headline_type"] == "supply"
+        for r in replayed["obligations"] if r.get("schedule_component")
+    )
+    assert sum(r["amount_billions"] for r in replayed["current_snapshot"]) == pytest.approx(13.3, abs=0.05)
+    (replayed_headline,) = [
+        r for r in replayed["obligations"]
+        if r["type"] == "supply" and r["amount_billions"] == 13.3
+    ]
+    assert [y["fiscal_year"] for y in replayed_headline["schedule"]] == [
+        "2026", "2027", "2028", "2029", "2030", "Thereafter",
+    ]
+
+
+def test_schedule_components_legacy_null_flags_replay(tmp_path):
+    """Events stored without flags replay to the same ~$13.3B snapshot."""
+    from app.domain.events import sec_event_id
+    from app.storage import parquet
+
+    table = [
+        ("2026", 4.752), ("2027", 3.708), ("2028", 1.981),
+        ("2029", 1.306), ("2030", 0.788), ("Thereafter", 0.773),
+    ]
+    store_rows = [
+        {
+            "event_id": sec_event_id("SYN", "legacy-head"),
+            "ticker": "SYN", "event_type": "supply", "amount_billions": 13.3,
+            "certainty": "contractual", "status": "future_cash_obligation",
+            "revenue_matched": False, "default_triggered": False,
+            "fiscal_year": None,
+            "schedule_json": json.dumps([
+                {"fiscal_year": fy, "amount_billions": amt} for fy, amt in table
+            ]),
+            "filed_at": "2026-02-01", "known_at": "2026-02-01",
+            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note",
+            "content_hash": "legacy-head", "parser_version": obligations.PARSER_VERSION,
+        },
+    ]
+    for i, (fy, amt) in enumerate(table):
+        ch = f"legacy-c{i}"
+        store_rows.append({
+            "event_id": sec_event_id("SYN", ch),
+            "ticker": "SYN", "event_type": "purchase_commitments", "amount_billions": amt,
+            "certainty": "contractual", "status": "future_cash_obligation",
+            "revenue_matched": False, "default_triggered": False,
+            "fiscal_year": fy, "filed_at": "2026-02-01", "known_at": "2026-02-01",
+            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note table",
+            "content_hash": ch, "parser_version": obligations.PARSER_VERSION,
+        })
+    assert parquet.write_rows("events", store_rows, root=tmp_path / "parquet") == 7
+    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
+    assert "error" not in replayed
+    assert len(replayed["obligations"]) == 7
+    comps = [r for r in replayed["obligations"] if r.get("schedule_component")]
+    assert len(comps) == 6
+    assert all(c["headline_type"] == "supply" for c in comps)
+    assert sum(r["amount_billions"] for r in replayed["current_snapshot"]) == pytest.approx(13.3, abs=0.05)
+
+
 def test_reconciliation_ambiguity_attaches_closest_and_warns():
     md = (
         "Supply commitments were $10.1 billion. Vendor commitments were "
