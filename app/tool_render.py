@@ -177,6 +177,9 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
             reported = _cell(item.get('reported_ticker'))
             if reported:
                 lines.append(f"Reported as: {reported}")
+            obj = _cell(item.get('object_name'))
+            if obj:
+                lines.append(f"Object: {obj}")
             lines.append(f"Type: {ctype}")
             lines.append(f"Source: {source} [{tier}/{integrity}]")
             lines.append(f"Published: {published} | Retrieved: {retrieved}")
