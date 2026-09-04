@@ -29,6 +29,7 @@ from .services import risk as risk_service
 from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 from .services import sec_facts
+from . import sec
 from .storage import duckdb
 
 logger = logging.getLogger(__name__)
@@ -59,27 +60,211 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_filing_section",
-            "description": "Returns text from any SEC filing (10-K, 10-Q, 8-K, "
-                "Form 4, DEF 14A, SC 13D/G). Specify form type and item. "
-                "SC 13D (activist) / SC 13G (passive) with item 'ownership' "
-                "or 'purpose' show big-investor 5%+ stakes.",
+            "name": "list_sec_filings",
+            "description": "Lists SEC EDGAR filings for a ticker or CIK. Any form string works (10-K, 8-K, SC 13D, Form 4, S-1, 20-F, 13F-HR, ...). Start here for filing discovery; then drill into get_sec_document or a deterministic analyzer.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
-                    "form_type": {"type": "string", "enum": [
-                        "10-K", "10-Q", "8-K", "4", "DEF 14A", "SC 13D", "SC 13G"
-                    ]},
-                    "item": {"type": "string", "enum": [
-                        "business", "risk_factors", "mda", "financial_statements",
-                        "earnings", "guidance", "material_agreements",
-                        "bankruptcy", "regulatory", "other_events",
-                        "proxy_summary", "executive_compensation", "ownership",
-                        "transactions", "purpose"
-                    ]}
+                    "forms": {"type": "array", "items": {"type": "string"}},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."},
+                    "limit": {"type": "integer"}
                 },
-                "required": ["ticker", "form_type", "item"]
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sec_filing",
+            "description": "Returns one filing's record (form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number.",
+            "parameters": {
+                "type": "object",
+                "properties": {"accession_no": {"type": "string"}},
+                "required": ["accession_no"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sec_documents",
+            "description": "Lists the documents and exhibits attached to one filing by accession number.",
+            "parameters": {
+                "type": "object",
+                "properties": {"accession_no": {"type": "string"}},
+                "required": ["accession_no"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sec_document",
+            "description": "Returns the text of one filing document (default: primary document) by accession number. Load only the document relevant to the question, never full history.",
+            "parameters": {
+                "type": "object",
+                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}},
+                "required": ["accession_no"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diff_sec_filings",
+            "description": "Deterministic diff between two filings by accession numbers (amendment vs prior, risk-factor changes). Numbers first; the LLM interprets only after deterministic output.",
+            "parameters": {
+                "type": "object",
+                "properties": {"current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}},
+                "required": ["current_accession", "previous_accession"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_material_events",
+            "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions before loading raw filings.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker", "since"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_beneficial_ownership",
+            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ownership_changes",
+            "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_insider_activity",
+            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_planned_insider_sales",
+            "description": "Planned insider sales from Form 144 notices (proposed, not yet executed). Compare with get_insider_activity for follow-through.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_offering_history",
+            "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dilution_profile",
+            "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_institutional_ownership",
+            "description": "13F filing pointers (filing level only until the 13F holdings follow-up). For holder/entry questions when position detail is unavailable.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_governance_events",
+            "description": "Proxy/governance filing context (DEF 14A, contested forms, information statements) with retrieval pointers.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_transaction_status",
+            "description": "M&A filing context (tender offers, 14D-9, S-4, merger proxies). Deal status is unknown until structured parsers land; use get_sec_document for filing text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_short_pressure_profile",
+            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ticker": {"type": "string"}},
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tools",
+            "description": "Find the right tool first: keyword search over tool names, descriptions, and domain tags. Call this when unsure which tool fits; it returns only matching schemas.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "domain": {"type": "string", "description": "Browse a domain pack: filings, ownership, insider, offerings, events, governance, transactions, market."}},
+                "required": []
             }
         }
     },
@@ -91,7 +276,7 @@ TOOLS = [
                 "(SEC current-filings feed, ~24h window): issuer, filer, stake "
                 "percent/shares, filed date, accession. Call for 'most recent' "
                 "or 'latest' big-investor filings when no ticker is given; then "
-                "drill into get_filing_section for detail. It lists filings, it "
+                "drill into get_beneficial_ownership for detail. It lists filings, it "
                 "does not establish that a filing caused a price move.",
             "parameters": {
                 "type": "object",
@@ -1243,6 +1428,65 @@ def suggest_public_search_queries(
                 related.append(names_by_entity[other])
     return plan_public_search_queries(primary_name, primary_ticker, related)
 
+
+def _wrap_list(identifier, records, key: str) -> dict:
+    """SEC list results: identifier echo, count, to_dict records, source."""
+    items = [r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in records or []]
+    return {"subject": identifier, "count": len(items), key: items, "source": "SEC EDGAR"}
+
+
+# search_tools catalog: name -> (domain, keyword tags). New tools add one
+# line here; prompts never change.
+_SEC_TOOL_TAGS = {
+    "list_sec_filings": ("filings", "list filings forms 10-K 10-Q 8-K discovery accession"),
+    "get_sec_filing": ("filings", "filing record accession metadata filed known amendment"),
+    "list_sec_documents": ("filings", "documents exhibits attachments list accession"),
+    "get_sec_document": ("filings", "document text read MD&A risk factors business primary exhibit"),
+    "diff_sec_filings": ("filings", "diff compare change amendment prior risk factors"),
+    "get_material_events": ("events", "material events changed new earnings bankruptcy 8-K since"),
+    "get_beneficial_ownership": ("ownership", "beneficial ownership 13D 13G holder stake percent activist passive"),
+    "get_ownership_changes": ("ownership", "ownership change holder stake increase decrease activist"),
+    "get_insider_activity": ("insider", "insider purchase sale transactions Form 4 open market"),
+    "get_planned_insider_sales": ("insider", "planned insider sale Form 144 proposed notice"),
+    "get_offering_history": ("offerings", "offering registration S-1 S-3 prospectus financing shelf"),
+    "get_dilution_profile": ("offerings", "dilution shares offering ATM convertible warrant"),
+    "get_institutional_ownership": ("ownership", "institutional 13F holdings fund manager"),
+    "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
+    "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
+    "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
+}
+
+_SEC_DOMAIN_PACKS = {
+    "filings": ["list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
+    "events": ["get_material_events"],
+    "ownership": ["get_beneficial_ownership", "get_ownership_changes"],
+    "insider": ["get_insider_activity", "get_planned_insider_sales"],
+    "offerings": ["get_offering_history", "get_dilution_profile"],
+    "governance": ["get_governance_events"],
+    "transactions": ["get_transaction_status"],
+    "market": ["get_short_pressure_profile"],
+}
+
+
+def _search_tools(args: dict, model: str) -> dict:
+    """Keyword search over tool names, descriptions, and domain tags."""
+    del model
+    query = (args.get("query") or "").strip().lower()
+    domain = (args.get("domain") or "").strip().lower()
+    by_name = {tool["function"]["name"]: tool for tool in TOOLS}
+    if domain and not query:
+        names = _SEC_DOMAIN_PACKS.get(domain, [])
+        return {"domain": domain, "schemas": [by_name[n] for n in names if n in by_name]}
+    tokens = query.split()
+    matches = []
+    for name, tool in by_name.items():
+        if name == "search_tools":
+            continue
+        tags = _SEC_TOOL_TAGS.get(name, ("", ""))[1]
+        haystack = f"{name} {tool['function'].get('description', '')} {tags}".lower().replace("_", " ")
+        if tokens and all(token in haystack for token in tokens):
+            matches.append(tool)
+    return {"query": args.get("query"), "count": len(matches), "schemas": matches}
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
 _DIRECT_HANDLERS = {
@@ -1250,12 +1494,75 @@ _DIRECT_HANDLERS = {
     "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
         args["ticker"], args["metric"], as_of=args.get("as_of")
     ),
-    "get_filing_section": lambda args, model: edgar_client.get_filing_section(
-        args["ticker"], args["form_type"], args["item"]
+    "list_sec_filings": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.list_sec_filings(
+            args["ticker"], forms=args.get("forms"), start_date=args.get("start_date"),
+            end_date=args.get("end_date"), as_of=args.get("as_of"),
+            limit=args.get("limit", 50),
+        ), "filings",
     ),
-    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(
-        args.get("form_type", "both"), args.get("limit", 10)
+    "get_sec_filing": lambda args, model: sec.get_sec_filing(args["accession_no"]).to_dict(),
+    "list_sec_documents": lambda args, model: _wrap_list(
+        args.get("accession_no"), sec.list_sec_documents(args["accession_no"]), "documents",
     ),
+    "get_sec_document": lambda args, model: sec.get_sec_document(
+        args["accession_no"], args.get("document_name"),
+    ),
+    "diff_sec_filings": lambda args, model: sec.diff_filings(
+        args["current_accession"], args["previous_accession"], section=args.get("section"),
+    ),
+    "get_material_events": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_material_events(
+            args["ticker"], args["since"], as_of=args.get("as_of"),
+            limit=args.get("limit", 50),
+        ), "events",
+    ),
+    "get_beneficial_ownership": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_beneficial_ownership(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+        ), "records",
+    ),
+    "get_ownership_changes": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_ownership_changes(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+        ), "changes",
+    ),
+    "get_insider_activity": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_insider_activity(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 50),
+        ), "transactions",
+    ),
+    "get_planned_insider_sales": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_planned_insider_sales(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+        ), "proposed_sales",
+    ),
+    "get_offering_history": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_offering_history(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 50),
+        ), "offerings",
+    ),
+    "get_dilution_profile": lambda args, model: sec.get_dilution_profile(
+        args["ticker"], as_of=args.get("as_of"),
+    ),
+    "get_institutional_ownership": lambda args, model: sec.get_institutional_ownership(
+        args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 10),
+    ),
+    "get_governance_events": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_governance_events(
+            args["ticker"], since=args.get("since"), as_of=args.get("as_of"),
+            limit=args.get("limit", 10),
+        ), "events",
+    ),
+    "get_transaction_status": lambda args, model: _wrap_list(
+        args.get("ticker"), sec.get_transaction_status(
+            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 10),
+        ), "transactions",
+    ),
+    "get_short_pressure_profile": lambda args, model: sec.get_short_pressure_context(
+        args["ticker"],
+    ),
+    "search_tools": _search_tools,
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
         args["ticker"], args["statement_type"]
     ),
@@ -1341,7 +1648,23 @@ _ROBINHOOD_HANDLERS = {
 TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
-    "get_filing_section": Capability.RESEARCH,
+    "list_sec_filings": Capability.RESEARCH,
+    "get_sec_filing": Capability.RESEARCH,
+    "list_sec_documents": Capability.RESEARCH,
+    "get_sec_document": Capability.RESEARCH,
+    "diff_sec_filings": Capability.RESEARCH,
+    "get_material_events": Capability.RESEARCH,
+    "get_beneficial_ownership": Capability.RESEARCH,
+    "get_ownership_changes": Capability.RESEARCH,
+    "get_insider_activity": Capability.RESEARCH,
+    "get_planned_insider_sales": Capability.RESEARCH,
+    "get_offering_history": Capability.RESEARCH,
+    "get_dilution_profile": Capability.RESEARCH,
+    "get_institutional_ownership": Capability.RESEARCH,
+    "get_governance_events": Capability.RESEARCH,
+    "get_transaction_status": Capability.RESEARCH,
+    "get_short_pressure_profile": Capability.RESEARCH,
+    "search_tools": Capability.RESEARCH,
     "get_recent_ownership_filings": Capability.RESEARCH,
     "diff_risk_factors": Capability.RESEARCH,
     "get_financial_statements": Capability.RESEARCH,

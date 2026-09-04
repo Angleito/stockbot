@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Deterministic per-case drive plan: case id -> ordered (tool, arguments).
 PLAN = {
     11: [("get_short_interest", {"ticker": "AAPL"})],
-    5: [("get_filing_section", {"ticker": "MSFT", "form_type": "10-Q", "item": "mda"})],
+    5: [("list_sec_filings", {"ticker": "MSFT", "forms": ["10-Q"], "limit": 1})],
     29: [("get_valuation_metrics", {"ticker": "AAPL"})],
 }
 

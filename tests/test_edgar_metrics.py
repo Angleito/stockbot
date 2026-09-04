@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from app import edgar_client
+from app.sec.events8k import KNOWN_8K_ITEMS, parse_8k_events
+from app.sec.material import EIGHT_K_ITEM_EVENTS, material_events_from_8k
 from app.tools import TOOLS
 
 
@@ -121,3 +123,35 @@ def test_eps_ttm_uses_quarterly_facts_and_derives_q4(monkeypatch):
     assert by_end["2026-01-25"] == 1.76  # derived: 4.90 - 3.14
     assert by_end["2026-04-26"] == 2.39
     assert result["ttm_eps_diluted"] == 6.53
+
+
+# Step-1 8-K mapping regression, migrated to the new suite after
+# get_filing_section was retired: bankruptcy is Item 1.03 (never 2.06)
+# and impairments is Item 2.06 end to end (parse -> event -> vocabulary).
+
+
+def test_8k_bankruptcy_is_item_103_not_206():
+    assert EIGHT_K_ITEM_EVENTS["1.03"] == "bankruptcy"
+    assert EIGHT_K_ITEM_EVENTS["2.06"] == "impairment"
+    assert "Bankruptcy" in KNOWN_8K_ITEMS["1.03"]
+    assert "Impairment" in KNOWN_8K_ITEMS["2.06"]
+
+
+def test_8k_events_route_103_and_206_texts():
+    events = parse_8k_events(
+        "0000000001-26-000001",
+        {"Item 1.03": "bankruptcy text", "Item 2.06": "impairments text EX-99.1"},
+    )
+    by_number = {event.item_number: event for event in events}
+    assert list(by_number["2.06"].exhibit_refs) == ["EX-99.1"]
+    assert by_number["2.06"].text == "impairments text EX-99.1"
+
+
+def test_8k_bankruptcy_maps_to_bankruptcy_event():
+    events = material_events_from_8k(
+        "0000000001-26-000001",
+        parse_8k_events("0000000001-26-000001", {"Item 1.03": "bankruptcy text"}),
+        issuer="FAKE",
+    )
+    assert [event.event_type for event in events] == ["bankruptcy"]
+    assert events[0].severity == "critical"

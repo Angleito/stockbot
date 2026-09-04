@@ -18,20 +18,23 @@ def _ensure_init() -> None:
     global _initialized
     if not _initialized:
         init_config()
-        # edgartools identity stays inside this module (the edgar boundary).
-        from edgar import set_identity
+        # edgartools identity lives in app/sec/client.py (the edgar boundary).
+        from app.sec.client import ensure_identity
 
-        set_identity(get_sec_edgar_identity())
+        ensure_identity()
         _initialized = True
 
 
 def _no_data(ticker: str, what: str) -> dict:
     return {"error": f"No data found for {ticker}: {what}"}
 
+
 def get_company(ticker: str) -> Company:
     """edgartools Company handle for a ticker (lazy init inside)."""
     _ensure_init()
-    return Company(ticker)
+    from app.sec.client import get_company as _sec_get_company
+
+    return _sec_get_company(ticker)
 
 
 def get_latest_report(ticker: str, form_type: str = "10-K"):
@@ -263,73 +266,6 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
         return _no_data(ticker, f"error retrieving {metric}: {e}")
 
 
-_SECTION_ATTRS = {
-    # 10-K / 10-Q sections
-    "business": "business",
-    "risk_factors": "risk_factors",
-    "mda": "management_discussion",
-    "financial_statements": "financials",
-    # 8-K items
-    "earnings": "earnings",  # Item 2.02
-    "guidance": "guidance",  # Item 7.01
-    "material_agreements": "material_agreements",  # Item 1.01
-    "bankruptcy": "bankruptcy",  # Item 2.06
-    "regulatory": "regulatory",  # Item 7.01
-    "other_events": "other_events",  # Item 8.01
-    # Form 4
-    "transactions": "transactions",
-    # DEF 14A (proxy)
-    "proxy_summary": "proxy_summary",
-    "executive_compensation": "executive_compensation",
-    "ownership": "ownership",
-    # SC 13D / SC 13G (beneficial ownership) — handled by _schedule13_section
-    "purpose": "purpose_of_transaction",
-}
-
-
-def get_filing_section(ticker: str, form_type: str, item: str) -> dict:
-    """Return the raw text of a section of the latest 10-K or 10-Q."""
-    _ensure_init()
-    key = f"filing_section:{ticker}:{form_type}:{item}"
-    return _cached_or_fetch(key, lambda: _fetch_filing_section(ticker, form_type, item))
-
-
-def _schedule13_section(ticker: str, filing, doc, form_type: str, item: str) -> dict:
-    """Ownership/purpose text from the latest SC 13D/G filing."""
-    if item not in ("ownership", "purpose"):
-        return {"error": f"Invalid item '{item}' for {form_type}: use 'ownership' or 'purpose'"}
-    try:
-        to_context = getattr(doc, "to_context", None)
-        if item == "ownership":
-            text = to_context(detail="standard") if callable(to_context) else str(doc)
-        else:
-            items = getattr(doc, "items", None)
-            purpose = getattr(items, "item4_purpose_of_transaction", None) if items is not None else None
-            if purpose:
-                text = str(purpose)
-            elif form_type == "SC 13G":
-                # 13G is passive: no Item 4 purpose; certification + ownership is the substance.
-                certification = getattr(items, "item10_certification", None) if items is not None else None
-                context = to_context(detail="standard") if callable(to_context) else str(doc)
-                text = f"{context}\n\nCertification: {certification}" if certification else context
-            else:
-                text = to_context(detail="full") if callable(to_context) else str(doc)
-    except Exception:
-        text = str(doc)
-    if not str(text).strip():
-        return _no_data(ticker, f"section '{item}' not found in {form_type}")
-    event_date = str(getattr(doc, "date_of_event", "") or getattr(doc, "event_date", "") or "")
-    return {
-        "ticker": ticker,
-        "form_type": filing.form,
-        "item": item,
-        "filed": str(filing.filing_date),
-        "event_date": event_date or None,
-        "accession_no": filing.accession_no,
-        "text": str(text),
-        "source": f"{filing.form} {item} filed {filing.filing_date} (accession {filing.accession_no})",
-    }
-
 
 _OWNERSHIP_FEED_FORMS = ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
 _OWNERSHIP_FEED_TTL_SECONDS = 3600  # SEC current-filings feed covers ~24h
@@ -445,134 +381,6 @@ def _fetch_recent_ownership_filings(form_type, limit) -> dict:
         logger.warning("get_recent_ownership_filings(%s) failed: %s", form_type, e)
         return {"error": f"No data found: error retrieving recent {label} filings: {e}"}
 
-
-def _fetch_filing_section(ticker: str, form_type: str, item: str) -> dict:
-    if item not in _SECTION_ATTRS:
-        return {"error": f"Invalid item '{item}'"}
-    if form_type not in ("10-K", "10-Q", "8-K", "4", "DEF 14A", "SC 13D", "SC 13G"):
-        return {"error": f"Invalid form_type '{form_type}'"}
-    if form_type in ("SC 13D", "SC 13G") and item not in ("ownership", "purpose"):
-        return {"error": f"Invalid item '{item}' for {form_type}: use 'ownership' or 'purpose'"}
-
-    try:
-        company = Company(ticker)
-        filings = company.get_filings(form=[form_type])
-        if not filings:
-            return _no_data(ticker, f"no {form_type} filings found")
-
-        filing = filings[0]
-        doc = filing.obj()
-
-        if form_type in ("SC 13D", "SC 13G"):
-            return _schedule13_section(ticker, filing, doc, form_type, item)
-
-        # Map item name to attribute name for lookup
-        attr_name = _SECTION_ATTRS.get(item, item)
-        section = getattr(doc, attr_name, None)
-        # 10-Q MD&A is not exposed as an attribute; retrieve the Part I
-        # Item 2 section text via the filing's section map.
-        if section is None and form_type == "10-Q" and item == "mda":
-            try:
-                mda = doc.get_item_with_part("part_i", "item 2")
-                if mda:
-                    return {
-                        "ticker": ticker,
-                        "form_type": "10-Q",
-                        "item": "mda",
-                        "filed": str(filing.filing_date),
-                        "accession_no": filing.accession_no,
-                        "text": str(mda),
-                        "source": f"10-Q Part I Item 2 (MD&A) filed {filing.filing_date} (accession {filing.accession_no})",
-                    }
-            except Exception:
-                pass
-
-        # 8-K earnings/guidance: fall back to the Item 2.02 press release
-        # text, which is where the outlook/guidance language actually lives.
-        if section is None and form_type == "8-K" and item in ("earnings", "guidance"):
-            release = _fetch_latest_earnings_release(ticker)
-            if "error" not in release:
-                release["item"] = item
-                release["form_type"] = "8-K"
-                release["note"] = (
-                    f"'{item}' extracted from the 8-K Item 2.02 press "
-                    "release text; edgartools exposes no separate "
-                    f"'{item}' attribute for this filing."
-                )
-                return release
-
-        # 8-K material agreements / other events: fall back to the raw
-        # 8-K document text for the matching item section (e.g. Item 1.01
-        # material agreements, Item 7.01/8.01 disclosure), which edgartools
-        # does not expose as a dedicated attribute.
-        if (
-            section is None
-            and form_type == "8-K"
-            and item in ("material_agreements", "other_events", "regulatory")
-        ):
-            doc_text = getattr(doc, "document", None)
-            if doc_text is not None:
-                raw = str(doc_text)
-                item_headings = {
-                    "material_agreements": ["Item 1.01"],
-                    "other_events": ["Item 8.01"],
-                    "regulatory": ["Item 7.01"],
-                }
-                for heading in item_headings[item]:
-                    idx = raw.find(heading)
-                    if idx < 0:
-                        continue
-                    next_idx = len(raw)
-                    for other in (
-                        "Item 1.01", "Item 2.03", "Item 5.02", "Item 7.01",
-                        "Item 8.01", "Item 9.01",
-                    ):
-                        pos = raw.find(other, idx + len(heading))
-                        if 0 < pos < next_idx:
-                            next_idx = pos
-                    text = raw[idx:next_idx].strip()
-                    if text:
-                        return {
-                            "ticker": ticker,
-                            "form_type": "8-K",
-                            "item": item,
-                            "filed": str(filing.filing_date),
-                            "accession_no": filing.accession_no,
-                            "text": text,
-                            "source": (
-                                f"8-K {heading} filed {filing.filing_date} "
-                                f"(accession {filing.accession_no})"
-                            ),
-                            "note": (
-                                f"'{item}' extracted from the raw 8-K "
-                                f"{heading} document text."
-                            ),
-                        }
-
-        if section is None:
-            return _no_data(ticker, f"section '{item}' not found in {form_type}")
-        
-        # Convert section to text
-        if isinstance(section, str):
-            text = section
-        else:
-            try:
-                text = section.text() if callable(getattr(section, "text", None)) else str(section)
-            except Exception:
-                text = str(section)
-        
-        return {
-            "ticker": ticker,
-            "form_type": form_type,
-            "item": item,
-            "filed": str(filing.filing_date),
-            "accession_no": filing.accession_no,
-            "text": text,
-            "source": f"{form_type} {item} filed {filing.filing_date} (accession {filing.accession_no})",
-        }
-    except Exception as e:
-        logger.warning("get_filing_section(%s, %s, %s) failed: %s", ticker, form_type, item, e)
-        return _no_data(ticker, f"error retrieving {form_type} {item}: {e}")
 
 
 def get_latest_earnings_release(ticker: str) -> dict:

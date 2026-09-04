@@ -34,7 +34,7 @@
     "question": "Summarize AAPL's latest earnings",
     "ticker": "AAPL",
     "expected_behavior": {
-      "expected_tools": ["get_filing_section", "get_financial_statements", "get_xbrl_facts"],
+      "expected_tools": ["get_material_events", "get_financial_statements", "get_xbrl_facts"],
       "must_contain": [],
       "must_not_contain": []
     }
@@ -44,7 +44,7 @@
     "question": "What did MSFT say drove revenue this quarter?",
     "ticker": "MSFT",
     "expected_behavior": {
-      "expected_tools": ["get_filing_section"],
+      "expected_tools": ["list_sec_filings", "get_sec_document"],
       "must_contain": [],
       "must_not_contain": []
     }
@@ -84,7 +84,7 @@
     "question": "How's FAKEZZZXY99 doing?",
     "ticker": "FAKEZZZXY99",
     "expected_behavior": {
-      "expected_tools": ["get_fundamentals", "get_filing_section"],
+      "expected_tools": ["get_fundamentals", "list_sec_filings"],
       "must_contain": ["no data", "not found", "unable to find", "could not find", "does not exist", "no information"],
       "must_not_contain": ["$"]
     }
@@ -330,6 +330,150 @@
       "expected_tools": ["get_valuation_metrics"],
       "must_contain": [],
       "must_not_contain": []
+    }
+  },
+  {
+    "id": 30,
+    "question": "Has an activist investor taken a new 5%+ stake in TSLA?",
+    "ticker": "TSLA",
+    "expected_behavior": {
+      "expected_tools": ["get_beneficial_ownership"],
+      "required_tools": ["get_beneficial_ownership"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 31,
+    "question": "Have insiders been buying or selling AAPL shares recently?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_insider_activity"],
+      "required_tools": ["get_insider_activity"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 32,
+    "question": "What is the dilution risk from NVDA's recent offerings?",
+    "ticker": "NVDA",
+    "expected_behavior": {
+      "expected_tools": ["get_offering_history", "get_dilution_profile"],
+      "required_tools": ["get_offering_history", "get_dilution_profile"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 33,
+    "question": "What changed in MSFT's latest shelf amendment versus the prior filing?",
+    "ticker": "MSFT",
+    "expected_behavior": {
+      "expected_tools": ["diff_sec_filings", "get_offering_history"],
+      "required_tools": ["diff_sec_filings"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 34,
+    "question": "Which institutions hold META in recent 13F filings?",
+    "ticker": "META",
+    "expected_behavior": {
+      "expected_tools": ["get_institutional_ownership"],
+      "required_tools": ["get_institutional_ownership"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 35,
+    "question": "Did AAPL insiders follow through on planned Form 144 sales?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_planned_insider_sales", "get_insider_activity"],
+      "required_tools": ["get_planned_insider_sales", "get_insider_activity"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 36,
+    "question": "What is the status of any pending merger or tender offer involving AMZN?",
+    "ticker": "AMZN",
+    "expected_behavior": {
+      "expected_tools": ["get_transaction_status"],
+      "required_tools": ["get_transaction_status"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 37,
+    "question": "Has TSLA received any delisting or listing-deficiency notice?",
+    "ticker": "TSLA",
+    "expected_behavior": {
+      "expected_tools": ["get_material_events"],
+      "required_tools": ["get_material_events"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 38,
+    "question": "Has MSFT changed auditors or restated financials recently?",
+    "ticker": "MSFT",
+    "expected_behavior": {
+      "expected_tools": ["get_material_events"],
+      "required_tools": ["get_material_events"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 39,
+    "question": "What changed at NVDA since its last earnings release?",
+    "ticker": "NVDA",
+    "expected_behavior": {
+      "expected_tools": ["get_material_events"],
+      "required_tools": ["get_material_events"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 40,
+    "question": "What did AAPL's 5%+ ownership look like as of 2024-06-01?",
+    "ticker": "AAPL",
+    "expected_behavior": {
+      "expected_tools": ["get_beneficial_ownership", "get_ownership_changes"],
+      "required_tools": ["get_beneficial_ownership"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": []
+    }
+  },
+  {
+    "id": 41,
+    "question": "Is GME under heavy short pressure right now?",
+    "ticker": "GME",
+    "expected_behavior": {
+      "expected_tools": ["get_short_pressure_profile"],
+      "required_tools": ["get_short_pressure_profile"],
+      "forbidden_tools": ["search_web"],
+      "must_contain": [],
+      "must_not_contain": ["manipulation", "guaranteed"]
     }
   }
 ]
