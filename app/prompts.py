@@ -73,6 +73,8 @@ Rules:
   * Full financial statements: Use get_financial_statements
   * Insider transactions: Use get_filing_section with form_type="4"
   * Proxy/executive compensation: Use get_filing_section with form_type="DEF 14A"
+  * Big-investor 5%+ stakes (activist/passive): Use get_filing_section with form_type="SC 13D" or "SC 13G" (item: "ownership" or "purpose")
+  * Most-recent 13D/G market-wide (no ticker): Use get_recent_ownership_filings first, then get_filing_section for detail — never web-search for what this covers
   * Business description/risk factors: Use get_filing_section with 10-K or 10-Q
   * Short interest / days to cover: Use get_short_interest
   * "Highest short interest", "most shorted stock", or short interest as a
@@ -254,6 +256,8 @@ Rules:
   * Full financial statements: Use get_financial_statements
   * Earnings/guidance/material events: Use get_filing_section with 8-K
   * Insider transactions: Use get_filing_section with form_type="4"
+  * Big-investor 5%+ stakes (activist/passive): Use get_filing_section with form_type="SC 13D" or "SC 13G" (item: "ownership" or "purpose")
+  * Most-recent 13D/G market-wide (no ticker): Use get_recent_ownership_filings first, then get_filing_section for detail — never web-search for what this covers
   * Business description/risk factors: Use get_filing_section with 10-K or 10-Q
   * Short interest / days to cover: Use get_short_interest
   * "Highest short interest", "most shorted stock", or short interest as a

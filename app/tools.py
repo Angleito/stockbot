@@ -61,23 +61,45 @@ TOOLS = [
         "function": {
             "name": "get_filing_section",
             "description": "Returns text from any SEC filing (10-K, 10-Q, 8-K, "
-                "Form 4, DEF 14A). Specify form type and item.",
+                "Form 4, DEF 14A, SC 13D/G). Specify form type and item. "
+                "SC 13D (activist) / SC 13G (passive) with item 'ownership' "
+                "or 'purpose' show big-investor 5%+ stakes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "form_type": {"type": "string", "enum": [
-                        "10-K", "10-Q", "8-K", "4", "DEF 14A"
+                        "10-K", "10-Q", "8-K", "4", "DEF 14A", "SC 13D", "SC 13G"
                     ]},
                     "item": {"type": "string", "enum": [
                         "business", "risk_factors", "mda", "financial_statements",
                         "earnings", "guidance", "material_agreements",
                         "bankruptcy", "regulatory", "other_events",
                         "proxy_summary", "executive_compensation", "ownership",
-                        "transactions"
+                        "transactions", "purpose"
                     ]}
                 },
                 "required": ["ticker", "form_type", "item"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_ownership_filings",
+            "description": "Lists the most recent SC 13D/13G filings market-wide "
+                "(SEC current-filings feed, ~24h window): issuer, filer, stake "
+                "percent/shares, filed date, accession. Call for 'most recent' "
+                "or 'latest' big-investor filings when no ticker is given; then "
+                "drill into get_filing_section for detail. It lists filings, it "
+                "does not establish that a filing caused a price move.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "form_type": {"type": "string", "enum": ["SC 13D", "SC 13G", "both"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25}
+                },
+                "required": []
             }
         }
     },
@@ -1231,6 +1253,9 @@ _DIRECT_HANDLERS = {
     "get_filing_section": lambda args, model: edgar_client.get_filing_section(
         args["ticker"], args["form_type"], args["item"]
     ),
+    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(
+        args.get("form_type", "both"), args.get("limit", 10)
+    ),
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
         args["ticker"], args["statement_type"]
     ),
@@ -1317,6 +1342,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
     "get_filing_section": Capability.RESEARCH,
+    "get_recent_ownership_filings": Capability.RESEARCH,
     "diff_risk_factors": Capability.RESEARCH,
     "get_financial_statements": Capability.RESEARCH,
     "get_xbrl_facts": Capability.RESEARCH,

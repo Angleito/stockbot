@@ -282,6 +282,8 @@ _SECTION_ATTRS = {
     "proxy_summary": "proxy_summary",
     "executive_compensation": "executive_compensation",
     "ownership": "ownership",
+    # SC 13D / SC 13G (beneficial ownership) — handled by _schedule13_section
+    "purpose": "purpose_of_transaction",
 }
 
 
@@ -292,11 +294,165 @@ def get_filing_section(ticker: str, form_type: str, item: str) -> dict:
     return _cached_or_fetch(key, lambda: _fetch_filing_section(ticker, form_type, item))
 
 
+def _schedule13_section(ticker: str, filing, doc, form_type: str, item: str) -> dict:
+    """Ownership/purpose text from the latest SC 13D/G filing."""
+    if item not in ("ownership", "purpose"):
+        return {"error": f"Invalid item '{item}' for {form_type}: use 'ownership' or 'purpose'"}
+    try:
+        to_context = getattr(doc, "to_context", None)
+        if item == "ownership":
+            text = to_context(detail="standard") if callable(to_context) else str(doc)
+        else:
+            items = getattr(doc, "items", None)
+            purpose = getattr(items, "item4_purpose_of_transaction", None) if items is not None else None
+            if purpose:
+                text = str(purpose)
+            elif form_type == "SC 13G":
+                # 13G is passive: no Item 4 purpose; certification + ownership is the substance.
+                certification = getattr(items, "item10_certification", None) if items is not None else None
+                context = to_context(detail="standard") if callable(to_context) else str(doc)
+                text = f"{context}\n\nCertification: {certification}" if certification else context
+            else:
+                text = to_context(detail="full") if callable(to_context) else str(doc)
+    except Exception:
+        text = str(doc)
+    if not str(text).strip():
+        return _no_data(ticker, f"section '{item}' not found in {form_type}")
+    event_date = str(getattr(doc, "date_of_event", "") or getattr(doc, "event_date", "") or "")
+    return {
+        "ticker": ticker,
+        "form_type": filing.form,
+        "item": item,
+        "filed": str(filing.filing_date),
+        "event_date": event_date or None,
+        "accession_no": filing.accession_no,
+        "text": str(text),
+        "source": f"{filing.form} {item} filed {filing.filing_date} (accession {filing.accession_no})",
+    }
+
+
+_OWNERSHIP_FEED_FORMS = ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
+_OWNERSHIP_FEED_TTL_SECONDS = 3600  # SEC current-filings feed covers ~24h
+_OWNERSHIP_TICKER_TTL_SECONDS = 7 * 86400  # ponytail: cached CIK->ticker map, refreshes weekly
+
+
+def get_recent_ownership_filings(form_type: str = "both", limit: int = 10) -> dict:
+    """Most recent SC 13D/G filings market-wide (SEC current-filings feed, ~24h window)."""
+    _ensure_init()
+    key = f"ownership_feed:{form_type}:{limit}"
+    hit = cache.get(key, ttl=_OWNERSHIP_FEED_TTL_SECONDS)
+    if hit is not None:
+        return hit
+    value = _fetch_recent_ownership_filings(form_type, limit)
+    cache.set(key, value)
+    return value
+
+
+def _resolve_issuer_ticker(cik: int) -> str | None:
+    """Best-effort CIK -> ticker for drill-down (cached; None when unresolvable)."""
+    key = f"cik_ticker:{int(cik):010d}"
+    hit = cache.get(key, ttl=_OWNERSHIP_TICKER_TTL_SECONDS)
+    if hit is not None:
+        return hit or None
+    try:
+        tickers = Company(int(cik)).tickers
+        value = tickers[0] if tickers else ""
+    except Exception:
+        value = ""
+    cache.set(key, value)
+    return value or None
+
+
+def _ownership_feed_row(filing) -> dict:
+    """One feed row with issuer/filer detail; never raises (detail degrades to filer-only)."""
+    row = {
+        "form": str(getattr(filing, "form", "")),
+        "filed": str(getattr(filing, "filing_date", "")),
+        "accession_no": getattr(filing, "accession_no", None),
+    }
+    try:
+        doc = filing.obj()
+    except Exception:
+        row["filer"] = str(getattr(filing, "company", ""))
+        row["note"] = "filing detail unavailable"
+        return row
+    try:
+        persons = getattr(doc, "reporting_persons", None) or []
+        row["filers"] = [p.name for p in persons[:5]]
+        issuer = getattr(doc, "issuer_info", None)
+        if issuer is not None:
+            row["issuer"] = getattr(issuer, "name", None)
+            row["issuer_cik"] = getattr(issuer, "cik", None)
+        if getattr(doc, "total_percent", None) is not None:
+            row["percent"] = round(float(doc.total_percent), 2)
+        if getattr(doc, "total_shares", None) is not None:
+            row["shares"] = int(doc.total_shares)
+        row["event_date"] = str(getattr(doc, "date_of_event", "") or "") or None
+    except Exception:
+        row["note"] = "ownership detail unavailable (pre-XML filing)"
+    if not row.get("filers"):
+        row["filers"] = [str(getattr(filing, "company", ""))]
+    return row
+
+
+def _fetch_recent_ownership_filings(form_type, limit) -> dict:
+    label = str(form_type or "both").strip().upper()
+    if label in ("BOTH", "13D/G", "13DG"):
+        forms = list(_OWNERSHIP_FEED_FORMS)
+    elif label in ("SC 13D", "13D"):
+        forms = ["SC 13D", "SC 13D/A"]
+    elif label in ("SC 13G", "13G"):
+        forms = ["SC 13G", "SC 13G/A"]
+    else:
+        return {"error": f"Invalid form_type '{form_type}': use 'SC 13D', 'SC 13G', or 'both'"}
+    try:
+        limit = max(1, min(int(limit or 10), 25))
+    except (TypeError, ValueError):
+        return {"error": f"Invalid limit '{limit}': use 1-25"}
+    try:
+        from edgar import get_current_filings
+
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for form in forms:
+            try:
+                # ponytail: 10 filings per variant (40 merged max); raise page_size if daily 13D/G volume exceeds it
+                feed = get_current_filings(form=form, page_size=10)
+            except Exception:
+                continue  # one variant failing must not sink the feed
+            for filing in feed:
+                accession = str(getattr(filing, "accession_no", ""))
+                if accession in seen:
+                    continue
+                seen.add(accession)
+                rows.append(_ownership_feed_row(filing))
+        rows.sort(key=lambda r: r.get("filed", ""), reverse=True)
+        rows = rows[:limit]
+        for row in rows:
+            if row.get("issuer_cik"):
+                try:
+                    row["ticker"] = _resolve_issuer_ticker(int(row["issuer_cik"]))
+                except (TypeError, ValueError):
+                    row["ticker"] = None
+        return {
+            "form_type": "both" if label in ("BOTH", "13D/G", "13DG") else label,
+            "window": "SEC current-filings feed (~24h)",
+            "count": len(rows),
+            "filings": rows,
+            "source": "SEC EDGAR current filings (SC 13D/G)",
+        }
+    except Exception as e:
+        logger.warning("get_recent_ownership_filings(%s) failed: %s", form_type, e)
+        return {"error": f"No data found: error retrieving recent {label} filings: {e}"}
+
+
 def _fetch_filing_section(ticker: str, form_type: str, item: str) -> dict:
     if item not in _SECTION_ATTRS:
         return {"error": f"Invalid item '{item}'"}
-    if form_type not in ("10-K", "10-Q", "8-K", "4", "DEF 14A"):
+    if form_type not in ("10-K", "10-Q", "8-K", "4", "DEF 14A", "SC 13D", "SC 13G"):
         return {"error": f"Invalid form_type '{form_type}'"}
+    if form_type in ("SC 13D", "SC 13G") and item not in ("ownership", "purpose"):
+        return {"error": f"Invalid item '{item}' for {form_type}: use 'ownership' or 'purpose'"}
 
     try:
         company = Company(ticker)
@@ -307,6 +463,8 @@ def _fetch_filing_section(ticker: str, form_type: str, item: str) -> dict:
         filing = filings[0]
         doc = filing.obj()
 
+        if form_type in ("SC 13D", "SC 13G"):
+            return _schedule13_section(ticker, filing, doc, form_type, item)
 
         # Map item name to attribute name for lookup
         attr_name = _SECTION_ATTRS.get(item, item)

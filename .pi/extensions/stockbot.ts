@@ -27,6 +27,7 @@ const TOOL_TIMEOUT_MS = 120_000;
 const CARD_TOOLS: Record<string, { title: string; argKeys: string[] }> = {
 	get_fundamentals: { title: "Fundamentals", argKeys: ["ticker"] },
 	get_filing_section: { title: "Filing section", argKeys: ["ticker", "form", "accession_number"] },
+	get_recent_ownership_filings: { title: "Recent 13D/G", argKeys: ["form_type", "limit"] },
 	get_financial_statements: { title: "Financial statements", argKeys: ["ticker", "form"] },
 	get_xbrl_facts: { title: "XBRL facts", argKeys: ["ticker", "concept"] },
 	get_short_interest: { title: "Short interest", argKeys: ["ticker"] },
