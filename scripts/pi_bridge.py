@@ -33,20 +33,12 @@ from app.pi_gateway import PiSessionContext, execute_pi_tool
 from app.policy import Capability
 from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
 from app.runtime import EventType
-from app.storage.runs import RunRecorder
+from app.storage.runs import RunRecorder, reset_current_recorder, set_current_recorder
 from app.tools import TOOL_REGISTRY_VERSION, tools_for_capabilities
 
 logger = logging.getLogger(__name__)
 
 _sessions: dict[str, PiSessionContext] = {}
-
-
-def _session(session_id: str) -> PiSessionContext:
-    session = _sessions.get(session_id)
-    if session is None:
-        session = PiSessionContext(session_id=session_id)
-        _sessions[session_id] = session
-    return session
 
 
 def _describe() -> dict:
@@ -78,10 +70,20 @@ def _tool_call(request: dict) -> dict:
     arguments = request.get("arguments", {})
     if not isinstance(arguments, dict):
         return {"error": "missing_arg"}
-    session_id = request.get("session_id", "default")
-    if not isinstance(session_id, str) or not session_id:
-        session_id = "default"
-    return {"result": execute_pi_tool(name, arguments, _session(session_id))}
+    run_id = request.get("run_id") or request.get("session_id")
+    if not isinstance(run_id, str) or not run_id:
+        return {"error": "missing_arg"}
+    session = _sessions.get(run_id)
+    if session is None:
+        return {"error": "unknown_run"}
+    recorder = _recorders.get(run_id)
+    if recorder is None:
+        return {"result": execute_pi_tool(name, arguments, session)}
+    token = set_current_recorder(recorder)
+    try:
+        return {"result": execute_pi_tool(name, arguments, session)}
+    finally:
+        reset_current_recorder(token)
 
 
 _recorders: dict[str, RunRecorder] = {}
@@ -112,18 +114,35 @@ def _pi_event(request: dict) -> dict:
         return {"error": "missing_arg"}
     if not isinstance(event, str) or not event:
         return {"error": "missing_arg"}
+    if event == "agent_end":
+        recorder = _recorders.get(run_id)
+        try:
+            if recorder is not None and recorder.enabled:
+                status = request.get("status") or "completed"
+                recorder.complete(status=str(status), answer=str(request.get("answer") or ""))
+                if status == "failed":
+                    meta = {k: v for k, v in request.items() if k not in ("op", "run_id", "event")}
+                    recorder.record_event(EventType.RUN_FAILED, metadata=meta or None)
+        except Exception as exc:  # observability never breaks research
+            logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
+        finally:
+            try:
+                if recorder is not None:
+                    recorder.__exit__(None, None, None)
+            except Exception as exc:  # teardown never breaks the response contract
+                logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
+            _sessions.pop(run_id, None)
+            _recorders.pop(run_id, None)
+        return {"ok": True}
     try:
+        if event == "agent_start":
+            _sessions[run_id] = PiSessionContext(session_id=run_id)
         recorder = _recorder_for(run_id)
         if recorder is None or not recorder.enabled:
             return {"ok": True}  # dropped, research continues
         meta = {k: v for k, v in request.items() if k not in ("op", "run_id", "event")}
         if event == "agent_start":
             recorder.record_event(EventType.RUN_STARTED, metadata=meta or None)
-        elif event == "agent_end":
-            status = request.get("status") or "completed"
-            recorder.complete(status=str(status), answer=str(request.get("answer") or ""))
-            if status == "failed":
-                recorder.record_event(EventType.RUN_FAILED, metadata=meta or None)
         elif event == "tool_execution_start":
             recorder.record_event(
                 EventType.TOOL_STARTED, tool_name=str(request.get("tool") or ""),

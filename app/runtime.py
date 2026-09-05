@@ -159,6 +159,8 @@ class ExecutionBudget:
     tool_calls: int = 0
     model_calls: int = 0
     evidence_tokens: int = 0
+    max_search_calls: int = 25
+    search_calls: int = 0
     _started: float = field(default_factory=time.perf_counter, init=False, repr=False)
 
     def elapsed_seconds(self) -> float:
@@ -194,6 +196,16 @@ class ExecutionBudget:
         if self.tool_calls >= self.max_tool_calls:
             return False
         self.tool_calls += 1
+        return True
+
+    def reserve_search_call(self) -> bool:
+        """Consume one search-call slot; False when runtime or the search limit
+        is exhausted."""
+        if self.runtime_remaining() <= 0:
+            return False
+        if self.search_calls >= self.max_search_calls:
+            return False
+        self.search_calls += 1
         return True
 
 

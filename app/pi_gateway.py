@@ -178,8 +178,10 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         }
 
     # Gate 8 (reserve): one budget slot per call before any external work.
-    # search_web is exempt from run budgets.
+    # search_web draws from its dedicated pool, not the generic tool pool.
     if name != "search_web" and not session.budget.reserve_tool_call():
+        return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+    if name == "search_web" and not session.budget.reserve_search_call():
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
 
     # Gate 3: intent firewall. No approval callback in this plan, so
@@ -342,4 +344,13 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
             decision="allowed",
             reason=None,
         )
-    return result
+    safe_meta = {
+        "row_count": meta.row_count,
+        "returned_count": meta.returned_count,
+        "truncated": meta.truncated,
+        "source": envelope.source,
+        "sensitivity": envelope.sensitivity.value,
+        "integrity": envelope.integrity.value,
+        "status": status,
+    }
+    return {"content": final_text, "meta": safe_meta}
