@@ -471,3 +471,31 @@ def test_valuation_skips_schedule_components():
     assert valuation._obligation_annual_impact(
         [headline, *comps], 6
     )["contingent_annual_billions"] == pytest.approx(13.3 / 6.0, abs=0.01)
+
+
+def test_get_live_quote_caches_retrieval_instant(monkeypatch):
+    cache = FakeCache()
+    monkeypatch.setattr(valuation, "cache", cache)
+    monkeypatch.setattr(
+        valuation.analyst_client, "get_analyst_estimates",
+        lambda t: {"quote": {"price": 100.0}, "as_of": "2026-08-10T12:00:00Z"},
+    )
+    quote = valuation.get_live_quote("KO")
+    assert quote == {"price": 100.0, "retrieved_at": "2026-08-10T12:00:00Z"}
+    assert cache.store["live_price:KO"] == {"price": 100.0, "retrieved_at": "2026-08-10T12:00:00Z"}
+
+
+def test_get_live_quote_legacy_row_yields_none_retrieved_at(monkeypatch):
+    cache = FakeCache()
+    cache.store["live_price:KO"] = {"price": 65.0}
+    monkeypatch.setattr(valuation, "cache", cache)
+    assert valuation.get_live_quote("KO") == {"price": 65.0, "retrieved_at": None}
+
+
+def test_get_live_price_returns_float_only(monkeypatch):
+    monkeypatch.setattr(valuation, "cache", FakeCache())
+    monkeypatch.setattr(
+        valuation.analyst_client, "get_analyst_estimates",
+        lambda t: {"quote": {"price": 65.0}, "as_of": "2026-08-10T12:00:00Z"},
+    )
+    assert valuation.get_live_price("KO") == 65.0

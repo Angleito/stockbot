@@ -147,6 +147,17 @@ def _derive_q4_from_facts(full_facts, concept, fy_end) -> Any:
 
 _DIVIDEND_CONCEPT = "CommonStockDividendsPerShareDeclared"
 _DIVIDEND_SOURCE = "SEC EDGAR company facts (Declared dividends per share)"
+_DIVIDEND_TTM_MAX_AGE_DAYS = 180
+
+
+def _is_recent_dividend_period(period_end: Any, as_of: _dt.date) -> bool:
+    """True only when period_end is on/before as_of and at most 180 days old."""
+    try:
+        end = _dt.date.fromisoformat(str(period_end)[:10])
+    except (TypeError, ValueError, AttributeError):
+        return False
+    delta = (as_of - end).days
+    return 0 <= delta <= _DIVIDEND_TTM_MAX_AGE_DAYS
 
 def _null_dividend_payload(ticker: str) -> dict:
     """Coverage uncertainty: concept absence is not proof of a nonpayer."""
@@ -157,7 +168,7 @@ def _null_dividend_payload(ticker: str) -> dict:
         "ttm_dividend_yield": None,
         "price": None,
         "price_source": None,
-        "price_as_of": None,
+        "price_retrieved_at": None,
         "growth_1y": None,
         "growth_3y_cagr": None,
         "growth_5y_cagr": None,
@@ -196,10 +207,10 @@ def _dividend_growth(annual: dict) -> dict:
     return out
 
 
-def _dividend_valuation(ticker: str, ttm: Any, *, price_as_of: Optional[str]) -> dict[str, Any]:
-    """Point-in-time valuation: historical requests expose no price metadata."""
-    nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_as_of": None}
-    if price_as_of is None or ttm is None:
+def _dividend_valuation(ticker: str, ttm: Any, *, include_price: bool) -> dict[str, Any]:
+    """Point-in-time valuation: stale/absent TTM or historical requests expose no price."""
+    nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None}
+    if not include_price or ttm is None:
         return dict(nulls)
     try:
         ttm_f = float(ttm)
@@ -207,16 +218,18 @@ def _dividend_valuation(ticker: str, ttm: Any, *, price_as_of: Optional[str]) ->
         return dict(nulls)
     try:
         from . import valuation as _valuation
-        quote = _valuation.get_live_price(ticker)
+        quote = _valuation.get_live_quote(ticker)
     except Exception:
         return dict(nulls)
+    if not isinstance(quote, dict):
+        return dict(nulls)
     try:
-        price = float(quote) if quote is not None else None
+        price = float(quote.get("price")) if quote.get("price") is not None else None
     except (TypeError, ValueError):
         return dict(nulls)
     if price is None or price <= 0:
         return dict(nulls)
-    return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_as_of": price_as_of}
+    return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at")}
 
 
 def _dividend_annual_history(rows: list[dict]) -> tuple[list[dict], dict]:
@@ -256,7 +269,14 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
     result = _cached_or_fetch(key, lambda: _fetch_fundamentals(ticker, metric))
     if metric == "dividends" and isinstance(result, dict) and "error" not in result:
         result = dict(result)
-        result.update(_dividend_valuation(ticker, result.get("ttm_dividend_per_share"), price_as_of=_dt.date.today().isoformat() if include_dividend_price else None))
+        latest_end = result.pop("_latest_dividend_period_end", None)
+        if result.get("dividend_status") != "insufficient_data":
+            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today()):
+                result["ttm_dividend_per_share"] = None
+                result["dividend_status"] = "unknown"
+            else:
+                result["dividend_status"] = "paying"
+        result.update(_dividend_valuation(ticker, result.get("ttm_dividend_per_share"), include_price=include_dividend_price))
     return result
 
 
@@ -373,6 +393,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 ttm = round(sum(float(r["value"]) for _, r in recent.iterrows()), 4)
             else:
                 ttm = None
+            latest_end = str(recent.iloc[-1]["period_end"]) if len(recent) else None
             fy = div[
                 (div["duration_days"] >= _FY_DAYS[0])
                 & (div["duration_days"] <= _FY_DAYS[1])
@@ -385,11 +406,12 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             history, annual = _dividend_annual_history(fy_rows)
             return {
                 "ticker": ticker,
-                "dividend_status": "paying",
+                "dividend_status": "paying" if ttm is not None else "unknown",
                 "ttm_dividend_per_share": ttm,
                 **_dividend_growth(annual),
                 "annual_history": history,
                 "source": _DIVIDEND_SOURCE,
+                "_latest_dividend_period_end": latest_end,
             }
         if metric == "balance_sheet":
             financials = company.get_financials()

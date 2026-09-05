@@ -40,18 +40,27 @@ def _no_data(ticker: str, what: str) -> dict:
     return {"error": f"No valuation data for {ticker}: {what}"}
 
 
-def get_live_price(ticker: str) -> Optional[float]:
-    """Latest tradeable quote as of now (5-minute TTL)."""
+def get_live_quote(ticker: str) -> dict[str, Any]:
+    """Latest quote with Yahoo retrieval instant (5-minute TTL)."""
     key = f"live_price:{ticker}"
     hit = cache.get(key, ttl=PRICE_CACHE_TTL_SECONDS)
     if hit is not None:
-        return hit.get("price")
+        if isinstance(hit, dict):
+            return {"price": hit.get("price"), "retrieved_at": hit.get("retrieved_at")}
+        return {"price": hit, "retrieved_at": None}
     estimates = analyst_client.get_analyst_estimates(ticker)
-    price = (estimates.get("quote") or {}).get("price")
+    quote = (estimates.get("quote") or {}) if isinstance(estimates, dict) else {}
+    price = quote.get("price") if isinstance(quote, dict) else None
+    retrieved_at = estimates.get("as_of") if isinstance(estimates, dict) else None
     if price is None:
-        return None
-    cache.set(key, {"price": price})
-    return price
+        return {"price": None, "retrieved_at": None}
+    cache.set(key, {"price": price, "retrieved_at": retrieved_at})
+    return {"price": price, "retrieved_at": retrieved_at}
+
+
+def get_live_price(ticker: str) -> Optional[float]:
+    """Latest tradeable quote as of now (5-minute TTL)."""
+    return get_live_quote(ticker).get("price")
 
 
 def _annualized(amount_billions: float, years: float) -> float:

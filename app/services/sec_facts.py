@@ -31,6 +31,7 @@ from ..edgar_client import (
     _dividend_growth,
     _dividend_valuation,
     _has_contiguous_quarters,
+    _is_recent_dividend_period,
 )
 from ..storage import duckdb
 
@@ -257,13 +258,13 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     return result
 
 
-def _assemble_dividend_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
+def _assemble_dividend_payload(ticker: str, rows: list[dict], as_of: _dt.date) -> Optional[dict]:
     """Deterministic store assembly over feed rows (pure; no storage)."""
     if not any(r.get("concept") == DIVIDEND_PER_SHARE_CONCEPT for r in rows):
         return None
     quarters = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _QUARTER_DAYS)
     recent = _quarters_with_derived_q4(quarters, rows, DIVIDEND_PER_SHARE_CONCEPT)
-    if len(recent) == 4 and _has_contiguous_quarters([r["period_end"] for r in recent]):
+    if len(recent) == 4 and _has_contiguous_quarters([r["period_end"] for r in recent]) and _is_recent_dividend_period(recent[-1]["period_end"], as_of):
         ttm = round(sum(float(r["value"]) for r in recent), 4)
     else:
         ttm = None
@@ -271,7 +272,7 @@ def _assemble_dividend_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     history, annual = _dividend_annual_history(fy_rows)
     return {
         "ticker": ticker,
-        "dividend_status": "paying",
+        "dividend_status": "paying" if ttm is not None else "unknown",
         "ttm_dividend_per_share": ttm,
         **_dividend_growth(annual),
         "annual_history": history,
@@ -309,10 +310,10 @@ def _dividend_fundamental(ticker: str, requested: _dt.date) -> dict:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
     store_rows = _store_rows(entity_id, _DIVIDEND_CONCEPTS, requested, data_root) if entity_id else []
-    payload = _assemble_dividend_payload(ticker, store_rows) if store_rows else None
+    payload = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
     current = requested == _today()
     if payload is not None:
-        payload = {**payload, **_dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), price_as_of=requested.isoformat() if current else None)}
+        payload = {**payload, **_dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), include_price=current)}
         return _envelope(
             ticker, "dividends", payload,
             data_source="store", as_of_date=requested.isoformat(),

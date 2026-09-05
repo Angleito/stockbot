@@ -28,6 +28,8 @@ from app.tool_render import render_tool_result
 KO_CIK = 21344
 RETRIEVED_AT = "2026-08-01T00:00:00Z"
 AS_OF = "2026-08-10"
+STALE_AS_OF = "2026-09-05"
+QUOTE_RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
 
 @pytest.fixture
@@ -40,7 +42,10 @@ def store(tmp_path, monkeypatch):
 @pytest.fixture
 def priced(monkeypatch):
     """Stub the live-price seam shared by the store and live paths."""
-    monkeypatch.setattr(valuation, "get_live_price", lambda ticker: 65.0)
+    monkeypatch.setattr(
+        valuation, "get_live_quote",
+        lambda ticker: {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT},
+    )
     return valuation
 
 
@@ -145,13 +150,17 @@ def _seed_growth(tmp_path, skip_years=()):
              if year not in skip_years]
     if 2025 not in skip_years:
         facts.extend(_quarter_facts(2025, _ANNUAL_TOTALS[2025]))
+        # Keep the TTM window fresh for an August 2026 query: trailing
+        # Q3/Q4 2025 + Q1/Q2 2026 stays contiguous at 2.00.
+        facts.append(_div_fact(0.50, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "q2026Q1"))
+        facts.append(_div_fact(0.50, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-29", "q2026Q2"))
     _seed_dividends(tmp_path, KO_CIK, facts)
 
 
 def _fail_on_price(monkeypatch):
     def _boom(ticker):
         raise AssertionError("historical dividend query must not call Yahoo")
-    monkeypatch.setattr(valuation, "get_live_price", _boom)
+    monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
 def test_concept_parity_and_parser_bump():
@@ -178,7 +187,7 @@ def test_historical_never_calls_yahoo(store, monkeypatch):
     assert result["ttm_dividend_yield"] is None
     assert result["price"] is None
     assert result["price_source"] is None
-    assert result["price_as_of"] is None
+    assert result["price_retrieved_at"] is None
     assert result["dividend_status"] == "paying"
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]
 
@@ -224,7 +233,10 @@ def test_missing_comparison_year_yields_null(store, monkeypatch):
 def test_current_date_valuation(store, monkeypatch):
     _seed_ko(store)
     monkeypatch.setattr(sec_facts, "_today", lambda: _dt.date(2026, 8, 10))
-    monkeypatch.setattr(valuation, "get_live_price", lambda ticker: 65.0)
+    monkeypatch.setattr(
+        valuation, "get_live_quote",
+        lambda ticker: {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT},
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["data_source"] == "store"
     assert result["dividend_status"] == "paying"
@@ -232,20 +244,23 @@ def test_current_date_valuation(store, monkeypatch):
     assert result["ttm_dividend_yield"] == 0.0318
     assert result["price"] == 65.0
     assert result["price_source"] == "yahoo"
-    assert result["price_as_of"] == AS_OF
+    assert result["price_retrieved_at"] == QUOTE_RETRIEVED_AT
 
 
 @pytest.mark.parametrize("price", [None, 0, -3.0])
 def test_current_date_unusable_price_yields_null(store, monkeypatch, price):
     _seed_ko(store)
     monkeypatch.setattr(sec_facts, "_today", lambda: _dt.date(2026, 8, 10))
-    monkeypatch.setattr(valuation, "get_live_price", lambda ticker: price)
+    monkeypatch.setattr(
+        valuation, "get_live_quote",
+        lambda ticker: {"price": price, "retrieved_at": QUOTE_RETRIEVED_AT},
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["ttm_dividend_per_share"] == 2.07
     assert result["ttm_dividend_yield"] is None
     assert result["price"] is None
     assert result["price_source"] is None
-    assert result["price_as_of"] is None
+    assert result["price_retrieved_at"] is None
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]
 
 
@@ -257,11 +272,11 @@ def test_shifted_fy_metadata_uses_period_end_year(store, monkeypatch):
         _div_fact(2.10, "2025-01-01", "2025-12-31", 2026, "FY", "2026-03-01", "s2"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["dividend_status"] == "paying"
+    assert result["dividend_status"] == "unknown"
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.10}]
 
 
-def test_non_contiguous_ttm_reports_paying_with_null_ttm(store, monkeypatch):
+def test_non_contiguous_ttm_reports_unknown_with_null_ttm(store, monkeypatch):
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -271,12 +286,12 @@ def test_non_contiguous_ttm_reports_paying_with_null_ttm(store, monkeypatch):
         _div_fact(0.50, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "g4"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["dividend_status"] == "paying"
+    assert result["dividend_status"] == "unknown"
     assert result["ttm_dividend_per_share"] is None
     assert result["ttm_dividend_yield"] is None
     assert result["price"] is None
     assert result["price_source"] is None
-    assert result["price_as_of"] is None
+    assert result["price_retrieved_at"] is None
 
 
 def test_future_known_restatements_excluded(store, monkeypatch):
@@ -312,11 +327,123 @@ def test_store_primary_with_incomplete_coverage_never_falls_back(store, monkeypa
     _fail_on_price(monkeypatch)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["data_source"] == "store"
-    assert result["dividend_status"] == "paying"
+    assert result["dividend_status"] == "unknown"
     assert result["ttm_dividend_per_share"] is None
     assert result["ttm_dividend_yield"] is None
     assert result["annual_history"] == []
     assert result["growth_1y"] is None
+
+
+def test_stale_2021_quarters_report_unknown_without_yahoo(store, monkeypatch):
+    calls = []
+
+    def _boom(ticker):
+        calls.append(ticker)
+        raise AssertionError("stale dividend query must not call Yahoo")
+
+    monkeypatch.setattr(valuation, "get_live_quote", _boom)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(
+        store, KO_CIK,
+        [*_quarter_facts(2021, 2.00), _fy_fact(2021, 2.00)],
+    )
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=STALE_AS_OF)
+    assert result["data_source"] == "store"
+    assert result["dividend_status"] == "unknown"
+    assert result["ttm_dividend_per_share"] is None
+    assert result["ttm_dividend_yield"] is None
+    assert result["price"] is None
+    assert result["price_source"] is None
+    assert result["price_retrieved_at"] is None
+    assert result["annual_history"] == [{"fiscal_year": 2021, "dividend_per_share": 2.00}]
+    assert calls == []
+
+
+def _seed_chain_ending(store, latest_end: _dt.date):
+    ends = [latest_end - _dt.timedelta(days=91 * i) for i in (3, 2, 1, 0)]
+    facts = []
+    for i, end in enumerate(ends):
+        start = end - _dt.timedelta(days=90)
+        filed = end + _dt.timedelta(days=10)
+        facts.append(_div_fact(
+            0.50, start.isoformat(), end.isoformat(), end.year, f"Q{(end.month - 1) // 3 + 1}",
+            filed.isoformat(), f"b{i}",
+        ))
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(store, KO_CIK, facts)
+
+
+@pytest.mark.parametrize(
+    ("age_days", "expected_status", "expected_ttm"),
+    [(180, "paying", 2.00), (181, "unknown", None)],
+)
+def test_dividend_recency_boundary_days(store, monkeypatch, age_days, expected_status, expected_ttm):
+    _fail_on_price(monkeypatch)
+    requested = _dt.date.fromisoformat(AS_OF)
+    _seed_chain_ending(store, requested - _dt.timedelta(days=age_days))
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["dividend_status"] == expected_status
+    assert result["ttm_dividend_per_share"] == expected_ttm
+    assert result["price_retrieved_at"] is None
+
+
+def test_live_cached_candidate_finalization_removes_private_and_nulls_stale(monkeypatch):
+    import pandas as pd
+
+
+    fake_store: dict = {}
+
+    class _FakeCache:
+        def get(self, key, ttl=None):
+            return fake_store.get(key)
+
+        def set(self, key, value):
+            fake_store[key] = value
+
+    monkeypatch.setattr(edgar_client, "cache", _FakeCache())
+    monkeypatch.setattr(edgar_client, "_ensure_init", lambda: None)
+
+    def _boom(ticker):
+        raise AssertionError("stale live candidate must not call Yahoo")
+
+    monkeypatch.setattr(valuation, "get_live_quote", _boom)
+    starts = ["2021-01-01", "2021-04-01", "2021-07-01", "2021-10-01"]
+    ends = ["2021-03-31", "2021-06-30", "2021-09-30", "2021-12-31"]
+    rows = [
+        {"concept": "us-gaap:" + edgar_client._DIVIDEND_CONCEPT,
+         "period_start": start, "period_end": end, "value": 0.50,
+         "fiscal_year": 2021, "fiscal_period": f"Q{q}"}
+        for q, (start, end) in enumerate(zip(starts, ends), start=1)
+    ]
+    rows.append({
+        "concept": "us-gaap:" + edgar_client._DIVIDEND_CONCEPT,
+        "period_start": "2021-01-01", "period_end": "2021-12-31",
+        "value": 2.00, "fiscal_year": 2021, "fiscal_period": "FY",
+    })
+
+    class _Facts:
+        def to_dataframe(self):
+            return pd.DataFrame(rows)
+
+    class _Company:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        def get_facts(self):
+            return _Facts()
+
+    monkeypatch.setattr(edgar_client, "Company", _Company)
+    result = edgar_client.get_fundamentals("KO", "dividends", include_dividend_price=True)
+    assert "_latest_dividend_period_end" not in result
+    assert result["dividend_status"] == "unknown"
+    assert result["ttm_dividend_per_share"] is None
+    assert result["ttm_dividend_yield"] is None
+    assert result["price"] is None
+    assert result["price_source"] is None
+    assert result["price_retrieved_at"] is None
+    # Cached facts-only candidate retains the private period end for next call.
+    assert fake_store["fundamentals:KO:dividends"]["_latest_dividend_period_end"] == "2021-12-31"
+    assert fake_store["fundamentals:KO:dividends"]["ttm_dividend_per_share"] == 2.00
 
 
 def test_live_fallback_when_store_empty(store, monkeypatch):
@@ -328,7 +455,7 @@ def test_live_fallback_when_store_empty(store, monkeypatch):
         return {"ticker": ticker, "dividend_status": "paying",
                 "ttm_dividend_per_share": 2.07,
                 "ttm_dividend_yield": None, "price": None,
-                "price_source": None, "price_as_of": None,
+                "price_source": None, "price_retrieved_at": None,
                 "growth_1y": None,
                 "growth_3y_cagr": None, "growth_5y_cagr": None,
                 "growth_10y_cagr": None,
@@ -387,7 +514,7 @@ def test_tool_schema_and_dispatch(store, monkeypatch):
     assert set(result) >= {"ticker", "ttm_dividend_per_share", "ttm_dividend_yield",
                            "growth_1y", "growth_3y_cagr", "growth_5y_cagr",
                            "growth_10y_cagr", "annual_history",
-                           "dividend_status", "price", "price_source", "price_as_of"}
+                           "dividend_status", "price", "price_source", "price_retrieved_at"}
 
 
 def test_render_annual_history(store, monkeypatch):
