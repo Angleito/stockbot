@@ -78,7 +78,6 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "get_planned_insider_sales": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_offering_history": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_dilution_profile": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
-    "get_institutional_ownership": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_governance_events": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_transaction_status": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_short_pressure_profile": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),

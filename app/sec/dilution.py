@@ -10,10 +10,10 @@ _NQ = "not_quantifiable"
 
 from .offerings import REGISTRATION_FORMS
 
-_ISSUED_424B_FORMS = frozenset(
+_OFFERING_424B_FORMS = frozenset(
     {"424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8"})
 
-_REGISTERED_CAPACITY_FORMS = frozenset(
+_REGISTRATION_ACCESSION_FORMS = frozenset(
     {f.strip().upper() for f in REGISTRATION_FORMS} | {"EFFECT", "RW"})
 
 
@@ -103,11 +103,10 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
             existing = int(float(raw))
     except (ValueError, TypeError):
         existing = None
-    issued_total = 0
-    registered_total = 0
-    issued_accessions = []
+    disclosed_total = 0
+    offering_accessions = []
     registration_accessions = []
-    issued_known = False
+    disclosed_known = False
     for offering in history or []:
         try:
             form = getattr(offering, "form", None)
@@ -124,23 +123,20 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
         if value <= 0:
             continue
         norm = form.strip().upper() if isinstance(form, str) else ""
-        if norm in _ISSUED_424B_FORMS:
-            issued_total += value
-            issued_known = True
+        if norm in _OFFERING_424B_FORMS:
+            disclosed_total += value
+            disclosed_known = True
             if accession:
-                issued_accessions.append(accession)
-        elif norm in _REGISTERED_CAPACITY_FORMS:
-            registered_total += value
+                offering_accessions.append(accession)
+        elif norm in _REGISTRATION_ACCESSION_FORMS:
             if accession:
                 registration_accessions.append(accession)
     out = dilution_profile(existing_shares=existing,
-                           new_shares=issued_total if issued_known else None,
-                           source_accessions=tuple(issued_accessions))
-    out["issued_shares"] = issued_total if issued_known else None
-    out["registered_capacity"] = registered_total or None
+                           new_shares=None,
+                           source_accessions=())
+    out["offering_shares_disclosed"] = disclosed_total if disclosed_known else None
+    out["offering_accessions"] = tuple(offering_accessions)
     out["registration_accessions"] = tuple(registration_accessions)
-    out["note"] = ("Conservative: only 424B takedowns count as issued shares; "
-                   "S-1/S-3/F-1/F-3/S-8/EFFECT/RW count as registered capacity, "
-                   "never as new issued shares; multiple 424B supplements for one "
-                   "financing are not deduplicated.")
+    out["registered_capacity"] = "not_quantifiable"
+    out["note"] = ("Observed only: 424B share counts are disclosed offering sizes, not confirmed issuance, and are never added to current shares outstanding without a pre-offering baseline; registration filings (S-1/S-3/F-1/F-3/S-8/EFFECT/RW, including /A amendments) are listed as individual accessions, never summed into capacity until deterministic dedup lineage lands; dilution_pct stays not_quantifiable.")
     return out

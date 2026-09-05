@@ -211,18 +211,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_institutional_ownership",
-            "description": "Issuer's own 13F-HR/13F-NT filing pointers only (filing level). Does not answer who holds the issuer; ticker-to-holders position lookup is deferred.",
-            "parameters": {
-                "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_governance_events",
             "description": "Proxy/governance filing context (DEF 14A, contested forms, information statements) with retrieval pointers.",
             "parameters": {
@@ -1450,7 +1438,6 @@ _SEC_TOOL_TAGS = {
     "get_planned_insider_sales": ("insider", "planned insider sale Form 144 proposed notice"),
     "get_offering_history": ("offerings", "offering registration S-1 S-3 prospectus financing shelf"),
     "get_dilution_profile": ("offerings", "dilution shares offering ATM convertible warrant"),
-    "get_institutional_ownership": ("ownership", "institutional 13F holdings fund manager"),
     "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
     "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
     "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
@@ -1544,9 +1531,6 @@ _DIRECT_HANDLERS = {
     ),
     "get_dilution_profile": lambda args, model: sec.get_dilution_profile(
         args["ticker"], as_of=args.get("as_of"),
-    ),
-    "get_institutional_ownership": lambda args, model: sec.get_institutional_ownership(
-        args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 10),
     ),
     "get_governance_events": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_governance_events(
@@ -1660,7 +1644,6 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "get_planned_insider_sales": Capability.RESEARCH,
     "get_offering_history": Capability.RESEARCH,
     "get_dilution_profile": Capability.RESEARCH,
-    "get_institutional_ownership": Capability.RESEARCH,
     "get_governance_events": Capability.RESEARCH,
     "get_transaction_status": Capability.RESEARCH,
     "get_short_pressure_profile": Capability.RESEARCH,

@@ -30,7 +30,6 @@ TOOL_DOMAINS: dict[str, str] = {
     "get_planned_insider_sales": "financial_research",
     "get_offering_history": "financial_research",
     "get_dilution_profile": "financial_research",
-    "get_institutional_ownership": "financial_research",
     "get_governance_events": "financial_research",
     "get_transaction_status": "financial_research",
     "get_short_pressure_profile": "financial_research",

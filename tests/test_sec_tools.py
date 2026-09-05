@@ -1,4 +1,4 @@
-"""Step-9 registry cutover: exact 17-tool SEC inventory + search_tools discovery.
+"""Step-9 registry cutover: exact 16-tool SEC inventory + search_tools discovery.
 
 Offline: app.sec seams are monkeypatched at the tools.sec boundary; no
 network, no edgar import.
@@ -24,7 +24,6 @@ SEC_SUITE = [
     "get_planned_insider_sales",
     "get_offering_history",
     "get_dilution_profile",
-    "get_institutional_ownership",
     "get_governance_events",
     "get_transaction_status",
     "get_short_pressure_profile",
@@ -60,6 +59,14 @@ def test_get_filing_section_retired():
     assert "get_filing_section" not in tools._DIRECT_HANDLERS
     assert "get_filing_section" not in tools.TOOL_CAPABILITIES
     result = tools.execute_tool("get_filing_section", {}, "test", context=_research_context())
+    assert "error" in result
+
+def test_get_institutional_ownership_retired():
+    names = {entry["function"]["name"] for entry in tools.TOOLS}
+    assert "get_institutional_ownership" not in names
+    assert "get_institutional_ownership" not in tools._DIRECT_HANDLERS
+    assert "get_institutional_ownership" not in tools.TOOL_CAPABILITIES
+    result = tools.execute_tool("get_institutional_ownership", {"ticker": "FAKE"}, "test", context=_research_context())
     assert "error" in result
 
 
