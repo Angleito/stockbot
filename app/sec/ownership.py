@@ -71,8 +71,35 @@ def _purpose_of(items) -> "str | None":
     if text and not text.startswith("<"):
         return text
     return None
-def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no):
-    """One BeneficialOwnership per reporting person; never raises."""
+def _subject_of(schedule) -> "tuple[str | None, str | None]":
+    """Authoritative subject from structured issuer info; never the filer."""
+    try:
+        info = getattr(schedule, "issuer_info", None)
+    except Exception:
+        return None, None
+    if info is None:
+        return None, None
+    cik = _first(info, "cik", "issuerCIK", "issuer_cik")
+    name = _first(info, "name", "issuerName", "issuer_name")
+    try:
+        cik = str(cik).strip() if cik is not None else None
+    except Exception:
+        cik = None
+    try:
+        name = str(name).strip() if name is not None else None
+    except Exception:
+        name = None
+    return (cik or None), (name or None)
+
+
+def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no,
+                       subject_cik=None, subject_name=None,
+                       document_name=None, known_at=None, source_url=None):
+    """One BeneficialOwnership per reporting person; never raises.
+
+    Subject identity comes only from explicit args or the schedule's
+    structured ``issuer_info``. The filer is never copied into subject.
+    """
     try:
         persons = getattr(schedule, "reporting_persons", []) or []
     except Exception:
@@ -84,10 +111,25 @@ def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no):
     except Exception:
         items = None
     purpose = _purpose_of(items)
+    info_cik, info_name = _subject_of(schedule)
+    try:
+        explicit_cik = str(subject_cik).strip() if subject_cik is not None else None
+    except Exception:
+        explicit_cik = None
+    try:
+        explicit_name = str(subject_name).strip() if subject_name is not None else None
+    except Exception:
+        explicit_name = None
+    resolved_cik = explicit_cik or info_cik
+    resolved_name = explicit_name or info_name
     try:
         is_amend = str(form or "").strip().upper().endswith("/A")
     except Exception:
         is_amend = False
+    try:
+        known = str(known_at) if known_at is not None else filed_at
+    except Exception:
+        known = filed_at
     out = []
     iterator = persons
     for person in iterator:
@@ -114,6 +156,11 @@ def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no):
                                                            "shared_dispositive")),
                 is_amendment=is_amend,
                 purpose_text=purpose,
+                subject_cik=resolved_cik,
+                subject_name=resolved_name,
+                document_name=document_name,
+                known_at=known,
+                source_url=source_url,
             ))
         except Exception:
             continue
@@ -127,10 +174,10 @@ def load_schedule(accession_no: str):
     filing = get_by_accession_number(accession_no)
     form = getattr(filing, "form", "") or ""
     if form in _FORMS_13D:
-        from edgar import Schedule13D
+        from edgar.beneficial_ownership import Schedule13D
 
         return Schedule13D.from_filing(filing)
-    from edgar import Schedule13G
+    from edgar.beneficial_ownership import Schedule13G
 
     return Schedule13G.from_filing(filing)
 
@@ -145,16 +192,41 @@ def get_beneficial_ownership(ticker_or_cik, *, as_of=None, limit=20,
             accession = getattr(filing, "accession_no", "")
             form = getattr(filing, "form", "")
             filed_at = getattr(filing, "filed_at", None)
-            issuer = getattr(filing, "company", None) or str(ticker_or_cik)
+            issuer = getattr(filing, "filer_name", None) or str(ticker_or_cik)
             schedule = load_schedule(accession)
-            out.extend(normalize_schedule(schedule, issuer=issuer, form=form,
-                                          filed_at=filed_at,
-                                          accession_no=accession))
+            try:
+                info = getattr(schedule, "issuer_info", None)
+                subject_name = getattr(info, "name", None) if info is not None else None
+                issuer = subject_name or issuer
+            except Exception:
+                pass
+            out.extend(normalize_schedule(
+                schedule, issuer=issuer, form=form, filed_at=filed_at,
+                accession_no=accession,
+                document_name=getattr(filing, "primary_document", None),
+                known_at=getattr(filing, "known_at", None) or filed_at,
+                source_url=getattr(filing, "source", None)))
         except Exception:
             continue
     if limit is not None:
         out = out[:limit]
     return out
+
+
+def query_subject_owners(subject_cik, *, as_of=None, root=None, limit=200):
+    """Subject -> reporting owners over ``sec_beneficial_ownership`` (PIT)."""
+    from . import store as _store
+
+    return _store.query_beneficial_ownership(
+        subject_cik=subject_cik, as_of=as_of, root=root, limit=limit)
+
+
+def query_owner_subjects(owner_cik, *, as_of=None, root=None, limit=200):
+    """Owner/reporter -> subjects over ``sec_beneficial_ownership`` (PIT)."""
+    from . import store as _store
+
+    return _store.query_beneficial_ownership(
+        owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
 
 
 def diff_ownership(previous: BeneficialOwnership, current: BeneficialOwnership):
