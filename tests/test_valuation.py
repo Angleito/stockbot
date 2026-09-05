@@ -477,8 +477,8 @@ def test_get_live_quote_caches_retrieval_instant(monkeypatch):
     cache = FakeCache()
     monkeypatch.setattr(valuation, "cache", cache)
     monkeypatch.setattr(
-        valuation.analyst_client, "get_analyst_estimates",
-        lambda t: {"quote": {"price": 100.0}, "as_of": "2026-08-10T12:00:00Z"},
+        valuation.analyst_client, "get_quote_price",
+        lambda t: {"price": 100.0, "retrieved_at": "2026-08-10T12:00:00Z"},
     )
     quote = valuation.get_live_quote("KO")
     assert quote == {"price": 100.0, "retrieved_at": "2026-08-10T12:00:00Z"}
@@ -495,7 +495,26 @@ def test_get_live_quote_legacy_row_yields_none_retrieved_at(monkeypatch):
 def test_get_live_price_returns_float_only(monkeypatch):
     monkeypatch.setattr(valuation, "cache", FakeCache())
     monkeypatch.setattr(
-        valuation.analyst_client, "get_analyst_estimates",
-        lambda t: {"quote": {"price": 65.0}, "as_of": "2026-08-10T12:00:00Z"},
+        valuation.analyst_client, "get_quote_price",
+        lambda t: {"price": 65.0, "retrieved_at": "2026-08-10T12:00:00Z"},
     )
     assert valuation.get_live_price("KO") == 65.0
+
+
+def test_get_live_quote_ignores_stale_estimates_cache(monkeypatch):
+    cache = FakeCache()
+    cache.store["analyst_estimates:KO"] = {"quote": {"price": 100.0}, "as_of": "2026-08-10T12:01:00Z"}
+    monkeypatch.setattr(valuation, "cache", cache)
+    monkeypatch.setattr(
+        valuation.analyst_client, "_quote_summary",
+        lambda t, m: {"price": {"regularMarketPrice": {"raw": 101.0}}},
+    )
+    assert valuation.get_live_quote("KO")["price"] == 101.0
+
+
+def test_get_live_quote_yahoo_failure_yields_none(monkeypatch):
+    monkeypatch.setattr(valuation, "cache", FakeCache())
+    def _boom(t, m):
+        raise RuntimeError("yahoo down")
+    monkeypatch.setattr(valuation.analyst_client, "_quote_summary", _boom)
+    assert valuation.get_live_quote("KO") == {"price": None, "retrieved_at": None}

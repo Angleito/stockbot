@@ -272,7 +272,8 @@ def test_shifted_fy_metadata_uses_period_end_year(store, monkeypatch):
         _div_fact(2.10, "2025-01-01", "2025-12-31", 2026, "FY", "2026-03-01", "s2"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["dividend_status"] == "unknown"
+    assert result["dividend_status"] == "paying"
+    assert result["ttm_dividend_per_share"] == 2.10
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.10}]
 
 
@@ -525,3 +526,55 @@ def test_render_annual_history(store, monkeypatch):
     assert text.startswith("KO dividends [store] as of 2026-08-10")
     assert "ttm_dividend_per_share: 2.07" in text
     assert "- 2025: dividend 2.04" in text
+
+
+def test_semiannual_payer_ttm(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(store, KO_CIK, [
+        _div_fact(0.90, "2025-07-01", "2025-12-31", 2025, "Q2", "2026-01-15", "s1"),
+        _div_fact(0.90, "2026-01-01", "2026-06-30", 2026, "Q2", "2026-07-15", "s2"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["ttm_dividend_per_share"] == 1.80
+    assert result["dividend_status"] == "paying"
+
+
+def test_annual_payer_ttm(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(store, KO_CIK, [
+        _div_fact(2.50, "2025-07-01", "2026-06-30", 2026, "FY", "2026-07-15", "a1"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["ttm_dividend_per_share"] == 2.50
+    assert result["dividend_status"] == "paying"
+
+
+def test_monthly_payer_ttm(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    months = [("2025-08-01", "2025-08-31"), ("2025-09-01", "2025-09-30"),
+              ("2025-10-01", "2025-10-31"), ("2025-11-01", "2025-11-30"),
+              ("2025-12-01", "2025-12-31"), ("2026-01-01", "2026-01-31"),
+              ("2026-02-01", "2026-02-28"), ("2026-03-01", "2026-03-31"),
+              ("2026-04-01", "2026-04-30"), ("2026-05-01", "2026-05-31"),
+              ("2026-06-01", "2026-06-30"), ("2026-07-01", "2026-07-31")]
+    _seed_dividends(store, KO_CIK, [
+        _div_fact(0.20, s, e, 2026, "M", "2026-08-01", f"m{i}")
+        for i, (s, e) in enumerate(months)
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["ttm_dividend_per_share"] == 2.40
+    assert result["dividend_status"] == "paying"
+
+
+def test_stale_annual_reports_unknown(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(store, KO_CIK, [
+        _div_fact(2.50, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "old1"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["ttm_dividend_per_share"] is None
+    assert result["dividend_status"] == "unknown"

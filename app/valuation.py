@@ -41,17 +41,16 @@ def _no_data(ticker: str, what: str) -> dict:
 
 
 def get_live_quote(ticker: str) -> dict[str, Any]:
-    """Latest quote with Yahoo retrieval instant (5-minute TTL)."""
+    """Latest quote with Yahoo retrieval instant (5-minute TTL, independent of the 1-hour analyst-estimates cache)."""
     key = f"live_price:{ticker}"
     hit = cache.get(key, ttl=PRICE_CACHE_TTL_SECONDS)
     if hit is not None:
         if isinstance(hit, dict):
             return {"price": hit.get("price"), "retrieved_at": hit.get("retrieved_at")}
         return {"price": hit, "retrieved_at": None}
-    estimates = analyst_client.get_analyst_estimates(ticker)
-    quote = (estimates.get("quote") or {}) if isinstance(estimates, dict) else {}
+    quote = analyst_client.get_quote_price(ticker)
     price = quote.get("price") if isinstance(quote, dict) else None
-    retrieved_at = estimates.get("as_of") if isinstance(estimates, dict) else None
+    retrieved_at = quote.get("retrieved_at") if isinstance(quote, dict) else None
     if price is None:
         return {"price": None, "retrieved_at": None}
     cache.set(key, {"price": price, "retrieved_at": retrieved_at})

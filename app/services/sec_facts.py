@@ -22,14 +22,20 @@ from .. import edgar_client
 from ..domain.market.identity import resolve_ticker_aliases
 from ..edgar_client import (
     _DERIVED_Q4_OFFSET_DAYS,
+    _DIVIDEND_ANNUAL_MAX_AGE_DAYS,
+    _DIVIDEND_MONTH_MAX_AGE_DAYS,
+    _DIVIDEND_SEMI_MAX_AGE_DAYS,
     _DIVIDEND_SOURCE,
     _FY_DAYS,
     _MISSING_QUARTER_GAP_DAYS,
+    _MONTH_DAYS,
     _QUARTER_DAYS,
+    _SEMI_DAYS,
     _YTD_DAYS,
     _dividend_annual_history,
     _dividend_growth,
     _dividend_valuation,
+    _has_contiguous_gaps,
     _has_contiguous_quarters,
     _is_recent_dividend_period,
 )
@@ -268,6 +274,15 @@ def _assemble_dividend_payload(ticker: str, rows: list[dict], as_of: _dt.date) -
         ttm = round(sum(float(r["value"]) for r in recent), 4)
     else:
         ttm = None
+        for days, count, cap in ((_MONTH_DAYS, 12, _DIVIDEND_MONTH_MAX_AGE_DAYS), (_SEMI_DAYS, 2, _DIVIDEND_SEMI_MAX_AGE_DAYS)):
+            tier = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, days)[-count:]
+            if len(tier) == count and _has_contiguous_gaps([r["period_end"] for r in tier], days, count) and _is_recent_dividend_period(tier[-1]["period_end"], as_of, cap):
+                ttm = round(sum(float(r["value"]) for r in tier), 4)
+                break
+        else:
+            fy_tier = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _FY_DAYS)
+            if fy_tier and _is_recent_dividend_period(fy_tier[-1]["period_end"], as_of, _DIVIDEND_ANNUAL_MAX_AGE_DAYS):
+                ttm = round(float(fy_tier[-1]["value"]), 4)
     fy_rows = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _FY_DAYS)
     history, annual = _dividend_annual_history(fy_rows)
     return {
