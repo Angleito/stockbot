@@ -346,10 +346,16 @@ def get_offering_history(ticker_or_cik, *, as_of=None, limit=50,
     return linked
 
 
-def query_registrant_offerings(registrant, *, as_of=None, root=None,
-                               limit=200):
+def query_registrant_offerings(registrant, *, registrant_cik=None, as_of=None,
+                               root=None, limit=200):
     """Registrant -> offerings over ``sec_offerings`` (PIT)."""
     from . import store as _store
 
-    return _store.query_offerings(registrant=registrant, as_of=as_of,
+    if registrant_cik is None and isinstance(registrant, int):
+        registrant_cik, registrant = registrant, None
+    elif registrant_cik is None and isinstance(registrant, str) \
+            and registrant.strip().isdigit():
+        registrant_cik, registrant = registrant.strip(), None
+    return _store.query_offerings(registrant=registrant,
+                                  registrant_cik=registrant_cik, as_of=as_of,
                                   root=root, limit=limit)

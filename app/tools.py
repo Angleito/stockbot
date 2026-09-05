@@ -1615,6 +1615,8 @@ def _sec_search_result(args: dict) -> dict:
             "search_sec_filings needs one of: query, ticker, cik, "
             "company_name, person_name, domain, accession_no, "
             "security_identifier")
+    # ponytail: explicit limit caps retrieval; absent limit retrieves exhaustively
+    explicit_limit = args.get("limit") if "limit" in args else None
     request = sec.SECSearchRequest(
         query=args.get("query"), ticker=args.get("ticker"), cik=args.get("cik"),
         company_name=args.get("company_name"),
@@ -1625,16 +1627,32 @@ def _sec_search_result(args: dict) -> dict:
         start_date=args.get("start_date"), end_date=args.get("end_date"),
         as_of=args.get("as_of"),
         exhaustive=args.get("exhaustive", True),
-        max_results=args.get("limit", 20),
+        max_results=explicit_limit,
     )
-    return _search_envelope(sec.SECDiscoveryService().search(request))
+    envelope = _search_envelope(sec.SECDiscoveryService().search(request))
+    if explicit_limit is None and request.exhaustive:
+        _ctx = 20
+        for _key in ("hits", "filings"):
+            _rows = envelope.get(_key)
+            if isinstance(_rows, list) and len(_rows) > _ctx:
+                envelope[_key] = _rows[:_ctx]
+        envelope["count"] = len(envelope.get("hits") or [])
+        _note = "payload truncated to 20 context rows; coverage reports full retrieval"
+        _warns = envelope.get("warnings")
+        if isinstance(_warns, tuple):
+            envelope["warnings"] = [*_warns, _note]
+        elif isinstance(_warns, list):
+            _warns.append(_note)
+        else:
+            envelope["warnings"] = [_note]
+    return envelope
 
 
 def _sec_relationships_result(args: dict) -> dict:
-    """Typed/workflow/mention relationship fan-out, grouped by type/status."""
     result = sec.search_sec_relationships(
         args["entity"], relationship_types=args.get("relationship_types"),
         as_of=args.get("as_of"), limit=args.get("limit", 50),
+        exhaustive=args.get("exhaustive", True),
     )
     found = len(result.get("typed") or []) + len(
         result.get("relationships") or []) + len(result.get("mentions") or [])

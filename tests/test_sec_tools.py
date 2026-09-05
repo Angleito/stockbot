@@ -203,7 +203,7 @@ def test_search_sec_filings_dispatch_full_packet(monkeypatch):
     assert result["counts"]["results_reported"] == 3
     assert result["counts"]["pages"] == 2
     assert list(result["evidence_packet_ids"]) == ["entity:1234567"]
-    assert list(result["warnings"]) == ["1 partition queued"]
+    assert list(result["warnings"]) == ["1 partition queued", "payload truncated to 20 context rows; coverage reports full retrieval"]
     assert result["source"] == "SEC EDGAR"
 
 

@@ -313,7 +313,7 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         session.run_security.data_labels.add("external")
     if envelope.sensitivity is Sensitivity.PRIVATE:
         session.run_security.data_labels.add("private")
-    if name != "search_web" and not session.budget.add_evidence_tokens(len(final_text) // 4):
+    if not session.budget.add_evidence_tokens(len(final_text) // 4):
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
     if recorder is not None:
         evidence_id = f"{run_id}:evid:{recorder.next_evidence_seq():04d}"
@@ -352,5 +352,6 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         "sensitivity": envelope.sensitivity.value,
         "integrity": envelope.integrity.value,
         "status": status,
+        "as_of": meta.as_of,
     }
     return {"content": final_text, "meta": safe_meta}

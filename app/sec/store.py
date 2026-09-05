@@ -868,6 +868,8 @@ def store_13f_holding(
 def query_13f_holdings(
     *,
     manager_cik: "Optional[int | str]" = None,
+    entity_id: Optional[str] = None,
+    security_id: Optional[str] = None,
     security: Optional[str] = None,
     cusip: Optional[str] = None,
     isin: Optional[str] = None,
@@ -885,6 +887,12 @@ def query_13f_holdings(
     if manager_cik is not None:
         where.append("manager_cik = ?")
         params.append(str(manager_cik).strip())
+    if entity_id is not None:
+        where.append("entity_id = ?")
+        params.append(str(entity_id).strip())
+    if security_id is not None:
+        where.append("security_id = ?")
+        params.append(str(security_id).strip())
     key = security if security is not None else cusip if cusip is not None else isin
     if key is not None:
         normalized = str(key).strip().upper()
@@ -1009,6 +1017,7 @@ def store_offering(
 def query_offerings(
     *,
     registrant: Optional[str] = None,
+    registrant_cik: "Optional[int | str]" = None,
     filer_cik: "Optional[int | str]" = None,
     accession: Optional[str] = None,
     form: Optional[str] = None,
@@ -1022,6 +1031,18 @@ def query_offerings(
     if registrant is not None:
         where.append("registrant_name = ?")
         params.append(str(registrant))
+    if registrant_cik is not None:
+        # ponytail: canonical bare CIK plus SEC 10-digit padding match legacy rows
+        try:
+            _canon = str(int(str(registrant_cik).strip()))
+        except (TypeError, ValueError, AttributeError):
+            _canon = None
+        if _canon is not None:
+            where.append("(registrant_cik = ? OR registrant_cik = ?)")
+            params.extend([_canon, f"{int(_canon):010d}"])
+        else:
+            where.append("registrant_cik = ?")
+            params.append(str(registrant_cik).strip())
     if filer_cik is not None:
         where.append("filer_cik = ?")
         params.append(str(filer_cik).strip())

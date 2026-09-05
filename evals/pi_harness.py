@@ -56,13 +56,20 @@ class Bridge:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
         )
 
-    def call(self, name, arguments, session_id):
+    def call(self, name, arguments, run_id):
         self.proc.stdin.write(json.dumps({
             "op": "tool_call", "name": name,
-            "arguments": arguments, "session_id": session_id,
+            "arguments": arguments, "run_id": run_id,
         }) + "\n")
         self.proc.stdin.flush()
         return json.loads(self.proc.stdout.readline()).get("result", {})
+
+    def event(self, run_id, event, **extra):
+        self.proc.stdin.write(json.dumps({
+            "op": "pi_event", "run_id": run_id, "event": event, **extra,
+        }) + "\n")
+        self.proc.stdin.flush()
+        return json.loads(self.proc.stdout.readline())
 
     def close(self):
         self.proc.stdin.close()
@@ -102,10 +109,13 @@ def main():
     try:
         for cid, calls in PLAN.items():
             case = cases[cid]
+            run_id = f"eval-{cid}"
+            bridge.event(run_id, "agent_start", question=case.get("question", ""))
             detailed, results = [], []
             for name, args in calls:
-                results.append(bridge.call(name, args, f"eval-{cid}"))
+                results.append(bridge.call(name, args, run_id))
                 detailed.append({"name": name, "arguments": args})
+            bridge.event(run_id, "agent_end")
             ok, details = check_case(case, detailed, json.dumps(results))
             passed += ok
             print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {case['question']}")

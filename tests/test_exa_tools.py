@@ -364,3 +364,83 @@ def test_pi_search_web_respects_runtime_budget(monkeypatch):
     assert result.get("error_type") == "budget_exhausted"
     assert "error" in result
     assert calls == []
+
+
+def test_pi_search_evidence_tokens_enforce_budget(monkeypatch):
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+
+    evidence = [
+        {
+            "title": "AMD Q3",
+            "url": "https://example.com/amd-q3",
+            "source_domain": "example.com",
+            "highlight": "Q3 revenue grew 12 percent on data-center demand",
+        }
+    ]
+    calls = []
+    monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls, evidence=evidence))
+    session = PiSessionContext(session_id=_new_run_id("evidence-budget"))
+    session.budget.max_evidence_tokens = 5
+    result = execute_pi_tool("search_web", {"query": "AMD revenue"}, session)
+    assert result.get("error_type") == "budget_exhausted"
+    assert len(calls) == 1
+    assert session.budget.evidence_tokens == 0
+
+
+def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch, tmp_path):
+    import hashlib
+
+    from app.storage.runs import get_model_calls, get_run
+
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    run_id = _new_run_id("lifecycle")
+    question = "What drove AMD revenue growth in Q3?"
+    model = "test-model-lifecycle"
+    started_at = "2026-09-05T00:00:00+00:00"
+    completed_at = "2026-09-05T00:00:01+00:00"
+    usage = {
+        "prompt_tokens": 120,
+        "completion_tokens": 45,
+        "reasoning_tokens": 10,
+        "prompt_tokens_details": {"cached_tokens": 30},
+        "total_tokens": 165,
+        "cost": 0.0025,
+    }
+    answer = "AMD revenue grew 12 percent on data-center demand."
+    try:
+        assert _bridge_request(
+            {"op": "pi_event", "run_id": run_id, "event": "agent_start", "question": question}
+        ) == {"ok": True}
+        assert _bridge_request(
+            {
+                "op": "pi_event", "run_id": run_id, "event": "message_end",
+                "role": "assistant", "turn": 0, "model": model,
+                "started_at": started_at, "completed_at": completed_at,
+                "usage": usage, "tool_call_count": 2,
+            }
+        ) == {"ok": True}
+        assert _bridge_request(
+            {"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}
+        ) == {"ok": True}
+        run = get_run(run_id)
+        assert run["question"] == question
+        assert run["status"] == "completed"
+        assert run["input_tokens"] == 120
+        assert run["output_tokens"] == 45
+        assert run["total_tokens"] == 165
+        assert run["estimated_model_cost"] == 0.0025
+        assert run["final_answer_hash"] == hashlib.sha256(answer.encode()).hexdigest()
+        calls = get_model_calls(run_id)
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["model"] == model
+        assert call["started_at"] == started_at
+        assert call["completed_at"] == completed_at
+        assert call["input_tokens"] == 120
+        assert call["output_tokens"] == 45
+        assert call["reasoning_tokens"] == 10
+        assert call["cached_tokens"] == 30
+        assert call["estimated_cost"] == 0.0025
+        assert call["tool_call_count"] == 2
+    finally:
+        _end_run(run_id)

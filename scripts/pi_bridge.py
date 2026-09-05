@@ -5,7 +5,7 @@ Protocol (one JSON object per line on stdin, one per line on stdout):
   {"op": "doctor"} -> {"bridge_ok": true, "prompt_chars": int,
     "tool_count": int, "tool_names": [str], "registry_version": str,
     "python": str, "cwd": str}
-  {"op": "tool_call", "name": str, "arguments": dict, "session_id": str}
+  {"op": "tool_call", "name": str, "arguments": dict, "run_id": str}
     -> {"result": {...}}
   {"op": "pi_event", "run_id": str, "event": str, ...} -> {"ok": true}
   (recorded into the existing runs DB via RunRecorder; unknown events or a
@@ -70,7 +70,7 @@ def _tool_call(request: dict) -> dict:
     arguments = request.get("arguments", {})
     if not isinstance(arguments, dict):
         return {"error": "missing_arg"}
-    run_id = request.get("run_id") or request.get("session_id")
+    run_id = request.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"error": "missing_arg"}
     session = _sessions.get(run_id)
@@ -89,12 +89,12 @@ def _tool_call(request: dict) -> dict:
 _recorders: dict[str, RunRecorder] = {}
 
 
-def _recorder_for(run_id: str) -> RunRecorder | None:
+def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
     recorder = _recorders.get(run_id)
     if recorder is None:
         try:
             recorder = RunRecorder(
-                run_id=run_id, request_id=run_id, question="", as_of=None,
+                run_id=run_id, request_id=run_id, question=question, as_of=None,
                 model="pi", provider="pi", model_parameters={},
                 agent_version="pi", prompt_version=PROMPT_VERSION,
                 tool_registry_version=TOOL_REGISTRY_VERSION, git_sha="",
@@ -137,7 +137,8 @@ def _pi_event(request: dict) -> dict:
     try:
         if event == "agent_start":
             _sessions[run_id] = PiSessionContext(session_id=run_id)
-        recorder = _recorder_for(run_id)
+        question = request.get("question")
+        recorder = _recorder_for(run_id, question if isinstance(question, str) else "")
         if recorder is None or not recorder.enabled:
             return {"ok": True}  # dropped, research continues
         meta = {k: v for k, v in request.items() if k not in ("op", "run_id", "event")}

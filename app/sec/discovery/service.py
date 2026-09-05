@@ -20,7 +20,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from ...domain.market.ids import sec_entity_id
+from ...domain.market.ids import sec_entity_id, sec_security_id
 from ..filings import _check_as_of
 from ..models import (
     EntityCandidate,
@@ -217,7 +217,8 @@ def verify_sec_entity(cik: int | str, *, expected_name=None,
 
     Missing CIK -> ``not_found``; contradicting expectations -> ``conflict``;
     fuzzy-only evidence -> ``ambiguous`` with no entity id. Only ``verified``
-    candidates carry the canonical ``entity_id``.
+    candidates carry the canonical ``entity_id``. Transport/schema failure
+    raises (never ``not_found``); callers record failed coverage.
     """
     from ..client import get_submissions_metadata
 
@@ -355,6 +356,7 @@ def find_sec_entities(query: str, *, as_of=None,
     ranked: list[tuple] = []  # (tier_rank, -score, cik, EntityCandidate)
     pool: dict[int, dict] = {}
     failed = 0
+    meta_errors: list[str] = []
 
     def _add(cik: object, name: object, tickers: list, source: str) -> None:
         try:
@@ -382,19 +384,29 @@ def find_sec_entities(query: str, *, as_of=None,
             _attempt(backend, 0, 0, status="failed")
             failed += 1
         else:
-            candidate = verify_sec_entity(cik_int, as_of=as_of)
-            ok = candidate.verification_status == "verified"
-            _attempt(backend, 1 if ok else 0, 1 if ok else 0,
-                     pit_basis="known_at" if as_of else None)
-            candidate = replace(candidate, match_source="exact-cik")
-            if ok:
-                ranked.append((0, -1.0, cik_int, candidate))
-                meta = get_submissions_metadata(cik_int)
-                if meta is not None:
-                    metas[cik_int] = meta
+            try:
+                candidate = verify_sec_entity(cik_int, as_of=as_of)
+            except Exception as exc:
+                _attempt(backend, 0, 0, status="failed", error=exc,
+                         pit_basis="known_at" if as_of else None)
+                errors.append(f"exact-cik route failed: {exc}")
+                failed += 1
             else:
-                ranked.append((5, 0.0, cik_int, candidate))
-                errors.append(f"CIK {query} not found in SEC submissions")
+                ok = candidate.verification_status == "verified"
+                _attempt(backend, 1 if ok else 0, 1 if ok else 0,
+                         pit_basis="known_at" if as_of else None)
+                candidate = replace(candidate, match_source="exact-cik")
+                if ok:
+                    ranked.append((0, -1.0, cik_int, candidate))
+                    try:
+                        meta = get_submissions_metadata(cik_int)
+                    except Exception:
+                        meta = None
+                    if meta is not None:
+                        metas[cik_int] = meta
+                else:
+                    ranked.append((5, 0.0, cik_int, candidate))
+                    errors.append(f"CIK {query} not found in SEC submissions")
     else:
         try:
             ticker_cik = resolve_cik(query)
@@ -432,8 +444,9 @@ def find_sec_entities(query: str, *, as_of=None,
         for cik_int, slot in sorted(pool.items()):
             try:
                 meta = get_submissions_metadata(cik_int)
-            except Exception:
+            except Exception as exc:
                 meta = None
+                meta_errors.append(f"{cik_int}: {exc}")
             if meta is None:
                 continue
             tickers = tuple(meta.get("tickers") or [])
@@ -453,6 +466,10 @@ def find_sec_entities(query: str, *, as_of=None,
             if candidate.verification_status != "conflict":
                 ranked.append((tier, -candidate.match_score, cik_int, candidate))
                 metas[cik_int] = meta
+        if meta_errors and not metas:
+            errors.append(
+                f"submissions metadata unavailable: {meta_errors[0]}")
+            failed += 1
 
     ranked.sort(key=lambda item: (item[0], item[1], item[2]))
     entities: list[EntityCandidate] = [item[3] for item in ranked]
@@ -665,6 +682,8 @@ BACKFILL_PRIORITY = (
     "S-1", "S-3", "424B", "S-4", "DEF 14A", "D",
 )
 BACKFILL_SOURCE = "sec-global"
+DOC_SOURCE = "sec-documents"
+TYPED_SOURCE = "sec-typed"
 # SEC global quarterly indexes start in 1993; the current quarter always
 # comes from the current feed, never a quarterly partition.
 SEC_GLOBAL_START = (1993, 1)
@@ -898,6 +917,202 @@ def _raw_root_for(data_root) -> object:
     return base / "raw" if base.name != "parquet" else base.parent / "raw"
 
 
+_LOCAL_EXHAUSTIVE_GUARD = 100_000
+
+def _fetch_typed(query_fn, *, cap, root=None, **filters):
+    """Fetch one typed store query in a single snapshot. Returns (rows, exhausted, pages).
+
+    cap=None reads up to a documented local guard and proves exhaustion with
+    a short read; hitting the guard stays partial. Bounded caps return at
+    most cap rows via one limit+1 probe. Rows dedupe by persisted identity
+    (overlapping directions can return the same row twice).
+    """
+    out: list[dict] = []
+    seen: set = set()
+
+    def _push(rows) -> None:
+        for row in rows or []:
+            try:
+                key = json.dumps(row, sort_keys=True, default=str)
+            except Exception:
+                key = repr(row)
+            if key not in seen:
+                seen.add(key)
+                out.append(row)
+
+    if cap is None:
+        raw = query_fn(limit=_LOCAL_EXHAUSTIVE_GUARD, root=root, **filters)
+        _push(raw)
+        return out, len(raw or []) < _LOCAL_EXHAUSTIVE_GUARD, 1
+    cap = max(int(cap), 0)
+    probe = query_fn(limit=cap + 1, root=root, **filters)
+    _push(probe)
+    if len(probe or []) <= cap:
+        return out, True, 1
+    return out[:cap], False, 1
+
+
+
+
+def _warehouse_batch(store, form, qs, qe, *, root=None, limit=10_000):
+    try:
+        rows = store.query_filings(forms=[form], limit=limit, root=root)
+    except Exception:
+        return []
+    out = []
+    for row in rows:
+        try:
+            filing = _filing_from_local_row(row)
+        except Exception:
+            continue
+        day = (filing.filed_at or filing.known_at or "")[:10]
+        if day and not qs <= day <= qe:
+            continue
+        out.append(filing)
+    return out
+
+
+def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
+    """Enqueue a quarterly job; reset finished-but-uncovered ones for resume."""
+    job_id = store.enqueue_backfill_job(
+        source, form, qs, qe, PARSER_VERSION, batch_size=batch_size, root=root)
+    try:
+        job = store.get_job(job_id, root=root)
+        if job is not None and job.get("status") in ("complete", "failed"):
+            now = datetime.now(timezone.utc)
+            cur = (now.year, (now.month - 1) // 3 + 1)
+            quarters, _ = _quarters_for_range(qs, qe, cap=2)
+            past = [(y, q) for y, q in quarters or [] if (y, q) != cur]
+            if not past:
+                return job_id
+            wanted = [source] + (
+                [DOC_SOURCE, TYPED_SOURCE]
+                if str(form).strip().upper() in _TYPED_HYDRATION_FORMS else [])
+            uncovered = False
+            for year, quarter in past:
+                for src in wanted:
+                    try:
+                        covered = store.is_partition_covered(
+                            src, form, _partition_for_quarter(year, quarter), root=root)
+                    except Exception:
+                        covered = False
+                    if not covered:
+                        uncovered = True
+                        break
+                if uncovered:
+                    break
+            if uncovered:
+                store.requeue_job(job_id, root=root)
+    except Exception:
+        pass
+    return job_id
+
+
+_TYPED_HYDRATION_FORMS = frozenset(
+    {"SC 13D", "SC 13G", "13D", "13G", "3", "4", "5", "13F-HR"})
+
+
+def _hydrate_relationship_filing(filing, *, data_root=None):
+    """Archive primary document + store typed rows for one filing.
+
+    Returns (typed_rows, doc_ok, error): doc_ok tells the document stage
+    from the typed stage; error None means this filing parsed cleanly.
+    Never raises.
+    """
+    try:
+        form_raw = getattr(filing, "form", "")
+        form = str(form_raw or "").strip().upper()
+        accession = str(getattr(filing, "accession_no", ""))
+        if not accession:
+            return 0, False, "missing accession"
+        filed_at = getattr(filing, "filed_at", None)
+        known_at = getattr(filing, "known_at", None) or filed_at
+        source_url = getattr(filing, "source", None) or ""
+        filer_name = getattr(filing, "filer_name", None)
+        filer_cik = getattr(filing, "filer_cik", None)
+        from .. import archive as _archive
+        from .. import store as _store
+        from ..documents import get_by_accession_number, get_sec_document
+        try:
+            doc = get_sec_document(accession, None)
+        except Exception as exc:
+            return 0, False, f"no supported primary document: {exc}"
+        try:
+            text = doc.get("text") or ""
+            payload = text.encode("utf-8", "replace") if isinstance(text, str) else bytes(text)
+            doc_name = doc.get("document_name") or getattr(filing, "primary_document", None) or "primary"
+            url = doc.get("url") or source_url
+            record = _archive.archive_sec_document(
+                accession, str(doc_name), payload, url=url or "",
+                metadata={"form": form_raw}, root=_raw_root_for(data_root))
+            _payload_path = getattr(record, "payload_path", None)
+            raw_path = str(_payload_path) if _payload_path is not None else None
+        except Exception as exc:
+            return 0, False, f"document archive failed: {exc}"
+        try:
+            if form in ("SC 13D", "SC 13G", "13D", "13G"):
+                from ..ownership import load_schedule, normalize_schedule
+                schedule = load_schedule(accession)
+                recs = normalize_schedule(
+                    schedule, issuer=filer_name or "", form=form_raw, filed_at=filed_at,
+                    accession_no=accession, document_name=str(doc_name),
+                    known_at=known_at, source_url=source_url or None)
+                written = 0
+                for rec in recs or []:
+                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("source_url", source_url or None)
+                    written += _store.store_beneficial_ownership(d, root=data_root)
+                return written, True, None
+            if form in ("3", "4", "5"):
+                from ..insider import load_ownership, normalize_ownership_filing
+                obj = load_ownership(accession)
+                recs = normalize_ownership_filing(
+                    obj, issuer=filer_name or "", form=form_raw, filed_at=filed_at,
+                    accession_no=accession,
+                    issuer_cik=str(filer_cik).strip() if filer_cik is not None else None,
+                    document_name=str(doc_name), known_at=known_at)
+                written = 0
+                for rec in recs or []:
+                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("source_url", source_url or None)
+                    written += _store.store_insider_transaction(d, root=data_root)
+                return written, True, None
+            if form == "13F-HR":
+                from ..insider import normalize_13f_holdings
+                edgar_filing = get_by_accession_number(accession)
+                inner = edgar_filing.obj() if hasattr(edgar_filing, "obj") else edgar_filing
+                infotable = None
+                for attr in ("infotable", "information_table", "holdings", "info_table"):
+                    try:
+                        infotable = getattr(inner, attr, None)
+                    except Exception:
+                        infotable = None
+                    if infotable is not None:
+                        break
+                if infotable is None:
+                    return 0, True, "no 13F information table in filing object"
+                recs = normalize_13f_holdings(
+                    infotable, manager_name=filer_name,
+                    manager_cik=str(filer_cik).strip() if filer_cik is not None else None,
+                    accession_no=accession, report_period=getattr(filing, "report_period", None),
+                    filed_at=filed_at, form=form_raw, document_name=str(doc_name),
+                    known_at=known_at, source_url=source_url or None)
+                written = 0
+                for rec in recs or []:
+                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("source_url", source_url or None)
+                    written += _store.store_13f_holding(d, root=data_root)
+                return written, True, None
+            return 0, True, f"unsupported form for typed hydration: {form_raw!r}"
+        except Exception as exc:
+            return 0, True, f"typed parse/store failed: {exc}"
+    except Exception as exc:
+        return 0, False, str(exc)
+
+
 def run_backfill_job(job: dict, data_root=None) -> bool:
     """Drain one leased job: archive + normalize + coverage + checkpoint."""
     from .. import archive as _archive
@@ -910,16 +1125,12 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
         job.get("start_date"), job.get("end_date"), cap=10_000)
     now = datetime.now(timezone.utc)
     current = (now.year, (now.month - 1) // 3 + 1)
-    # Index rows carry no document payloads, so no typed relationship parser
-    # can run here; relationship forms stay filings-only partial coverage
-    # (never speculative parsing).
-    filings_only = str(form).strip().upper() in (
-        "SC 13D", "SC 13G", "13D", "13G", "3", "4", "5", "13F-HR")
-    current_partition = f"{current[0]}-Q{current[1]}"
+    needs_typed = str(form).strip().upper() in _TYPED_HYDRATION_FORMS
     try:
         targets = list(quarters) or [None]
         last_key: str | None = None
         total = 0
+        job_failed = False
         for target in targets:
             if target is None:
                 partition = f"{current[0]}-Q{current[1]}"
@@ -930,48 +1141,77 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                     continue
                 rows = get_current_filings(form, page_size=batch_size)
                 feed_snapshot = True
+                filing_skip = False
+                typed_done = False
             else:
                 year, quarter = target
                 partition = _partition_for_quarter(year, quarter)
                 key = f"{form}/{partition}"
-                prior = _store.get_checkpoint(
+                qs, qe = _quarter_dates(year, quarter)
+                filing_ck = _store.get_checkpoint(
                     "sec-backfill", source, key, root=data_root)
-                if prior and prior.get("status") == "complete":
-                    if not _store.is_partition_covered(
-                            source, form, partition, root=data_root):
-                        _store.store_coverage(
-                            source, form, partition,
-                            "partial" if (
-                                filings_only or partition
-                                == current_partition) else "complete",
-                            coverage_date=job.get("end_date"), root=data_root)
+                doc_ck = _store.get_checkpoint(
+                    "sec-backfill", DOC_SOURCE, key, root=data_root)
+                typed_ck = _store.get_checkpoint(
+                    "sec-backfill", TYPED_SOURCE, key, root=data_root)
+                filing_done = bool(filing_ck) and filing_ck.get("status") == "complete"
+                doc_done = bool(doc_ck) and doc_ck.get("status") == "complete"
+                typed_done = (not needs_typed) or (
+                    bool(typed_ck) and typed_ck.get("status") == "complete")
+                if filing_done and doc_done and typed_done:
+                    for _src in [source, DOC_SOURCE] + ([TYPED_SOURCE] if needs_typed else []):
+                        try:
+                            if not _store.is_partition_covered(
+                                    _src, form, partition, root=data_root):
+                                _store.store_coverage(
+                                    _src, form, partition, "complete",
+                                    coverage_date=job.get("end_date"), root=data_root)
+                        except Exception:
+                            pass
                     continue
                 if (year, quarter) == current:
                     rows = get_current_filings(form, page_size=batch_size)
                     feed_snapshot = True
+                    filing_skip = False
+                elif filing_done:
+                    # Filing stage already complete: hydrate from the
+                    # warehouse instead of refetching the live index.
+                    rows = _warehouse_batch(
+                        _store, form, qs, qe, root=data_root)
+                    feed_snapshot = False
+                    filing_skip = True
                 else:
                     rows = get_global_filings(year, quarter, form=form)
                     feed_snapshot = False
+                    filing_skip = False
             # Feed snapshots are bounded samples, never full-quarter coverage;
             # quarterly partitions drain fully within the job, so "complete"
             # means the source was exhausted (never claimed after truncation).
             batch = list(rows)[:batch_size] if feed_snapshot else list(rows)
-            for filing in batch:
-                payload = json.dumps(
-                    filing.to_dict(), sort_keys=True, default=str).encode()
-                records = _archive.archive_sec_filing(
-                    filing, {"submission": payload},
-                    url=filing.source or "", root=_raw_root_for(data_root))
-                _store.store_filing(
-                    filing,
-                    raw_submission_path=getattr(
-                        records.get("submission"), "payload_path", None),
-                    raw_primary_path=getattr(
-                        records.get("primary"), "payload_path", None),
-                    root=data_root)
-                last_key = filing.accession_no
+            typed_rows, typed_errors, doc_bad = 0, [], 0
+            if not filing_skip:
+                for filing in batch:
+                    payload = json.dumps(
+                        filing.to_dict(), sort_keys=True, default=str).encode()
+                    records = _archive.archive_sec_filing(
+                        filing, {"submission": payload},
+                        url=filing.source or "", root=_raw_root_for(data_root))
+                    _store.store_filing(
+                        filing,
+                        raw_submission_path=getattr(
+                            records.get("submission"), "payload_path", None),
+                        raw_primary_path=getattr(
+                            records.get("primary"), "payload_path", None),
+                        root=data_root)
+                    last_key = filing.accession_no
+            else:
+                for filing in batch:
+                    last_key = filing.accession_no
             total += len(batch)
-            if feed_snapshot or filings_only:
+            # Filing-index stage.
+            if filing_skip:
+                pass
+            elif feed_snapshot:
                 _store.store_coverage(
                     source, form, partition, "partial",
                     coverage_date=job.get("end_date"),
@@ -980,8 +1220,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                 _store.store_checkpoint(
                     "sec-backfill", source, key, "partial",
                     last_key=last_key, record_count=len(batch),
-                    totals={"filings_only": filings_only,
-                            "feed_snapshot": feed_snapshot},
+                    totals={"feed_snapshot": feed_snapshot},
                     root=data_root)
             else:
                 _store.store_coverage(
@@ -992,6 +1231,66 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                 _store.advance_checkpoint(
                     "sec-backfill", source, key, last_key=last_key,
                     record_count=len(batch), root=data_root)
+            # Document + typed stages (relationship forms only).
+            if needs_typed and not typed_done:
+                for filing in batch:
+                    try:
+                        _rows, _doc_ok, _err = _hydrate_relationship_filing(
+                            filing, data_root=data_root)
+                    except Exception as exc:
+                        _rows, _doc_ok, _err = 0, False, str(exc)
+                    typed_rows += _rows
+                    if not _doc_ok:
+                        doc_bad += 1
+                    if _err:
+                        typed_errors.append(f"{filing.accession_no}: {_err}")
+                doc_status = "complete" if not doc_bad else "partial"
+                typed_status = "complete" if not typed_errors else "partial"
+                if feed_snapshot:
+                    doc_status = typed_status = "partial"
+                _store.store_coverage(
+                    DOC_SOURCE, form, partition, doc_status,
+                    coverage_date=job.get("end_date"),
+                    accession_count=len(batch), last_key=last_key,
+                    root=data_root)
+                _store.store_coverage(
+                    TYPED_SOURCE, form, partition, typed_status,
+                    coverage_date=job.get("end_date"),
+                    accession_count=typed_rows, last_key=last_key,
+                    root=data_root)
+                if doc_status == "complete":
+                    _store.advance_checkpoint(
+                        "sec-backfill", DOC_SOURCE, key, last_key=last_key,
+                        record_count=len(batch), root=data_root)
+                else:
+                    _store.store_checkpoint(
+                        "sec-backfill", DOC_SOURCE, key, "partial",
+                        last_key=last_key, record_count=len(batch),
+                        error="; ".join(typed_errors[:3]) if typed_errors else None,
+                        totals={"typed_rows": typed_rows,
+                                "doc_failures": doc_bad,
+                                "typed_error_count": len(typed_errors),
+                                "typed_errors": typed_errors[:5]},
+                        root=data_root)
+                if typed_status == "complete":
+                    _store.advance_checkpoint(
+                        "sec-backfill", TYPED_SOURCE, key, last_key=last_key,
+                        record_count=typed_rows, root=data_root)
+                else:
+                    _store.store_checkpoint(
+                        "sec-backfill", TYPED_SOURCE, key, "partial",
+                        last_key=last_key, record_count=typed_rows,
+                        error="; ".join(typed_errors[:3]) if typed_errors else None,
+                        totals={"typed_rows": typed_rows,
+                                "doc_failures": doc_bad,
+                                "typed_error_count": len(typed_errors),
+                                "typed_errors": typed_errors[:5]},
+                        root=data_root)
+                    if not feed_snapshot:
+                        job_failed = True
+        if job_failed:
+            _store.fail_job(job["id"], "typed stage incomplete; retryable", last_key=last_key, root=data_root)
+            return False
         _store.complete_job(job["id"], last_key=last_key, root=data_root)
         return True
     except Exception as exc:
@@ -1366,14 +1665,14 @@ class SECDiscoveryService:
                     and request.domain is None:
                 _record("security-search", "no security_identifier",
                         "not_applicable")
-            # Bounded live EFTS: pages up to the request limit per variant;
-            # unretrieved remainder stays partial with the Route 5 quarterly
-            # jobs as continuation work (never an unbounded history wait).
+            # EFTS per variant: explicit limit (or exhaustive=False default) stays bounded;
+            # exhaustive without an explicit limit pages to reported-total exhaustion or the
+            # documented EFTS cap; unretrieved remainder stays partial.
             if variants:
                 from ..client import search_sec_filings
 
                 forms = list(request.forms) if request.forms else None
-                per_variant = request.max_results or 20
+                per_variant = 10_000 if (request.exhaustive and request.max_results is None) else (request.max_results or 20)
                 for variant, route in variants:
                     try:
                         _adopt(search_sec_filings(
@@ -1482,10 +1781,9 @@ class SECDiscoveryService:
                         qs, qe = _quarter_dates(year, quarter)
                         partition = _partition_for_quarter(year, quarter)
                         try:
-                            job_id = _backfill_store.enqueue_backfill_job(
-                                BACKFILL_SOURCE, form, qs, qe,
-                                PARSER_VERSION, batch_size=batch_size,
-                                root=data_root)
+                            job_id = _enqueue_or_requeue(
+                                _backfill_store, BACKFILL_SOURCE, form, qs, qe,
+                                batch_size=batch_size, root=data_root)
                         except Exception as exc:
                             _record("backfill", f"{form} {partition}",
                                     "failed", error=exc,
@@ -1574,25 +1872,26 @@ class SECDiscoveryService:
                                     filters={"form": form})
                             errors.append(
                                 f"current-filings {form!r} failed: {exc}")
-                            kept = []
-                            for filing in rows:
-                                day = (filing.filed_at
-                                       or filing.known_at or "")[:10]
-                                if request.start_date and day \
-                                        and day < request.start_date:
-                                    continue
-                                if request.end_date and day \
-                                        and day > request.end_date:
-                                    continue
-                                if _keep(filing):
-                                    kept.append(filing)
-                            _record("current-filings", form, "complete",
-                                    reported=len(rows), retrieved=len(kept),
-                                    pages=1,
-                                    pit_basis="known_at" if as_of else None,
-                                    filters={"form": form})
-                            for filing in kept:
-                                filings.setdefault(filing.accession_no, filing)
+                            continue
+                        kept = []
+                        for filing in rows:
+                            day = (filing.filed_at
+                                   or filing.known_at or "")[:10]
+                            if request.start_date and day \
+                                    and day < request.start_date:
+                                continue
+                            if request.end_date and day \
+                                    and day > request.end_date:
+                                continue
+                            if _keep(filing):
+                                kept.append(filing)
+                        _record("current-filings", form, "complete",
+                                reported=len(rows), retrieved=len(kept),
+                                pages=1,
+                                pit_basis="known_at" if as_of else None,
+                                filters={"form": form})
+                        for filing in kept:
+                            filings.setdefault(filing.accession_no, filing)
                 else:
                     _record("current-filings",
                             "range excludes current quarter; quarterly "
@@ -1627,6 +1926,21 @@ class SECDiscoveryService:
         _SEC_FORMS = ("13F-HR",)
         if request.search_relationships:
             from .. import store as _rel_store
+
+            # ponytail: one shared pager; each route snapshots the counters
+            # below so bounded probes stay attributable to their own attempt.
+            _rel_cap = [None if (request.exhaustive and request.max_results is None)
+                        else (request.max_results or 50)]
+            _rel_pages = [0]
+            _rel_open = [0]
+
+            def _rel_rows(query_fn, **kw):
+                _rows, _exh, _pg = _fetch_typed(
+                    query_fn, cap=_rel_cap[0], root=data_root, **kw)
+                _rel_pages[0] += _pg
+                if not _exh:
+                    _rel_open[0] += 1
+                return _rows
 
             def _cik_int(value):
                 try:
@@ -1694,7 +2008,7 @@ class SECDiscoveryService:
                         partition = _partition_for_quarter(year, quarter)
                         try:
                             covered = _rel_store.is_partition_covered(
-                                BACKFILL_SOURCE, form, partition,
+                                TYPED_SOURCE, form, partition,
                                 root=data_root)
                         except Exception:
                             covered = False
@@ -1702,10 +2016,9 @@ class SECDiscoveryService:
                             continue
                         qs, qe = _quarter_dates(year, quarter)
                         try:
-                            job_id = _rel_store.enqueue_backfill_job(
-                                BACKFILL_SOURCE, form, qs, qe,
-                                PARSER_VERSION, batch_size=50,
-                                root=data_root)
+                            job_id = _enqueue_or_requeue(
+                                _rel_store, BACKFILL_SOURCE, form, qs, qe,
+                                batch_size=50, root=data_root)
                         except Exception as exc:
                             _record("backfill", f"{form} {partition}",
                                     "failed", error=exc,
@@ -1737,11 +2050,13 @@ class SECDiscoveryService:
                         "returned immediately (never waits for history)")
             if rel_ciks:
                 rel_found = 0
+                _rel_mark = (_rel_pages[0], _rel_open[0])
+                if unbounded_rel:
+                    _rel_cap[0] = request.max_results or 50
                 try:
                     for cik in rel_ciks:
-                        for row in _rel_store.query_beneficial_ownership(
-                                subject_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_beneficial_ownership,
+                                subject_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("subject_cik"),
                                 row.get("subject_name"), "ownership-subject",
@@ -1754,9 +2069,8 @@ class SECDiscoveryService:
                                 "sec-beneficial-ownership",
                                 row.get("known_at"))
                             rel_found += 1
-                        for row in _rel_store.query_beneficial_ownership(
-                                owner_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_beneficial_ownership,
+                                owner_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("subject_cik"),
                                 row.get("subject_name"), "ownership-subject",
@@ -1769,9 +2083,8 @@ class SECDiscoveryService:
                                 "sec-beneficial-ownership",
                                 row.get("known_at"))
                             rel_found += 1
-                        for row in _rel_store.query_insider_transactions(
-                                issuer_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_insider_transactions,
+                                issuer_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("issuer_cik"),
                                 row.get("issuer_name"), "insider-issuer",
@@ -1781,9 +2094,8 @@ class SECDiscoveryService:
                                 row.get("owner_name"), "insider-owner",
                                 "sec-insider", row.get("known_at"))
                             rel_found += 1
-                        for row in _rel_store.query_insider_transactions(
-                                owner_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_insider_transactions,
+                                owner_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("issuer_cik"),
                                 row.get("issuer_name"), "insider-issuer",
@@ -1793,9 +2105,8 @@ class SECDiscoveryService:
                                 row.get("owner_name"), "insider-owner",
                                 "sec-insider", row.get("known_at"))
                             rel_found += 1
-                        for row in _rel_store.query_13f_holdings(
-                                manager_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_13f_holdings,
+                                manager_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("manager_cik"),
                                 row.get("manager_name"), "13f-manager",
@@ -1807,9 +2118,10 @@ class SECDiscoveryService:
                             "locally stored rows (partial, limited)")
                     _record("local-relationships",
                             f"{len(rel_ciks)} cik(s)",
-                            "partial" if unbounded_rel else "complete",
+                            "partial" if (unbounded_rel or _rel_open[0] > _rel_mark[1]) else "complete",
                             reported=rel_found, retrieved=len(relationships),
-                            pages=1, pit_basis="known_at" if as_of else None,
+                            pages=_rel_pages[0] - _rel_mark[0],
+                            pit_basis="known_at" if as_of else None,
                             filters={"ciks": rel_ciks})
                 except Exception as exc:
                     _record("local-relationships", f"{rel_ciks}", "failed",
@@ -1821,9 +2133,13 @@ class SECDiscoveryService:
                         "not_applicable")
             if request.security_identifier is not None:
                 try:
-                    rows = _rel_store.query_13f_holdings(
-                        security=request.security_identifier, as_of=as_of,
-                        limit=50, root=data_root)
+                    rows, _sec_exh, _sec_pg = _fetch_typed(
+                        _rel_store.query_13f_holdings,
+                        cap=_rel_cap[0], root=data_root,
+                        security=request.security_identifier, as_of=as_of)
+                    _rel_pages[0] += _sec_pg
+                    if not _sec_exh:
+                        _rel_open[0] += 1
                 except Exception as exc:
                     _record("local-securities",
                             str(request.security_identifier), "failed",
@@ -1837,8 +2153,9 @@ class SECDiscoveryService:
                             row.get("manager_name"), "13f-manager",
                             "sec-13f", row.get("known_at"))
                     _record("local-securities",
-                            str(request.security_identifier), "complete",
-                            reported=len(rows), retrieved=len(rows), pages=1,
+                            str(request.security_identifier),
+                            "complete" if _sec_exh else "partial",
+                            reported=len(rows), retrieved=len(rows), pages=_sec_pg,
                             pit_basis="known_at" if as_of else None)
             else:
                 _record("local-securities", "no security_identifier",
@@ -1850,11 +2167,11 @@ class SECDiscoveryService:
             # filer/target/acquirer/registrant links project.
             if rel_ciks:
                 txn_found = 0
+                _txn_mark = (_rel_pages[0], _rel_open[0])
                 try:
                     for cik in rel_ciks:
-                        for row in _rel_store.query_transactions(
-                                filer_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_transactions,
+                                filer_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("filer_cik"),
                                 row.get("filer_name"), "transaction-filer",
@@ -1870,9 +2187,8 @@ class SECDiscoveryService:
                                 row.get("acquirer_name"), "transaction-acquirer",
                                 "sec-transactions", row.get("known_at"))
                             txn_found += 1
-                        for row in _rel_store.query_transactions(
-                                subject_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_transactions,
+                                subject_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("filer_cik"),
                                 row.get("filer_name"), "transaction-filer",
@@ -1888,9 +2204,8 @@ class SECDiscoveryService:
                                 row.get("acquirer_name"), "transaction-acquirer",
                                 "sec-transactions", row.get("known_at"))
                             txn_found += 1
-                        for row in _rel_store.query_offerings(
-                                filer_cik=cik, as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_offerings,
+                                filer_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("filer_cik"),
                                 row.get("filer_name"), "offering-filer",
@@ -1902,9 +2217,8 @@ class SECDiscoveryService:
                                 "offering-registrant",
                                 "sec-offerings", row.get("known_at"))
                             txn_found += 1
-                        for row in _rel_store.query_offerings(
-                                registrant=str(cik), as_of=as_of, limit=50,
-                                root=data_root):
+                        for row in _rel_rows(_rel_store.query_offerings,
+                                registrant_cik=cik, as_of=as_of):
                             _add_party(
                                 row.get("accession"), row.get("filer_cik"),
                                 row.get("filer_name"), "offering-filer",
@@ -1915,11 +2229,12 @@ class SECDiscoveryService:
                                 row.get("registrant_name"),
                                 "offering-registrant",
                                 "sec-offerings", row.get("known_at"))
-                            txn_found += 1
                     _record("local-transactions",
-                            f"{len(rel_ciks)} cik(s)", "complete",
+                            f"{len(rel_ciks)} cik(s)",
+                            "complete" if _rel_open[0] <= _txn_mark[1] else "partial",
                             reported=txn_found, retrieved=len(relationships),
-                            pages=1, pit_basis="known_at" if as_of else None,
+                            pages=_rel_pages[0] - _txn_mark[0],
+                            pit_basis="known_at" if as_of else None,
                             filters={"ciks": rel_ciks})
                 except Exception as exc:
                     _record("local-transactions", f"{rel_ciks}", "failed",
@@ -2038,6 +2353,7 @@ class SECDiscoveryService:
 # type/status; mentions never flatten into verified links.
 
 _CIK_RE = re.compile(r"(\d{1,10})\s*$")
+_DIRECT_CIK_RE = re.compile(r"^\s*(?:sec:cik:)?0*(\d{1,10})\s*$", re.IGNORECASE)
 
 
 def _relationship_ciks(entity: object) -> list[str]:
@@ -2052,7 +2368,12 @@ def _relationship_ciks(entity: object) -> list[str]:
                 ciks.append(text)
 
     if isinstance(entity, str):
-        _add(entity)
+        # ponytail: full-match only; substring search turned "Rule 144" into CIK 144
+        match = _DIRECT_CIK_RE.match(entity)
+        if match:
+            text = str(int(match.group(1)))
+            if text not in ciks:
+                ciks.append(text)
     else:
         for attr in ("cik", "entity_id"):
             try:
@@ -2067,9 +2388,82 @@ def _relationship_ciks(entity: object) -> list[str]:
     return ciks
 
 
+def _resolve_relationship_identity(entity: object, *, as_of=None):
+    """Direct CIK/ID or single-verified-candidate CIK; else ([], candidates, status, err)."""
+    direct = _relationship_ciks(entity)
+    if direct:
+        return direct, [], "direct", None
+    query: str | None = None
+    if isinstance(entity, str):
+        query = entity.strip() or None
+    elif isinstance(entity, dict):
+        for key in ("query", "ticker", "name"):
+            value = entity.get(key)
+            if isinstance(value, str) and value.strip():
+                query = value.strip()
+                break
+    else:
+        for attr in ("query", "ticker", "name"):
+            try:
+                value = getattr(entity, attr, None)
+            except Exception:
+                value = None
+            if isinstance(value, str) and value.strip():
+                query = value.strip()
+                break
+            if attr == "name" and value is not None and query is None:
+                try:
+                    text = str(value).strip()
+                except Exception:
+                    text = ""
+                if text:
+                    query = text
+                    break
+    if not query:
+        return [], [], "unresolved", None
+    match = _DIRECT_CIK_RE.match(query)
+    if match:
+        return [str(int(match.group(1)))], [], "direct", None
+    try:
+        sub = find_sec_entities(query, as_of=as_of, exhaustive=True)
+    except Exception as exc:
+        return [], [], "failed", exc
+    try:
+        ents = list(getattr(sub, "entities", ()) or ())
+    except Exception:
+        ents = []
+    uniq: dict[str, object] = {}
+    for cand in ents:
+        try:
+            if getattr(cand, "verification_status", None) != "verified":
+                continue
+            cik_value = getattr(cand, "cik", None)
+            if cik_value is None:
+                continue
+            uniq.setdefault(str(int(str(cik_value).strip())), cand)
+        except Exception:
+            continue
+    if len(uniq) == 1:
+        return list(uniq), ents, "verified", None
+    try:
+        coverage_status = getattr(getattr(sub, "coverage", None), "status", None)
+        sub_errors = list(getattr(sub, "errors", ()) or ())
+    except Exception:
+        coverage_status, sub_errors = None, []
+    if coverage_status == "failed" and not ents:
+        first = sub_errors[0] if sub_errors else "entity resolution failed"
+        err = first if isinstance(first, Exception) else RuntimeError(str(first))
+        return [], ents, "failed", err
+    if not ents:
+        return [], [], "not_found", None
+    return [], ents, "ambiguous", None
+
+
+
+
 def search_sec_relationships(entity: object, relationship_types=None,
                              as_of: str | None = None, data_root=None,
-                             limit: int = 50) -> dict:
+                             limit: int = 50, exhaustive: bool = True) -> dict:
     """Fan out across typed, workflow, mention, and EFTS routes.
 
     Returns groups by ``relationship_type`` then status. Typed
@@ -2084,13 +2478,15 @@ def search_sec_relationships(entity: object, relationship_types=None,
     wanted = None
     if relationship_types is not None:
         wanted = {normalize_label(t) for t in relationship_types}
-    ciks = _relationship_ciks(entity)
+    ciks, _candidates, _resolution, _resolution_err = _resolve_relationship_identity(
+        entity, as_of=as_of)
     attempts: list[dict] = []
     warnings: list[str] = []
     errors: list[str] = []
     typed: list[dict] = []
     workflow: list[dict] = []
     mentions: list[dict] = []
+    managers: list = []
 
     def _want(label: object) -> bool:
         return wanted is None or normalize_label(label) in wanted
@@ -2103,49 +2499,90 @@ def search_sec_relationships(entity: object, relationship_types=None,
             typed.append({"relationship_type": normalize_label(label),
                           "status": status, **row})
 
+    if not ciks:
+        if _resolution == "failed":
+            _record("entity-resolution", "failed", error=str(_resolution_err),
+                    resolution=_resolution)
+            errors.append(f"entity resolution failed: {_resolution_err}")
+        elif _resolution == "ambiguous":
+            _record("entity-resolution", "ambiguous", resolution=_resolution,
+                    candidates=len(_candidates))
+            warnings.append(
+                f"ambiguous entity {str(entity)!r}: "
+                f"{len(_candidates)} candidates; no relationship rows returned")
+        elif _resolution == "not_found":
+            _record("entity-resolution", "not_applicable",
+                    resolution=_resolution, reason="no verified candidate")
+            warnings.append(f"no SEC entity candidates for {str(entity)!r}")
+        else:
+            _record("entity-resolution", "not_applicable",
+                    resolution=_resolution, reason="no cik context")
+            warnings.append(f"no CIK context for {str(entity)!r}")
+        _record("local-typed", "not_applicable", reason="no cik context",
+                resolution=_resolution)
+        _record("local-workflow", "failed" if _resolution == "failed" else "not_applicable",
+                reason="no entity filter; unfiltered scan disabled",
+                resolution=_resolution,
+                error=str(_resolution_err) if _resolution_err else None)
+        _record("local-mentions", "not_applicable", reason="no cik context")
+        _record("efts-mentions", "not_applicable", reason="no cik context")
+        return {"entity": str(entity), "ciks": (),
+                "relationship_types": tuple(relationship_types or ()),
+                "as_of": as_of, "groups": {}, "typed": [], "relationships": [],
+                "mentions": [], "managers": [], "attempts": attempts, "warnings": warnings,
+                "errors": errors, "candidates": tuple(_candidates),
+                "resolution": _resolution}
+
+    _t1_cap = None if exhaustive else limit
+    _t1_pages = [0]
+    _t1_open = [0]
+
+    def _typed_rows(query_fn, **kw):
+        _rows, _exh, _pg = _fetch_typed(
+            query_fn, cap=_t1_cap, root=data_root, **kw)
+        _t1_pages[0] += _pg
+        if not _exh:
+            _t1_open[0] += 1
+        return _rows
+
     # Route 1: typed ownership / holdings / insider indexes, both directions.
     if ciks:
         try:
             for cik in ciks:
-                for row in _store.query_beneficial_ownership(
-                        subject_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_beneficial_ownership,
+                        subject_cik=cik, as_of=as_of):
                     _emit("beneficial_owner", "verified", {
                         "from_entity_id": row.get("filer_cik"),
                         "to_entity_id": row.get("subject_cik"),
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-                for row in _store.query_beneficial_ownership(
-                        owner_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_beneficial_ownership,
+                        owner_cik=cik, as_of=as_of):
                     _emit("beneficial_owner", "verified", {
                         "from_entity_id": row.get("filer_cik"),
                         "to_entity_id": row.get("subject_cik"),
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-                for row in _store.query_insider_transactions(
-                        issuer_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_insider_transactions,
+                        issuer_cik=cik, as_of=as_of):
                     _emit("insider_owner", "verified", {
                         "from_entity_id": row.get("owner_cik"),
                         "to_entity_id": row.get("issuer_cik"),
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-                for row in _store.query_insider_transactions(
-                        owner_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_insider_transactions,
+                        owner_cik=cik, as_of=as_of):
                     _emit("insider_owner", "verified", {
                         "from_entity_id": row.get("owner_cik"),
                         "to_entity_id": row.get("issuer_cik"),
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-                for row in _store.query_13f_holdings(
-                        manager_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_13f_holdings,
+                        manager_cik=cik, as_of=as_of):
                     _emit("holding_manager", "verified", {
                         "from_entity_id": row.get("manager_cik"),
                         "to_entity_id": row.get("issuer_cik")
@@ -2153,9 +2590,8 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-                for row in _store.query_transactions(
-                        filer_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_transactions,
+                        filer_cik=cik, as_of=as_of):
                     _emit("transaction_party", "verified", {
                         "from_entity_id": row.get("filer_cik"),
                         "to_entity_id": row.get("target_cik")
@@ -2164,9 +2600,8 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at"),
                         "status": row.get("status") or "unknown"})
-                for row in _store.query_transactions(
-                        subject_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_transactions,
+                        subject_cik=cik, as_of=as_of):
                     _emit("transaction_party", "verified", {
                         "from_entity_id": row.get("filer_cik"),
                         "to_entity_id": row.get("target_cik")
@@ -2175,21 +2610,137 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at"),
                         "status": row.get("status") or "unknown"})
-                for row in _store.query_offerings(
-                        filer_cik=cik, as_of=as_of, limit=limit,
-                        root=data_root):
+                for row in _typed_rows(_store.query_offerings,
+                        filer_cik=cik, as_of=as_of):
                     _emit("offering_party", "verified", {
                         "from_entity_id": row.get("filer_cik"),
                         "to_entity_id": row.get("registrant_cik"),
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
                         "known_at": row.get("known_at")})
-            _record("local-typed", "complete", ciks=ciks, found=len(typed))
+            _record("local-typed", "complete" if not _t1_open[0] else "partial",
+                    ciks=ciks, found=len(typed), pages=_t1_pages[0])
         except Exception as exc:
             _record("local-typed", "failed", ciks=ciks, error=str(exc))
             errors.append(f"local-typed failed: {exc}")
     else:
         _record("local-typed", "not_applicable", reason="no cik context")
+
+    _inv_pages = [0]
+    _inv_open = [0]
+
+    def _inv_rows(query_fn, **kw):
+        _rows, _exh, _pg = _fetch_typed(
+            query_fn, cap=_t1_cap, root=data_root, **kw)
+        _inv_pages[0] += _pg
+        if not _exh:
+            _inv_open[0] += 1
+        return _rows
+
+    # Inverse 13F: verified issuer/entity CIK -> canonical plus alias-mapped
+    # security IDs -> holdings -> manager CIKs. Unmapped issuers stay
+    # partial; holdings are never globally scanned.
+    if ciks:
+        try:
+            from ...storage import duckdb as _duck
+            for cik in ciks:
+                try:
+                    _eid = sec_entity_id(int(cik))
+                except Exception:
+                    _eid = f"sec:cik:{cik}"
+                try:
+                    _canonical = sec_security_id(int(cik))
+                except Exception:
+                    _canonical = None
+                _keys: list[str] = []
+                if _canonical and all(_canonical != _k for _k in _keys):
+                    _keys.append(_canonical)
+                try:
+                    _alias_sql = (
+                        "SELECT alias_value FROM entity_aliases "
+                        "WHERE entity_id = ? AND alias_type IN "
+                        "('cusip', 'isin', 'security')")
+                    _alias_params: list = [_eid]
+                    if as_of is not None:
+                        _alias_sql += " AND (known_at IS NULL OR substr(known_at, 1, 10) <= ?)"
+                        _alias_params.append(as_of)
+                    _alias_rows = _duck.query(
+                        _alias_sql, params=_alias_params, data_root=data_root)
+                except Exception:
+                    _alias_rows = []
+                for _ar in _alias_rows or []:
+                    try:
+                        _v = str((_ar or {}).get("alias_value") or "").strip()
+                    except Exception:
+                        _v = ""
+                    if _v and all(_v != _k for _k in _keys):
+                        _keys.append(_v)
+                _held: list[dict] = []
+                _seen: set = set()
+
+                def _collect(_rows) -> None:
+                    for _row in _rows or []:
+                        _hk = (_row.get("accession"), _row.get("manager_cik"),
+                               _row.get("cusip"), _row.get("issuer_name"),
+                               _row.get("class_title"), _row.get("security_id"))
+                        if _hk not in _seen:
+                            _seen.add(_hk)
+                            _held.append(_row)
+
+                for _key in _keys:
+                    try:
+                        _collect(_inv_rows(_store.query_13f_holdings,
+                            security_id=_key, as_of=as_of))
+                    except Exception:
+                        pass
+                try:
+                    _collect(_inv_rows(_store.query_13f_holdings,
+                        entity_id=_eid, as_of=as_of))
+                except Exception:
+                    pass
+                for _key in _keys:
+                    _upper = str(_key).strip().upper()
+                    if not _upper or _upper == str(_canonical or "").strip().upper():
+                        continue
+                    try:
+                        _collect(_inv_rows(_store.query_13f_holdings,
+                            security=_upper, as_of=as_of))
+                    except Exception:
+                        pass
+                for _row in _held:
+                    _emit("holding_manager", "verified", {
+                        "from_entity_id": _row.get("manager_cik"),
+                        "to_entity_id": _row.get("issuer_cik")
+                        or _row.get("cusip") or _row.get("security"),
+                        "accession": _row.get("accession"),
+                        "document_name": _row.get("document_name"),
+                        "known_at": _row.get("known_at")})
+                for _mcik in sorted({str(_row.get("manager_cik") or "").strip()
+                                     for _row in _held} - {""}):
+                    try:
+                        managers.append(verify_sec_entity(_mcik, as_of=as_of))
+                    except Exception as exc:
+                        warnings.append(f"manager {_mcik} hydration failed: {exc}")
+                if _held and not _inv_open[0]:
+                    _record("local-13f-inverse", "complete", ciks=ciks, cik=cik,
+                            found=len(_held), managers=len(managers),
+                            pages=_inv_pages[0])
+                elif _held:
+                    _record("local-13f-inverse", "partial", ciks=ciks, cik=cik,
+                            found=len(_held), pages=_inv_pages[0],
+                            reason="retrieval capped before exhaustion")
+                else:
+                    _record("local-13f-inverse", "partial", ciks=ciks, cik=cik,
+                            pages=_inv_pages[0],
+                            reason="no mapped CUSIP/ISIN/security ID holdings for issuer")
+                    warnings.append(
+                        f"no 13F holdings map to issuer {cik}; "
+                        "unmapped keyspace stays partial (never globally scanned)")
+        except Exception as exc:
+            _record("local-13f-inverse", "failed", ciks=ciks, error=str(exc))
+            errors.append(f"local-13f-inverse failed: {exc}")
+    else:
+        _record("local-13f-inverse", "not_applicable", reason="no cik context")
 
     # Route 2: verified/candidate workflow rows keep their stored status.
     try:
@@ -2205,9 +2756,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
                 ev_all.extend(_store.query_relationship_evidence(
                     None, entity_id=eid, as_of=as_of, limit=limit,
                     root=data_root))
-        else:
-            ev_all.extend(_store.query_relationship_evidence(
-                None, as_of=as_of, limit=limit, root=data_root))
+        # ponytail: no unfiltered fallback; without an entity filter there is no query
         by_rel: dict = {}
         for ev in ev_all:
             if ev.get("relationship_id"):
@@ -2318,7 +2867,9 @@ def search_sec_relationships(entity: object, relationship_types=None,
             "relationship_types": tuple(relationship_types or ()),
             "as_of": as_of, "groups": groups, "typed": typed,
             "relationships": workflow, "mentions": mentions,
-            "attempts": attempts, "warnings": warnings, "errors": errors}
+            "managers": managers,
+            "attempts": attempts, "warnings": warnings, "errors": errors,
+            "candidates": tuple(_candidates), "resolution": _resolution}
 
 
 # --- Phase 9: walk-forward relationship-type evaluation + ontology state ---

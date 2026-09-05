@@ -11,14 +11,25 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-type Json = Record<string, unknown>;
+export type Json = Record<string, unknown>;
+
+export function toolCallRequest(runId: string, name: string, params: Json): Json {
+	return { op: "tool_call", name, arguments: params, run_id: runId };
+}
+
+export function bridgeModelText(bridge: Json): string {
+	const result = bridge.result;
+	if (result && typeof result === "object" && typeof (result as Json).content === "string") {
+		return (result as Json).content as string;
+	}
+	return JSON.stringify(bridge);
+}
 
 // Absolute bridge paths derived from this file's location: Pi's extension
 // host cwd is not the repo root, so relative venv/scripts paths ENOENT.
 const ROOT = new URL("../..", import.meta.url).pathname;
 const BRIDGE_CMD = `${ROOT}/venv/bin/python`;
 const BRIDGE_ARGS = [`${ROOT}/scripts/pi_bridge.py`];
-const SESSION_ID = "pi";
 const TOOL_TIMEOUT_MS = 120_000;
 
 // Custom tool cards (step 9). Tools without an entry use Pi's default raw
@@ -43,19 +54,21 @@ function short(value: unknown, max = 80): string {
 
 // Shallow PIT/source scan: payload shapes vary per tool, so look at the
 // top level plus one nesting level instead of per-tool parsers.
-function payloadMeta(details: unknown): { pit: string; sources: string } {
+export function payloadMeta(details: unknown): { pit: string; sources: string } {
 	let pit = "";
 	let sources = "";
 	// Bridge payload; narrow once, then read known keys.
 	const top: Json = details && typeof details === "object" ? (details as Json) : {};
 	const inner: Json =
 		top.result && typeof top.result === "object" ? (top.result as Json) : top;
-	for (const obj of [inner, top]) {
+	const meta: Json =
+		inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
+	for (const obj of [meta, inner, top]) {
 		if (!pit && (typeof obj.as_of === "string" || typeof obj.known_at === "string")) {
 			pit = String(obj.as_of ?? obj.known_at);
 		}
-		if (!sources && (obj.source_names ?? obj.sources)) {
-			sources = short(obj.source_names ?? obj.sources);
+		if (!sources && (obj.source_names ?? obj.sources ?? obj.source)) {
+			sources = short(obj.source_names ?? obj.sources ?? obj.source);
 		}
 	}
 	return { pit, sources };
@@ -219,16 +232,11 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 			parameters: Type.Unsafe(fn.parameters),
 			async execute(toolCallId, params) {
 				toolCalls++;
-				const result = await callBridge({
-					op: "tool_call",
-					name: fn.name,
-					arguments: params,
-					session_id: SESSION_ID,
-				});
+				const bridge = await callBridge(toolCallRequest(runId, fn.name, params as Json));
 				refreshStatus(lastCtx);
 				return {
-					content: [{ type: "text", text: JSON.stringify(result) }],
-					details: result,
+					content: [{ type: "text", text: bridgeModelText(bridge) }],
+					details: bridge,
 				};
 			},
 			renderCall: cardSpec
@@ -272,7 +280,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 	}
 
 	// --- prompt replacement (coding prompt -> research prompt) ---
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (event) => {
+		pendingQuestion = event.prompt;
 		if (bridgeDown)
 			return {
 				systemPrompt:
@@ -295,6 +304,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 	// --- lifecycle forwarding (step 8) + status pane (step 9) ---
 	// run_id per agent turn-chain, monotonic sequence; drops if bridge down.
 	let runId = crypto.randomUUID();
+	let pendingQuestion = "";
 	let seq = 0;
 	let turns = 0;
 	let toolCalls = 0;
@@ -332,10 +342,11 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", () => {
 		runId = crypto.randomUUID();
 		seq = 0;
-		emit({ event: "agent_start" });
+		emit({ event: "agent_start", question: pendingQuestion });
+		pendingQuestion = "";
 	});
 	pi.on("tool_execution_start", (event) => {
-		emit({ event: "tool_execution_start", tool: event.toolName, tool_call_id: event.toolCallId });
+		emit({ event: "tool_execution_start", tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args });
 	});
 	pi.on("tool_execution_end", (event, ctx) => {
 		lastCtx = ctx;
@@ -349,16 +360,32 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event, ctx) => {
 		lastCtx = ctx;
-		const message: unknown = event.message;
-		const role =
-			message && typeof message === "object" && "role" in message && typeof message.role === "string"
-				? message.role
-				: "";
+		const message = event.message as unknown as Json;
+		if (message.role !== "assistant") return;
+		const blocks = Array.isArray(message.content) ? (message.content as Json[]) : [];
+		const usage = (message.usage as unknown as Json) ?? {};
+		const cost = (usage.cost as unknown as Json) ?? {};
+		const num = (v: unknown) => (typeof v === "number" ? v : 0);
+		const input = num(usage.input);
+		const cacheRead = num(usage.cacheRead);
+		const cacheWrite = num(usage.cacheWrite);
 		emit({
 			event: "message_end",
-			role,
+			role: "assistant",
 			turn: turns,
-			model: ctx.model?.id ?? undefined,
+			model: typeof message.model === "string" && message.model ? message.model : (ctx.model?.id ?? undefined),
+			finish_reason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+			started_at: typeof message.timestamp === "number" ? new Date(message.timestamp).toISOString() : new Date().toISOString(),
+			completed_at: new Date().toISOString(),
+			tool_call_count: blocks.filter((b) => b.type === "toolCall").length,
+			usage: {
+				prompt_tokens: input + cacheRead + cacheWrite,
+				completion_tokens: num(usage.output),
+				reasoning_tokens: num(usage.reasoning),
+				prompt_tokens_details: { cached_tokens: cacheRead },
+				total_tokens: num(usage.totalTokens),
+				cost: num(cost.total),
+			},
 		});
 	});
 	pi.on("turn_end", (event, ctx) => {
@@ -367,7 +394,15 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 		emit({ event: "turn_end", turn: event.turnIndex });
 		refreshStatus(ctx);
 	});
-	pi.on("agent_end", () => {
-		emit({ event: "agent_end", status: "completed" });
+	pi.on("agent_end", (event) => {
+		const messages = Array.isArray(event.messages) ? (event.messages as unknown as Json[]) : [];
+		const assistants = messages.filter((m) => m.role === "assistant");
+		const last = assistants[assistants.length - 1] as Json | undefined;
+		const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
+		const answer = blocks
+			.filter((b) => b.type === "text" && typeof b.text === "string")
+			.map((b) => b.text as string)
+			.join("\n");
+		emit({ event: "agent_end", status: "completed", answer });
 	});
 }

@@ -347,7 +347,8 @@ DATASETS["sec_ingestion_coverage"] = Dataset(
         ("accession_count", INTEGER), ("last_key", TEXT),
         ("parser_version", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
     )),
-    unique_keys=("source", "form", "date_partition", "parser_version"),
+    # ponytail: status in key so partial->complete upgrades append instead of deduping away
+    unique_keys=("source", "form", "date_partition", "parser_version", "status"),
     partition_field="coverage_date",
 )
 DATASETS["sec_beneficial_ownership"] = Dataset(

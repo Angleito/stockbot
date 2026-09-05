@@ -1,6 +1,11 @@
 """edgartools-only access. `edgar` is imported lazily so module import
 has no side effects and never touches the network."""
 
+
+class SECClientError(Exception):
+    """SEC EDGAR transport/parse failure; never a no-data answer."""
+
+
 _initialized = False
 
 
@@ -324,9 +329,9 @@ def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, obj
 
     Unlike the ticker-company index behind :func:`find_sec_company`, this
     dataset includes no-ticker registrants. Matching is a deterministic
-    normalized substring scan (exact, then prefix, then substring); network or
-    parse failure returns ``[]`` and never raises. ``limit``/blank violations
-    raise ``ValueError`` like the other discovery adapters.
+    normalized substring scan (exact, then prefix, then substring).
+    Fetch failure raises ``SECClientError`` (never a zero-result assertion);
+    ``limit``/blank violations raise ``ValueError`` like the other adapters.
     """
     if not isinstance(query, str) or not query.strip():
         raise ValueError(f"invalid query: {query!r}")
@@ -337,8 +342,8 @@ def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, obj
         from edgar.entity.tickers import get_cik_lookup_data
 
         frame = get_cik_lookup_data()
-    except Exception:
-        return []
+    except Exception as exc:
+        raise SECClientError(f"cik lookup fetch failed for {query!r}: {exc}") from exc
     try:
         import re
         import unicodedata
@@ -367,8 +372,8 @@ def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, obj
             else:
                 continue
             rows.append((rank, name, cik))
-    except Exception:
-        return []
+    except Exception as exc:
+        raise SECClientError(f"cik lookup parse failed for {query!r}: {exc}") from exc
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
     return [
         {"name": name, "cik": cik, "tickers": [], "exchange": None}
@@ -403,8 +408,9 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
 
     Returns current name, ``formerNames`` (with SEC ``from``/``to`` dates),
     tickers, SIC, state of incorporation, addresses, and a light filing
-    history. Unknown CIK, network, or parse failure returns ``None`` and
-    never raises.
+    history. Unknown CIK (definitive SEC not-found/empty) returns ``None``;
+    transport or schema failure raises ``SECClientError`` and never becomes
+    a zero-data assertion.
     """
     try:
         cik_int = int(str(cik).strip())
@@ -415,8 +421,11 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
         from edgar.entity.submissions import get_entity_submissions
 
         data = get_entity_submissions(cik_int)
-    except Exception:
-        return None
+    except Exception as exc:
+        if "404" in str(exc):
+            return None
+        raise SECClientError(
+            f"submissions fetch failed for CIK {cik!r}: {exc}") from exc
     if data is None:
         return None
     try:
@@ -472,8 +481,9 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
             "former_names": former,
             "filing_history": history,
         }
-    except Exception:
-        return None
+    except Exception as exc:
+        raise SECClientError(
+            f"submissions parse failed for CIK {cik!r}: {exc}") from exc
 
 
 def get_global_filings(year=None, quarter=None, form=None, filing_date=None,
