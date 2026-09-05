@@ -60,13 +60,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "find_sec_company",
-            "description": "Maps an issuer name to candidate CIKs with tickers when known. Tickers are optional and usually empty for private issuers. Candidates require identity verification before list_sec_filings.",
+            "name": "find_sec_entities",
+            "description": "Resolves a company name, ticker, or CIK to verified SEC entity candidates (CIK, tickers, verification status), including no-ticker registrants and former names. Ties and fuzzy-only matches stay ambiguous; verify identity before list_sec_filings.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "limit": {"type": "integer"}
+                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; former names apply only within their known/valid interval."},
+                    "exhaustive": {"type": "boolean", "description": "Fan out over all entity routes (default true)."}
                 },
                 "required": ["query"]
             }
@@ -76,17 +77,26 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "Searches EDGAR filing text for company, person, or domain terms. Returns CIK plus accession numbers for existing retrieval via get_sec_filing, list_sec_documents, or get_sec_document.",
+            "description": "Exhaustive EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes. Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "forms": {"type": "array", "items": {"type": "string"}},
-                    "start_date": {"type": "string"},
-                    "end_date": {"type": "string"},
-                    "limit": {"type": "integer"}
+                "query": {"type": "string"},
+                "ticker": {"type": "string"},
+                "cik": {"type": "string"},
+                "company_name": {"type": "string"},
+                "person_name": {"type": "string"},
+                "domain": {"type": "string"},
+                "security_identifier": {"type": "string", "description": "Ticker, CUSIP, ISIN, or class title; never treated as issuer identity."},
+                "accession_no": {"type": "string"},
+                "forms": {"type": "array", "items": {"type": "string"}},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; records known after it are excluded."},
+                "exhaustive": {"type": "boolean", "description": "Fan out over all routes (default true)."},
+                "limit": {"type": "integer"}
                 },
-                "required": ["query"]
+                "required": []
             }
         }
     },
@@ -94,7 +104,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. If only a company, person, or domain is known, call find_sec_company or search_sec_filings first, verify identity, then call with identifier.",
+            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. If only a company, person, or domain is known, call find_sec_entities or search_sec_filings first, verify identity, then call with identifier.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -112,11 +122,45 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_sec_filing",
-            "description": "Returns one filing's record (form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number.",
+            "name": "search_sec_relationships",
+            "description": "Ownership and transaction relationships for an entity (CIK, ticker, or entity id), both directions: 13D/G beneficial owners, 13F manager holdings (either direction), insider issuer/owner links, transaction filer/target/acquirer, offering filer/registrant, plus verified workflow links and observed mentions. Mentions never flatten into verified links; transaction status stays unknown without closing evidence.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}},
+                "properties": {
+                    "entity": {"type": "string", "description": "CIK, ticker, entity id, or candidate dict."},
+                    "relationship_types": {"type": "array", "items": {"type": "string"}, "description": "Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager)."},
+                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD."},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["entity"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sec_search_coverage",
+            "description": "Reads persisted SEC ingestion coverage and backfill jobs only (never infers completeness from rows). Use to check whether a form/source/date partition is covered or still queued/running/failed, or to revisit one search's ledger.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "form": {"type": "string"},
+                    "search_id": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sec_filing",
+            "description": "Returns one filing's record (filer, subject when known, form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number.",
+            "parameters": {
+                "type": "object",
+                "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
                 "required": ["accession_no"]
             }
         }
@@ -128,7 +172,7 @@ TOOLS = [
             "description": "Lists the documents and exhibits attached to one filing by accession number.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}},
+                "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
                 "required": ["accession_no"]
             }
         }
@@ -140,7 +184,7 @@ TOOLS = [
             "description": "Returns the text of one filing document (default: primary document) by accession number. Load only the document relevant to the question, never full history.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}},
+                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
                 "required": ["accession_no"]
             }
         }
@@ -1459,8 +1503,10 @@ def _wrap_list(identifier, records, key: str) -> dict:
 # search_tools catalog: name -> (domain, keyword tags). New tools add one
 # line here; prompts never change.
 _SEC_TOOL_TAGS = {
-    "find_sec_company": ("filings", "find company issuer entity name CIK private registrant candidate"),
-    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain search forms accession"),
+    "find_sec_entities": ("filings", "entity CIK ticker company issuer verify identity private no-ticker former name ambiguous exhaustive"),
+    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain security mention filer coverage search forms accession exhaustive relationship backfill"),
+    "search_sec_relationships": ("ownership", "relationships beneficial owner 13D 13G holding manager 13F insider issuer verified mention inverse transaction offering party"),
+    "get_sec_search_coverage": ("filings", "coverage backfill jobs ledger partitions complete partial queued failed search persistence"),
     "list_sec_filings": ("filings", "list filings forms 10-K 10-Q 8-K discovery accession"),
     "get_sec_filing": ("filings", "filing record accession metadata filed known amendment"),
     "list_sec_documents": ("filings", "documents exhibits attachments list accession"),
@@ -1479,9 +1525,9 @@ _SEC_TOOL_TAGS = {
 }
 
 _SEC_DOMAIN_PACKS = {
-    "filings": ["find_sec_company", "search_sec_filings", "list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
+    "filings": ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage", "list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
     "events": ["get_material_events"],
-    "ownership": ["get_beneficial_ownership", "get_ownership_changes"],
+    "ownership": ["search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"],
     "insider": ["get_insider_activity", "get_planned_insider_sales"],
     "offerings": ["get_offering_history", "get_dilution_profile"],
     "governance": ["get_governance_events"],
@@ -1509,6 +1555,114 @@ def _search_tools(args: dict, model: str) -> dict:
         if tokens and all(token in haystack for token in tokens):
             matches.append(tool)
     return {"query": args.get("query"), "count": len(matches), "schemas": matches}
+
+
+def _search_envelope(result) -> dict:
+    """SECSearchResult -> model packet: roles, ledger, PIT, jobs, evidence."""
+    data = result.to_dict()
+    cov = data.get("coverage") or {}
+    attempts = data.get("attempts") or []
+    hits = [
+        {**hit, "match_role": "mention",
+         "subject_cik": None, "subject_name": None}
+        for hit in data.get("text_hits") or []
+    ]
+    bases = [a.get("pit_basis") for a in attempts if a.get("pit_basis")]
+    request = data.get("request") or {}
+    return {
+        "subject": request.get("query") or request.get("company_name"),
+        "query": request.get("query"),
+        "search_id": data.get("search_id"),
+        "request": request,
+        "count": len(hits),
+        "entities": data.get("entities"),
+        "filings": data.get("filings"),
+        "parties": data.get("relationships"),
+        "hits": hits,
+        "coverage": cov,
+        "attempts": attempts,
+        "counts": {
+            "results_reported": cov.get("results_reported", 0),
+            "results_retrieved": cov.get("results_retrieved", 0),
+            "pages": cov.get("pages", 0),
+            "entities": len(data.get("entities") or []),
+            "filings": len(data.get("filings") or []),
+            "documents": len(data.get("documents") or []),
+        },
+        "pit_basis": max(set(bases), key=bases.count) if bases else None,
+        "warnings": data.get("warnings"),
+        "errors": data.get("errors"),
+        "backfill_jobs": list(cov.get("pending_backfill_jobs") or []),
+        "evidence_packet_ids": data.get("evidence_packet_ids"),
+        "source": "SEC EDGAR",
+    }
+
+
+def _find_sec_entities(args: dict) -> dict:
+    """Entity discovery -> envelope with candidate verification statuses."""
+    return _search_envelope(sec.find_sec_entities(
+        args["query"], as_of=args.get("as_of"),
+        exhaustive=args.get("exhaustive", True),
+    ))
+
+
+def _sec_search_result(args: dict) -> dict:
+    """Exhaustive discovery search -> envelope with jobs + evidence IDs."""
+    if not any(args.get(key) for key in (
+            "query", "ticker", "cik", "company_name", "person_name",
+            "domain", "accession_no", "security_identifier")):
+        raise ValueError(
+            "search_sec_filings needs one of: query, ticker, cik, "
+            "company_name, person_name, domain, accession_no, "
+            "security_identifier")
+    request = sec.SECSearchRequest(
+        query=args.get("query"), ticker=args.get("ticker"), cik=args.get("cik"),
+        company_name=args.get("company_name"),
+        person_name=args.get("person_name"), domain=args.get("domain"),
+        accession_no=args.get("accession_no"),
+        security_identifier=args.get("security_identifier"),
+        forms=tuple(args["forms"]) if args.get("forms") else None,
+        start_date=args.get("start_date"), end_date=args.get("end_date"),
+        as_of=args.get("as_of"),
+        exhaustive=args.get("exhaustive", True),
+        max_results=args.get("limit", 20),
+    )
+    return _search_envelope(sec.SECDiscoveryService().search(request))
+
+
+def _sec_relationships_result(args: dict) -> dict:
+    """Typed/workflow/mention relationship fan-out, grouped by type/status."""
+    result = sec.search_sec_relationships(
+        args["entity"], relationship_types=args.get("relationship_types"),
+        as_of=args.get("as_of"), limit=args.get("limit", 50),
+    )
+    found = len(result.get("typed") or []) + len(
+        result.get("relationships") or []) + len(result.get("mentions") or [])
+    errors = result.get("errors") or []
+    return {
+        "subject": args.get("entity"),
+        "entity": result.get("entity"),
+        "ciks": list(result.get("ciks") or []),
+        "request": {"entity": args.get("entity"),
+                    "relationship_types": args.get("relationship_types"),
+                    "as_of": args.get("as_of")},
+        "count": found,
+        "groups": result.get("groups"),
+        "parties": result.get("typed"),
+        "relationships": result.get("relationships"),
+        "mentions": result.get("mentions"),
+        "coverage": {"status": "failed" if errors and not found else (
+            "partial" if errors or result.get("warnings") else "complete")},
+        "attempts": result.get("attempts"),
+        "counts": {"typed": len(result.get("typed") or []),
+                   "workflow": len(result.get("relationships") or []),
+                   "mentions": len(result.get("mentions") or [])},
+        "pit_basis": "known_at" if args.get("as_of") else None,
+        "warnings": result.get("warnings"),
+        "errors": errors,
+        "backfill_jobs": [],
+        "source": "SEC EDGAR",
+    }
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
 _DIRECT_HANDLERS = {
@@ -1516,17 +1670,13 @@ _DIRECT_HANDLERS = {
     "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
         args["ticker"], args["metric"], as_of=args.get("as_of")
     ),
-    "find_sec_company": lambda args, model: _wrap_list(
-        args.get("query"), sec.find_sec_company(
-            args["query"], limit=args.get("limit", 10),
-        ), "matches",
+    "find_sec_entities": lambda args, model: _find_sec_entities(args),
+    "search_sec_relationships": lambda args, model: _sec_relationships_result(args),
+    "get_sec_search_coverage": lambda args, model: sec.get_sec_search_coverage(
+        source=args.get("source"), form=args.get("form"),
+        search_id=args.get("search_id"), limit=args.get("limit", 200),
     ),
-    "search_sec_filings": lambda args, model: _wrap_list(
-        args.get("query"), sec.search_sec_filings(
-            args["query"], forms=args.get("forms"), start_date=args.get("start_date"),
-            end_date=args.get("end_date"), limit=args.get("limit", 20),
-        ), "hits",
-    ),
+    "search_sec_filings": lambda args, model: _sec_search_result(args),
     "list_sec_filings": lambda args, model: _wrap_list(
         args.get("identifier"), sec.list_sec_filings(
             args["identifier"], forms=args.get("forms"), start_date=args.get("start_date"),
@@ -1534,12 +1684,14 @@ _DIRECT_HANDLERS = {
             limit=args.get("limit", 50),
         ), "filings",
     ),
-    "get_sec_filing": lambda args, model: sec.get_sec_filing(args["accession_no"]).to_dict(),
+    "get_sec_filing": lambda args, model: sec.get_sec_filing(
+        args["accession_no"], as_of=args.get("as_of")).to_dict(),
     "list_sec_documents": lambda args, model: _wrap_list(
-        args.get("accession_no"), sec.list_sec_documents(args["accession_no"]), "documents",
+        args.get("accession_no"), sec.list_sec_documents(
+            args["accession_no"], as_of=args.get("as_of")), "documents",
     ),
     "get_sec_document": lambda args, model: sec.get_sec_document(
-        args["accession_no"], args.get("document_name"),
+        args["accession_no"], args.get("document_name"), as_of=args.get("as_of"),
     ),
     "diff_sec_filings": lambda args, model: sec.diff_filings(
         args["current_accession"], args["previous_accession"], section=args.get("section"),
@@ -1596,10 +1748,6 @@ _DIRECT_HANDLERS = {
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
         args["ticker"], args["statement_type"]
     ),
-    "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(
-        args["ticker"], args["concept"]
-    ),
-    "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(args["ticker"]),
     "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(args["ticker"]),
     "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(args["ticker"]),
     "get_obligations": lambda args, model: obligations.get_obligations(args["ticker"]),
@@ -1678,8 +1826,10 @@ _ROBINHOOD_HANDLERS = {
 TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
-    "find_sec_company": Capability.RESEARCH,
+    "find_sec_entities": Capability.RESEARCH,
     "search_sec_filings": Capability.RESEARCH,
+    "search_sec_relationships": Capability.RESEARCH,
+    "get_sec_search_coverage": Capability.RESEARCH,
     "list_sec_filings": Capability.RESEARCH,
     "get_sec_filing": Capability.RESEARCH,
     "list_sec_documents": Capability.RESEARCH,

@@ -1,6 +1,7 @@
-"""Pi-harness eval port (step 10): drive 3 eval_set.json cases via the bridge.
+"""Pi-harness eval port: drive eval_set.json cases via the bridge.
 
-Cases: 11 (short-interest), 5 (filing), 29 (valuation).
+Cases: 11 (short-interest), 5 (filing), 29 (valuation), 34 (inverse 13F),
+42-51 (exhaustive SEC discovery).
 
 Each case issues its tool sequence through `scripts/pi_bridge.py` tool_call
 ops (subprocess JSONL) and applies the case's own expected_behavior assertions
@@ -26,6 +27,22 @@ PLAN = {
     11: [("get_short_interest", {"ticker": "AAPL"})],
     5: [("list_sec_filings", {"identifier": "MSFT", "forms": ["10-Q"], "limit": 1})],
     29: [("get_valuation_metrics", {"ticker": "AAPL"})],
+    34: [("find_sec_entities", {"query": "META"}),
+         ("search_sec_relationships", {"entity": "1326801"})],
+    42: [("find_sec_entities", {"query": "Vanguard Group"})],
+    43: [("search_sec_filings", {"query": "Elon Musk", "limit": 5})],
+    44: [("search_sec_relationships", {"entity": "320193"})],
+    45: [("search_sec_relationships", {"entity": "1067983",
+                                      "relationship_types": ["holding_manager"]})],
+    46: [("search_sec_filings", {"query": "Apple Inc", "limit": 3})],
+    47: [("search_sec_filings", {"person_name": "Jane Doe", "limit": 5})],
+    48: [("search_sec_filings", {"domain": "example.com",
+                                "security_identifier": "037833100", "limit": 5})],
+    49: [("get_sec_search_coverage", {"form": "10-K"})],
+    50: [("search_sec_filings", {"query": "Apple buyback", "limit": 5,
+                                "as_of": "2020-01-01"})],
+    51: [("search_sec_relationships", {"entity": "320193",
+                                      "relationship_types": ["beneficial_owner"]})],
 }
 
 

@@ -19,8 +19,10 @@ TOOL_DOMAINS: dict[str, str] = {
     # SEC filing data.
     "get_fundamentals": "financial_research",
     "list_sec_filings": "financial_research",
-    "find_sec_company": "financial_research",
+    "find_sec_entities": "financial_research",
     "search_sec_filings": "financial_research",
+    "search_sec_relationships": "financial_research",
+    "get_sec_search_coverage": "financial_research",
     "get_sec_filing": "financial_research",
     "list_sec_documents": "financial_research",
     "get_sec_document": "financial_research",
