@@ -1,0 +1,39 @@
+"""True SEC entity discovery + exact accession resolution (Phase 2)."""
+
+from .service import (
+    BACKFILL_PRIORITY,
+    BACKFILL_SOURCE,
+    SECDiscoveryService,
+    build_evidence_packet,
+    drain_backfill_queue,
+    ensure_backfill_worker,
+    find_sec_entities,
+    get_sec_search_coverage,
+    normalize_accession_no,
+    normalize_name,
+    rank_hits,
+    resolve_sec_accession,
+    run_backfill_job,
+    search_sec_relationships,
+    stripped_name_key,
+    verify_sec_entity,
+)
+
+__all__ = [
+    "BACKFILL_PRIORITY",
+    "BACKFILL_SOURCE",
+    "SECDiscoveryService",
+    "build_evidence_packet",
+    "drain_backfill_queue",
+    "ensure_backfill_worker",
+    "find_sec_entities",
+    "get_sec_search_coverage",
+    "normalize_accession_no",
+    "normalize_name",
+    "rank_hits",
+    "resolve_sec_accession",
+    "run_backfill_job",
+    "search_sec_relationships",
+    "stripped_name_key",
+    "verify_sec_entity",
+]

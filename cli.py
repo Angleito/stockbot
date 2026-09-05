@@ -27,7 +27,8 @@ from app.storage.runs import (
 )
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
-_SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login")
+_SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
+                "backfill-sec", "resume-sec-backfill", "sec-coverage")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -216,6 +217,97 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
         for issue in evaluation.issues:
             print(f"    - {issue_to_prose(issue)}")
 
+def _cmd_backfill_sec(source: str | None, forms: list[str], from_date: str,
+                      to_date: str, batch_size: int,
+                      data_root: str | None) -> None:
+    """Enqueue bounded quarterly/form jobs for the range, then drain inline."""
+    from app.sec import store as sec_store
+    from app.sec.discovery.service import (
+        BACKFILL_SOURCE,
+        _quarter_dates,
+        _quarters_for_range,
+        drain_backfill_queue,
+    )
+    if not forms:
+        print("error: --form is required (e.g. --form 10-K)", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        quarters, _ = _quarters_for_range(from_date, to_date, cap=10_000)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not quarters:
+        print("no quarterly partitions in range "
+              "(before 1993 global indexes or current quarter only); "
+              "nothing to backfill")
+        return
+    ids = []
+    for form in forms:
+        for year, quarter in quarters:
+            qs, qe = _quarter_dates(year, quarter)
+            try:
+                ids.append(sec_store.enqueue_backfill_job(
+                    source or BACKFILL_SOURCE, form, qs, qe,
+                    batch_size=batch_size, root=data_root))
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                raise SystemExit(2)
+    print(f"queued {len(ids)} job(s): {ids}")
+    summary = drain_backfill_queue(data_root)
+    print(json.dumps({"jobs": ids, **summary}, indent=2))
+
+
+def _cmd_resume_sec_backfill(job_id: str | None,
+                             data_root: str | None) -> None:
+    """Requeue one (or all) interrupted jobs and drain the queue inline."""
+    from app.sec import store as sec_store
+    from app.sec.discovery.service import drain_backfill_queue
+    if job_id:
+        if sec_store.get_job(job_id, root=data_root) is None:
+            print(f"error: no backfill job {job_id!r}", file=sys.stderr)
+            raise SystemExit(1)
+        sec_store.requeue_job(job_id, root=data_root)
+        print(f"requeued {job_id}")
+    else:
+        failed = sec_store.list_jobs(status="failed", root=data_root)
+        for job in failed:
+            sec_store.requeue_job(job["id"], root=data_root)
+        print(f"requeued {len(failed)} failed job(s)")
+    print(json.dumps(drain_backfill_queue(data_root), indent=2))
+
+
+def _cmd_sec_coverage(source: str | None, form: str | None,
+                      from_date: str | None, to_date: str | None,
+                      data_root: str | None) -> None:
+    """Show ingestion coverage rows plus pending backfill jobs."""
+    from app.sec import store as sec_store
+    for label, value in (("from", from_date), ("to", to_date)):
+        if value is not None:
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                print(f"error: --{label} must be YYYY-MM-DD, got {value!r}",
+                      file=sys.stderr)
+                raise SystemExit(2)
+    rows = sec_store.query_coverage(source=source, form=form, root=data_root)
+    if from_date:
+        rows = [r for r in rows if (r.get("coverage_date") or "")[:10] >= from_date]
+    if to_date:
+        rows = [r for r in rows if (r.get("coverage_date") or "")[:10] <= to_date]
+    for row in rows:
+        print(f"{row.get('source')} {row.get('form')} "
+              f"{row.get('date_partition')} {row.get('status')} "
+              f"count={row.get('accession_count')} last={row.get('last_key')}")
+    if not rows:
+        print("no coverage rows")
+    pending = [j for j in sec_store.list_jobs(root=data_root)
+               if j["status"] in ("queued", "running", "failed")]
+    if pending:
+        print(f"pending jobs: {[j['id'] for j in pending]}")
+    else:
+        print("no pending backfill jobs")
+
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
@@ -248,6 +340,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"port to listen on (default {DEFAULT_LOG_SERVER_PORT})",
     )
     subparsers.add_parser("robinhood-login", help="authorize Robinhood OAuth deliberately (opens browser)")
+    backfill_parser = subparsers.add_parser(
+        "backfill-sec",
+        help="enqueue bounded SEC quarterly/form backfill jobs, then drain inline (dates required; no all-history default)")
+    backfill_parser.add_argument("--source", default="sec-global", help="coverage source (default sec-global)")
+    backfill_parser.add_argument("--form", action="append", default=[], help="SEC form, e.g. 10-K (repeatable; required)")
+    backfill_parser.add_argument("--from", dest="from_date", required=True, help="range start YYYY-MM-DD (required)")
+    backfill_parser.add_argument("--to", dest="to_date", required=True, help="range end YYYY-MM-DD (required)")
+    backfill_parser.add_argument("--batch-size", type=int, default=50, help="filings per job batch (default 50)")
+    backfill_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
+    resume_parser = subparsers.add_parser(
+        "resume-sec-backfill",
+        help="requeue interrupted SEC backfill jobs and drain the queue inline")
+    resume_parser.add_argument("job_id", nargs="?", default=None, help="one job ID to resume (default: all queued/failed)")
+    resume_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
+    coverage_parser = subparsers.add_parser(
+        "sec-coverage", help="show SEC ingestion coverage plus pending backfill jobs")
+    coverage_parser.add_argument("--source", default=None, help="filter by coverage source")
+    coverage_parser.add_argument("--form", default=None, help="filter by SEC form")
+    coverage_parser.add_argument("--from", dest="from_date", default=None, help="coverage on/after YYYY-MM-DD")
+    coverage_parser.add_argument("--to", dest="to_date", default=None, help="coverage on/before YYYY-MM-DD")
+    coverage_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     return parser
 
 
@@ -291,10 +404,19 @@ def main() -> None:
         _cmd_evaluate_mandate(mandate_path, data_root)
     elif args.command == "log-server":
         _cmd_log_server(args.port)
+    elif args.command == "backfill-sec":
+        _cmd_backfill_sec(args.source, args.form, args.from_date, args.to_date,
+                          args.batch_size, args.data_root or None)
+    elif args.command == "resume-sec-backfill":
+        _cmd_resume_sec_backfill(args.job_id, args.data_root or None)
+    elif args.command == "sec-coverage":
+        _cmd_sec_coverage(args.source, args.form, args.from_date, args.to_date,
+                          args.data_root or None)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
-            "refresh-obligations, evaluate-mandate, log-server, robinhood-login)"
+            "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
+            "backfill-sec, resume-sec-backfill, sec-coverage)"
         )
 
 

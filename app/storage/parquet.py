@@ -47,6 +47,8 @@ DATASETS: dict[str, Dataset] = {
             ("entity_id", TEXT), ("name", TEXT), ("entity_type", TEXT),
             ("sic", TEXT), ("source", TEXT), ("known_at", TEXT),
             ("retrieved_at", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+            ("cik", TEXT), ("accession", TEXT), ("document_name", TEXT),
+            ("source_url", TEXT), ("raw_archive_path", TEXT),
         )),
         unique_keys=("entity_id",),
     ),
@@ -57,6 +59,7 @@ DATASETS: dict[str, Dataset] = {
             ("security_id", TEXT), ("source", TEXT), ("valid_from", TEXT),
             ("valid_to", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
             ("content_hash", TEXT), ("parser_version", TEXT),
+            ("cik", TEXT), ("accession", TEXT), ("source_url", TEXT),
         )),
         unique_keys=("alias_type", "alias_value", "entity_id", "source", "valid_from"),
     ),
@@ -67,6 +70,9 @@ DATASETS: dict[str, Dataset] = {
             ("ticker", TEXT), ("exchange", TEXT), ("source", TEXT),
             ("known_at", TEXT), ("retrieved_at", TEXT), ("content_hash", TEXT),
             ("parser_version", TEXT),
+            ("cik", TEXT), ("accession", TEXT), ("source_url", TEXT),
+            ("raw_archive_path", TEXT), ("cusip", TEXT), ("isin", TEXT),
+            ("class_title", TEXT),
         )),
         unique_keys=("security_id",),
     ),
@@ -77,6 +83,10 @@ DATASETS: dict[str, Dataset] = {
             ("source_url", TEXT), ("accession", TEXT), ("sha256", TEXT),
             ("retrieved_at", TEXT), ("published_at", TEXT), ("known_at", TEXT),
             ("content_hash", TEXT), ("parser_version", TEXT),
+            ("document_name", TEXT), ("file_type", TEXT), ("file_description", TEXT),
+            ("location", TEXT), ("filer_cik", TEXT), ("filer_name", TEXT),
+            ("form", TEXT), ("filed_at", TEXT), ("accepted_at", TEXT),
+            ("raw_archive_path", TEXT),
         )),
         unique_keys=("doc_id",),
     ),
@@ -153,8 +163,9 @@ DATASETS: dict[str, Dataset] = {
             ("pipeline", TEXT), ("source", TEXT), ("key", TEXT),
             ("payload_hash", TEXT), ("status", TEXT), ("record_count", INTEGER),
             ("started_at", TEXT), ("finished_at", TEXT), ("parser_version", TEXT),
+            ("last_key", TEXT), ("error", TEXT), ("totals_json", TEXT),
         )),
-        unique_keys=("pipeline", "source", "key", "payload_hash"),
+        unique_keys=("pipeline", "source", "key", "payload_hash", "status"),
     ),
     "portfolio_snapshots": Dataset(
         name="portfolio_snapshots",
@@ -243,15 +254,222 @@ DATASETS["sec_filings"] = Dataset(
     name="sec_filings",
     schema=pa.schema(_fields(
         ("accession", TEXT), ("form", TEXT), ("cik", TEXT), ("company", TEXT),
+        ("filer_cik", TEXT), ("filer_name", TEXT),
+        ("subject_cik", TEXT), ("subject_name", TEXT),
         ("filed_at", TEXT), ("accepted_at", TEXT), ("known_at", TEXT),
         ("report_period", TEXT), ("primary_document", TEXT),
         ("is_amendment", pa.bool_()), ("amendment_of", TEXT),
         ("issuer_cik", TEXT), ("source_url", TEXT),
         ("raw_submission_path", TEXT), ("raw_primary_path", TEXT),
         ("retrieved_at", TEXT), ("content_hash", TEXT), ("parser_version", TEXT),
+        ("document_name", TEXT), ("document_location", TEXT),
+        ("raw_archive_path", TEXT),
     )),
     unique_keys=("accession",),
     partition_field="filed_at",
+)
+DATASETS["filing_parties"] = Dataset(
+    name="filing_parties",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("role", TEXT), ("entity_id", TEXT),
+        ("cik", TEXT), ("name", TEXT), ("source", TEXT),
+        ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
+        ("source_url", TEXT), ("raw_archive_path", TEXT),
+        ("document_name", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "role", "entity_id", "cik", "name"),
+    partition_field="known_at",
+)
+DATASETS["document_text"] = Dataset(
+    name="document_text",
+    schema=pa.schema(_fields(
+        ("doc_id", TEXT), ("content_hash", TEXT), ("accession", TEXT),
+        ("document_name", TEXT), ("text", TEXT), ("source_url", TEXT),
+        ("raw_archive_path", TEXT), ("location", TEXT), ("file_type", TEXT),
+        ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("doc_id", "content_hash"),
+    partition_field="filed_at",
+)
+DATASETS["sec_searches"] = Dataset(
+    name="sec_searches",
+    schema=pa.schema(_fields(
+        ("search_id", TEXT), ("request_json", TEXT), ("coverage_status", TEXT),
+        ("sources_attempted_json", TEXT), ("sources_completed_json", TEXT),
+        ("sources_failed_json", TEXT), ("results_reported", INTEGER),
+        ("results_retrieved", INTEGER), ("pages", INTEGER),
+        ("date_coverage", TEXT), ("forms_covered_json", TEXT),
+        ("pending_jobs_json", TEXT), ("warnings_json", TEXT),
+        ("errors_json", TEXT), ("evidence_packet_ids_json", TEXT),
+        ("dedup_counts_json", TEXT), ("retrieved_at", TEXT),
+        ("known_at", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("search_id",),
+    partition_field="retrieved_at",
+)
+DATASETS["sec_search_attempts"] = Dataset(
+    name="sec_search_attempts",
+    schema=pa.schema(_fields(
+        ("attempt_id", TEXT), ("search_id", TEXT), ("backend", TEXT),
+        ("query", TEXT), ("filters_json", TEXT), ("status", TEXT),
+        ("results_reported", INTEGER), ("results_retrieved", INTEGER),
+        ("pages_retrieved", INTEGER), ("truncated", pa.bool_()),
+        ("source_limit", TEXT), ("pit_basis", TEXT), ("error_type", TEXT),
+        ("error_message", TEXT), ("started_at", TEXT), ("completed_at", TEXT),
+        ("retrieved_at", TEXT),
+    )),
+    unique_keys=("attempt_id",),
+    partition_field="retrieved_at",
+)
+DATASETS["sec_text_hits"] = Dataset(
+    name="sec_text_hits",
+    schema=pa.schema(_fields(
+        ("hit_id", TEXT), ("search_id", TEXT), ("attempt_id", TEXT),
+        ("query", TEXT), ("accession", TEXT), ("filer_cik", TEXT),
+        ("filer_name", TEXT), ("form", TEXT), ("filed_at", TEXT),
+        ("matched_document", TEXT), ("file_type", TEXT),
+        ("file_description", TEXT), ("items_json", TEXT), ("sic", TEXT),
+        ("location", TEXT), ("state", TEXT), ("inc_state", TEXT),
+        ("score", DOUBLE), ("source_url", TEXT), ("page", INTEGER),
+        ("known_at", TEXT), ("retrieved_at", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT), ("raw_archive_path", TEXT),
+    )),
+    unique_keys=("search_id", "query", "accession", "matched_document"),
+    partition_field="filed_at",
+)
+DATASETS["sec_ingestion_coverage"] = Dataset(
+    name="sec_ingestion_coverage",
+    schema=pa.schema(_fields(
+        ("source", TEXT), ("form", TEXT), ("family", TEXT),
+        ("date_partition", TEXT), ("coverage_date", TEXT), ("status", TEXT),
+        ("accession_count", INTEGER), ("last_key", TEXT),
+        ("parser_version", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
+    )),
+    unique_keys=("source", "form", "date_partition", "parser_version"),
+    partition_field="coverage_date",
+)
+DATASETS["sec_beneficial_ownership"] = Dataset(
+    name="sec_beneficial_ownership",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("document_name", TEXT), ("subject_cik", TEXT),
+        ("subject_name", TEXT), ("filer_cik", TEXT), ("filer_name", TEXT),
+        ("reporter_name", TEXT), ("shares", DOUBLE), ("percent", DOUBLE),
+        ("voting_power", TEXT), ("dispositive_power", TEXT), ("purpose", TEXT),
+        ("form", TEXT), ("filed_at", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_url", TEXT),
+        ("raw_archive_path", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "subject_cik", "filer_cik", "reporter_name"),
+    partition_field="filed_at",
+)
+DATASETS["sec_13f_holdings"] = Dataset(
+    name="sec_13f_holdings",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("document_name", TEXT), ("manager_cik", TEXT),
+        ("manager_name", TEXT), ("report_period", TEXT), ("issuer_name", TEXT),
+        ("entity_id", TEXT), ("security_id", TEXT), ("class_title", TEXT),
+        ("cusip", TEXT), ("isin", TEXT), ("shares", DOUBLE), ("value", DOUBLE),
+        ("put_call", TEXT), ("discretion", TEXT), ("voting", TEXT),
+        ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
+        ("source_url", TEXT), ("raw_archive_path", TEXT),
+        ("content_hash", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "manager_cik", "cusip", "issuer_name",
+                 "put_call", "class_title", "discretion", "content_hash"),
+    partition_field="filed_at",
+)
+DATASETS["sec_insider_transactions"] = Dataset(
+    name="sec_insider_transactions",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("document_name", TEXT), ("form", TEXT),
+        ("issuer_cik", TEXT), ("issuer_name", TEXT), ("owner_cik", TEXT),
+        ("owner_name", TEXT), ("is_director", pa.bool_()),
+        ("is_officer", pa.bool_()), ("is_ten_percent", pa.bool_()),
+        ("is_other", pa.bool_()), ("role_title", TEXT),
+        ("security_title", TEXT), ("transaction_code", TEXT),
+        ("transaction_date", TEXT), ("shares", DOUBLE), ("price", DOUBLE),
+        ("holdings", DOUBLE), ("filed_at", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_url", TEXT),
+        ("raw_archive_path", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "owner_cik", "transaction_code",
+                 "transaction_date", "security_title",
+                 "shares", "price", "holdings", "content_hash"),
+    partition_field="filed_at",
+)
+DATASETS["sec_offerings"] = Dataset(
+    name="sec_offerings",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("document_name", TEXT), ("form", TEXT),
+        ("filer_cik", TEXT), ("filer_name", TEXT), ("registrant_cik", TEXT),
+        ("registrant_name", TEXT), ("security_title", TEXT),
+        ("amount", DOUBLE), ("filed_at", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_url", TEXT),
+        ("raw_archive_path", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "document_name", "security_title"),
+    partition_field="filed_at",
+)
+DATASETS["sec_transactions"] = Dataset(
+    name="sec_transactions",
+    schema=pa.schema(_fields(
+        ("accession", TEXT), ("document_name", TEXT), ("form", TEXT),
+        ("filer_cik", TEXT), ("filer_name", TEXT), ("subject_cik", TEXT),
+        ("subject_name", TEXT), ("target_cik", TEXT), ("target_name", TEXT),
+        ("acquirer_cik", TEXT), ("acquirer_name", TEXT), ("status", TEXT),
+        ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
+        ("source_url", TEXT), ("raw_archive_path", TEXT),
+        ("content_hash", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("accession", "form", "target_cik", "acquirer_cik"),
+    partition_field="filed_at",
+)
+DATASETS["relationship_evidence"] = Dataset(
+    name="relationship_evidence",
+    schema=pa.schema(_fields(
+        ("evidence_id", TEXT), ("relationship_id", TEXT),
+        ("relationship_type", TEXT), ("from_entity_id", TEXT),
+        ("to_entity_id", TEXT), ("accession", TEXT),
+        ("document_name", TEXT), ("source_span", TEXT),
+        ("extraction_method", TEXT), ("confidence", DOUBLE),
+        ("is_counterevidence", pa.bool_()), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_url", TEXT),
+        ("raw_archive_path", TEXT), ("content_hash", TEXT),
+        ("parser_version", TEXT),
+    )),
+    unique_keys=("evidence_id",),
+    partition_field="known_at",
+)
+DATASETS["relationship_revisions"] = Dataset(
+    name="relationship_revisions",
+    schema=pa.schema(_fields(
+        ("revision_id", TEXT), ("relationship_id", TEXT),
+        ("previous_status", TEXT), ("new_status", TEXT), ("actor", TEXT),
+        ("reason", TEXT), ("recorded_at", TEXT),
+        ("superseded_revision_id", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("revision_id",),
+    partition_field="recorded_at",
+)
+DATASETS["relationship_type_evaluations"] = Dataset(
+    name="relationship_type_evaluations",
+    schema=pa.schema(_fields(
+        ("evaluation_id", TEXT), ("relationship_type", TEXT),
+        ("window_start", TEXT), ("window_end", TEXT), ("metrics_json", TEXT),
+        ("decision", TEXT), ("inputs_hash", TEXT),
+        ("prev_state", TEXT), ("new_state", TEXT),
+        ("actor", TEXT), ("reason", TEXT),
+        ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("evaluation_id",),
+    partition_field="window_end",
 )
 
 
@@ -308,7 +526,7 @@ def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
     existing = set()
     for table in read_table(name, root).to_batches():
         existing.update(
-            tuple(str(v) for v in batch)
+            tuple("" if v is None else str(v) for v in batch)
             for batch in zip(*(table.column(key).to_pylist() for key in ds.unique_keys))
         )
     new_rows = [
