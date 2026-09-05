@@ -26,7 +26,6 @@ class RunLimits:
     max_runtime: float = 600.0     # seconds
     max_tool_result_bytes: int = 64 * 1024   # == tool_render.MAX_TOOL_MESSAGE_BYTES
     max_evidence_tokens: int = 48_000
-    max_exa_searches: int = 3      # per-run cap on the optional search_web tool
 
 
 @dataclass(frozen=True)

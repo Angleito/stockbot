@@ -156,11 +156,9 @@ class ExecutionBudget:
     max_model_calls: int
     max_runtime: float
     max_evidence_tokens: int
-    max_exa_searches: int = 3
     tool_calls: int = 0
     model_calls: int = 0
     evidence_tokens: int = 0
-    exa_searches: int = 0
     _started: float = field(default_factory=time.perf_counter, init=False, repr=False)
 
     def elapsed_seconds(self) -> float:
@@ -198,12 +196,6 @@ class ExecutionBudget:
         self.tool_calls += 1
         return True
 
-    def reserve_exa_search(self) -> bool:
-        """Consume one Exa-search slot; False when the per-run cap is exhausted."""
-        if self.exa_searches >= self.max_exa_searches:
-            return False
-        self.exa_searches += 1
-        return True
 
     def add_evidence_tokens(self, count: int) -> bool:
         """Register evidence tokens only while within budget; False refuses the addition."""

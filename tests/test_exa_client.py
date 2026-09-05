@@ -130,7 +130,7 @@ def test_missing_results_key(enabled, monkeypatch):
 
 
 def test_limit_clamp(enabled, monkeypatch):
-    for limit, expected in ((99, 10), (0, 1), (None, 5)):
+    for limit, expected in ((99, 25), (0, 1), (None, 5)):
         session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
         exa_client.search("AMD news", limit=limit)
         payload = session.posts[0][1]["json"]

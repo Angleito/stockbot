@@ -103,8 +103,6 @@ class PiSessionContext:
             max_model_calls=limits.max_model_calls,
             max_runtime=limits.max_runtime,
             max_evidence_tokens=limits.max_evidence_tokens,
-            # Pi searches get own pool: 25/run, not the 3-cap in RunLimits.
-            max_exa_searches=25,
         )
 
 
@@ -180,11 +178,8 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         }
 
     # Gate 8 (reserve): one budget slot per call before any external work.
-    # Searches skip the 64-call count pool but still respect wall-clock.
-    if name == "search_web":
-        if session.budget.runtime_remaining() <= 0:
-            return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
-    elif not session.budget.reserve_tool_call():
+    # search_web is exempt from run budgets.
+    if name != "search_web" and not session.budget.reserve_tool_call():
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
 
     # Gate 3: intent firewall. No approval callback in this plan, so
@@ -209,15 +204,6 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
 
     # Gate 4: search_web egress; every other tool's private-pattern args check.
     if name == "search_web":
-        if not session.budget.reserve_exa_search():
-            return {
-                "error": (
-                    "Exa search budget exhausted "
-                    f"(max {session.budget.max_exa_searches} per run)"
-                ),
-                "source": "exa",
-                "soft": True,
-            }
         decision = authorize_egress("exa", arguments, session.run_security)
         if not decision.allowed:
             _record_security(
@@ -325,7 +311,7 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         session.run_security.data_labels.add("external")
     if envelope.sensitivity is Sensitivity.PRIVATE:
         session.run_security.data_labels.add("private")
-    if not session.budget.add_evidence_tokens(len(final_text) // 4):
+    if name != "search_web" and not session.budget.add_evidence_tokens(len(final_text) // 4):
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
     if recorder is not None:
         evidence_id = f"{run_id}:evid:{recorder.next_evidence_seq():04d}"
