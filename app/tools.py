@@ -882,7 +882,7 @@ TOOLS = [
                     "start_published_date": {"type": "string", "description": "Optional start publication date YYYY-MM-DD, inclusive."},
                     "end_published_date": {"type": "string", "description": "Optional end publication date YYYY-MM-DD, inclusive."},
                     "search_type": {"type": "string", "enum": ["auto", "fast", "deep-lite"], "description": "Optional search mode (default auto)."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Maximum results, 1-10 (default 5)."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Maximum results, 1-25 (default 5)."},
                 },
                 "required": ["query"],
             },

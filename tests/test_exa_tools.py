@@ -38,7 +38,7 @@ def test_search_web_schema_shape():
     assert props["exclude_domains"]["type"] == "array"
     assert "YYYY-MM-DD" in props["start_published_date"]["description"]
     assert props["limit"]["minimum"] == 1
-    assert props["limit"]["maximum"] == 10
+    assert props["limit"]["maximum"] == 25
     # Optional fields are plain types absent from `required` (repo style).
     for key in ("category", "search_type", "limit", "include_domains"):
         assert key not in params["required"]
