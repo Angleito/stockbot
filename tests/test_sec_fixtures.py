@@ -113,3 +113,55 @@ def test_8k_items_parse_with_bankruptcy():
     events = events8k.parse_8k_events(e8k["accession_no"], e8k["items"])
     assert len(events) >= 2
     assert any(e.item_number == "1.03" for e in events)
+
+
+def _by_accession(entries, accession):
+    return next(e for e in entries if e["accession_no"] == accession)
+
+
+def test_no_ticker_registrant_has_empty_tickers():
+    entry = _by_accession(_load(), "0000320193-24-000101")
+    assert entry["tickers"] == []
+    assert _ACC_RE.match(entry["accession_no"])
+
+
+def test_former_name_carries_validity_interval():
+    entry = _by_accession(_load(), "0000320193-24-000102")
+    (former,) = entry["former_names"]
+    assert former["from"] < former["to"]
+    assert former["name"] != entry["issuer"]
+
+
+def test_13d_filer_and_subject_are_distinct():
+    entry = _by_accession(_load(), "0000320193-24-000103")
+    assert entry["filer"]["cik"] != entry["subject"]["cik"]
+    assert entry["subject"]["name"] == entry["issuer"]
+    assert _person(entry).filer_name == entry["filer"]["name"]
+
+
+def test_13f_manager_and_held_issuer_are_distinct():
+    entry = _by_accession(_load(), "0000320193-24-000104")
+    (holding,) = entry["holdings"]
+    assert entry["manager"]["name"] == entry["issuer"]
+    assert holding["issuer_name"] != entry["manager"]["name"]
+    assert len(holding["cusip"]) == 9
+
+
+def test_form4_owner_and_issuer_roles_are_distinct():
+    entry = _by_accession(_load(), "0000320193-24-000105")
+    assert entry["owner"]["cik"] != entry["issuer_cik"]
+    assert entry["owner"]["is_officer"] is True
+    assert entry["transactions"][0]["code"] == "P"
+
+
+def test_merger_target_acquirer_unknown_without_closing():
+    entry = _by_accession(_load(), "0000320193-24-000106")
+    assert entry["target"]["cik"] != entry["acquirer"]["cik"]
+    assert entry["status"] == "unknown"
+
+
+def test_multi_class_securities_stay_distinct():
+    entry = _by_accession(_load(), "0000320193-24-000107")
+    cusips = [s["cusip"] for s in entry["securities"]]
+    assert len(set(cusips)) == 2
+    assert all(s["class_title"] for s in entry["securities"])

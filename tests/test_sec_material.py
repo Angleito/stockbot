@@ -59,9 +59,9 @@ class _Report:
 def test_get_material_events_sorted_and_skips_bad_load(monkeypatch):
     seen = {}
     fakes = [
-        SimpleNamespace(accession_no="ACC1", company="Acme"),
-        SimpleNamespace(accession_no="ACC2", company="Acme"),
-        SimpleNamespace(accession_no="BAD", company="Acme"),
+        SimpleNamespace(accession_no="ACC1", filer_name="Acme"),
+        SimpleNamespace(accession_no="ACC2", filer_name="Acme"),
+        SimpleNamespace(accession_no="BAD", filer_name="Acme"),
     ]
 
     def fake_list(ticker_or_cik, **kwargs):

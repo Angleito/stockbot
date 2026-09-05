@@ -108,3 +108,37 @@ def test_unparseable_schedule_yields_no_records():
         SimpleNamespace(reporting_persons="not-a-list", items=None),
         issuer="ACME", form="SC 13G", filed_at=None,
         accession_no="a9") == []
+
+
+def test_store_queries_both_ownership_directions(tmp_path):
+    from app.sec.store import query_beneficial_ownership, store_beneficial_ownership
+
+    assert store_beneficial_ownership({
+        "accession": "0000000000-25-000013", "form": "SC 13D",
+        "subject_cik": 320193, "subject_name": "Subject Co",
+        "filer_cik": 999001, "filer_name": "Owner LP",
+        "shares": 5000000, "percent": 6.2, "known_at": "2024-03-10",
+    }, root=tmp_path) == 1
+    by_subject = query_beneficial_ownership(subject_cik=320193, root=tmp_path)
+    assert [r["filer_cik"] for r in by_subject] == ["999001"]
+    assert by_subject[0]["subject_name"] == "Subject Co"
+    by_owner = query_beneficial_ownership(owner_cik=999001, root=tmp_path)
+    assert [r["subject_cik"] for r in by_owner] == ["320193"]
+    # Filer and subject never share a fallback identity.
+    assert by_owner[0]["filer_cik"] != by_owner[0]["subject_cik"]
+
+
+def test_store_queries_13f_both_directions(tmp_path):
+    from app.sec.store import query_13f_holdings, store_13f_holding
+
+    assert store_13f_holding({
+        "accession": "0000000000-25-000014", "form": "13F-HR",
+        "manager_cik": 103567, "manager_name": "Sample Manager LLC",
+        "issuer_name": "Sample Issuer Inc", "class_title": "COM",
+        "cusip": "594918104", "shares": 1000, "value": 50000,
+        "known_at": "2024-02-14",
+    }, root=tmp_path) == 1
+    by_manager = query_13f_holdings(manager_cik=103567, root=tmp_path)
+    assert by_manager[0]["cusip"] == "594918104"
+    by_security = query_13f_holdings(security="594918104", root=tmp_path)
+    assert [r["manager_cik"] for r in by_security] == ["103567"]

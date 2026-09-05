@@ -87,11 +87,14 @@ def test_get_sec_filing_amendment(monkeypatch):
     assert filing.form == "10-K/A"
     assert filing.is_amendment is True
     assert filing.amendment_of is None
-    assert filing.cik == filing.issuer_cik == 123
+    assert filing.filer_cik == 123
+    assert filing.filer_name == "Fake Corp"
+    assert filing.subject_cik == filing.filer_cik == 123
+    assert filing.subject_name == "Fake Corp"
     assert filing.report_period == "2023-12-31"
     assert filing.primary_document == "primary.htm"
     assert filing.source == "https://sec/0002"
-    assert filing.to_dict()["company"] == "Fake Corp"
+    assert filing.to_dict()["filer_name"] == "Fake Corp"
 
 
 def test_get_sec_filing_invalid_accession(monkeypatch):
@@ -110,11 +113,11 @@ def test_documents_list_get_text_primary(monkeypatch):
     monkeypatch.setattr(documents, "get_by_accession_number", lambda acc: fake)
 
     listed = documents.list_sec_documents("0003")
-    assert [d.document for d in listed] == ["primary.htm", "ex-99.htm"]
+    assert [d.document_name for d in listed] == ["primary.htm", "ex-99.htm"]
     assert listed[0].to_dict()["accession_no"] == "0003"
 
     doc = documents.get_sec_document("0003")
-    assert doc["document"] == "primary.htm"
+    assert doc["document_name"] == "primary.htm"
     assert doc["text"] == "hello"
 
     assert documents.get_sec_filing_text("0003") == "hello"
@@ -170,13 +173,17 @@ def test_search_sec_filings_normalizes_cik_accession(monkeypatch):
                  cik="bad", period="2025-12-31", score=3.0),
         ]),
     )
-    (first, second) = client.search_sec_filings("Acme Labs", forms=["D", "D/A"], limit=2)
-    assert first["cik"] == 1234567
-    assert first["accession_no"] == "0000000001-26-000001"
-    assert first["source_url"] is None
-    assert second["cik"] is None
-    assert second["company"] is None
-    assert second["period"] == "2025-12-31"
+    result = client.search_sec_filings("Acme Labs", forms=["D", "D/A"], limit=2)
+    (first, second) = result.text_hits
+    assert first.filer_cik == 1234567
+    assert first.filer_name == "Acme Labs Inc"
+    assert first.accession_no == "0000000001-26-000001"
+    assert first.source_url is None
+    assert second.filer_cik is None
+    assert second.filer_name is None
+    assert second.filed_at == "2026-02-01"
+    assert result.coverage.status == "complete"
+    assert result.coverage.results_reported == 2
 
 
 def test_discovery_adapters_reject_blank_and_bad_limit():
@@ -190,3 +197,126 @@ def test_discovery_adapters_reject_blank_and_bad_limit():
         client.search_sec_filings("")
     with pytest.raises(ValueError):
         client.search_sec_filings("Acme", limit=0)
+
+
+def test_efts_page_two_failure_is_partial_with_page_one(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.search.efts as efts
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+
+    class _Hit:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def _boom():
+        raise ConnectionError("efts reset")
+
+    page2 = SimpleNamespace(
+        total=3,
+        results=[_Hit(accession_number="0000000003-26-000001", form="10-K",
+                      filed="2026-03-01", company="Acme Labs Inc",
+                      cik="1234567", period=None, score=1.0)],
+    )
+    page1 = SimpleNamespace(
+        total=3,
+        results=[_Hit(accession_number="0000000001-26-000001", form="10-K",
+                      filed="2026-01-01", company="Acme Labs Inc",
+                      cik="1234567", period=None, score=5.0)],
+        next=_boom,
+    )
+    monkeypatch.setattr(efts, "search_filings", lambda query, **k: page1)
+    result = client.search_sec_filings("Acme Labs", limit=10)
+    assert result.coverage.status == "partial"
+    assert [h.accession_no for h in result.text_hits] == ["0000000001-26-000001"]
+    assert result.coverage.results_reported == 3
+    assert result.coverage.results_retrieved == 1
+    assert any(a.status == "failed" for a in result.attempts)
+    assert result.errors and "page 2" in result.errors[0]
+
+
+def test_efts_preserves_matched_document_metadata(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.search.efts as efts
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+
+    class _Hit:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(
+        efts, "search_filings",
+        lambda query, **kwargs: SimpleNamespace(total=1, results=[
+            _Hit(accession_number="0000000001-26-000001", form="10-K",
+                 filed="2026-01-01", company="Acme Labs Inc", cik="1234567",
+                 period=None, score=5.0, document_id="acme-10k.htm",
+                 file_type="10-K", file_description="ANNUAL REPORT",
+                 items=["1A", "7"], sic="3571", location="CA",
+                 state="CA", inc_state="DE"),
+        ]),
+    )
+    (hit,) = client.search_sec_filings("Acme Labs").text_hits
+    assert hit.matched_document == "acme-10k.htm"
+    assert hit.file_type == "10-K"
+    assert hit.file_description == "ANNUAL REPORT"
+    assert "1A" in hit.items
+    assert hit.sic == "3571"
+    assert hit.filer_name == "Acme Labs Inc"  # mention query never rewrites filer
+    assert hit.page == 1
+
+
+def test_efts_dedups_repeated_accession_document(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.search.efts as efts
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+
+    class _Hit:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def _hit():
+        return _Hit(accession_number="0000000001-26-000001", form="10-K",
+                    filed="2026-01-01", company="Acme Labs Inc",
+                    cik="1234567", period=None, score=5.0)
+
+    page2 = SimpleNamespace(total=2, results=[_hit()])
+    page1 = SimpleNamespace(total=2, results=[_hit()], next=lambda: page2)
+    monkeypatch.setattr(efts, "search_filings", lambda query, **k: page1)
+    result = client.search_sec_filings("Acme Labs", limit=10)
+    assert len(result.text_hits) == 1  # same query/accession/document deduped
+    assert result.coverage.results_reported == 2
+    assert result.coverage.pages == 2
+    assert len(result.attempts) == 2  # every producing attempt retained
+
+
+def test_efts_as_of_excludes_future_filed_at(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.search.efts as efts
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+
+    class _Hit:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(
+        efts, "search_filings",
+        lambda query, **k: SimpleNamespace(total=1, results=[
+            _Hit(accession_number="0000000009-26-000001", form="10-K",
+                 filed="2026-09-01", company="Acme Labs Inc",
+                 cik="1234567", period=None, score=5.0),
+        ]),
+    )
+    result = client.search_sec_filings("Acme Labs", as_of="2026-01-01")
+    assert result.text_hits == ()
+    assert any("as_of" in w for w in result.warnings)

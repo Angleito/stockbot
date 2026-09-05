@@ -73,3 +73,22 @@ def test_get_transaction_status_newest_first(monkeypatch):
     assert [t.accession_no for t in out] == ["new", "old"]
     assert [t.status for t in out] == ["unknown", "unknown"]
     assert all(t.target == "TGT" for t in out)
+
+
+def test_store_transaction_unknown_status_both_directions(tmp_path):
+    from app.sec.store import query_transactions, store_transaction
+
+    assert store_transaction({
+        "accession": "0000000000-25-000016", "form": "S-4",
+        "filer_cik": 111111, "filer_name": "Acquirer Inc",
+        "subject_cik": 222222, "subject_name": "Target Co",
+        "target_cik": 222222, "target_name": "Target Co",
+        "known_at": "2024-05-01",
+    }, root=tmp_path) == 1
+    by_filer = query_transactions(filer_cik=111111, root=tmp_path)
+    assert by_filer[0]["status"] == "unknown"
+    assert by_filer[0]["target_name"] == "Target Co"
+    by_subject = query_transactions(subject_cik=222222, root=tmp_path)
+    # Registration without closing evidence keeps status unknown.
+    assert [r["status"] for r in by_subject] == ["unknown"]
+    assert by_subject[0]["filer_name"] == "Acquirer Inc"

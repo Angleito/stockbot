@@ -128,3 +128,22 @@ def test_get_insider_activity_skips_failed_loads(monkeypatch):
     txns = insider.get_insider_activity("ACME")
     assert len(txns) == 1
     assert txns[0].transaction_kind == "open_market_purchase"
+
+
+def test_store_queries_insider_both_directions(tmp_path):
+    from app.sec.store import query_insider_transactions, store_insider_transaction
+
+    assert store_insider_transaction({
+        "accession": "0000000000-25-000015", "form": "4",
+        "issuer_cik": 320193, "issuer_name": "Issuer Inc",
+        "owner_cik": 1206472, "owner_name": "Jane Doe",
+        "is_director": True, "transaction_code": "P",
+        "shares": 100, "known_at": "2024-04-01",
+    }, root=tmp_path) == 1
+    by_issuer = query_insider_transactions(issuer_cik=320193, root=tmp_path)
+    assert by_issuer[0]["owner_name"] == "Jane Doe"
+    assert by_issuer[0]["is_director"] is True
+    by_owner = query_insider_transactions(owner_cik=1206472, root=tmp_path)
+    assert [r["issuer_cik"] for r in by_owner] == ["320193"]
+    # Roles stay on their own side: issuer is never the owner.
+    assert by_owner[0]["issuer_name"] != by_owner[0]["owner_name"]
