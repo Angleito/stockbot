@@ -12,7 +12,7 @@
     "smoke": "bun run smoke-mock && bun run smoke-prod",
     "clean-env": "rm -rf venv",
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck",
-    "stockbot": "pkill -f \"[s]cripts/pi_bridge.py\" 2>/dev/null || true; trap 'pkill -f \"[s]cripts/pi_bridge.py\" 2>/dev/null || true' EXIT INT TERM; pi --no-builtin-tools --extension .pi/extensions/stockbot.ts"
+    "stockbot": "pi --no-builtin-tools --extension .pi/extensions/stockbot.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.85.0"
