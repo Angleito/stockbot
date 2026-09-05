@@ -134,9 +134,10 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
     out = dilution_profile(existing_shares=existing,
                            new_shares=None,
                            source_accessions=())
-    out["offering_shares_disclosed"] = disclosed_total if disclosed_known else None
+    out["fully_diluted_shares"] = _NQ
+    out["sum_of_disclosed_share_counts"] = disclosed_total if disclosed_known else None
     out["offering_accessions"] = tuple(offering_accessions)
     out["registration_accessions"] = tuple(registration_accessions)
     out["registered_capacity"] = "not_quantifiable"
-    out["note"] = ("Observed only: 424B share counts are disclosed offering sizes, not confirmed issuance, and are never added to current shares outstanding without a pre-offering baseline; registration filings (S-1/S-3/F-1/F-3/S-8/EFFECT/RW, including /A amendments) are listed as individual accessions, never summed into capacity until deterministic dedup lineage lands; dilution_pct stays not_quantifiable.")
+    out["note"] = ("Observed only: 424B share counts are summed across disclosures without deduplication. This is not confirmed issuance and must not be interpreted as incremental dilution. Registration filings (S-1/S-3/F-1/F-3/S-8/EFFECT/RW, including /A amendments) are listed as individual accessions, never summed into capacity; dilution_pct stays not_quantifiable.")
     return out

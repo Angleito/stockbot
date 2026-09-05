@@ -50,9 +50,11 @@ def test_profile_observes_without_computing(monkeypatch):
     out = dilution.get_dilution_profile("ACME")
     assert out["dilution_pct"] == "not_quantifiable"
     assert out["inputs"]["new_shares"] is None
-    assert out["offering_shares_disclosed"] == 150
+    assert out["sum_of_disclosed_share_counts"] == 150
     assert out["offering_accessions"] == ("a1", "a4")
     assert out["registration_accessions"] == ("a2", "a3", "a5")
     assert out["registered_capacity"] == "not_quantifiable"
     assert out["source_accessions"] == ()
-    assert out["fully_diluted_shares"] == 850
+    assert out["fully_diluted_shares"] == "not_quantifiable"
+    assert "424B share counts are summed across disclosures without deduplication. This is not confirmed issuance and must not be interpreted as incremental dilution." in out["note"]
+    assert "offering_shares_disclosed" not in out
