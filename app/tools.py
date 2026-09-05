@@ -130,7 +130,15 @@ TOOLS = [
                     "entity": {"type": "string", "description": "CIK, ticker, entity id, or candidate dict."},
                     "relationship_types": {"type": "array", "items": {"type": "string"}, "description": "Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager)."},
                     "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD."},
-                    "limit": {"type": "integer"}
+                    "limit": {"type": "integer"},
+                    "exhaustive": {
+                        "type": "boolean",
+                        "description": (
+                            "Exhaust all applicable relationship indexes and SEC routes; "
+                            "the returned model context remains bounded."
+                        ),
+                        "default": True,
+                    }
                 },
                 "required": ["entity"]
             }
@@ -1652,11 +1660,13 @@ def _sec_relationships_result(args: dict) -> dict:
     result = sec.search_sec_relationships(
         args["entity"], relationship_types=args.get("relationship_types"),
         as_of=args.get("as_of"), limit=args.get("limit", 50),
-        exhaustive=False,
+        exhaustive=args.get("exhaustive", True),
     )
     found = len(result.get("typed") or []) + len(
         result.get("relationships") or []) + len(result.get("mentions") or [])
     errors = result.get("errors") or []
+    attempts = result.get("attempts") or []
+    incomplete = any((a or {}).get("status") in ("partial", "retrying") for a in attempts)
     return {
         "subject": args.get("entity"),
         "entity": result.get("entity"),
@@ -1670,7 +1680,7 @@ def _sec_relationships_result(args: dict) -> dict:
         "relationships": result.get("relationships"),
         "mentions": result.get("mentions"),
         "coverage": {"status": "failed" if errors and not found else (
-            "partial" if errors or result.get("warnings") else "complete")},
+            "partial" if errors or result.get("warnings") or incomplete else "complete")},
         "attempts": result.get("attempts"),
         "counts": {"typed": len(result.get("typed") or []),
                    "workflow": len(result.get("relationships") or []),

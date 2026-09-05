@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from ...domain.market.ids import sec_entity_id, sec_security_id
+from ..context import TRANSACTION_FORMS
 from ..filings import _check_as_of
 from ..models import (
     EntityCandidate,
@@ -31,6 +32,7 @@ from ..models import (
     SearchCoverage,
     pit_of,
 )
+from ..offerings import OFFERING_FORMS
 
 PARSER_VERSION = "1"
 SOURCE = "sec-submissions"
@@ -954,9 +956,9 @@ def _fetch_typed(query_fn, *, cap, root=None, **filters):
 
 
 
-def _warehouse_batch(store, form, qs, qe, *, root=None, limit=10_000):
+def _warehouse_batch(store, form, qs, qe, *, root=None, limit=None):
     try:
-        rows = store.query_filings(forms=[form], limit=limit, root=root)
+        rows = store.query_filings(forms=[form], start_date=qs, end_date=qe, limit=limit, root=root)
     except Exception:
         return []
     out = []
@@ -970,6 +972,24 @@ def _warehouse_batch(store, form, qs, qe, *, root=None, limit=10_000):
             continue
         out.append(filing)
     return out
+
+
+def _base_form(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if text.endswith("/A"):
+        text = text[:-2]
+    return text
+
+
+_TRANSACTION_BASE_FORMS = frozenset(_base_form(f) for f in TRANSACTION_FORMS)
+_OFFERING_BASE_FORMS = frozenset(_base_form(f) for f in OFFERING_FORMS)
+_TYPED_HYDRATION_FORMS = frozenset(
+    {"SC 13D", "SC 13G", "13D", "13G", "3", "4", "5", "13F-HR"}
+    | _TRANSACTION_BASE_FORMS | _OFFERING_BASE_FORMS)
+
+
+def _needs_typed_hydration(value: object) -> bool:
+    return _base_form(value) in _TYPED_HYDRATION_FORMS
 
 
 def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
@@ -987,7 +1007,7 @@ def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
                 return job_id
             wanted = [source] + (
                 [DOC_SOURCE, TYPED_SOURCE]
-                if str(form).strip().upper() in _TYPED_HYDRATION_FORMS else [])
+                if _needs_typed_hydration(form) else [])
             uncovered = False
             for year, quarter in past:
                 for src in wanted:
@@ -1008,10 +1028,6 @@ def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
     return job_id
 
 
-_TYPED_HYDRATION_FORMS = frozenset(
-    {"SC 13D", "SC 13G", "13D", "13G", "3", "4", "5", "13F-HR"})
-
-
 def _hydrate_relationship_filing(filing, *, data_root=None):
     """Archive primary document + store typed rows for one filing.
 
@@ -1021,7 +1037,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
     """
     try:
         form_raw = getattr(filing, "form", "")
-        form = str(form_raw or "").strip().upper()
+        form = _base_form(form_raw)
         accession = str(getattr(filing, "accession_no", ""))
         if not accession:
             return 0, False, "missing accession"
@@ -1030,6 +1046,8 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
         source_url = getattr(filing, "source", None) or ""
         filer_name = getattr(filing, "filer_name", None)
         filer_cik = getattr(filing, "filer_cik", None)
+        subject_cik = getattr(filing, "subject_cik", None)
+        subject_name = getattr(filing, "subject_name", None)
         from .. import archive as _archive
         from .. import store as _store
         from ..documents import get_by_accession_number, get_sec_document
@@ -1047,6 +1065,8 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                 metadata={"form": form_raw}, root=_raw_root_for(data_root))
             _payload_path = getattr(record, "payload_path", None)
             raw_path = str(_payload_path) if _payload_path is not None else None
+            retrieved_at = getattr(record, "retrieved_at", None)
+            content_hash = getattr(record, "sha256", None)
         except Exception as exc:
             return 0, False, f"document archive failed: {exc}"
         try:
@@ -1061,6 +1081,8 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                 for rec in recs or []:
                     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
                     d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("retrieved_at", retrieved_at)
+                    d.setdefault("content_hash", content_hash)
                     d.setdefault("source_url", source_url or None)
                     written += _store.store_beneficial_ownership(d, root=data_root)
                 return written, True, None
@@ -1076,6 +1098,8 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                 for rec in recs or []:
                     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
                     d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("retrieved_at", retrieved_at)
+                    d.setdefault("content_hash", content_hash)
                     d.setdefault("source_url", source_url or None)
                     written += _store.store_insider_transaction(d, root=data_root)
                 return written, True, None
@@ -1103,8 +1127,54 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                 for rec in recs or []:
                     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
                     d.setdefault("raw_archive_path", raw_path)
+                    d.setdefault("retrieved_at", retrieved_at)
+                    d.setdefault("content_hash", content_hash)
                     d.setdefault("source_url", source_url or None)
                     written += _store.store_13f_holding(d, root=data_root)
+                return written, True, None
+            if form in _TRANSACTION_BASE_FORMS:
+                from ..transactions import normalize_transaction
+                try:
+                    obj = get_by_accession_number(accession).obj()
+                except Exception:
+                    obj = None
+                rec = normalize_transaction(
+                    accession, form_raw, target=str(subject_name or ""),
+                    filed_at=filed_at, text=text, obj=obj,
+                    filer_cik=filer_cik, filer_name=filer_name,
+                    subject_cik=subject_cik, subject_name=subject_name,
+                    document_name=str(doc_name), known_at=known_at,
+                    source_url=source_url or None)
+                d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                d.setdefault("raw_archive_path", raw_path)
+                d.setdefault("retrieved_at", retrieved_at)
+                d.setdefault("content_hash", content_hash)
+                d.setdefault("source_url", source_url or None)
+                written = _store.store_transaction(d, root=data_root)
+                return written, True, None
+            if form in _OFFERING_BASE_FORMS:
+                from ..offerings import load_terms, normalize_offering
+                try:
+                    obj = get_by_accession_number(accession).obj()
+                except Exception:
+                    obj = None
+                try:
+                    terms = load_terms(accession)
+                except Exception:
+                    terms = {}
+                rec = normalize_offering(
+                    accession, form_raw, issuer=filer_name or "",
+                    filed_at=filed_at, terms=terms, obj=obj, text=text,
+                    filer_cik=filer_cik, filer_name=filer_name,
+                    registrant_cik=filer_cik, registrant_name=filer_name,
+                    document_name=str(doc_name), known_at=known_at,
+                    source_url=source_url or None)
+                d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                d.setdefault("raw_archive_path", raw_path)
+                d.setdefault("retrieved_at", retrieved_at)
+                d.setdefault("content_hash", content_hash)
+                d.setdefault("source_url", source_url or None)
+                written = _store.store_offering(d, root=data_root)
                 return written, True, None
             return 0, True, f"unsupported form for typed hydration: {form_raw!r}"
         except Exception as exc:
@@ -1125,7 +1195,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
         job.get("start_date"), job.get("end_date"), cap=10_000)
     now = datetime.now(timezone.utc)
     current = (now.year, (now.month - 1) // 3 + 1)
-    needs_typed = str(form).strip().upper() in _TYPED_HYDRATION_FORMS
+    needs_typed = _needs_typed_hydration(form)
     try:
         targets = list(quarters) or [None]
         last_key: str | None = None
@@ -1458,6 +1528,7 @@ class SECDiscoveryService:
         now = _utcnow()
         # Interactive bound for global/current-feed reads and backfill batches.
         batch_size = max(int(request.max_results or 50), 1)
+        result_limit = request.max_results if request.max_results is not None else (None if request.exhaustive else 50)
         attempts: list[SearchAttempt] = []
         warnings: list[str] = []
         errors: list[str] = []
@@ -1814,11 +1885,9 @@ class SECDiscoveryService:
                     partition = _partition_for_quarter(year, quarter)
                     qs, qe = _quarter_dates(year, quarter)
                     try:
-                        # Bounds apply before the limit: over-fetch, filter to
-                        # the partition, then cap the kept rows.
-                        fetch_limit = batch_size * 5
+                        probe_limit = None if result_limit is None else result_limit + 1
                         rows = _backfill_store.query_filings(
-                            forms=[form], as_of=as_of, limit=fetch_limit,
+                            forms=[form], start_date=qs, end_date=qe, as_of=as_of, limit=probe_limit,
                             root=data_root)
                     except Exception as exc:
                         _record("local-filings", f"{form} {partition}",
@@ -1839,9 +1908,12 @@ class SECDiscoveryService:
                             continue
                         if _keep(filing):
                             kept_all.append(filing)
-                    kept = kept_all[:batch_size]
-                    fully_evaluated = (len(rows) < fetch_limit
-                                       and len(kept_all) <= batch_size)
+                    if result_limit is None:
+                        kept = kept_all
+                        fully_evaluated = True
+                    else:
+                        kept = kept_all[:result_limit]
+                        fully_evaluated = len(rows) <= result_limit
                     _record("local-filings", f"{form} {partition}",
                             "complete" if fully_evaluated else "partial",
                             reported=len(rows), retrieved=len(kept), pages=1,
@@ -1920,8 +1992,7 @@ class SECDiscoveryService:
 
         # Route 6: local relationship/security indexes (Phase 6 typed rows).
         # Covered partitions run locally; missing ones become bounded
-        # quarterly/form jobs, never a blocked call. (Phase 7 extends this
-        # route with transaction/offering datasets.)
+        # quarterly/form jobs, never a blocked call.
         _REL_FORMS = ("SC 13D", "SC 13G", "3", "4", "5")
         _SEC_FORMS = ("13F-HR",)
         if request.search_relationships:
@@ -2002,7 +2073,7 @@ class SECDiscoveryService:
                 quarters = []
             if quarters:
                 ordered = _sort_forms_by_priority(
-                    list(_REL_FORMS) + list(_SEC_FORMS))
+                    list(dict.fromkeys(list(_REL_FORMS) + list(_SEC_FORMS) + sorted(_TRANSACTION_BASE_FORMS) + sorted(_OFFERING_BASE_FORMS))))
                 for form in ordered:
                     for year, quarter in quarters:
                         partition = _partition_for_quarter(year, quarter)
@@ -2463,7 +2534,7 @@ def _resolve_relationship_identity(entity: object, *, as_of=None):
 
 def search_sec_relationships(entity: object, relationship_types=None,
                              as_of: str | None = None, data_root=None,
-                             limit: int = 50, exhaustive: bool = False) -> dict:
+                             limit: int = 50, exhaustive: bool = True) -> dict:
     """Fan out across typed, workflow, mention, and EFTS routes.
 
     Returns groups by ``relationship_type`` then status. Typed
@@ -2754,7 +2825,8 @@ def search_sec_relationships(entity: object, relationship_types=None,
         if entity_ids:
             for eid in entity_ids:
                 ev_all.extend(_store.query_relationship_evidence(
-                    None, entity_id=eid, as_of=as_of, limit=limit,
+                    None, entity_id=eid, as_of=as_of,
+                    limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else limit,
                     root=data_root))
         # ponytail: no unfiltered fallback; without an entity filter there is no query
         by_rel: dict = {}
@@ -2790,7 +2862,11 @@ def search_sec_relationships(entity: object, relationship_types=None,
                              if latest_rev else None,
                              "evidence": ev_rows})
             kept += 1
-        _record("local-workflow", "complete", found=kept)
+        if exhaustive and len(ev_all) >= _LOCAL_EXHAUSTIVE_GUARD:
+            _record("local-workflow", "partial", found=kept,
+                    reason="retrieval capped at local exhaustive guard")
+        else:
+            _record("local-workflow", "complete", found=kept)
     except Exception as exc:
         _record("local-workflow", "failed", error=str(exc))
         errors.append(f"local-workflow failed: {exc}")
@@ -2800,8 +2876,9 @@ def search_sec_relationships(entity: object, relationship_types=None,
         try:
             for cik in ciks:
                 for row in _store.search_document_text(
-                        cik, limit=min(limit, 20), as_of=as_of,
-                        root=data_root):
+                        cik,
+                        limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else min(limit, 20),
+                        as_of=as_of, root=data_root):
                     mentions.append({
                         "relationship_type": "mention",
                         "status": "observed",
@@ -2809,7 +2886,12 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "document_name": row.get("document_name"),
                         "source_span": (row.get("text") or "")[:280],
                         "known_at": row.get("known_at")})
-            _record("local-mentions", "complete", found=len(mentions))
+            _local_found = len(mentions)
+            if exhaustive and _local_found >= _LOCAL_EXHAUSTIVE_GUARD:
+                _record("local-mentions", "partial", found=_local_found,
+                        reason="retrieval capped at local exhaustive guard")
+            else:
+                _record("local-mentions", "complete", found=_local_found)
         except Exception as exc:
             _record("local-mentions", "failed", error=str(exc))
             warnings.append(f"local mentions unavailable: {exc}")
@@ -2823,7 +2905,9 @@ def search_sec_relationships(entity: object, relationship_types=None,
             found = 0
             for cik in ciks:
                 result = search_sec_filings(
-                    cik, limit=min(limit, 20), as_of=as_of)
+                    cik,
+                    limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else min(limit, 20),
+                    as_of=as_of)
                 for hit in result.text_hits:
                     mentions.append({
                         "relationship_type": "mention",
@@ -2833,7 +2917,11 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "source_span": hit.query,
                         "known_at": None})
                     found += 1
-            _record("efts-mentions", "complete", found=found)
+            if exhaustive and found >= _LOCAL_EXHAUSTIVE_GUARD:
+                _record("efts-mentions", "partial", found=found,
+                        reason="retrieval capped at local exhaustive guard")
+            else:
+                _record("efts-mentions", "complete", found=found)
         except Exception as exc:
             _record("efts-mentions", "failed", error=str(exc))
             warnings.append(f"efts mentions unavailable: {exc}")
@@ -2856,6 +2944,9 @@ def search_sec_relationships(entity: object, relationship_types=None,
                 e.get("relationship_type"), _active, _demoted))
     except Exception:
         pass
+    typed = typed[:limit]
+    workflow = workflow[:limit]
+    mentions = mentions[:limit]
     groups: dict = {}
     for entry in typed + workflow + mentions:
         rtype = entry.get("relationship_type") or "unknown"

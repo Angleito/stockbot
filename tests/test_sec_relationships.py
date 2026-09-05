@@ -429,7 +429,7 @@ def test_relationship_search_limit_bounds_typed_queries(tmp_path, monkeypatch):
     monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
     monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
 
-    out = search_sec_relationships("1234567", limit=50, data_root=tmp_path)
+    out = search_sec_relationships("1234567", limit=50, exhaustive=False, data_root=tmp_path)
     assert seen
     assert all(limit is not None and limit <= 51 for _, limit in seen)
     typed = next(a for a in out["attempts"] if a["backend"] == "local-typed")
@@ -439,3 +439,122 @@ def test_relationship_search_limit_bounds_typed_queries(tmp_path, monkeypatch):
     search_sec_relationships("1234567", limit=50, exhaustive=True,
                              data_root=tmp_path)
     assert any(limit == disc._LOCAL_EXHAUSTIVE_GUARD for _, limit in seen)
+
+
+def test_relationship_search_exhaustive_propagates_guard_and_bounds_output(tmp_path, monkeypatch):
+    received = {}
+
+    def _typed_row(i):
+        return {"filer_cik": "1234567", "subject_cik": "1234567",
+                "accession": f"TACC-{i}", "document_name": "primary",
+                "known_at": "2024-01-10T00:00:00Z"}
+
+    def _track(name, rows):
+        def _fake(*a, **k):
+            received[name] = k.get("limit")
+            return list(rows)
+        return _fake
+
+    import app.sec.store as sec_store_mod
+    typed_rows = [_typed_row(i) for i in range(5)]
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _track("typed", typed_rows))
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _track("typed", typed_rows))
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _track("typed", typed_rows))
+    monkeypatch.setattr(sec_store_mod, "query_transactions", _track("typed", typed_rows))
+    monkeypatch.setattr(sec_store_mod, "query_offerings", _track("typed", typed_rows))
+    ev_rows = [{"relationship_id": f"rel:e{i}", "relationship_type": "supplier_of",
+                "accession": f"EACC-{i}"} for i in range(5)]
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _track("workflow", ev_rows))
+    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions",
+                        lambda rid, **k: [{"revision_id": f"{rid}:r0", "new_status": "verified"}])
+    doc_rows = [{"accession": f"DACC-{i}", "document_name": "primary",
+                 "text": f"mention text {i}", "known_at": "2024-01-10T00:00:00Z"}
+                for i in range(5)]
+    monkeypatch.setattr(sec_store_mod, "search_document_text", _track("local", doc_rows))
+    hits = [SimpleNamespace(accession_no=f"FACC-{i}", matched_document="primary",
+                            query="1234567") for i in range(5)]
+    efts_limits = {}
+    def _fake_efts(*a, **k):
+        efts_limits["limit"] = k.get("limit")
+        return SimpleNamespace(text_hits=list(hits))
+    monkeypatch.setattr("app.sec.client.search_sec_filings", _fake_efts)
+    monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+
+    out = search_sec_relationships("1234567", limit=2, exhaustive=True, data_root=tmp_path)
+    assert received["workflow"] == disc._LOCAL_EXHAUSTIVE_GUARD
+    assert received["local"] == disc._LOCAL_EXHAUSTIVE_GUARD
+    assert efts_limits["limit"] == disc._LOCAL_EXHAUSTIVE_GUARD
+    assert received["typed"] == disc._LOCAL_EXHAUSTIVE_GUARD
+    assert len(out["typed"]) <= 2
+    assert len(out["relationships"]) <= 2
+    assert len(out["mentions"]) <= 2
+    assert out["typed"][0]["accession"] == "TACC-0"
+    grouped = [e for g in out["groups"].values() for v in g.values() for e in v]
+    assert len(grouped) == len(out["typed"]) + len(out["relationships"]) + len(out["mentions"])
+
+
+def test_relationship_search_bounded_preserves_cheap_caps(tmp_path, monkeypatch):
+    received = {}
+
+    def _track(name):
+        def _fake(*a, **k):
+            received[name] = k.get("limit")
+            return []
+        return _fake
+
+    import app.sec.store as sec_store_mod
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _track("typed"))
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _track("typed"))
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _track("typed"))
+    monkeypatch.setattr(sec_store_mod, "query_transactions", _track("typed"))
+    monkeypatch.setattr(sec_store_mod, "query_offerings", _track("typed"))
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _track("workflow"))
+    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "search_document_text", _track("local"))
+    efts_limits = {}
+    def _fake_efts(*a, **k):
+        efts_limits["limit"] = k.get("limit")
+        return SimpleNamespace(text_hits=[])
+    monkeypatch.setattr("app.sec.client.search_sec_filings", _fake_efts)
+    monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+
+    search_sec_relationships("1234567", limit=7, exhaustive=False, data_root=tmp_path)
+    # typed routes probe at limit+1 via the unchanged _fetch_typed path;
+    # workflow/local/EFTS pass their cap straight through.
+    assert received["typed"] == 8
+    assert received["workflow"] == 7
+    assert received["local"] == min(7, 20)
+    assert efts_limits["limit"] == min(7, 20)
+
+
+def test_relationship_search_guard_boundary_marks_partial(tmp_path, monkeypatch):
+    import app.sec.store as sec_store_mod
+    guard = disc._LOCAL_EXHAUSTIVE_GUARD
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_offerings", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions",
+                        lambda rid, **k: [{"revision_id": f"{rid}:r0", "new_status": "verified"}])
+    monkeypatch.setattr(sec_store_mod, "search_document_text", lambda *a, **k: [])
+    monkeypatch.setattr("app.sec.client.search_sec_filings",
+                        lambda *a, **k: SimpleNamespace(text_hits=[]))
+    monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence",
+                        lambda *a, **k: [{"relationship_id": "rel:g",
+                                          "relationship_type": "supplier_of"}] * guard)
+    out = search_sec_relationships("1234567", exhaustive=True, data_root=tmp_path)
+    attempt = next(a for a in out["attempts"] if a["backend"] == "local-workflow")
+    assert attempt["status"] == "partial"
+
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence",
+                        lambda *a, **k: [{"relationship_id": "rel:g",
+                                          "relationship_type": "supplier_of"}] * (guard - 1))
+    out = search_sec_relationships("1234567", exhaustive=True, data_root=tmp_path)
+    attempt = next(a for a in out["attempts"] if a["backend"] == "local-workflow")
+    assert attempt["status"] == "complete"
