@@ -144,10 +144,86 @@ def _derive_q4_from_facts(full_facts, concept, fy_end) -> Any:
     return pd.DataFrame([row])
 
 
+_DIVIDEND_CONCEPT = "CommonStockDividendsPerShareDeclared"
+_DIVIDEND_SOURCE = "SEC EDGAR company facts (Declared dividends per share)"
+
+def _null_dividend_payload(ticker: str) -> dict:
+    """Non-payers and incomplete histories report nulls, never an error."""
+    return {
+        "ticker": ticker,
+        "ttm_dividend_per_share": None,
+        "ttm_dividend_yield": None,
+        "growth_1y": None,
+        "growth_3y_cagr": None,
+        "growth_5y_cagr": None,
+        "growth_10y_cagr": None,
+        "annual_history": [],
+        "source": _DIVIDEND_SOURCE,
+    }
+
+
+def _dividend_growth(annual: dict) -> dict:
+    """Exact-gap growth/CAGR over annual totals; missing gaps stay null."""
+    out = {"growth_1y": None, "growth_3y_cagr": None, "growth_5y_cagr": None, "growth_10y_cagr": None}
+    if not annual:
+        return out
+    latest_year = max(annual)
+    latest = annual[latest_year]
+    for key, n in (("growth_1y", 1), ("growth_3y_cagr", 3), ("growth_5y_cagr", 5), ("growth_10y_cagr", 10)):
+        prev = annual.get(latest_year - n)
+        if prev is None or prev <= 0:
+            continue
+        if n == 1:
+            out[key] = round((latest - prev) / prev, 4)
+        else:
+            out[key] = round((latest / prev) ** (1.0 / n) - 1, 4)
+    return out
+
+
+def _dividend_yield(ticker: str, ttm) -> Any:
+    """TTM yield off the Yahoo quote (5-min TTL); null when price unusable."""
+    if ttm is None:
+        return None
+    try:
+        from . import valuation as _valuation
+        price = _valuation.get_live_price(ticker)
+    except Exception:
+        return None
+    try:
+        price = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        return None
+    if price is None or price <= 0:
+        return None
+    return round(float(ttm) / price, 4)
+
+
+def _dividend_annual_history(rows: list[dict]) -> tuple[list[dict], dict]:
+    """Complete fiscal years only: four distinct quarter ends per year."""
+    by_year: dict[int, list[dict]] = {}
+    for r in rows:
+        try:
+            fy = int(r.get("fiscal_year"))
+            float(r.get("value"))
+        except (TypeError, ValueError):
+            continue
+        by_year.setdefault(fy, []).append(r)
+    history: list[dict] = []
+    annual: dict[int, float] = {}
+    for fy in sorted(by_year, reverse=True):
+        members = by_year[fy]
+        if len({str(m.get("period_end")) for m in members}) != 4:
+            continue
+        total = round(sum(float(m["value"]) for m in members), 4)
+        annual[fy] = total
+        history.append({"fiscal_year": fy, "dividend_per_share": total})
+    return history, annual
+
+
 def get_fundamentals(ticker: str, metric: str) -> dict:
     """Return a specific fundamental for ticker.
 
-    metric: 'eps' | 'balance_sheet' | 'shares_outstanding' | 'overview'
+    metric: 'eps' | 'dividends' | 'balance_sheet' | 'shares_outstanding' | 'overview'
 
     'shares_float' is accepted as a deprecated alias for
     'shares_outstanding': it returns SEC-reported shares outstanding, not
@@ -249,6 +325,43 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             if recent_basic is not None and len(recent_basic) == 4:
                 result["ttm_eps_basic"] = round(sum(float(r["value"]) for _, r in recent_basic.iterrows()), 2)
             return result
+        if metric == "dividends":
+            facts = company.get_facts()
+            df = facts.to_dataframe()
+            div = df[df["concept"].isin(
+                ["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT]
+            )].copy()
+            if div.empty:
+                return _null_dividend_payload(ticker)
+            div["duration_days"] = _fact_duration_days(div)
+            # Quarterly-only: YTD/FY rows would double-count the TTM sum.
+            q = div[
+                (div["duration_days"] >= _QUARTER_DAYS[0])
+                & (div["duration_days"] <= _QUARTER_DAYS[1])
+            ].copy()
+            if q.empty:
+                return _null_dividend_payload(ticker)
+            q = _dedup_latest(q).sort_values("period_end")
+            recent = _quarters_with_derived_q4(
+                q, df, "us-gaap:" + _DIVIDEND_CONCEPT
+            )
+            rows = [
+                {"period_end": str(r["period_end"]), "fiscal_year": r["fiscal_year"], "value": float(r["value"])}
+                for _, r in q.iterrows()
+            ]
+            for _, r in recent.iterrows():
+                if str(r["period_end"]) not in {row["period_end"] for row in rows}:
+                    rows.append({"period_end": str(r["period_end"]), "fiscal_year": r["fiscal_year"], "value": float(r["value"])})
+            history, annual = _dividend_annual_history(rows)
+            ttm = round(sum(float(r["value"]) for _, r in recent.iterrows()), 4) if len(recent) == 4 else None
+            return {
+                "ticker": ticker,
+                "ttm_dividend_per_share": ttm,
+                "ttm_dividend_yield": _dividend_yield(ticker, ttm),
+                **_dividend_growth(annual),
+                "annual_history": history,
+                "source": _DIVIDEND_SOURCE,
+            }
         if metric == "balance_sheet":
             financials = company.get_financials()
             bs = getattr(financials, "balance_sheet", None) or getattr(financials, "get_balance_sheet", lambda: None)()

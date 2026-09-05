@@ -10,12 +10,13 @@ from typing import Any, Optional
 from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
-COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v3"
+COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v4"
 
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
 _ORIGINAL_CONCEPT = "dei:EntityCommonStockSharesOutstanding"
 EPS_UNIT = "USD/shares"
 EPS_CONCEPT_NAMES: tuple[str, ...] = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
+DIVIDEND_PER_SHARE_CONCEPT = "CommonStockDividendsPerShareDeclared"
 
 CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
     "Revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
@@ -92,7 +93,6 @@ def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
                     entries.append((canonical, f"{namespace}:{tag}", "USD", fact))
     return entries
 
-
 def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     """Per-share earnings facts, accepted only under the ``USD/shares`` unit."""
     entries: list[tuple[str, str, str, dict]] = []
@@ -112,10 +112,30 @@ def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     return entries
 
 
+def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+    """Declared dividend-per-share facts, accepted only under ``USD/shares``."""
+    entries: list[tuple[str, str, str, dict]] = []
+    namespaces = raw.get("facts") or {}
+    if not isinstance(namespaces, dict):
+        return entries
+    for namespace, concepts in namespaces.items():
+        if not isinstance(concepts, dict):
+            continue
+        for tag, payload in concepts.items():
+            if tag != DIVIDEND_PER_SHARE_CONCEPT:
+                continue
+            units = (payload or {}).get("units") or {}
+            for fact in units.get(EPS_UNIT) or []:
+                if isinstance(fact, dict):
+                    entries.append((tag, f"{namespace}:{tag}", EPS_UNIT, fact))
+    return entries
+
+
 def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
     entries.extend(_extract_canonical_facts(raw))
     entries.extend(_extract_eps_facts(raw))
+    entries.extend(_extract_dividend_facts(raw))
     return entries
 
 

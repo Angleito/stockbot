@@ -199,7 +199,7 @@ def test_eps_facts_normalized_with_period_metadata():
     assert diluted_row["fiscal_year"] == 2025
     assert diluted_row["fiscal_period"] == "Q2"
     assert diluted_row["known_at"] == "2025-08-28"
-    assert diluted_row["parser_version"] == "sec-companyfacts-v3"
+    assert diluted_row["parser_version"] == "sec-companyfacts-v4"
     assert diluted_row["parser_version"] == COMPANY_FACTS_PARSER_VERSION
 
 

@@ -1170,7 +1170,7 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
     skip = {
         "source", "metric", "data_source", "as_of_date", "requested_as_of",
         "row_count", "returned_count", "truncated", "ticker",
-        "quarterly_eps", "matching_concepts", "balance_sheet",
+        "quarterly_eps", "annual_history", "matching_concepts", "balance_sheet",
     }
     for key, value in result.items():
         if key in skip or value is None or isinstance(value, (list, dict)):
@@ -1188,6 +1188,11 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
         if row.get("eps_basic") is not None:
             text += f" | basic {row['eps_basic']}"
         _add(text)
+
+    for row in result.get("annual_history") or []:
+        if not isinstance(row, dict):
+            continue
+        _add(f"- {row.get('fiscal_year', '?')}: dividend {row.get('dividend_per_share', '?')}")
 
     for row in result.get("matching_concepts") or []:
         if not isinstance(row, dict):

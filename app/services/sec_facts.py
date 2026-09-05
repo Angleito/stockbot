@@ -22,10 +22,14 @@ from .. import edgar_client
 from ..domain.market.identity import resolve_ticker_aliases
 from ..edgar_client import (
     _DERIVED_Q4_OFFSET_DAYS,
+    _DIVIDEND_SOURCE,
     _FY_DAYS,
     _MISSING_QUARTER_GAP_DAYS,
     _QUARTER_DAYS,
     _YTD_DAYS,
+    _dividend_annual_history,
+    _dividend_growth,
+    _dividend_yield,
 )
 from ..storage import duckdb
 
@@ -34,9 +38,11 @@ DEFAULT_DATA_ROOT = duckdb.DEFAULT_DATA_ROOT
 DILUTED_EPS_CONCEPT = "EarningsPerShareDiluted"
 BASIC_EPS_CONCEPT = "EarningsPerShareBasic"
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
+DIVIDEND_PER_SHARE_CONCEPT = "CommonStockDividendsPerShareDeclared"
 
 _EPS_CONCEPTS = (DILUTED_EPS_CONCEPT, BASIC_EPS_CONCEPT)
-_METRICS = ("eps", "shares_outstanding", "balance_sheet", "overview")
+_DIVIDEND_CONCEPTS = (DIVIDEND_PER_SHARE_CONCEPT,)
+_METRICS = ("eps", "shares_outstanding", "balance_sheet", "overview", "dividends")
 
 
 def _today() -> _dt.date:
@@ -250,6 +256,30 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     return result
 
 
+def _assemble_dividend_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
+    """Deterministic store assembly over feed rows (pure; no storage)."""
+    quarters = _quarter_rows(rows, DIVIDEND_PER_SHARE_CONCEPT)
+    if not quarters:
+        return None
+    recent = _quarters_with_derived_q4(quarters, rows, DIVIDEND_PER_SHARE_CONCEPT)
+    full = list(quarters)
+    seen = {str(r["period_end"]) for r in full}
+    for r in recent:
+        if str(r["period_end"]) not in seen:
+            full.append(r)
+            seen.add(str(r["period_end"]))
+    history, annual = _dividend_annual_history(full)
+    ttm = round(sum(float(r["value"]) for r in recent), 4) if len(recent) == 4 else None
+    return {
+        "ticker": ticker,
+        "ttm_dividend_per_share": ttm,
+        "ttm_dividend_yield": _dividend_yield(ticker, ttm),
+        **_dividend_growth(annual),
+        "annual_history": history,
+        "source": _DIVIDEND_SOURCE,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
@@ -267,11 +297,35 @@ def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> d
         metric = "shares_outstanding"
     if metric == "eps":
         return _eps_fundamental(ticker, requested)
+    if metric == "dividends":
+        return _dividend_fundamental(ticker, requested)
     if metric == "shares_outstanding":
         return _shares_outstanding_fundamental(ticker, requested)
     if metric in ("balance_sheet", "overview"):
         return _live_only_fundamental(ticker, metric, requested)
     return {"error": f"Unknown metric '{metric}'", "error_type": "invalid_tool_arguments"}
+
+
+def _dividend_fundamental(ticker: str, requested: _dt.date) -> dict:
+    data_root = DEFAULT_DATA_ROOT
+    entity_id = _resolve_entity(ticker, requested, data_root)
+    store_rows = _store_rows(entity_id, _DIVIDEND_CONCEPTS, requested, data_root) if entity_id else []
+    payload = _assemble_dividend_payload(ticker, store_rows) if store_rows else None
+    if payload is not None:
+        return _envelope(
+            ticker, "dividends", payload,
+            data_source="store", as_of_date=requested.isoformat(),
+            row_count=len(payload["annual_history"]),
+        )
+    payload = edgar_client.get_fundamentals(ticker, "dividends")
+    if "error" in payload:
+        return payload
+    return _envelope(
+        ticker, "dividends", payload,
+        data_source="live", as_of_date=_today().isoformat(),
+        requested_as_of=requested.isoformat(),
+        row_count=len(payload.get("annual_history") or []),
+    )
 
 
 def _eps_fundamental(ticker: str, requested: _dt.date) -> dict:
