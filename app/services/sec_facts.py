@@ -29,7 +29,8 @@ from ..edgar_client import (
     _YTD_DAYS,
     _dividend_annual_history,
     _dividend_growth,
-    _dividend_yield,
+    _dividend_valuation,
+    _has_contiguous_quarters,
 )
 from ..storage import duckdb
 
@@ -137,8 +138,8 @@ def _duration_days(row: dict) -> Optional[int]:
     return (end_date - start_date).days
 
 
-def _quarter_rows(rows: list[dict], concept: str) -> list[dict]:
-    """True quarterly (~3-month) facts for a concept, restatements resolved
+def _duration_rows(rows: list[dict], concept: str, day_range: tuple[int, int]) -> list[dict]:
+    """Facts of a given duration for a concept, restatements resolved
     by the true latest filed_at (accession DESC tie-break) — replacing
     edgar_client._dedup_latest's fiscal-year proxy — newest period first."""
     q = []
@@ -146,7 +147,7 @@ def _quarter_rows(rows: list[dict], concept: str) -> list[dict]:
         if row.get("concept") != concept:
             continue
         duration = _duration_days(row)
-        if duration is not None and _QUARTER_DAYS[0] <= duration <= _QUARTER_DAYS[1]:
+        if duration is not None and day_range[0] <= duration <= day_range[1]:
             q.append(row)
     by_end: dict[str, dict] = {}
     for row in q:
@@ -219,12 +220,12 @@ def _quarters_with_derived_q4(quarter_rows: list[dict], all_rows: list[dict], co
 def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     """Deterministic store assembly over feed rows (pure; no storage)."""
     recent_diluted = _quarters_with_derived_q4(
-        _quarter_rows(rows, DILUTED_EPS_CONCEPT), rows, DILUTED_EPS_CONCEPT
+        _duration_rows(rows, DILUTED_EPS_CONCEPT, _QUARTER_DAYS), rows, DILUTED_EPS_CONCEPT
     )
     if not recent_diluted:
         return None
     recent_basic = None
-    basic_quarters = _quarter_rows(rows, BASIC_EPS_CONCEPT)
+    basic_quarters = _duration_rows(rows, BASIC_EPS_CONCEPT, _QUARTER_DAYS)
     if basic_quarters:
         recent_basic = _quarters_with_derived_q4(basic_quarters, rows, BASIC_EPS_CONCEPT)
 
@@ -258,22 +259,20 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
 
 def _assemble_dividend_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     """Deterministic store assembly over feed rows (pure; no storage)."""
-    quarters = _quarter_rows(rows, DIVIDEND_PER_SHARE_CONCEPT)
-    if not quarters:
+    if not any(r.get("concept") == DIVIDEND_PER_SHARE_CONCEPT for r in rows):
         return None
+    quarters = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _QUARTER_DAYS)
     recent = _quarters_with_derived_q4(quarters, rows, DIVIDEND_PER_SHARE_CONCEPT)
-    full = list(quarters)
-    seen = {str(r["period_end"]) for r in full}
-    for r in recent:
-        if str(r["period_end"]) not in seen:
-            full.append(r)
-            seen.add(str(r["period_end"]))
-    history, annual = _dividend_annual_history(full)
-    ttm = round(sum(float(r["value"]) for r in recent), 4) if len(recent) == 4 else None
+    if len(recent) == 4 and _has_contiguous_quarters([r["period_end"] for r in recent]):
+        ttm = round(sum(float(r["value"]) for r in recent), 4)
+    else:
+        ttm = None
+    fy_rows = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _FY_DAYS)
+    history, annual = _dividend_annual_history(fy_rows)
     return {
         "ticker": ticker,
+        "dividend_status": "paying",
         "ttm_dividend_per_share": ttm,
-        "ttm_dividend_yield": _dividend_yield(ticker, ttm),
         **_dividend_growth(annual),
         "annual_history": history,
         "source": _DIVIDEND_SOURCE,
@@ -311,13 +310,15 @@ def _dividend_fundamental(ticker: str, requested: _dt.date) -> dict:
     entity_id = _resolve_entity(ticker, requested, data_root)
     store_rows = _store_rows(entity_id, _DIVIDEND_CONCEPTS, requested, data_root) if entity_id else []
     payload = _assemble_dividend_payload(ticker, store_rows) if store_rows else None
+    current = requested == _today()
     if payload is not None:
+        payload = {**payload, **_dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), price_as_of=requested.isoformat() if current else None)}
         return _envelope(
             ticker, "dividends", payload,
             data_source="store", as_of_date=requested.isoformat(),
             row_count=len(payload["annual_history"]),
         )
-    payload = edgar_client.get_fundamentals(ticker, "dividends")
+    payload = edgar_client.get_fundamentals(ticker, "dividends", include_dividend_price=current)
     if "error" in payload:
         return payload
     return _envelope(
