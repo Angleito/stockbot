@@ -320,3 +320,28 @@ def test_efts_as_of_excludes_future_filed_at(monkeypatch):
     result = client.search_sec_filings("Acme Labs", as_of="2026-01-01")
     assert result.text_hits == ()
     assert any("as_of" in w for w in result.warnings)
+
+
+def test_discovery_current_feed_page_is_partial(tmp_path, monkeypatch):
+    from app.sec.discovery.service import SECDiscoveryService
+    from app.sec.models import Filing, SECSearchRequest
+    import app.sec.client as client
+
+    def _filing(accession):
+        return Filing(accession_no=accession, form="8-K", filer_cik=1234567,
+                      filer_name="Acme Inc", filed_at="2026-08-01",
+                      accepted_at="2026-08-01T10:00:00Z",
+                      known_at="2026-08-01T10:00:00Z",
+                      report_period=None, primary_document="primary.htm",
+                      is_amendment=False, amendment_of=None,
+                      source=f"https://sec/{accession}")
+
+    monkeypatch.setattr(client, "get_current_filings",
+                        lambda form, page_size=50: [_filing("a1"), _filing("a2")])
+    svc = SECDiscoveryService(data_root=tmp_path)
+    result = svc.search(SECSearchRequest(forms=("8-K",), max_results=2,
+                                        search_entities=False,
+                                        search_relationships=False))
+    current = [a for a in result.attempts if a.backend == "current-filings"]
+    assert current and all(a.status == "partial" for a in current)
+    assert result.coverage.status == "partial"

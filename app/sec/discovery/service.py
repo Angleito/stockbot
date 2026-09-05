@@ -1885,7 +1885,7 @@ class SECDiscoveryService:
                                 continue
                             if _keep(filing):
                                 kept.append(filing)
-                        _record("current-filings", form, "complete",
+                        _record("current-filings", form, "partial",
                                 reported=len(rows), retrieved=len(kept),
                                 pages=1,
                                 pit_basis="known_at" if as_of else None,
@@ -2463,7 +2463,7 @@ def _resolve_relationship_identity(entity: object, *, as_of=None):
 
 def search_sec_relationships(entity: object, relationship_types=None,
                              as_of: str | None = None, data_root=None,
-                             limit: int = 50, exhaustive: bool = True) -> dict:
+                             limit: int = 50, exhaustive: bool = False) -> dict:
     """Fan out across typed, workflow, mention, and EFTS routes.
 
     Returns groups by ``relationship_type`` then status. Typed

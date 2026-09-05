@@ -388,3 +388,54 @@ def test_ontology_boost_orders_but_never_filters(tmp_path, monkeypatch):
     out = search_sec_relationships(A, data_root=tmp_path)
     assert set(out["groups"]) == {"supplier_of", "customer_of"}
     assert list(out["groups"]) == ["supplier_of", "customer_of"]
+
+
+def test_relationship_search_limit_bounds_typed_queries(tmp_path, monkeypatch):
+    seen = []
+
+    def _row(i):
+        return {"filer_cik": "1234567", "subject_cik": "1234567",
+                "accession": f"ACC-{i}", "document_name": "primary",
+                "known_at": "2024-01-10T00:00:00Z"}
+
+    def _saturated(query_fn_name):
+        def _fake(*a, **k):
+            seen.append((query_fn_name, k.get("limit")))
+            if query_fn_name == "beneficial" and not any(
+                    s[0] == "beneficial" for s in seen[:-1]):
+                return [_row(i) for i in range(51)]
+            return []
+        return _fake
+
+    import app.sec.store as sec_store_mod
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership",
+                        _saturated("beneficial"))
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions",
+                        lambda *a, **k: (seen.append(("insider", k.get("limit"))), [])[1])
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings",
+                        lambda *a, **k: (seen.append(("holdings", k.get("limit"))), [])[1])
+    monkeypatch.setattr(sec_store_mod, "query_transactions",
+                        lambda *a, **k: (seen.append(("transactions", k.get("limit"))), [])[1])
+    monkeypatch.setattr(sec_store_mod, "query_offerings",
+                        lambda *a, **k: (seen.append(("offerings", k.get("limit"))), [])[1])
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "search_document_text",
+                        lambda *a, **k: [])
+    monkeypatch.setattr("app.sec.client.search_sec_filings",
+                        lambda *a, **k: SimpleNamespace(text_hits=[]))
+    monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+
+    out = search_sec_relationships("1234567", limit=50, data_root=tmp_path)
+    assert seen
+    assert all(limit is not None and limit <= 51 for _, limit in seen)
+    typed = next(a for a in out["attempts"] if a["backend"] == "local-typed")
+    assert typed["status"] == "partial"
+
+    seen.clear()
+    search_sec_relationships("1234567", limit=50, exhaustive=True,
+                             data_root=tmp_path)
+    assert any(limit == disc._LOCAL_EXHAUSTIVE_GUARD for _, limit in seen)

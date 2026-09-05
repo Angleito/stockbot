@@ -243,7 +243,12 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch):
         "attempts": [{"backend": "local-typed", "status": "complete"}],
         "warnings": [], "errors": [],
     }
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    seen = {}
+    def _fake(*a, **k):
+        seen.update(k)
+        seen["args"] = a
+        return payload
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "1234567"},
         "test", context=_research_context(),
@@ -255,7 +260,14 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch):
     assert result["counts"] == {"typed": 1, "workflow": 0, "mentions": 1}
     assert result["attempts"][0]["backend"] == "local-typed"
     assert result["source"] == "SEC EDGAR"
-
+    assert seen["limit"] == 50
+    assert seen["exhaustive"] is False
+    seen.clear()
+    tools.execute_tool(
+        "search_sec_relationships", {"entity": "1234567", "exhaustive": True},
+        "test", context=_research_context(),
+    )
+    assert seen["exhaustive"] is False
 
 def test_search_sec_relationships_partial_on_errors(monkeypatch):
     payload = {"entity": "X", "ciks": (), "groups": {}, "typed": [],

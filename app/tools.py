@@ -1652,7 +1652,7 @@ def _sec_relationships_result(args: dict) -> dict:
     result = sec.search_sec_relationships(
         args["entity"], relationship_types=args.get("relationship_types"),
         as_of=args.get("as_of"), limit=args.get("limit", 50),
-        exhaustive=args.get("exhaustive", True),
+        exhaustive=False,
     )
     found = len(result.get("typed") or []) + len(
         result.get("relationships") or []) + len(result.get("mentions") or [])
