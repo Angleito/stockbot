@@ -961,7 +961,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                     filing.to_dict(), sort_keys=True, default=str).encode()
                 records = _archive.archive_sec_filing(
                     filing, {"submission": payload},
-                    url=filing.source or "", root=raw_root)
+                    url=filing.source or "", root=_raw_root_for(data_root))
                 _store.store_filing(
                     filing,
                     raw_submission_path=getattr(
