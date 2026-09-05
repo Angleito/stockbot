@@ -167,7 +167,7 @@ def test_concept_parity_and_parser_bump():
     assert DIVIDEND_PER_SHARE_CONCEPT == "CommonStockDividendsPerShareDeclared"
     assert sec_facts.DIVIDEND_PER_SHARE_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
     assert edgar_client._DIVIDEND_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
-    assert COMPANY_FACTS_PARSER_VERSION == "sec-companyfacts-v4"
+    assert COMPANY_FACTS_PARSER_VERSION == "sec-companyfacts-v5"
 
 
 def test_wrong_unit_and_paid_concept_rejected():
@@ -272,8 +272,8 @@ def test_shifted_fy_metadata_uses_period_end_year(store, monkeypatch):
         _div_fact(2.10, "2025-01-01", "2025-12-31", 2026, "FY", "2026-03-01", "s2"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["dividend_status"] == "paying"
-    assert result["ttm_dividend_per_share"] == 2.10
+    assert result["dividend_status"] == "unknown"
+    assert result["ttm_dividend_per_share"] is None
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.10}]
 
 
@@ -536,9 +536,8 @@ def test_semiannual_payer_ttm(store, monkeypatch):
         _div_fact(0.90, "2026-01-01", "2026-06-30", 2026, "Q2", "2026-07-15", "s2"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["ttm_dividend_per_share"] == 1.80
-    assert result["dividend_status"] == "paying"
-
+    assert result["ttm_dividend_per_share"] is None
+    assert result["dividend_status"] == "unknown"
 
 def test_annual_payer_ttm(store, monkeypatch):
     _fail_on_price(monkeypatch)
@@ -547,8 +546,8 @@ def test_annual_payer_ttm(store, monkeypatch):
         _div_fact(2.50, "2025-07-01", "2026-06-30", 2026, "FY", "2026-07-15", "a1"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["ttm_dividend_per_share"] == 2.50
-    assert result["dividend_status"] == "paying"
+    assert result["ttm_dividend_per_share"] is None
+    assert result["dividend_status"] == "unknown"
 
 
 def test_monthly_payer_ttm(store, monkeypatch):
@@ -565,9 +564,8 @@ def test_monthly_payer_ttm(store, monkeypatch):
         for i, (s, e) in enumerate(months)
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["ttm_dividend_per_share"] == 2.40
-    assert result["dividend_status"] == "paying"
-
+    assert result["ttm_dividend_per_share"] is None
+    assert result["dividend_status"] == "unknown"
 
 def test_stale_annual_reports_unknown(store, monkeypatch):
     _fail_on_price(monkeypatch)
@@ -578,3 +576,17 @@ def test_stale_annual_reports_unknown(store, monkeypatch):
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["ttm_dividend_per_share"] is None
     assert result["dividend_status"] == "unknown"
+
+
+def test_fy_aggregate_plus_incomplete_quarters_is_not_ttm(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_dividends(store, KO_CIK, [
+        _div_fact(2.04, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "y2025FY"),
+        _div_fact(0.51, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "q1"),
+        _div_fact(0.51, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["ttm_dividend_per_share"] is None
+    assert result["dividend_status"] == "unknown"
+    assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]

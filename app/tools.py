@@ -43,7 +43,9 @@ TOOLS = [
                 "dividends, balance sheet line item, shares outstanding) for a ticker. "
                 "Note: shares_outstanding is SEC-reported shares outstanding, "
                 "not public float. Call this for any request for a specific "
-                "numeric metric.",
+                "numeric metric. Dividends responses include last paid and next "
+                "SEC-declared (upcoming) dividends with filing provenance; "
+                "undeclared estimates are never included.",
             "parameters": {
                 "type": "object",
                 "properties": {

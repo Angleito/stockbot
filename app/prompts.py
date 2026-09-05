@@ -72,6 +72,7 @@ Rules:
   * Earnings/guidance/material events: Use get_material_events, then get_sec_document on the cited accession
   * Forward guidance: get_material_events for recent 2.02 earnings events first; if insufficient, list recent 8-K/8-K/A, then inspect relevant 2.02, 7.01, 8.01 filings and exhibits via get_sec_document; never emit a guidance_change event without a deterministic classifier
   * Financial metrics (Revenue, NetIncome, Cash, Debt): Use get_xbrl_facts
+  * Dividends: Dividend metrics (TTM DPS, yield, CAGR, payout/coverage, cadence, streaks, risk flags) are tool-computed; the LLM interprets and never recalculates them. Render past dividends, present state, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED.
   * Full financial statements: Use get_financial_statements
   * Insider transactions: Use get_insider_activity; planned (unexecuted) sales: Use get_planned_insider_sales
   * Proxy/executive compensation/governance: Use get_governance_events, then get_sec_document
@@ -258,6 +259,7 @@ Rules:
   metrics if available. Format as a markdown table for readability.
 - TOOL SELECTION GUIDE (call search_tools first when unsure; load only matched schemas):
   * Financial metrics (Revenue, NetIncome, Cash, Debt): Use get_xbrl_facts
+  * Dividends: Dividend metrics (TTM DPS, yield, CAGR, payout/coverage, cadence, streaks, risk flags) are tool-computed; the LLM interprets and never recalculates them. Render past dividends, present state, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED.
   * Full financial statements: Use get_financial_statements
   * Source hierarchy: structured canonical data first, deterministic SEC analyzers next, raw filing/document after, external web last. The LLM interprets; it never calculates what a tool computes.
   * Incremental retrieval: get_material_events → latest 8-K document → insider → >5% holder changes → financing/dilution → financial changes. Never load full history.

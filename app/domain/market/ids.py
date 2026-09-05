@@ -23,6 +23,25 @@ def sec_fact_id(cik: int | str, accession: str, concept: str, period_end: str, v
     return f"sec:fact:{int(cik):010d}:{accession}:{concept}:{period_end}:{value}"
 
 
+def sec_dividend_event_id(
+    cik: int | str,
+    amount: float,
+    record_date: str | None,
+    payment_date: str | None,
+    dividend_type: str,
+    accession: str | None = None,
+    declaration_date: str | None = None,
+) -> str:
+    """Deterministic dividend-event ID: reruns dedup, amended amounts differ."""
+    event_id = (
+        f"sec:divevt:{int(cik):010d}:{float(amount):.4f}"
+        f":{record_date or 'norec'}:{payment_date or 'nopay'}:{dividend_type}"
+    )
+    if not record_date and not payment_date:
+        event_id += f":{accession}:{declaration_date or 'nodecl'}"
+    return event_id
+
+
 def finra_entity_id(symbol: str) -> str:
     """Provisional FINRA-only entity ID, used before the symbol resolves to
     an SEC CIK.  The authoritative entity ID is the SEC one once mapped."""

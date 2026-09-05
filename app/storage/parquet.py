@@ -250,6 +250,21 @@ DATASETS: dict[str, Dataset] = {
     ),
 }
 DATASETS["capital_events"] = Dataset(name="capital_events", schema=DATASETS["events"].schema, unique_keys=("event_id",), partition_field="filed_at")
+DATASETS["dividend_events"] = Dataset(
+    name="dividend_events",
+    schema=pa.schema(_fields(
+        ("dividend_event_id", TEXT), ("entity_id", TEXT), ("security_id", TEXT),
+        ("ticker", TEXT), ("amount_per_share", DOUBLE), ("currency", TEXT),
+        ("dividend_type", TEXT), ("declaration_date", TEXT), ("record_date", TEXT),
+        ("payment_date", TEXT), ("ex_dividend_date", TEXT), ("ex_dividend_date_source", TEXT),
+        ("status", TEXT), ("source_form", TEXT), ("accession", TEXT),
+        ("filed_at", TEXT), ("known_at", TEXT), ("source_url", TEXT),
+        ("source_concept", TEXT), ("source_type", TEXT), ("evidence_excerpt", TEXT),
+        ("content_hash", TEXT), ("parser_version", TEXT),
+    )),
+    unique_keys=("dividend_event_id",),
+    partition_field="filed_at",
+)
 DATASETS["sec_filings"] = Dataset(
     name="sec_filings",
     schema=pa.schema(_fields(

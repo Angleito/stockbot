@@ -63,8 +63,6 @@ def _cached_or_fetch(key: str, fetch):
 _QUARTER_DAYS = (60, 115)
 _YTD_DAYS = (240, 300)
 _FY_DAYS = (330, 400)
-_MONTH_DAYS = (20, 45)
-_SEMI_DAYS = (150, 215)
 _MISSING_QUARTER_GAP_DAYS = 130
 _DERIVED_Q4_OFFSET_DAYS = 91
 
@@ -150,9 +148,6 @@ def _derive_q4_from_facts(full_facts, concept, fy_end) -> Any:
 _DIVIDEND_CONCEPT = "CommonStockDividendsPerShareDeclared"
 _DIVIDEND_SOURCE = "SEC EDGAR company facts (Declared dividends per share)"
 _DIVIDEND_TTM_MAX_AGE_DAYS = 180
-_DIVIDEND_MONTH_MAX_AGE_DAYS = 45
-_DIVIDEND_SEMI_MAX_AGE_DAYS = 210
-_DIVIDEND_ANNUAL_MAX_AGE_DAYS = 400
 
 
 def _is_recent_dividend_period(period_end: Any, as_of: _dt.date, max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS) -> bool:
@@ -217,9 +212,26 @@ def _dividend_growth(annual: dict) -> dict:
     return out
 
 
+_NO_HISTORICAL_PRICE_STORE = "no_historical_price_store"
+
+
+def _dividend_valuation_stub() -> dict[str, Any]:
+    """Historical-price valuation is unavailable (no OHLCV store): nulls with reason."""
+    return {
+        "historical_yield": None,
+        "historical_yield_reason": _NO_HISTORICAL_PRICE_STORE,
+        "yield_percentile": None,
+        "yield_percentile_reason": _NO_HISTORICAL_PRICE_STORE,
+        "total_return": None,
+        "total_return_reason": _NO_HISTORICAL_PRICE_STORE,
+        "shareholder_yield": None,
+        "shareholder_yield_reason": _NO_HISTORICAL_PRICE_STORE,
+    }
+
+
 def _dividend_valuation(ticker: str, ttm: Any, *, include_price: bool) -> dict[str, Any]:
     """Point-in-time valuation: stale/absent TTM or historical requests expose no price."""
-    nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None}
+    nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None, **_dividend_valuation_stub()}
     if not include_price or ttm is None:
         return dict(nulls)
     try:
@@ -239,7 +251,7 @@ def _dividend_valuation(ticker: str, ttm: Any, *, include_price: bool) -> dict[s
         return dict(nulls)
     if price is None or price <= 0:
         return dict(nulls)
-    return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at")}
+    return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at"), **_dividend_valuation_stub()}
 
 
 def _dividend_annual_history(rows: list[dict]) -> tuple[list[dict], dict]:
@@ -280,9 +292,8 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
     if metric == "dividends" and isinstance(result, dict) and "error" not in result:
         result = dict(result)
         latest_end = result.pop("_latest_dividend_period_end", None)
-        max_age = result.pop("_dividend_ttm_max_age_days", _DIVIDEND_TTM_MAX_AGE_DAYS)
         if result.get("dividend_status") != "insufficient_data":
-            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today(), max_age):
+            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today()):
                 result["ttm_dividend_per_share"] = None
                 result["dividend_status"] = "unknown"
             else:
@@ -402,32 +413,8 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 recent = q
             ttm: Any = None
             latest_end: Any = str(recent.iloc[-1]["period_end"]) if len(recent) else None
-            max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS
             if len(recent) == 4 and _has_contiguous_quarters(list(recent["period_end"])):
                 ttm = round(sum(float(r["value"]) for _, r in recent.iterrows()), 4)
-            else:
-                for days, count, cap in ((_MONTH_DAYS, 12, _DIVIDEND_MONTH_MAX_AGE_DAYS), (_SEMI_DAYS, 2, _DIVIDEND_SEMI_MAX_AGE_DAYS)):
-                    tier = div[
-                        (div["duration_days"] >= days[0]) & (div["duration_days"] <= days[1])
-                    ].copy()
-                    if tier.empty:
-                        continue
-                    tier = _dedup_latest(tier).sort_values("period_end").tail(count)
-                    if len(tier) == count and _has_contiguous_gaps(list(tier["period_end"]), days, count):
-                        ttm = round(sum(float(r["value"]) for _, r in tier.iterrows()), 4)
-                        latest_end = str(tier.iloc[-1]["period_end"])
-                        max_age_days = cap
-                        break
-                else:
-                    fy_only = div[
-                        (div["duration_days"] >= _FY_DAYS[0])
-                        & (div["duration_days"] <= _FY_DAYS[1])
-                    ].copy()
-                    if not fy_only.empty:
-                        fy_only = _dedup_latest(fy_only).sort_values("period_end")
-                        ttm = round(float(fy_only.iloc[-1]["value"]), 4)
-                        latest_end = str(fy_only.iloc[-1]["period_end"])
-                        max_age_days = _DIVIDEND_ANNUAL_MAX_AGE_DAYS
             fy = div[
                 (div["duration_days"] >= _FY_DAYS[0])
                 & (div["duration_days"] <= _FY_DAYS[1])
@@ -446,7 +433,6 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 "annual_history": history,
                 "source": _DIVIDEND_SOURCE,
                 "_latest_dividend_period_end": latest_end,
-                "_dividend_ttm_max_age_days": max_age_days,
             }
         if metric == "balance_sheet":
             financials = company.get_financials()

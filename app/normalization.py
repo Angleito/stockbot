@@ -5,24 +5,38 @@ Network-free and agent-free: raw payloads in, normalized rows out.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
-COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v4"
+COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v5"
+FILING_TEXT_PARSER_VERSION = "sec-filing-text-v1"
 
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
 _ORIGINAL_CONCEPT = "dei:EntityCommonStockSharesOutstanding"
 EPS_UNIT = "USD/shares"
 EPS_CONCEPT_NAMES: tuple[str, ...] = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
 DIVIDEND_PER_SHARE_CONCEPT = "CommonStockDividendsPerShareDeclared"
+DIVIDEND_EVENT_AMOUNT_CONCEPT = "DividendsPayableAmountPerShare"
+DIVIDEND_EVENT_DECLARED_CONCEPT = "DividendsPayableDateDeclaredDayMonthAndYear"
+DIVIDEND_EVENT_RECORD_CONCEPT = "DividendsPayableDateOfRecordDayMonthAndYear"
+DIVIDEND_EVENT_PAYMENT_CONCEPT = "DividendPayableDateToBePaidDayMonthAndYear"
+_DIVIDEND_EVENT_DATE_ROLES = {
+    DIVIDEND_EVENT_DECLARED_CONCEPT: "declaration_date",
+    DIVIDEND_EVENT_RECORD_CONCEPT: "record_date",
+    DIVIDEND_EVENT_PAYMENT_CONCEPT: "payment_date",
+}
 
 CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
     "Revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
     "NetIncomeLoss": ("NetIncomeLoss",),
     "CashAndCashEquivalents": ("CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations"),
     "LongTermDebt": ("LongTermDebtCurrentAndNoncurrent", "LongTermDebtNoncurrent", "LongTermDebt"),
+    "OperatingCashFlow": ("NetCashProvidedByUsedInOperatingActivities",),
+    "CapEx": ("PaymentsToAcquirePropertyPlantAndEquipment",),
+    "DividendsPaid": ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends",),
 }
 
 
@@ -131,6 +145,206 @@ def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     return entries
 
 
+def _extract_dividend_event_facts(
+    raw: Any,
+    *,
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    source_url: str,
+    retrieved_at: str,
+    content_hash: str,
+) -> list[dict]:
+    """Declared-dividend events from structured XBRL facts; never infers dates."""
+    del retrieved_at  # known_at is filed_at, never extraction time.
+    namespaces = (raw.get("facts") if isinstance(raw, dict) else None) or {}
+    if not isinstance(namespaces, dict):
+        return []
+    amounts: list[tuple[str, str, float, str, str]] = []
+    dates: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for namespace, concepts in namespaces.items():
+        if not isinstance(concepts, dict):
+            continue
+        for tag, payload in concepts.items():
+            is_amount = tag == DIVIDEND_EVENT_AMOUNT_CONCEPT
+            role = _DIVIDEND_EVENT_DATE_ROLES.get(tag)
+            if not is_amount and role is None:
+                continue
+            units = (payload or {}).get("units") or {}
+            if not isinstance(units, dict):
+                continue
+            if is_amount:
+                unit_facts: list[tuple[str, list]] = [
+                    (unit, facts) for unit, facts in units.items()
+                    if isinstance(facts, list) and facts
+                ]
+                preferred = [u for u, _ in unit_facts if u == EPS_UNIT]
+                # Contingency A: fall back to the sole observed unit for this concept.
+                chosen = preferred[:1] if preferred else ([unit_facts[0][0]] if len(unit_facts) == 1 else [])
+                for unit in chosen:
+                    for fact in units.get(unit) or []:
+                        if not isinstance(fact, dict):
+                            continue
+                        try:
+                            amount = float(fact.get("val"))
+                        except (TypeError, ValueError):
+                            continue
+                        accession, filed = str(fact.get("accn") or ""), str(fact.get("filed") or "")
+                        if not accession or not filed:
+                            continue
+                        amounts.append((accession, filed, amount, unit, f"{namespace}:{tag}"))
+            else:
+                assert role is not None
+                for facts in units.values():
+                    if not isinstance(facts, list):
+                        continue
+                    for fact in facts:
+                        if not isinstance(fact, dict):
+                            continue
+                        value = str(fact.get("val") or "").strip()
+                        accession, filed = str(fact.get("accn") or ""), str(fact.get("filed") or "")
+                        if not value or not accession or not filed:
+                            continue
+                        dates.setdefault((accession, filed), {}).setdefault(role, set()).add(value)
+    groups: dict[tuple[str, str], list[tuple[float, str, str]]] = {}
+    for accession, filed, amount, unit, source_concept in amounts:
+        groups.setdefault((accession, filed), []).append((amount, unit, source_concept))
+    events: list[dict] = []
+    for (accession, filed) in sorted(groups):
+        seen: dict[float, tuple[str, str]] = {}
+        for amount, unit, source_concept in groups[(accession, filed)]:
+            seen.setdefault(amount, (unit, source_concept))
+        group_dates = dates.get((accession, filed), {})
+        declaration = min(group_dates.get("declaration_date") or (), default=None)
+        record = min(group_dates.get("record_date") or (), default=None)
+        payments = sorted(group_dates.get("payment_date") or ()) or [None]
+        for amount in sorted(seen):
+            unit, source_concept = seen[amount]
+            for payment in payments:
+                events.append({
+                    "dividend_event_id": ids.sec_dividend_event_id(
+                        cik, amount, record, payment, "unknown", accession, declaration),
+                    "entity_id": entity_id,
+                    "security_id": security_id,
+                    "ticker": None,
+                    "amount_per_share": amount,
+                    "currency": unit.split("/")[0] if "/" in unit else unit,
+                    "dividend_type": "unknown",
+                    "declaration_date": declaration,
+                    "record_date": record,
+                    "payment_date": payment,
+                    "ex_dividend_date": None,
+                    "ex_dividend_date_source": "unknown",
+                    "status": "unknown",
+                    "source_form": None,
+                    "accession": accession,
+                    "filed_at": filed,
+                    "known_at": filed,
+                    "source_url": source_url,
+                    "source_concept": source_concept,
+                    "source_type": "structured_xbrl",
+                    "evidence_excerpt": None,
+                    "content_hash": content_hash,
+                    "parser_version": COMPANY_FACTS_PARSER_VERSION,
+                })
+    return events
+
+
+_DIVIDEND_TEXT_MONTHS = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+    "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+_DIVIDEND_DECLARE_RE = re.compile(
+    r"declared\s+an?\s+"
+    r"(?:(quarterly|monthly|semiannual|annual|special|supplemental|extraordinary)\s+)?"
+    r"(?:cash\s+)?dividend\s+of\s+\$(?P<amount>\d[\d,]*(?:\.\d+)?)\s+per\s+share",
+    re.IGNORECASE,
+)
+_DIVIDEND_DATE_RES = {
+    "payment_date": re.compile(r"payable\s+(?:on\s+)?(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
+    "record_date": re.compile(
+        r"(?:shareholders|stockholders)\s+of\s+record\s+(?:on\s+|as\s+of\s+)?"
+        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
+    "ex_dividend_date": re.compile(
+        r"ex[-\s]?dividend\s+(?:date\s+)?(?:of\s+|on\s+|is\s+)?"
+        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
+}
+
+
+def _parse_dividend_text_date(value: str) -> Optional[str]:
+    match = re.match(r"([A-Za-z]+)\.?\s+(\d{1,2}),\s*(\d{4})", value.strip())
+    if not match:
+        return None
+    month = _DIVIDEND_TEXT_MONTHS.get(match.group(1)[:3].lower())
+    day = int(match.group(2))
+    if month is None or not 1 <= day <= 31:
+        return None
+    return f"{match.group(3)}-{month}-{day:02d}"
+
+
+def _extract_dividend_events_from_text(
+    text: str,
+    *,
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    accession: str,
+    filed_at: str,
+    source_url: str,
+    content_hash: str,
+) -> list[dict]:
+    """Proposed dividend events from filing prose; amount mandatory, dates optional."""
+    events: list[dict] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+        sentence = sentence.strip()
+        match = _DIVIDEND_DECLARE_RE.search(sentence)
+        if not match:
+            continue
+        try:
+            amount = float(match.group("amount").replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        lowered = sentence.lower()
+        if "supplemental" in lowered:
+            dividend_type = "supplemental"
+        elif "special" in lowered or "extraordinary" in lowered:
+            dividend_type = "special"
+        else:
+            dividend_type = "regular"
+        found = {key: _parse_dividend_text_date(m.group("date")) for key, m in
+                 ((key, rx.search(sentence)) for key, rx in _DIVIDEND_DATE_RES.items()) if m}
+        record = found.get("record_date")
+        payment = found.get("payment_date")
+        ex_date = found.get("ex_dividend_date")
+        events.append({
+            "dividend_event_id": ids.sec_dividend_event_id(
+                cik, amount, record, payment, dividend_type, accession, None),
+            "entity_id": entity_id,
+            "security_id": security_id,
+            "ticker": None,
+            "amount_per_share": amount,
+            "currency": "USD",
+            "dividend_type": dividend_type,
+            "declaration_date": None,
+            "record_date": record,
+            "payment_date": payment,
+            "ex_dividend_date": ex_date,
+            "ex_dividend_date_source": "explicit" if ex_date else "unknown",
+            "status": "unknown",
+            "source_form": None,
+            "accession": accession,
+            "filed_at": filed_at,
+            "known_at": filed_at,
+            "source_url": source_url,
+            "source_concept": None,
+            "source_type": "filing_text",
+            "evidence_excerpt": sentence,
+            "content_hash": content_hash,
+            "parser_version": FILING_TEXT_PARSER_VERSION,
+        })
+    return events
+
+
 def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
     entries.extend(_extract_canonical_facts(raw))
@@ -210,6 +424,10 @@ def normalize_sec_company_facts(
             "content_hash": content_hash,
             "parser_version": COMPANY_FACTS_PARSER_VERSION,
         })
+    dividend_events = _extract_dividend_event_facts(
+        raw, cik=cik, entity_id=entity_id, security_id=security_id,
+        source_url=source_url, retrieved_at=retrieved_at, content_hash=content_hash,
+    )
     securities = [{
         "security_id": security_id,
         "entity_id": entity_id,
@@ -222,7 +440,8 @@ def normalize_sec_company_facts(
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
-    return {"documents": documents, "financial_facts": financial_facts, "securities": securities}
+    return {"documents": documents, "financial_facts": financial_facts,
+            "securities": securities, "dividend_events": dividend_events}
 
 
 SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"

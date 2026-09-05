@@ -1171,11 +1171,53 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
         "source", "metric", "data_source", "as_of_date", "requested_as_of",
         "row_count", "returned_count", "truncated", "ticker",
         "quarterly_eps", "annual_history", "matching_concepts", "balance_sheet",
+        "last_dividend", "next_declared_dividend", "past_events",
+        "safety", "risk_flags",
     }
+    is_div = "dividend_status" in result or "last_dividend" in result or "next_declared_dividend" in result
+    _DIV_GROWTH_KEYS = ("growth_1y", "growth_3y_cagr", "growth_5y_cagr", "growth_10y_cagr")
+    if is_div:
+        skip |= set(_DIV_GROWTH_KEYS) | {"growth_trend", "growth_basis"}
+        _add("CURRENT:")
     for key, value in result.items():
         if key in skip or value is None or isinstance(value, (list, dict)):
             continue
         _add(f"{key}: {_cell(value)}")
+
+    if "last_dividend" in result or "next_declared_dividend" in result:
+        last = result.get("last_dividend") or {}
+        if isinstance(last, dict) and last.get("amount_per_share") is not None:
+            _add(f"LAST PAID: {last.get('amount_per_share')} on {last.get('payment_date', '?')}")
+        else:
+            _add("LAST PAID: none")
+        nxt = result.get("next_declared_dividend") or {}
+        if isinstance(nxt, dict) and nxt.get("amount_per_share") is not None:
+            text = f"NEXT DECLARED: {nxt.get('amount_per_share')} payable {nxt.get('payment_date', '?')}"
+            if nxt.get("record_date"):
+                text += f" (record {nxt['record_date']})"
+            _add(text)
+        else:
+            _add("NEXT DECLARED: none")
+
+    if is_div:
+        growth = [f"{k}: {_cell(result.get(k))}" for k in _DIV_GROWTH_KEYS if result.get(k) is not None]
+        if result.get("growth_trend"):
+            growth.append(f"trend: {_cell(result.get('growth_trend'))}")
+        if result.get("payment_cadence"):
+            growth.append(f"cadence: {_cell(result.get('payment_cadence'))} ({_cell(result.get('cadence_confidence'))})")
+        _add(f"GROWTH: {' | '.join(growth) if growth else 'none'}")
+        safety = result.get("safety")
+        if isinstance(safety, dict):
+            cov = [f"{k} {safety[k]}" for k in ("earnings_payout_ratio", "fcf_payout_ratio", "fcf_coverage", "cash_to_annual_dividend") if safety.get(k) is not None]
+            method = f" [{safety['methodology']}]" if safety.get("methodology") else ""
+            _add(f"SAFETY: {' | '.join(cov) if cov else 'none'}{method}")
+            raised = [f["flag"] for f in (safety.get("risk_flags") or []) if isinstance(f, dict) and f.get("status") is True]
+            _add(f"RISK FLAGS: {', '.join(str(f) for f in raised) if raised else 'none'}")
+        else:
+            _add("SAFETY: none")
+            _add("RISK FLAGS: none")
+        if result.get("annual_history"):
+            _add("HISTORY:")
 
     for row in result.get("quarterly_eps") or []:
         if not isinstance(row, dict):
