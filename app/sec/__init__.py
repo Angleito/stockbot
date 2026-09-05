@@ -1,7 +1,7 @@
 """Generic SEC filing layer (edgartools only; no direct SEC HTTP)."""
 
 from .archive import archive_sec_filing, find_archived
-from .client import ensure_identity, find_sec_company, get_company, resolve_cik, search_sec_filings
+from .client import ensure_identity, find_sec_company, get_cik_lookup_candidates, get_company, get_submissions_metadata, resolve_cik, search_sec_filings
 from .diffs import diff_filings
 from .documents import (
     get_filing_exhibit,
@@ -37,8 +37,10 @@ from .models import (
     GOVERNANCE_EVENT_TYPES,
     BeneficialOwnership,
     CurrentReportEvent,
+    EntityCandidate,
     Filing,
     FilingDocument,
+    FilingParty,
     GovernanceEvent,
     Insider,
     InsiderTransaction,
@@ -48,8 +50,14 @@ from .models import (
     ProxyProposal,
     Registration,
     RegulatoryEvent,
+    SECSearchRequest,
+    SECSearchResult,
+    SECTextHit,
+    SearchAttempt,
+    SearchCoverage,
     ShareholderVote,
     Transaction,
+    pit_of,
 )
 from .offerings import (
     OFFERING_FORMS,
@@ -87,7 +95,36 @@ from .transactions import (
 )
 from .foreign import reporting_regime
 from .normalization import document_from_attachment, filing_from_edgar
-from .store import query_filings, store_filing
+from .store import (
+    claim_job,
+    complete_job,
+    enqueue_backfill_job,
+    ensure_jobs_table,
+    fail_job,
+    get_job,
+    is_partition_covered,
+    list_jobs,
+    query_filings,
+    recover_stale_jobs,
+    requeue_job,
+    store_filing,
+)
+from .discovery import (
+    BACKFILL_PRIORITY,
+    BACKFILL_SOURCE,
+    SECDiscoveryService,
+    drain_backfill_queue,
+    ensure_backfill_worker,
+    find_sec_entities,
+    get_sec_search_coverage,
+    normalize_accession_no,
+    normalize_name,
+    resolve_sec_accession,
+    run_backfill_job,
+    search_sec_relationships,
+    stripped_name_key,
+    verify_sec_entity,
+)
 
 __all__ = [
     "BeneficialOwnership",
@@ -116,6 +153,14 @@ __all__ = [
     "material_events_from_8k",
     "Filing",
     "FilingDocument",
+    "EntityCandidate",
+    "FilingParty",
+    "SECSearchRequest",
+    "SECSearchResult",
+    "SECTextHit",
+    "SearchAttempt",
+    "SearchCoverage",
+    "pit_of",
     "KNOWN_8K_ITEMS",
     "archive_sec_filing",
     "diff_filings",
@@ -171,6 +216,25 @@ __all__ = [
     "get_transaction_status",
     "load_transaction_text",
     "normalize_transaction",
-    "update_transaction",
     "reporting_regime",
+    "stripped_name_key",
+    "find_sec_entities",
+    "search_sec_relationships",
+    "get_sec_search_coverage",
+    "verify_sec_entity",
+    "BACKFILL_PRIORITY",
+    "BACKFILL_SOURCE",
+    "claim_job",
+    "complete_job",
+    "drain_backfill_queue",
+    "enqueue_backfill_job",
+    "ensure_backfill_worker",
+    "ensure_jobs_table",
+    "fail_job",
+    "get_job",
+    "is_partition_covered",
+    "list_jobs",
+    "recover_stale_jobs",
+    "requeue_job",
+    "run_backfill_job",
 ]

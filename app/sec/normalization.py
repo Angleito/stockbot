@@ -41,6 +41,19 @@ def _accepted_at(filing):
     return None
 
 
+_ISSUER_SUBJECT_FORMS = frozenset({"10-K", "10-Q", "8-K", "S-1", "S-3", "DEF 14A"})
+
+
+def _subject_of(form: str, filer_cik: int, filer_name: str) -> tuple:
+    """Subject equals filer only for issuer periodic/current/registration/proxy
+    forms; third-party filings (13D/G, 3/4/5/144, 13F, tender/merger, …) leave
+    subject unknown until a structured parser supplies it."""
+    base = (form or "").split("/")[0].strip().upper()
+    if base in _ISSUER_SUBJECT_FORMS:
+        return filer_cik, filer_name
+    return None, None
+
+
 def filing_from_edgar(filing) -> Filing:
     form = _best(lambda: filing.form, "") or ""
     filed_at = str(_best(lambda: filing.filing_date, "") or "")
@@ -56,12 +69,14 @@ def filing_from_edgar(filing) -> Filing:
     else:
         name = _best(lambda: doc.document)
         primary_document = name if isinstance(name, str) and name else None
-    cik = _best(lambda: int(filing.cik), 0) or 0
+    filer_cik = _best(lambda: int(filing.cik), 0) or 0
+    filer_name = _best(lambda: str(filing.company), "") or ""
+    subject_cik, subject_name = _subject_of(form, filer_cik, filer_name)
     return Filing(
         accession_no=accession_no,
         form=form,
-        cik=cik,
-        company=_best(lambda: str(filing.company), "") or "",
+        filer_cik=filer_cik,
+        filer_name=filer_name,
         filed_at=filed_at,
         accepted_at=accepted_at,
         known_at=accepted_at or filed_at,
@@ -69,8 +84,9 @@ def filing_from_edgar(filing) -> Filing:
         primary_document=primary_document,
         is_amendment=form.endswith("/A"),
         amendment_of=None,
-        issuer_cik=cik,
         source=_best(lambda: str(filing.homepage_url), "") or "",
+        subject_cik=subject_cik,
+        subject_name=subject_name,
         accepted_at_missing=accepted_at is None,
     )
 
@@ -78,7 +94,7 @@ def filing_from_edgar(filing) -> Filing:
 def document_from_attachment(accession_no: str, attachment) -> FilingDocument:
     return FilingDocument(
         accession_no=accession_no,
-        document=_best(lambda: attachment.document),
+        document_name=_best(lambda: attachment.document),
         description=_best(lambda: attachment.description),
         size=_best(lambda: attachment.size),
         url=_best(lambda: attachment.url, "") or "",

@@ -105,6 +105,6 @@ def get_material_events(ticker_or_cik, since, *, as_of=None, limit=50):
         out.extend(material_events_from_8k(
             filing.accession_no,
             extract_8k_events(report, filing.accession_no, event_date=event_date),
-            issuer=filing.company, event_date=event_date, known_at=known_at))
+            issuer=filing.filer_name, event_date=event_date, known_at=known_at))
     out.sort(key=lambda e: (e.effective_date or e.known_at, e.event_id))
     return out

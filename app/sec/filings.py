@@ -7,6 +7,7 @@ from datetime import date
 
 from . import documents
 from .client import get_company
+from .models import pit_of
 from .normalization import filing_from_edgar
 
 _AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -41,13 +42,21 @@ def list_sec_filings(
     filings = get_company(ticker_or_cik).get_filings(**kwargs)
     out = [filing_from_edgar(f) for f in filings]
     if as_of is not None:
-        out = [x for x in out if x.known_at[:10] <= as_of]
+        kept = []
+        for x in out:
+            value, _basis = pit_of(x)
+            if value is not None and value[:10] <= as_of:
+                kept.append(x)
+        out = kept
     if limit is not None:
         out = out[:limit]
     return out
 
 
-def get_sec_filing(accession_no: str):
+def get_sec_filing(accession_no: str, as_of=None):
+    """Exact accession lookup; hydrates filing metadata first so a future
+    accession cannot bypass PIT."""
+    as_of = _check_as_of(as_of)
     try:
         filing = documents.get_by_accession_number(accession_no)
     except ValueError:
@@ -56,4 +65,10 @@ def get_sec_filing(accession_no: str):
         raise ValueError(f"invalid accession number: {accession_no!r}") from exc
     if filing is None:
         raise ValueError(f"invalid accession number: {accession_no!r}")
-    return filing_from_edgar(filing)
+    out = filing_from_edgar(filing)
+    if as_of is not None:
+        value, _basis = pit_of(out)
+        if value is None or value[:10] > as_of:
+            raise ValueError(
+                f"filing {accession_no!r} not known as of {as_of!r}")
+    return out
