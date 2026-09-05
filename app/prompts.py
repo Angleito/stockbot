@@ -309,7 +309,7 @@ Rules:
   * search_web evidence is search-time evidence, not point-in-time data:
     distinguish published_at from retrieved_at, and never claim historical
     completeness.
-  * Use at most 3 search_web calls per run. When evaluating an investment
+  * Use at most 25 search_web calls per run. When evaluating an investment
     thesis, deliberately search for counterevidence, not only supporting
     evidence.
   * Never use search_web for market-wide screening; deterministic screens

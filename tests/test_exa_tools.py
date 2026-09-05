@@ -130,3 +130,30 @@ def test_search_web_invalid_args_are_soft(monkeypatch):
     )
     assert "Unsupported search_type 'deep'" in result["error"]
     assert result["soft"] is True
+
+
+def test_pi_search_web_ignores_tool_calls(monkeypatch):
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+
+    monkeypatch.delenv("EXA_ENABLED", raising=False)
+    session = PiSessionContext(session_id="default")
+    assert session.budget.max_exa_searches == 25
+    for _ in range(64):
+        assert session.budget.reserve_tool_call()
+    assert session.budget.reserve_tool_call() is False
+    result = execute_pi_tool("search_web", {"query": "probe"}, session)
+    assert result.get("soft") is True
+    assert "budget" not in str(result.get("error", ""))
+
+
+def test_pi_search_web_caps_at_25(monkeypatch):
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+
+    monkeypatch.delenv("EXA_ENABLED", raising=False)
+    session = PiSessionContext(session_id="default")
+    for i in range(25):
+        result = execute_pi_tool("search_web", {"query": "probe %d" % i}, session)
+        assert result.get("soft") is True
+        assert "budget" not in str(result.get("error", ""))
+    capped = execute_pi_tool("search_web", {"query": "probe over"}, session)
+    assert "budget" in str(capped.get("error", "")).lower()

@@ -103,7 +103,8 @@ class PiSessionContext:
             max_model_calls=limits.max_model_calls,
             max_runtime=limits.max_runtime,
             max_evidence_tokens=limits.max_evidence_tokens,
-            max_exa_searches=limits.max_exa_searches,
+            # Pi searches get own pool: 25/run, not the 3-cap in RunLimits.
+            max_exa_searches=25,
         )
 
 
@@ -179,7 +180,11 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         }
 
     # Gate 8 (reserve): one budget slot per call before any external work.
-    if not session.budget.reserve_tool_call():
+    # Searches skip the 64-call count pool but still respect wall-clock.
+    if name == "search_web":
+        if session.budget.runtime_remaining() <= 0:
+            return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+    elif not session.budget.reserve_tool_call():
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
 
     # Gate 3: intent firewall. No approval callback in this plan, so
@@ -208,7 +213,7 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
             return {
                 "error": (
                     "Exa search budget exhausted "
-                    f"(max {LOCAL_CONTEXT.run_limits.max_exa_searches} per run)"
+                    f"(max {session.budget.max_exa_searches} per run)"
                 ),
                 "source": "exa",
                 "soft": True,
