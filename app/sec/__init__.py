@@ -1,7 +1,7 @@
 """Generic SEC filing layer (edgartools only; no direct SEC HTTP)."""
 
 from .archive import archive_sec_filing, find_archived
-from .client import ensure_identity, get_company, resolve_cik
+from .client import ensure_identity, find_sec_company, get_company, resolve_cik, search_sec_filings
 from .diffs import diff_filings
 from .documents import (
     get_filing_exhibit,
@@ -120,6 +120,7 @@ __all__ = [
     "archive_sec_filing",
     "diff_filings",
     "ensure_identity",
+    "find_sec_company",
     "extract_8k_events",
     "find_archived",
     "get_company",
@@ -130,6 +131,7 @@ __all__ = [
     "normalize_schedule",
     "parse_8k_events",
     "query_filings",
+    "search_sec_filings",
     "resolve_cik",
     "store_filing",
     "filing_from_edgar",

@@ -60,19 +60,52 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for a ticker or CIK. Any form string works (10-K, 8-K, SC 13D, Form 4, S-1, 20-F, 13F-HR, ...). Start here for filing discovery; then drill into get_sec_document or a deterministic analyzer.",
+            "name": "find_sec_company",
+            "description": "Maps an issuer name to candidate CIKs with tickers when known. Tickers are optional and usually empty for private issuers. Candidates require identity verification before list_sec_filings.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticker": {"type": "string"},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_sec_filings",
+            "description": "Searches EDGAR filing text for company, person, or domain terms. Returns CIK plus accession numbers for existing retrieval via get_sec_filing, list_sec_documents, or get_sec_document.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "forms": {"type": "array", "items": {"type": "string"}},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sec_filings",
+            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. If only a company, person, or domain is known, call find_sec_company or search_sec_filings first, verify identity, then call with identifier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "identifier": {"type": "string"},
                     "forms": {"type": "array", "items": {"type": "string"}},
                     "start_date": {"type": "string"},
                     "end_date": {"type": "string"},
                     "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."},
                     "limit": {"type": "integer"}
                 },
-                "required": ["ticker"]
+                "required": ["identifier"]
             }
         }
     },
@@ -1426,6 +1459,8 @@ def _wrap_list(identifier, records, key: str) -> dict:
 # search_tools catalog: name -> (domain, keyword tags). New tools add one
 # line here; prompts never change.
 _SEC_TOOL_TAGS = {
+    "find_sec_company": ("filings", "find company issuer entity name CIK private registrant candidate"),
+    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain search forms accession"),
     "list_sec_filings": ("filings", "list filings forms 10-K 10-Q 8-K discovery accession"),
     "get_sec_filing": ("filings", "filing record accession metadata filed known amendment"),
     "list_sec_documents": ("filings", "documents exhibits attachments list accession"),
@@ -1444,7 +1479,7 @@ _SEC_TOOL_TAGS = {
 }
 
 _SEC_DOMAIN_PACKS = {
-    "filings": ["list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
+    "filings": ["find_sec_company", "search_sec_filings", "list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
     "events": ["get_material_events"],
     "ownership": ["get_beneficial_ownership", "get_ownership_changes"],
     "insider": ["get_insider_activity", "get_planned_insider_sales"],
@@ -1481,9 +1516,20 @@ _DIRECT_HANDLERS = {
     "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
         args["ticker"], args["metric"], as_of=args.get("as_of")
     ),
+    "find_sec_company": lambda args, model: _wrap_list(
+        args.get("query"), sec.find_sec_company(
+            args["query"], limit=args.get("limit", 10),
+        ), "matches",
+    ),
+    "search_sec_filings": lambda args, model: _wrap_list(
+        args.get("query"), sec.search_sec_filings(
+            args["query"], forms=args.get("forms"), start_date=args.get("start_date"),
+            end_date=args.get("end_date"), limit=args.get("limit", 20),
+        ), "hits",
+    ),
     "list_sec_filings": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.list_sec_filings(
-            args["ticker"], forms=args.get("forms"), start_date=args.get("start_date"),
+        args.get("identifier"), sec.list_sec_filings(
+            args["identifier"], forms=args.get("forms"), start_date=args.get("start_date"),
             end_date=args.get("end_date"), as_of=args.get("as_of"),
             limit=args.get("limit", 50),
         ), "filings",
@@ -1632,6 +1678,8 @@ _ROBINHOOD_HANDLERS = {
 TOOL_CAPABILITIES: dict[str, Capability] = {
     "evaluate_mandate": Capability.PORTFOLIO_READ,
     "get_fundamentals": Capability.RESEARCH,
+    "find_sec_company": Capability.RESEARCH,
+    "search_sec_filings": Capability.RESEARCH,
     "list_sec_filings": Capability.RESEARCH,
     "get_sec_filing": Capability.RESEARCH,
     "list_sec_documents": Capability.RESEARCH,

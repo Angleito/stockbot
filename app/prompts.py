@@ -1,7 +1,7 @@
 """System prompt and reading prompt, as constants."""
 
 # Prompt version for observability records; bump when SYSTEM_PROMPT changes materially.
-PROMPT_VERSION = "8"
+PROMPT_VERSION = "9"
 
 SYSTEM_PROMPT = """You are a financial research assistant with access to
 tools for SEC filing data, stock fundamentals, public FINRA market data,
@@ -80,7 +80,7 @@ Rules:
   * M&A/tender/merger: Use get_transaction_status, then get_sec_document
   * Offerings/dilution/ATM/shelf: Use get_offering_history + get_dilution_profile (inputs, formula, and accessions are in the output)
   * 13F filings (any filer): Use list_sec_filings + get_sec_document directly; no ticker-to-holders lookup exists
-  * Filing discovery/text/diffs: Use list_sec_filings, get_sec_filing, list_sec_documents, get_sec_document, diff_sec_filings
+  * Filing discovery/text/diffs: Unknown ticker or CIK: call find_sec_company for issuer names and search_sec_filings for founder or domain terms, verify candidate identity, then call list_sec_filings(identifier=...) with get_sec_filing, list_sec_documents, get_sec_document, diff_sec_filings for retrieval and diffs
   * Short interest / days to cover: Use get_short_interest
   * "Highest short interest", "most shorted stock", or short interest as a
     percent of total shares: Use get_short_interest_leaderboard. It ranks
@@ -266,7 +266,7 @@ Rules:
   * Big-investor 5%+ stakes (activist/passive): Use get_beneficial_ownership; stake changes: Use get_ownership_changes
   * Most-recent 13D/G market-wide (no ticker): Use get_recent_ownership_filings first, then get_beneficial_ownership for detail — never web-search for what this covers
   * Offerings/dilution: Use get_offering_history + get_dilution_profile
-  * Filing discovery/text/diffs: Use list_sec_filings, get_sec_document, diff_sec_filings
+  * Filing discovery/text/diffs: Unknown ticker or CIK: call find_sec_company for issuer names and search_sec_filings for founder or domain terms, verify candidate identity, then call list_sec_filings(identifier=...) with get_sec_document and diff_sec_filings for retrieval and diffs
   * Short interest / days to cover: Use get_short_interest
   * "Highest short interest", "most shorted stock", or short interest as a
     percent of total shares: Use get_short_interest_leaderboard. This is not

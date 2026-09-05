@@ -12,6 +12,8 @@ from app import tools
 from app.policy import Capability, RequestContext
 
 SEC_SUITE = [
+    "find_sec_company",
+    "search_sec_filings",
     "list_sec_filings",
     "get_sec_filing",
     "list_sec_documents",
@@ -90,11 +92,89 @@ def test_list_sec_filings_dispatch_wraps_records(monkeypatch):
     fake = SimpleNamespace(to_dict=lambda: {"accession_no": "0000000001-26-000001"})
     monkeypatch.setattr(tools.sec, "list_sec_filings", lambda *a, **k: [fake])
     result = tools.execute_tool(
-        "list_sec_filings", {"ticker": "FAKE"}, "test", context=_research_context()
+        "list_sec_filings", {"identifier": "FAKE"}, "test", context=_research_context()
     )
     assert result["count"] == 1
     assert result["filings"][0]["accession_no"] == "0000000001-26-000001"
     assert result["source"] == "SEC EDGAR"
+
+
+def test_list_sec_filings_rejects_old_ticker_key():
+    result = tools.execute_tool(
+        "list_sec_filings", {"ticker": "FAKE"}, "test", context=_research_context()
+    )
+    assert result["error_type"] == "invalid_tool_arguments"
+
+
+def test_find_sec_company_dispatch_permits_empty_tickers(monkeypatch):
+    rows = [
+        {"name": "Acme Labs Inc", "cik": 1234567, "tickers": [], "exchange": None},
+        {"name": "AAPL Inc", "cik": 320193, "tickers": ["AAPL"], "exchange": None},
+    ]
+    monkeypatch.setattr(tools.sec, "find_sec_company", lambda *a, **k: rows)
+    result = tools.execute_tool(
+        "find_sec_company", {"query": "Acme Labs"}, "test", context=_research_context()
+    )
+    assert result["count"] == 2
+    assert result["matches"][0]["tickers"] == []
+    assert result["matches"][0]["exchange"] is None
+    assert result["matches"][1]["tickers"] == ["AAPL"]
+
+
+def test_search_sec_filings_dispatch_exposes_cik_accession(monkeypatch):
+    rows = [{
+        "company": "Acme Labs Inc", "cik": 1234567, "form": "D",
+        "filed": "2026-01-01", "accession_no": "0000000001-26-000001",
+        "source_url": None, "score": 5.5, "period": None,
+    }]
+    monkeypatch.setattr(tools.sec, "search_sec_filings", lambda *a, **k: rows)
+    result = tools.execute_tool(
+        "search_sec_filings", {"query": "Acme Labs", "forms": ["D", "D/A"]},
+        "test", context=_research_context(),
+    )
+    assert result["count"] == 1
+    assert result["hits"][0]["cik"] == 1234567
+    assert result["hits"][0]["accession_no"] == "0000000001-26-000001"
+
+
+def test_discovery_blank_and_bad_limit_surface_errors(monkeypatch):
+    missing = tools.execute_tool("find_sec_company", {}, "test", context=_research_context())
+    assert missing["error_type"] == "invalid_tool_arguments"
+    monkeypatch.setattr(
+        tools.sec, "find_sec_company",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("invalid query")),
+    )
+    blanked = tools.execute_tool(
+        "find_sec_company", {"query": "  "}, "test", context=_research_context()
+    )
+    assert "error" in blanked
+    monkeypatch.setattr(
+        tools.sec, "search_sec_filings",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("invalid limit")),
+    )
+    bad_limit = tools.execute_tool(
+        "search_sec_filings", {"query": "Acme", "limit": 0}, "test", context=_research_context()
+    )
+    assert "error" in bad_limit
+
+
+def test_search_tools_discovery_queries_and_domain_order():
+    found = tools.execute_tool(
+        "search_tools", {"query": "private issuer CIK"}, "test", context=_research_context()
+    )
+    assert "find_sec_company" in {s["function"]["name"] for s in found["schemas"]}
+    fts = tools.execute_tool(
+        "search_tools", {"query": "founder filing full text"}, "test", context=_research_context()
+    )
+    assert {s["function"]["name"] for s in fts["schemas"]} == {"search_sec_filings"}
+    pack = tools.execute_tool(
+        "search_tools", {"domain": "filings"}, "test", context=_research_context()
+    )
+    names = [s["function"]["name"] for s in pack["schemas"]]
+    assert names[:3] == ["find_sec_company", "search_sec_filings", "list_sec_filings"]
+    listed = next(s for s in pack["schemas"] if s["function"]["name"] == "list_sec_filings")
+    assert "identifier" in listed["function"]["parameters"]["properties"]
+    assert "Does NOT search company names" in listed["function"]["description"]
 
 
 def test_get_sec_document_dispatch_passes_through(monkeypatch):

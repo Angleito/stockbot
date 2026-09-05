@@ -67,6 +67,8 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     # SEC filing data.
     "get_fundamentals": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "list_sec_filings": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "find_sec_company": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "search_sec_filings": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_sec_filing": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "list_sec_documents": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_sec_document": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),

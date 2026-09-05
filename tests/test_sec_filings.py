@@ -121,3 +121,72 @@ def test_documents_list_get_text_primary(monkeypatch):
     assert documents.get_sec_document("0003", "ex-99.htm")["text"] == "exhibit"
     with pytest.raises(ValueError):
         documents.get_sec_document("0003", "missing.htm")
+
+
+def test_find_sec_company_normalizes_and_preserves_order(monkeypatch):
+    import pandas as pd
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.entity.search as company_search
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+    frame = pd.DataFrame([
+        {"cik": "1234567", "ticker": "", "company": "Acme Labs Inc", "score": 99},
+        {"cik": "not-a-cik", "ticker": "X", "company": "Skip Me", "score": 50},
+        {"cik": 320193, "ticker": "AAPL", "company": "AAPL Inc", "score": 90},
+    ])
+    monkeypatch.setattr(
+        company_search, "find_company",
+        lambda query, top_n=10: SimpleNamespace(results=frame, empty=False),
+    )
+    out = client.find_sec_company("Acme Labs", limit=2)
+    assert out == [
+        {"name": "Acme Labs Inc", "cik": 1234567, "tickers": [], "exchange": None},
+        {"name": "AAPL Inc", "cik": 320193, "tickers": ["AAPL"], "exchange": None},
+    ]
+
+
+def test_search_sec_filings_normalizes_cik_accession(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.sec.client as client
+    import edgar.search.efts as efts
+
+    monkeypatch.setattr(client, "ensure_identity", lambda: None)
+
+    class _Hit:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(
+        efts, "search_filings",
+        lambda query, **kwargs: SimpleNamespace(results=[
+            _Hit(accession_number="0000000001-26-000001", form="D",
+                 filed="2026-01-01", company="Acme Labs Inc",
+                 cik="1234567", period=None, score=5.5),
+            _Hit(accession_number="0000000002-26-000001", form="D/A",
+                 filed="2026-02-01", company=None,
+                 cik="bad", period="2025-12-31", score=3.0),
+        ]),
+    )
+    (first, second) = client.search_sec_filings("Acme Labs", forms=["D", "D/A"], limit=2)
+    assert first["cik"] == 1234567
+    assert first["accession_no"] == "0000000001-26-000001"
+    assert first["source_url"] is None
+    assert second["cik"] is None
+    assert second["company"] is None
+    assert second["period"] == "2025-12-31"
+
+
+def test_discovery_adapters_reject_blank_and_bad_limit():
+    import app.sec.client as client
+
+    with pytest.raises(ValueError):
+        client.find_sec_company("   ")
+    with pytest.raises(ValueError):
+        client.find_sec_company("Acme", limit=0)
+    with pytest.raises(ValueError):
+        client.search_sec_filings("")
+    with pytest.raises(ValueError):
+        client.search_sec_filings("Acme", limit=0)
