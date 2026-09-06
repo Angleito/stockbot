@@ -288,6 +288,24 @@ def test_coverage_matrix(store, monkeypatch):
     ])
     assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "structured_and_text"
 
+def test_cross_source_duplicate_merges_to_one_payment(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, "ev-xbrl-dup", 0.54, decl="2026-08-01", record="2026-08-29",
+               pay="2026-09-15", accn="0000000040", source_type="structured_xbrl",
+               dtype="unknown"),
+        _event(KO_CIK, "ev-text-dup", 0.54, decl="2026-08-01", record="2026-08-29",
+               pay="2026-09-15", accn="0000000041", source_type="filing_text",
+               dtype="regular"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
+    assert len(result["past_events"]) == 1
+    assert result["past_events"][0]["amount_per_share"] == 0.54
+    assert result["total_paid_per_share"] == 0.54
+    assert result["regular_paid_per_share"] == 0.54
+    assert result["events_coverage"] == "structured_and_text"
+
 
 # --- Phase 4: pure lifecycle analysis (app/services/dividend_analysis.py) ---
 # These tests call the pure module directly with plain dicts: no store fixture,

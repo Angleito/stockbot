@@ -283,6 +283,24 @@ def test_single_amount_single_payment_stays_paired():
     assert event["payment_date"] == "2026-09-15"
     assert event["record_date"] == "2026-08-29"
 
+def test_multiple_record_dates_emit_undated():
+    payload = {"cik": 21344, "entityName": "CIK21344", "facts": {"us-gaap": {
+        "DividendsPayableAmountPerShare": {"units": {"USD/shares": [
+            {"val": 0.54, "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+        "DividendPayableDateToBePaidDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-09-15", "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+        "DividendsPayableDateOfRecordDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-08-29", "accn": "A3", "filed": "2026-08-01"},
+            {"val": "2026-08-30", "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+    }}}
+    (event,) = _normalize(payload)["dividend_events"]
+    assert event["declaration_date"] is None
+    assert event["record_date"] is None
+    assert event["payment_date"] is None
+
 
 def test_store_document_text_extracts_filing_text_event(tmp_path):
     from app.sec import store as sec_store

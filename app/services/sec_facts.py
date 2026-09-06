@@ -332,23 +332,51 @@ def _extreme_event(cands: list[dict], *, earliest: bool) -> Optional[dict]:
 
 def _canonical_dividend_events(events: list[dict]) -> list[dict]:
     """Collapse amended duplicates; undated rows never merge."""
-    best: dict[tuple[str, str, str], dict] = {}
+    undated = [r for r in events if not r.get("payment_date")]
+    buckets: list[list[dict]] = []
+    keys: list[tuple[str, str]] = []
     for row in events:
         if not row.get("payment_date"):
             continue
-        key = (str(row.get("record_date") or ""), str(row.get("payment_date")),
-               str(row.get("dividend_type") or ""))
-        prev = best.get(key)
-        cur = (str(row.get("known_at") or ""), str(row.get("filed_at") or ""),
-               str(row.get("accession") or ""))
-        if prev is None:
-            best[key] = row
-        else:
-            old = (str(prev.get("known_at") or ""), str(prev.get("filed_at") or ""),
-                   str(prev.get("accession") or ""))
-            if cur >= old:
-                best[key] = row
-    return [r for r in events if not r.get("payment_date")] + list(best.values())
+        key = (str(row.get("record_date") or ""), str(row.get("payment_date")))
+        rt = str(row.get("dividend_type") or "")
+        placed = False
+        for i, bucket in enumerate(buckets):
+            if keys[i] != key:
+                continue
+            if all(rt == str(m.get("dividend_type") or "") or rt in ("", "unknown") or str(m.get("dividend_type") or "") in ("", "unknown") for m in bucket):
+                bucket.append(row)
+                placed = True
+                break
+        if not placed:
+            buckets.append([row])
+            keys.append(key)
+    canonical = []
+    for bucket in buckets:
+        winner = max(bucket, key=lambda r: (str(r.get("known_at") or ""), str(r.get("filed_at") or ""), str(r.get("accession") or "")))
+        out = dict(winner)
+        for mate in bucket:
+            if mate is winner:
+                continue
+            if out.get("amount_per_share") is None and mate.get("amount_per_share") is not None:
+                out["amount_per_share"] = mate.get("amount_per_share")
+            if str(out.get("dividend_type") or "") in ("", "unknown") and str(mate.get("dividend_type") or "") not in ("", "unknown"):
+                out["dividend_type"] = mate.get("dividend_type")
+            if not out.get("evidence_excerpt") and mate.get("evidence_excerpt"):
+                out["evidence_excerpt"] = mate.get("evidence_excerpt")
+            if not out.get("source_concept") and mate.get("source_concept"):
+                out["source_concept"] = mate.get("source_concept")
+        out["source_types"] = sorted({str(m.get("source_type")) for m in bucket if m.get("source_type")})
+        canonical.append(out)
+    return undated + canonical
+
+
+def _dividend_event_source_types(row: dict) -> list[str]:
+    sts = row.get("source_types")
+    if isinstance(sts, (list, tuple, set)) and sts:
+        return [str(s) for s in sts if s]
+    st = row.get("source_type")
+    return [str(st)] if st else []
 
 
 def _dividend_event_payload(events: list[dict], as_of: _dt.date, *, growth=None, ttm_dps=None, annual_history=None) -> dict[str, Any]:
@@ -379,8 +407,8 @@ def _dividend_event_payload(events: list[dict], as_of: _dt.date, *, growth=None,
         }
         for r in sorted(paid, key=lambda r: str(r["payment_date"]), reverse=True)[:12]
     ]
-    has_xbrl = any(r.get("source_type") == "structured_xbrl" for r in events)
-    has_text = any(r.get("source_type") == "filing_text" for r in events)
+    has_xbrl = any("structured_xbrl" in _dividend_event_source_types(r) for r in events)
+    has_text = any("filing_text" in _dividend_event_source_types(r) for r in events)
     coverage = (
         "structured_and_text" if has_xbrl and has_text
         else "structured_only" if has_xbrl

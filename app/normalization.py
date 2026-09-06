@@ -215,9 +215,11 @@ def _extract_dividend_event_facts(
         for amount, unit, source_concept in groups[(accession, filed)]:
             seen.setdefault(amount, (unit, source_concept))
         group_dates = dates.get((accession, filed), {})
+        declarations = sorted(group_dates.get("declaration_date") or ())
+        records = sorted(group_dates.get("record_date") or ())
         payments = sorted(group_dates.get("payment_date") or ())
         payments_nonnull = [p for p in payments if p]
-        if len(seen) == 1 and len(payments_nonnull) <= 1:
+        if len(seen) == 1 and len([d for d in declarations if d]) <= 1 and len([r for r in records if r]) <= 1 and len(payments_nonnull) <= 1:
             declaration = min(group_dates.get("declaration_date") or (), default=None)
             record = min(group_dates.get("record_date") or (), default=None)
             paired = payments_nonnull[:1] if payments_nonnull else [None]
