@@ -19,9 +19,8 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import duckdb
-import pyarrow.parquet as pq
-from ..config import get_data_root
 
+from ..config import get_data_root
 from ..domain.market.securities import TickerAlias
 from . import mappers, parquet
 
@@ -65,25 +64,27 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
         empty_dir = directory / "__empty__"
         files = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
         real_files = [p for p in files if empty_dir not in p.parents]
-        if real_files:
-            # DuckDB errors when a hive-partitioned scan sees a file without
-            # the partition column; the placeholder must not be scanned once
-            # real files exist.
-            if empty_dir.exists():
-                import shutil
+        if empty_dir.exists():
+            import shutil
 
-                shutil.rmtree(empty_dir)
+            shutil.rmtree(empty_dir)
+        current_table = f"__current_{name}"
+        conn.register(current_table, parquet.dataset(name).schema.empty_table())
+        if real_files:
             glob_path = directory / "**" / "*.parquet"
+            # Dataset schemas evolve (e.g. screen_runs stage counters): old and
+            # new parquet files must coexist, so scans union columns by name.
+            # The zero-row current-schema table contributes no records but
+            # guarantees new nullable columns exist on old-only views.
+            conn.execute(
+                f"CREATE OR REPLACE VIEW {name} AS "
+                f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning = true, union_by_name = true) "
+                f"UNION ALL BY NAME SELECT * FROM {current_table}"
+            )
         else:
-            empty_dir.mkdir(parents=True, exist_ok=True)
-            pq.write_table(parquet.dataset(name).schema.empty_table(), str(empty_dir / "part-empty.parquet"))
-            glob_path = empty_dir / "*.parquet"
-        # Dataset schemas evolve (e.g. screen_runs stage counters): old and
-        # new parquet files must coexist, so scans union columns by name.
-        conn.execute(
-            f"CREATE OR REPLACE VIEW {name} AS "
-            f"SELECT * FROM read_parquet('{glob_path}', hive_partitioning = true, union_by_name = true)"
-        )
+            conn.execute(
+                f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {current_table}"
+            )
 
 
 def query(

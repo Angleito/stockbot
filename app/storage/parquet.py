@@ -288,7 +288,8 @@ DATASETS["document_text"] = Dataset(
     schema=pa.schema(_fields(
         ("doc_id", TEXT), ("content_hash", TEXT), ("accession", TEXT),
         ("document_name", TEXT), ("text", TEXT), ("source_url", TEXT),
-        ("raw_archive_path", TEXT), ("location", TEXT), ("file_type", TEXT),
+        ("raw_archive_path", TEXT), ("source_content_hash", TEXT),
+        ("source_representation", TEXT), ("location", TEXT), ("file_type", TEXT),
         ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
         ("parser_version", TEXT),
     )),
@@ -529,9 +530,15 @@ def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
         return 0
     existing = set()
     for table in read_table(name, root).to_batches():
+        cols = []
+        for key in ds.unique_keys:
+            try:
+                cols.append(table.column(key).to_pylist())
+            except Exception:
+                cols.append([None] * table.num_rows)
         existing.update(
             tuple("" if v is None else str(v) for v in batch)
-            for batch in zip(*(table.column(key).to_pylist() for key in ds.unique_keys))
+            for batch in zip(*cols)
         )
     new_rows = [
         row for row in rows

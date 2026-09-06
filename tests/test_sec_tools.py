@@ -181,10 +181,12 @@ def test_search_sec_filings_dispatch_full_packet(monkeypatch):
     class _FakeService:
         seen = None
 
+        def __init__(self, data_root=None):
+            pass
+
         def search(self, request):
             _FakeService.seen = request
             return result_obj
-
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     result = tools.execute_tool(
         "search_sec_filings", {"query": "Acme Labs", "forms": ["D", "D/A"]},
@@ -211,6 +213,9 @@ def test_search_sec_filings_accepts_person_domain_security(monkeypatch):
     class _FakeService:
         seen = None
 
+        def __init__(self, data_root=None):
+            pass
+
         def search(self, request):
             _FakeService.seen = request
             return _result()
@@ -233,58 +238,96 @@ def test_search_sec_filings_rejects_empty_selectors():
     assert "error" in result
 
 
-def test_search_sec_filings_no_truncation_warning_when_small(monkeypatch):
-    from app.sec.models import Filing
-    hits = tuple(
-        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme",
-                   accession_no=f"0000000001-26-00000{i}", form="10-K",
-                   filed_at="2024-01-01", filer_cik=123, filer_name="Acme",
-                   matched_document="primary.htm", file_type="10-K", score=1.0)
-        for i in range(5)
-    )
-    filings = tuple(
-        Filing(accession_no=f"0000000001-26-00000{i}", form="10-K", filer_cik=123,
-               filer_name="Acme", filed_at="2024-01-01", accepted_at=None,
-               known_at="2024-01-01T00:00:00Z", report_period=None,
-               primary_document="primary.htm", is_amendment=False,
-               amendment_of=None, source="http://x")
-        for i in range(5)
-    )
-    result_obj = _result(text_hits=hits, filings=filings, warnings=(), errors=())
+def test_search_sec_filings_default_call_is_bounded(monkeypatch):
+    from app.config import get_data_root
+
     class _FakeService:
+        seen = None
+        seen_root = None
+
+        def __init__(self, data_root=None):
+            _FakeService.seen_root = data_root
+
         def search(self, request):
-            return result_obj
+            _FakeService.seen = request
+            return _result(warnings=(), errors=())
+
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
-    assert "payload truncated to 20 context rows; coverage reports full retrieval" not in list(result["warnings"] or [])
+    assert _FakeService.seen.exhaustive is False
+    assert _FakeService.seen.max_results == 20
+    assert _FakeService.seen_root == get_data_root()
+    assert "payload truncated to 20 context rows" not in " ".join(result["warnings"] or [])
 
 
-def test_search_sec_filings_truncation_warning_when_large(monkeypatch):
-    from app.sec.models import Filing
-    hits = tuple(
-        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme",
-                   accession_no=f"0000000001-26-000{i:03d}", form="10-K",
-                   filed_at="2024-01-01", filer_cik=123, filer_name="Acme",
-                   matched_document="primary.htm", file_type="10-K", score=1.0)
-        for i in range(25)
-    )
-    filings = tuple(
-        Filing(accession_no=f"0000000001-26-000{i:03d}", form="10-K", filer_cik=123,
-               filer_name="Acme", filed_at="2024-01-01", accepted_at=None,
-               known_at="2024-01-01T00:00:00Z", report_period=None,
-               primary_document="primary.htm", is_amendment=False,
-               amendment_of=None, source="http://x")
-        for i in range(25)
-    )
-    result_obj = _result(text_hits=hits, filings=filings, warnings=(), errors=())
+def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(monkeypatch):
     class _FakeService:
+        seen = None
+
+        def __init__(self, data_root=None):
+            pass
+
+        def search(self, request):
+            _FakeService.seen = request
+            return _result(warnings=(), errors=())
+
+    monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
+    tools.execute_tool("search_sec_filings", {"query": "Acme", "limit": 5}, "test", context=_research_context())
+    assert _FakeService.seen.max_results == 5
+    assert _FakeService.seen.exhaustive is False
+    tools.execute_tool("search_sec_filings", {"query": "Acme", "exhaustive": True}, "test", context=_research_context())
+    assert _FakeService.seen.max_results is None
+    assert _FakeService.seen.exhaustive is True
+
+
+def test_search_sec_filings_cap_warning_passes_through_once(monkeypatch):
+    warning = "results capped at 20; rerun with a higher limit or exhaustive=true"
+    result_obj = _result(warnings=(warning,), errors=())
+
+    class _FakeService:
+        def __init__(self, data_root=None):
+            pass
+
         def search(self, request):
             return result_obj
+
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
-    assert len(result["hits"]) == 20
-    assert len(result["filings"]) == 20
-    assert list(result["warnings"]).count("payload truncated to 20 context rows; coverage reports full retrieval") == 1
+    assert list(result["warnings"]).count(warning) == 1
+
+
+def test_find_sec_entities_default_call_is_bounded(monkeypatch):
+    from app.config import get_data_root
+
+    seen = {}
+
+    def _fake(query, **kwargs):
+        seen.update(kwargs)
+        seen["query"] = query
+        return _result()
+
+    monkeypatch.setattr(tools.sec, "find_sec_entities", _fake)
+    tools.execute_tool("find_sec_entities", {"query": "Acme"}, "test", context=_research_context())
+    assert seen["exhaustive"] is False
+    assert seen["max_results"] == 20
+    assert seen.get("limit", seen.get("max_results")) == 20
+    assert seen["data_root"] == get_data_root()
+
+
+def test_find_sec_entities_limit_and_exhaustive_forwarding(monkeypatch):
+    seen = {}
+
+    def _fake(query, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return _result()
+
+    monkeypatch.setattr(tools.sec, "find_sec_entities", _fake)
+    tools.execute_tool("find_sec_entities", {"query": "Acme", "limit": 5}, "test", context=_research_context())
+    assert seen["max_results"] == 5
+    tools.execute_tool("find_sec_entities", {"query": "Acme", "exhaustive": True}, "test", context=_research_context())
+    assert seen["max_results"] is None
+    assert seen["exhaustive"] is True
 
 
 
@@ -463,7 +506,7 @@ def test_search_tools_discovery_queries_and_domain_order():
 def test_get_sec_document_dispatch_passes_through(monkeypatch):
     monkeypatch.setattr(
         tools.sec, "get_sec_document",
-        lambda acc, name=None, as_of=None: {"accession_no": acc, "text": "hi"}
+        lambda acc, name=None, as_of=None, **_: {"accession_no": acc, "text": "hi"}
     )
     result = tools.execute_tool(
         "get_sec_document", {"accession_no": "0000000001-26-000001"},

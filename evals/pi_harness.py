@@ -29,7 +29,7 @@ PLAN = {
     29: [("get_valuation_metrics", {"ticker": "AAPL"})],
     34: [("find_sec_entities", {"query": "META"}),
          ("search_sec_relationships", {"entity": "1326801"})],
-    42: [("find_sec_entities", {"query": "Vanguard Group"})],
+    42: [("find_sec_entities", {"query": "Vanguard Group", "exhaustive": True})],
     43: [("search_sec_filings", {"query": "Elon Musk", "limit": 5})],
     44: [("search_sec_relationships", {"entity": "320193"})],
     45: [("search_sec_relationships", {"entity": "1067983",

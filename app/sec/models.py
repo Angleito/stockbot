@@ -95,8 +95,8 @@ class SECSearchRequest:
     search_documents: bool = True
     search_entities: bool = True
     search_relationships: bool = True
-    exhaustive: bool = True
-    max_results: Optional[int] = None
+    exhaustive: bool = False
+    max_results: Optional[int] = 20
 
     def to_dict(self) -> dict:
         return asdict(self)

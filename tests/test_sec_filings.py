@@ -327,6 +327,8 @@ def test_discovery_current_feed_page_is_partial(tmp_path, monkeypatch):
     from app.sec.models import Filing, SECSearchRequest
     import app.sec.client as client
 
+    seen = {}
+
     def _filing(accession):
         return Filing(accession_no=accession, form="8-K", filer_cik=1234567,
                       filer_name="Acme Inc", filed_at="2026-08-01",
@@ -336,15 +338,109 @@ def test_discovery_current_feed_page_is_partial(tmp_path, monkeypatch):
                       is_amendment=False, amendment_of=None,
                       source=f"https://sec/{accession}")
 
-    monkeypatch.setattr(client, "get_current_filings",
-                        lambda form, page_size=50: [_filing("a1"), _filing("a2")])
+    def _feed(form, page_size=40, owner="include"):
+        seen["page_size"] = page_size
+        return [_filing(f"a{i:03d}") for i in range(25)]
+
+    monkeypatch.setattr(client, "get_current_filings", _feed)
     svc = SECDiscoveryService(data_root=tmp_path)
-    result = svc.search(SECSearchRequest(forms=("8-K",), max_results=2,
+    result = svc.search(SECSearchRequest(forms=("8-K",), max_results=20,
                                         search_entities=False,
                                         search_relationships=False))
+    assert seen["page_size"] is not None and seen["page_size"] <= 21
+    assert len(result.filings) <= 20
     current = [a for a in result.attempts if a.backend == "current-filings"]
     assert current and all(a.status == "partial" for a in current)
+    assert all(a.truncated and a.source_limit for a in current)
     assert result.coverage.status == "partial"
+    assert "results capped at 20; rerun with a higher limit or exhaustive=true" in list(result.warnings)
+
+
+def test_discovery_filer_submissions_probe_is_bounded(tmp_path, monkeypatch):
+    from app.sec.discovery.service import SECDiscoveryService
+    from app.sec.models import EntityCandidate, Filing, SECSearchRequest
+    import app.sec.filings as _filings
+
+    seen = {}
+
+    def _fake_list(cik, forms=None, start_date=None, end_date=None, as_of=None, limit=50):
+        seen["limit"] = limit
+        return [Filing(accession_no=f"ACC-{i:03d}", form="10-K", filer_cik=int(str(cik)),
+                       filer_name="Acme", filed_at="2024-01-15", accepted_at=None,
+                       known_at="2024-01-15T00:00:00Z", report_period=None,
+                       primary_document="p.htm", is_amendment=False, amendment_of=None,
+                       source="http://x") for i in range(25)]
+
+    monkeypatch.setattr(_filings, "list_sec_filings", _fake_list)
+    monkeypatch.setattr("app.sec.discovery.service.find_sec_entities",
+                        lambda q, **k: __import__("types").SimpleNamespace(
+                            entities=(EntityCandidate(cik=123, name="Acme", tickers=(),
+                                                      exchange=None, match_source="exact-cik",
+                                                      match_score=1.0, match_type="exact_cik",
+                                                      verification_status="verified",
+                                                      entity_id="sec:cik:0000000123"),),
+                            filings=(), documents=(), relationships=(), text_hits=(),
+                            coverage=__import__("types").SimpleNamespace(status="complete",
+                                                                          source_limits=()),
+                            attempts=(), warnings=(), errors=(),
+                            retrieval_order=(), evidence_packet_ids=()))
+    svc = SECDiscoveryService(data_root=tmp_path)
+    result = svc.search(SECSearchRequest(query="123", forms=("10-K",), max_results=20,
+                                        search_relationships=False))
+    assert seen["limit"] is not None and seen["limit"] <= 21
+    assert len(result.filings) <= 20
+    sub = [a for a in result.attempts if a.backend == "filer-submissions"]
+    assert sub and all(a.status == "partial" for a in sub)
+    assert all(a.truncated and a.source_limit for a in sub)
+    assert result.coverage.status == "partial"
+
+
+def test_bounded_entity_discovery_probes_limit_plus_one(tmp_path, monkeypatch):
+    import app.sec.discovery.service as _svc
+    seen = {}
+    rows = [{"cik": 1000000 + i, "name": f"Test Co {i}", "tickers": []} for i in range(25)]
+
+    def _lookup(query, limit=50):
+        seen["cik_lookup_limit"] = limit
+        return list(rows)
+
+    def _company(query, limit=50):
+        seen["company_limit"] = limit
+        return []
+
+    monkeypatch.setattr("app.sec.client.get_cik_lookup_candidates", _lookup)
+    monkeypatch.setattr("app.sec.client.find_sec_company", _company)
+    monkeypatch.setattr("app.sec.client.get_submissions_metadata",
+                        lambda cik: {"cik": cik, "name": "Test Co", "tickers": [],
+                                     "exchanges": [], "sic": None, "former_names": []})
+    out = _svc.find_sec_entities("Test Co", max_results=20, data_root=tmp_path)
+    assert seen["cik_lookup_limit"] <= 21
+    assert seen["company_limit"] <= 21
+    assert len(out.entities) <= 20
+    assert out.coverage.status == "partial"
+    assert any(a.status == "partial" and a.truncated and a.source_limit for a in out.attempts)
+    assert "results capped at 20; rerun with a higher limit or exhaustive=true" in list(out.warnings)
+    assert out.request.exhaustive is False
+    assert out.request.max_results == 20
+
+
+def test_entity_writes_land_only_in_explicit_root(tmp_path, monkeypatch):
+    import app.sec.discovery.service as _svc
+
+    explicit = tmp_path / "explicit"
+    other = tmp_path / "other"
+    explicit.mkdir()
+    other.mkdir()
+    monkeypatch.setattr("app.sec.client.resolve_cik", lambda q: 1234567)
+    monkeypatch.setattr("app.sec.client.get_cik_lookup_candidates", lambda q, limit=50: [])
+    monkeypatch.setattr("app.sec.client.find_sec_company", lambda q, limit=50: [])
+    monkeypatch.setattr("app.sec.client.get_submissions_metadata",
+                        lambda cik: {"cik": 1234567, "name": "Acme Inc", "tickers": ["ACME"],
+                                     "exchanges": ["Nasdaq"], "sic": "1234", "former_names": []})
+    out = _svc.find_sec_entities("ACME", max_results=20, data_root=explicit)
+    assert [e for e in out.entities if e.verification_status == "verified"]
+    assert (explicit / "parquet").exists()
+    assert not (other / "parquet").exists()
 
 
 def test_exhaustive_filer_and_current_pass_none_and_complete(tmp_path, monkeypatch):
@@ -399,7 +495,7 @@ def test_entity_51_row_probe_marks_partial(monkeypatch):
     monkeypatch.setattr("app.sec.client.get_submissions_metadata",
                         lambda cik: {"cik": cik, "name": f"Test Co", "tickers": [],
                                      "exchanges": [], "sic": None, "former_names": []})
-    out = _svc.find_sec_entities("Test Co", exhaustive=True)
+    out = _svc.find_sec_entities("Test Co", exhaustive=True, max_results=None)
     assert out.coverage.status == "partial"
     assert any(a.backend == "cik-lookup" and a.status == "partial" and a.truncated
                and a.source_limit == "50 candidates" for a in out.attempts)

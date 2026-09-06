@@ -15,7 +15,7 @@ from . import exa_client
 from . import finra_client
 from . import obligations
 from . import valuation
-from .config import broker_enabled, get_robinhood_mcp_url
+from .config import broker_enabled, get_data_root, get_robinhood_mcp_url
 from .policy import Capability, RequestContext
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
@@ -61,13 +61,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "find_sec_entities",
-            "description": "Resolves a company name, ticker, or CIK to verified SEC entity candidates (CIK, tickers, verification status), including no-ticker registrants and former names. Ties and fuzzy-only matches stay ambiguous; verify identity before list_sec_filings.",
+            "description": "Resolves a company name, ticker, or CIK to verified SEC entity candidates (CIK, tickers, verification status), including no-ticker registrants and former names. Ties and fuzzy-only matches stay ambiguous; verify identity before list_sec_filings. Default is non-exhaustive (capped at limit).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; former names apply only within their known/valid interval."},
-                    "exhaustive": {"type": "boolean", "description": "Fan out over all entity routes (default true)."}
+                    "exhaustive": {"type": "boolean", "description": "Fan out over all entity routes (default false; non-exhaustive)."},
+                    "limit": {"type": "integer", "description": "Max candidates to return (default 20); higher values probe deeper."}
                 },
                 "required": ["query"]
             }
@@ -77,7 +78,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "Exhaustive EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes. Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document.",
+            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -93,7 +94,7 @@ TOOLS = [
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
                 "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; records known after it are excluded."},
-                "exhaustive": {"type": "boolean", "description": "Fan out over all routes (default true)."},
+                "exhaustive": {"type": "boolean", "description": "Fan out over all routes (default false; non-exhaustive)."},
                 "limit": {"type": "integer"}
                 },
                 "required": []
@@ -189,10 +190,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_sec_document",
-            "description": "Returns the text of one filing document (default: primary document) by accession number. Load only the document relevant to the question, never full history.",
+            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
+                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
                 "required": ["accession_no"]
             }
         }
@@ -1608,14 +1609,20 @@ def _search_envelope(result) -> dict:
 
 def _find_sec_entities(args: dict) -> dict:
     """Entity discovery -> envelope with candidate verification statuses."""
+    exhaustive = args.get("exhaustive", False)
+    if args.get("limit") is not None:
+        max_results = args.get("limit")
+    else:
+        max_results = None if exhaustive else 20
     return _search_envelope(sec.find_sec_entities(
         args["query"], as_of=args.get("as_of"),
-        exhaustive=args.get("exhaustive", True),
+        exhaustive=exhaustive, max_results=max_results,
+        data_root=get_data_root(),
     ))
 
 
 def _sec_search_result(args: dict) -> dict:
-    """Exhaustive discovery search -> envelope with jobs + evidence IDs."""
+    """Bounded discovery search -> envelope with jobs + evidence IDs."""
     if not any(args.get(key) for key in (
             "query", "ticker", "cik", "company_name", "person_name",
             "domain", "accession_no", "security_identifier")):
@@ -1623,8 +1630,11 @@ def _sec_search_result(args: dict) -> dict:
             "search_sec_filings needs one of: query, ticker, cik, "
             "company_name, person_name, domain, accession_no, "
             "security_identifier")
-    # ponytail: explicit limit caps retrieval; absent limit retrieves exhaustively
-    explicit_limit = args.get("limit") if "limit" in args else None
+    exhaustive = args.get("exhaustive", False)
+    if args.get("limit") is not None:
+        max_results = args.get("limit")
+    else:
+        max_results = None if exhaustive else 20
     request = sec.SECSearchRequest(
         query=args.get("query"), ticker=args.get("ticker"), cik=args.get("cik"),
         company_name=args.get("company_name"),
@@ -1634,28 +1644,28 @@ def _sec_search_result(args: dict) -> dict:
         forms=tuple(args["forms"]) if args.get("forms") else None,
         start_date=args.get("start_date"), end_date=args.get("end_date"),
         as_of=args.get("as_of"),
-        exhaustive=args.get("exhaustive", True),
-        max_results=explicit_limit,
+        exhaustive=exhaustive,
+        max_results=max_results,
     )
-    envelope = _search_envelope(sec.SECDiscoveryService().search(request))
-    if explicit_limit is None and request.exhaustive:
-        _ctx = 20
-        truncated = False
-        for _key in ("hits", "filings"):
-            _rows = envelope.get(_key)
-            if isinstance(_rows, (list, tuple)) and len(_rows) > _ctx:
-                envelope[_key] = list(_rows)[:_ctx]
-                truncated = True
-        if truncated:
-            _note = "payload truncated to 20 context rows; coverage reports full retrieval"
-            _warns = envelope.get("warnings")
-            if isinstance(_warns, tuple):
-                envelope["warnings"] = [*_warns, _note]
-            elif isinstance(_warns, list):
-                _warns.append(_note)
-            else:
-                envelope["warnings"] = [_note]
-    return envelope
+    return _search_envelope(
+        sec.SECDiscoveryService(data_root=get_data_root()).search(request))
+
+
+def _get_sec_document(args: dict, model: str) -> dict:
+    """Archive-first document read; model callers always get a bounded window."""
+    del model
+    offset = args.get("offset", 0)
+    max_chars = args.get("max_chars", 12_000)
+    try:
+        return sec.get_sec_document(
+            args["accession_no"], args.get("document_name"),
+            as_of=args.get("as_of"),
+            offset=0 if offset is None else offset,
+            max_chars=12_000 if max_chars is None else max_chars,
+            data_root=get_data_root(),
+        )
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc), "error_type": "invalid_tool_arguments"}
 
 
 def _sec_relationships_result(args: dict) -> dict:
@@ -1721,9 +1731,7 @@ _DIRECT_HANDLERS = {
         args.get("accession_no"), sec.list_sec_documents(
             args["accession_no"], as_of=args.get("as_of")), "documents",
     ),
-    "get_sec_document": lambda args, model: sec.get_sec_document(
-        args["accession_no"], args.get("document_name"), as_of=args.get("as_of"),
-    ),
+    "get_sec_document": _get_sec_document,
     "diff_sec_filings": lambda args, model: sec.diff_filings(
         args["current_accession"], args["previous_accession"], section=args.get("section"),
     ),

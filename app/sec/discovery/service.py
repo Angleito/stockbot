@@ -242,17 +242,22 @@ def verify_sec_entity(cik: int | str, *, expected_name=None,
     return candidate
 
 
-def _persist_entity(meta: dict, *, now: str) -> str | None:
+def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
     """Persist a verified CIK into entities/entity_aliases; warning or None.
 
     Rows conform to ``resolve_ticker_aliases`` PIT semantics: ticker aliases
     are currently valid (null bounds) and visible from ``known_at``; former
     names keep SEC ``from``/``to`` (null when missing). Extra keys are
     dropped by the warehouse writer, so only dataset columns are sent.
+    An explicit ``data_root`` writes under ``<data_root>/parquet``; None
+    keeps the configured default root.
     """
     try:
+        from pathlib import Path as _Path
+
         from ...storage.parquet import write_rows
 
+        parquet_root = _Path(data_root) / "parquet" if data_root is not None else None
         cik = meta.get("cik")
         entity_id = sec_entity_id(cik)
         sic = meta.get("sic")
@@ -266,7 +271,7 @@ def _persist_entity(meta: dict, *, now: str) -> str | None:
             "retrieved_at": now,
             "content_hash": None,
             "parser_version": PARSER_VERSION,
-        }])
+        }], root=parquet_root)
         aliases = []
         for ticker in meta.get("tickers") or []:
             if str(ticker).strip():
@@ -299,20 +304,24 @@ def _persist_entity(meta: dict, *, now: str) -> str | None:
                     "parser_version": PARSER_VERSION,
                 })
         if aliases:
-            write_rows("entity_aliases", aliases)
+            write_rows("entity_aliases", aliases, root=parquet_root)
     except Exception as exc:
         return f"entity persistence skipped for CIK {meta.get('cik')}: {exc}"
     return None
 
 
 def find_sec_entities(query: str, *, as_of=None,
-                      exhaustive: bool = True) -> SECSearchResult:
+                      exhaustive: bool = False, max_results: int | None = 20,
+                      data_root=None) -> SECSearchResult:
     """Fan out over exact-CIK, exact-ticker, and general legal-name routes.
 
     General names merge the no-ticker ``cik-lookup-data.txt`` scan with the
     ticker-company index by CIK; each pooled CIK loads submissions once and
     is classified exact/normalized/historical/fuzzy. Ties and fuzzy-only tops
     stay ``ambiguous``; verified candidates persist to the entity store.
+    Bounded calls probe each candidate source with ``max_results + 1``,
+    rank/retain at most ``max_results``, and prove truncation with the extra
+    row. ``max_results=None`` keeps the existing 50-candidate source cap.
     """
 
     from ..client import (
@@ -328,7 +337,8 @@ def find_sec_entities(query: str, *, as_of=None,
     query = query.strip()
     search_id = uuid.uuid4().hex[:12]
     request = SECSearchRequest(
-        query=query, as_of=as_of, exhaustive=exhaustive)
+        query=query, as_of=as_of, exhaustive=exhaustive,
+        max_results=max_results)
     attempts: list[SearchAttempt] = []
     warnings: list[str] = []
     errors: list[str] = []
@@ -425,7 +435,7 @@ def find_sec_entities(query: str, *, as_of=None,
         else:
             _add(ticker_cik, "", [query.strip().upper()], "exact-ticker")
             _attempt("exact-ticker", 1, 1)
-        fetch_limit = 51 if exhaustive else 10
+        fetch_limit = 51 if max_results is None else max_results + 1
         for backend, fetch in (
             ("cik-lookup", lambda: get_cik_lookup_candidates(
                 query, limit=fetch_limit)),
@@ -441,13 +451,20 @@ def find_sec_entities(query: str, *, as_of=None,
                 errors.append(f"{backend} route failed: {exc}")
                 failed += 1
                 continue
-            if exhaustive and len(found or []) > 50:
+            if max_results is None and len(found or []) > 50:
                 for row in list(found or [])[:50]:
                     _add(row.get("cik"), row.get("name"),
                          list(row.get("tickers") or []), backend)
                 _attempt(backend, 51, 50, status="partial", truncated=True,
                          source_limit="50 candidates")
                 warnings.append(f"{backend} candidate retrieval capped at 50; entity coverage partial")
+            elif max_results is not None and len(found or []) > max_results:
+                for row in found or []:
+                    _add(row.get("cik"), row.get("name"),
+                         list(row.get("tickers") or []), backend)
+                _attempt(backend, len(found), len(found), status="partial",
+                         truncated=True,
+                         source_limit=f"{max_results} candidates")
             else:
                 for row in found:
                     _add(row.get("cik"), row.get("name"),
@@ -506,14 +523,22 @@ def find_sec_entities(query: str, *, as_of=None,
         first = entities[0]
         entities[0] = replace(
             first, verification_status="ambiguous", entity_id=None)
+    if max_results is not None and len(entities) > max_results:
+        entities = entities[:max_results]
     final_by_cik = {e.cik: e for e in entities}
     for cik_int, meta in metas.items():
         if final_by_cik.get(cik_int, None) is not None and final_by_cik[cik_int].verification_status == "verified":
-            note = _persist_entity(meta, now=now)
+            note = _persist_entity(meta, now=now, data_root=data_root)
             if note:
                 warnings.append(note)
     if not entities and not errors:
         warnings.append(f"no SEC entity candidates for {query!r}")
+    if max_results is not None and any(
+            getattr(a, "truncated", False) for a in attempts):
+        cap_warning = (f"results capped at {max_results}; "
+                       "rerun with a higher limit or exhaustive=true")
+        if cap_warning not in warnings:
+            warnings.append(cap_warning)
     has_partial = any(getattr(a, "status", None) in ("partial", "source_limited") for a in attempts)
     if failed and not entities:
         status: str = "failed"
@@ -534,6 +559,8 @@ def find_sec_entities(query: str, *, as_of=None,
                 a.backend for a in attempts if a.status == "complete"),
             sources_failed=tuple(
                 a.backend for a in attempts if a.status == "failed"),
+            source_limits=tuple(dict.fromkeys(
+                a.source_limit for a in attempts if a.source_limit)),
             results_reported=len(pool) if pool else len(entities),
             results_retrieved=len(entities),
         ),
@@ -1066,25 +1093,20 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
         filer_cik = getattr(filing, "filer_cik", None)
         subject_cik = getattr(filing, "subject_cik", None)
         subject_name = getattr(filing, "subject_name", None)
-        from .. import archive as _archive
         from .. import store as _store
         from ..documents import get_by_accession_number, get_sec_document
         try:
-            doc = get_sec_document(accession, None)
+            doc = get_sec_document(accession, None, data_root=data_root)
         except Exception as exc:
             return 0, False, f"no supported primary document: {exc}"
+        if isinstance(doc, dict) and doc.get("error_type") == "pit_revision_conflict":
+            return 0, False, f"no supported primary document: {doc.get('error')}"
         try:
             text = doc.get("text") or ""
-            payload = text.encode("utf-8", "replace") if isinstance(text, str) else bytes(text)
             doc_name = doc.get("document_name") or getattr(filing, "primary_document", None) or "primary"
-            url = doc.get("url") or source_url
-            record = _archive.archive_sec_document(
-                accession, str(doc_name), payload, url=url or "",
-                metadata={"form": form_raw}, root=_raw_root_for(data_root))
-            _payload_path = getattr(record, "payload_path", None)
-            raw_path = str(_payload_path) if _payload_path is not None else None
-            retrieved_at = getattr(record, "retrieved_at", None)
-            content_hash = getattr(record, "sha256", None)
+            raw_path = doc.get("raw_archive_path")
+            retrieved_at = doc.get("retrieved_at")
+            content_hash = doc.get("content_hash")
         except Exception as exc:
             return 0, False, f"document archive failed: {exc}"
         try:
@@ -1570,6 +1592,7 @@ class SECDiscoveryService:
         retrieval_order: list[str] = []
         pit_gaps = 0
         quarter_capped = False
+        caller_capped = False
         pending: list[str] = []
         adopted_limits: list[str] = []
         adopted_not_complete: list[str] = []
@@ -1695,7 +1718,9 @@ class SECDiscoveryService:
                 try:
                     _adopt(find_sec_entities(
                         selector, as_of=as_of,
-                        exhaustive=request.exhaustive), route="entity")
+                        exhaustive=request.exhaustive,
+                        max_results=request.max_results,
+                        data_root=data_root), route="entity")
                 except ValueError as exc:
                     _record("entity-discovery", selector,
                             "failed", error=exc)
@@ -1776,15 +1801,21 @@ class SECDiscoveryService:
                 per_variant = 10_000 if (request.exhaustive and request.max_results is None) else (request.max_results or 20)
                 for variant, route in variants:
                     try:
-                        _adopt(search_sec_filings(
+                        sub = search_sec_filings(
                             variant, forms=forms,
                             start_date=request.start_date,
                             end_date=request.end_date, limit=per_variant,
-                            as_of=as_of), route=route)
+                            as_of=as_of)
                     except Exception as exc:
                         _record("efts", variant, "failed",
                                 error=exc, filters={"route": route})
                         errors.append(f"efts {variant!r} failed: {exc}")
+                        continue
+                    if (result_limit is not None
+                            and sub.coverage.status == "partial"
+                            and not sub.errors):
+                        caller_capped = True
+                    _adopt(sub, route=route)
             elif not any(a.backend == "efts" for a in attempts):
                 _record("efts", "no text/person/domain/security query",
                         "not_applicable")
@@ -1803,12 +1834,13 @@ class SECDiscoveryService:
             from ..filings import list_sec_filings
 
             sub_forms = list(request.forms) if request.forms else None
+            probe = None if result_limit is None else result_limit + 1
             for candidate in verified:
                 try:
                     rows = list_sec_filings(
                         candidate.cik, forms=sub_forms,
                         start_date=request.start_date, end_date=request.end_date,
-                        as_of=as_of, limit=result_limit)
+                        as_of=as_of, limit=probe)
                 except Exception as exc:
                     _record("filer-submissions", str(candidate.cik), "failed",
                             error=exc,
@@ -1816,13 +1848,25 @@ class SECDiscoveryService:
                     errors.append(
                         f"filer-submissions {candidate.cik} failed: {exc}")
                     continue
-                _record("filer-submissions", str(candidate.cik), "complete",
-                        reported=len(rows), retrieved=len(rows), pages=1,
-                        pit_basis="known_at" if as_of else None,
-                        filters={"forms": sub_forms,
-                                 "start_date": request.start_date,
-                                 "end_date": request.end_date})
-                for filing in rows:
+                if result_limit is not None and len(rows) > result_limit:
+                    caller_capped = True
+                    kept = rows[:result_limit]
+                    _record("filer-submissions", str(candidate.cik), "partial",
+                            reported=len(rows), retrieved=len(kept), pages=1,
+                            pit_basis="known_at" if as_of else None,
+                            source_limit=f"{result_limit} filings",
+                            filters={"forms": sub_forms,
+                                     "start_date": request.start_date,
+                                     "end_date": request.end_date})
+                else:
+                    kept = rows if result_limit is None else rows[:result_limit]
+                    _record("filer-submissions", str(candidate.cik), "complete",
+                            reported=len(rows), retrieved=len(kept), pages=1,
+                            pit_basis="known_at" if as_of else None,
+                            filters={"forms": sub_forms,
+                                     "start_date": request.start_date,
+                                     "end_date": request.end_date})
+                for filing in kept:
                     filings.setdefault(filing.accession_no, filing)
         elif not verified:
             _record("filer-submissions", "no verified entity", "not_applicable")
@@ -1944,10 +1988,13 @@ class SECDiscoveryService:
                     else:
                         kept = kept_all[:result_limit]
                         fully_evaluated = len(rows) <= result_limit
+                        if not fully_evaluated:
+                            caller_capped = True
                     _record("local-filings", f"{form} {partition}",
                             "complete" if fully_evaluated else "partial",
                             reported=len(rows), retrieved=len(kept), pages=1,
                             pit_basis="known_at" if as_of else None,
+                            source_limit=None if fully_evaluated else f"{result_limit} filings",
                             filters={"form": form, "partition": partition})
                     for filing in kept:
                         filings.setdefault(filing.accession_no, filing)
@@ -1963,10 +2010,11 @@ class SECDiscoveryService:
                 else:
                     want_current = True
                 if want_current:
+                    current_probe = None if result_limit is None else result_limit + 1
                     for form in ordered_forms:
                         try:
                             rows = get_current_filings(
-                                form, page_size=result_limit)
+                                form, page_size=current_probe)
                         except Exception as exc:
                             _record("current-filings", form, "failed",
                                     error=exc,
@@ -1987,12 +2035,22 @@ class SECDiscoveryService:
                                 continue
                             if _keep(filing):
                                 kept.append(filing)
-                        _record("current-filings", form,
-                                "complete" if result_limit is None else "partial",
-                                reported=len(rows), retrieved=len(kept),
-                                pages=1,
-                                pit_basis="known_at" if as_of else None,
-                                filters={"form": form})
+                        if result_limit is not None and len(rows) > result_limit:
+                            caller_capped = True
+                            kept = kept[:result_limit]
+                            _record("current-filings", form, "partial",
+                                    reported=len(rows), retrieved=len(kept),
+                                    pages=1,
+                                    pit_basis="known_at" if as_of else None,
+                                    source_limit=f"{result_limit} filings",
+                                    filters={"form": form})
+                        else:
+                            kept = kept if result_limit is None else kept[:result_limit]
+                            _record("current-filings", form, "complete",
+                                    reported=len(rows), retrieved=len(kept),
+                                    pages=1,
+                                    pit_basis="known_at" if as_of else None,
+                                    filters={"form": form})
                         for filing in kept:
                             filings.setdefault(filing.accession_no, filing)
                 else:
@@ -2346,6 +2404,8 @@ class SECDiscoveryService:
             else:
                 _record("local-transactions", "no entity/cik context",
                         "not_applicable")
+            if result_limit is not None and _rel_open[0] > 0:
+                caller_capped = True
         else:
             _record("local-relationships", "disabled by request",
                     "not_applicable")
@@ -2362,6 +2422,24 @@ class SECDiscoveryService:
             verified_ciks=[e.cik for e in verified],
             verified_names=[e.name for e in verified],
             relevant_forms=global_forms)
+        capped = False
+        if result_limit is not None:
+            if len(entities) > result_limit:
+                for key in list(entities.keys())[result_limit:]:
+                    del entities[key]
+                capped = True
+            if len(filings) > result_limit:
+                for key in list(filings.keys())[result_limit:]:
+                    del filings[key]
+                capped = True
+            if len(ranked) > result_limit:
+                ranked = ranked[:result_limit]
+                capped = True
+            if capped or caller_capped:
+                cap_warning = (f"results capped at {result_limit}; "
+                               "rerun with a higher limit or exhaustive=true")
+                if cap_warning not in warnings:
+                    warnings.append(cap_warning)
         packet = build_evidence_packet(
             search_id, entities=tuple(entities.values()),
             filings=tuple(filings.values()), text_hits=ranked,
@@ -2380,7 +2458,8 @@ class SECDiscoveryService:
         limits = tuple(dict.fromkeys(tuple(limits) + tuple(adopted_limits)))
         if not active or all(a.status == "failed" for a in active):
             status = "failed"
-        elif (pending or any(a.status in ("failed", "partial") for a in active)
+        elif (pending or capped or caller_capped
+                or any(a.status in ("failed", "partial") for a in active)
                 or any(s in ("partial", "failed")
                        for s in adopted_not_complete)):
             # Missing partitions queued as bounded backfill jobs: the call
@@ -2489,8 +2568,7 @@ def _relationship_ciks(entity: object) -> list[str]:
             _add(entity.get("entity_id"))
     return ciks
 
-
-def _resolve_relationship_identity(entity: object, *, as_of=None):
+def _resolve_relationship_identity(entity: object, *, as_of=None, data_root=None):
     """Direct CIK/ID or single-verified-candidate CIK; else ([], candidates, status, err)."""
     direct = _relationship_ciks(entity)
     if direct:
@@ -2527,7 +2605,8 @@ def _resolve_relationship_identity(entity: object, *, as_of=None):
     if match:
         return [str(int(match.group(1)))], [], "direct", None
     try:
-        sub = find_sec_entities(query, as_of=as_of, exhaustive=True)
+        sub = find_sec_entities(query, as_of=as_of, exhaustive=True,
+                                max_results=None, data_root=data_root)
     except Exception as exc:
         return [], [], "failed", exc
     try:
@@ -2581,7 +2660,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
     if relationship_types is not None:
         wanted = {normalize_label(t) for t in relationship_types}
     ciks, _candidates, _resolution, _resolution_err = _resolve_relationship_identity(
-        entity, as_of=as_of)
+        entity, as_of=as_of, data_root=data_root)
     attempts: list[dict] = []
     warnings: list[str] = []
     errors: list[str] = []

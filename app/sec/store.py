@@ -86,6 +86,7 @@ def store_filing(
 def query_filings(
     *,
     cik: Optional[int | str] = None,
+    accession: Optional[str] = None,
     forms: Optional[list[str]] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -99,6 +100,9 @@ def query_filings(
     if cik is not None:
         where.append("cik = ?")
         params.append(str(cik))
+    if accession is not None:
+        where.append("accession = ?")
+        params.append(str(accession))
     if forms:
         where.append(f"form IN ({', '.join(['?'] * len(forms))})")
         params.extend(forms)
@@ -115,7 +119,7 @@ def query_filings(
     sql = "SELECT * FROM sec_filings"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY known_at DESC"
+    sql += " ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC"
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     return duckdb.query(sql, params, data_root=root)
@@ -230,6 +234,8 @@ def store_document_text(
     document_name: Optional[str] = None,
     source_url: Optional[str] = None,
     raw_archive_path: Optional[Path | str] = None,
+    source_content_hash: Optional[str] = None,
+    source_representation: Optional[str] = None,
     location: Optional[str] = None,
     file_type: Optional[str] = None,
     filed_at: Optional[str] = None,
@@ -237,7 +243,6 @@ def store_document_text(
     retrieved_at: Optional[str] = None,
     root: Optional[Path | str] = None,
 ) -> int:
-    """Append one archived normalized document text, keyed by doc ID + hash."""
     now = retrieved_at or _utcnow()
     payload = text.encode("utf-8") if isinstance(text, str) else bytes(text)
     row = {
@@ -249,6 +254,8 @@ def store_document_text(
         "source_url": source_url,
         "raw_archive_path": str(raw_archive_path)
         if raw_archive_path is not None else None,
+        "source_content_hash": source_content_hash,
+        "source_representation": source_representation,
         "location": location,
         "file_type": file_type,
         "filed_at": filed_at,
@@ -287,7 +294,7 @@ def query_document_text(
     sql = "SELECT * FROM document_text"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC LIMIT {int(limit)}"
     return duckdb.query(sql, params, data_root=root)
 
 

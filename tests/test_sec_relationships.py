@@ -683,7 +683,7 @@ def test_hydrate_transaction_and_offering_real_normalizers(tmp_path, monkeypatch
     import app.sec.documents as sec_docs
     import app.sec.store as sec_store_mod
     monkeypatch.setattr(sec_docs, "get_sec_document",
-                        lambda acc, _: {"text": "Merger with Target Co for $10 per share",
+                        lambda acc, _=None, **__: {"text": "Merger with Target Co for $10 per share",
                                         "document_name": "primary.htm", "url": "http://x"})
     monkeypatch.setattr(sec_archive, "archive_sec_document",
                         lambda *a, **k: SimpleNamespace(payload_path="/tmp/p",
@@ -766,7 +766,7 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path, monkeypatch):
     import app.sec.ownership as sec_own
     import app.sec.store as sec_store_mod
     monkeypatch.setattr(sec_docs, "get_sec_document",
-                        lambda acc, _: {"text": "t", "document_name": "primary",
+                        lambda acc, _=None, **__: {"text": "t", "document_name": "primary",
                                         "url": "http://x"})
     monkeypatch.setattr(sec_archive, "archive_sec_document",
                         lambda *a, **k: SimpleNamespace(
