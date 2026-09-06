@@ -114,7 +114,16 @@ function describeFn(entry: unknown): { name: string; description: string; parame
  return { name: fn.name, description, parameters };
 }
 
-export default async function stockbotExtension(pi: ExtensionAPI) {
+function spawnPythonBridge(): ChildProcessWithoutNullStreams {
+ return spawn(BRIDGE_CMD, BRIDGE_ARGS, {
+  cwd: ROOT,
+  stdio: ["pipe", "pipe", "pipe"],
+ });
+}
+
+export function createBridgeClient(
+ spawnBridge: () => ChildProcessWithoutNullStreams = spawnPythonBridge,
+): { callBridge: (req: Json, timeoutMs?: number, fatal?: boolean) => Promise<Json> } {
  // --- bridge process (JSONL stdio; ID-correlated, 4 concurrent tool calls) ---
  let proc: ChildProcessWithoutNullStreams | null = null;
  let buf = "";
@@ -142,8 +151,33 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   permitQueue.shift()?.();
  }
 
+ function recycle(child: ChildProcessWithoutNullStreams): void {
+  if (child !== proc) return;
+  proc = null;
+  buf = "";
+  const entries = [...pending.values()];
+  pending.clear();
+  for (const entry of entries) {
+   clearTimeout(entry.timer);
+   entry.resolve(null);
+  }
+  writeChain = Promise.resolve();
+  try {
+   child.stdin.destroy();
+  } catch {
+   // already gone
+  }
+  try {
+   child.kill("SIGKILL");
+  } catch {
+   // already exited
+  }
+ }
+
  function markDead() {
   proc = null;
+  buf = "";
+  writeChain = Promise.resolve();
   for (const [, entry] of pending) {
    clearTimeout(entry.timer);
    entry.resolve(null);
@@ -153,6 +187,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  function pump(child: ChildProcessWithoutNullStreams) {
   child.stdout.on("data", (chunk) => {
+   if (child !== proc) return;
    buf += Buffer.from(chunk).toString("utf8");
    let i: number;
    while ((i = buf.indexOf("\n")) >= 0) {
@@ -187,10 +222,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  function ensureBridge(): boolean {
   if (proc) return true;
   try {
-   proc = spawn(BRIDGE_CMD, BRIDGE_ARGS, {
-    cwd: ROOT,
-    stdio: ["pipe", "pipe", "pipe"],
-   });
+   proc = spawnBridge();
    buf = "";
    pump(proc);
    return true;
@@ -225,6 +257,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (typeof req.id !== "string" || !req.id) req.id = crypto.randomUUID();
   const id = req.id as string;
   const isToolCall = req.op === "tool_call";
+  const isAgentEnd = req.op === "pi_event" && req.event === "agent_end";
   let queuedMs = 0;
   if (isToolCall) {
    queuedMs = await acquire();
@@ -234,28 +267,55 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    if (!ensureBridge() || !proc) return fail("spawn failed");
    const child = proc;
    const { promise, resolve } = Promise.withResolvers<string | null>();
+   let timedOut = false;
+   let writeFailed = false;
    const timer = setTimeout(() => {
-    if (pending.delete(id)) resolve(null);
+    if (pending.delete(id)) {
+     timedOut = true;
+     resolve(null);
+    }
    }, timeoutMs);
    pending.set(id, { resolve, timer });
-   const sent = await writeLine(child, JSON.stringify(req));
-   if (!sent) {
-    if (pending.delete(id)) {
+   void writeLine(child, JSON.stringify(req)).then((sent) => {
+    if (!sent && pending.delete(id)) {
+     writeFailed = true;
      clearTimeout(timer);
      resolve(null);
     }
-   }
+   });
    const line = await promise;
-   if (line === null) return fail(`no response in ${timeoutMs}ms`);
+   if (line === null) {
+    if (writeFailed) {
+     recycle(child);
+     return fail("write failed");
+    }
+    if (timedOut) {
+     if (fatal || isAgentEnd) recycle(child);
+     return fail(`no response in ${timeoutMs}ms`);
+    }
+    return fail("bridge reset");
+   }
+   let parsed: Json;
    try {
-    return JSON.parse(line) as Json;
+    parsed = JSON.parse(line) as Json;
    } catch {
     return fail(`unparseable line: ${line.slice(0, 120)}`);
    }
+   if (parsed.error === "tool_drain_timeout") {
+    recycle(child);
+    return fail("tool drain timeout");
+   }
+   return parsed;
   } finally {
    if (isToolCall) release();
   }
  }
+
+ return { callBridge };
+}
+
+export default async function stockbotExtension(pi: ExtensionAPI) {
+ const { callBridge } = createBridgeClient();
 
  // --- describe: prompt + RESEARCH tool registry ---
  const describe = await callBridge({ op: "describe" }, 30_000);

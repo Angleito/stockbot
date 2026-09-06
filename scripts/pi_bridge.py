@@ -25,9 +25,9 @@ ops/missing keys -> {"error": "unknown_op"|"missing_arg"}, and any unhandled
 per-request exception -> {"error": "bridge_failed"}. The process never exits
 on a single request. ``tool_call`` work runs on a 4-worker pool so
 independent calls overlap; ``describe``/``doctor``/lifecycle stay on the
-main thread. ``agent_end`` waits for its run's submitted calls before
-completing/closing the recorder; EOF drains all submitted work before
-executor shutdown.
+main thread. ``agent_end`` uses a bounded drain for its run's submitted
+calls before completing/closing the recorder; EOF uses a bounded drain
+of all submitted work and exits unsuccessfully if workers remain.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import os
 import sys
 import threading
 from datetime import datetime, timezone
@@ -59,6 +60,7 @@ _inflight: dict[str, set[concurrent.futures.Future]] = {}
 _state_lock = threading.Lock()
 _stdout_lock = threading.Lock()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+TOOL_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 def _write(response: dict) -> None:
@@ -86,6 +88,20 @@ def _untrack(run_id: str, fut: concurrent.futures.Future) -> None:
 def _run_futures(run_id: str) -> list:
     with _state_lock:
         return list(_inflight.get(run_id, ()))
+
+
+def _all_futures() -> list:
+    with _state_lock:
+        return [fut for futs in _inflight.values() for fut in list(futs)]
+
+
+def _drain_futures(futures: list) -> int:
+    if not futures:
+        return 0
+    _, not_done = concurrent.futures.wait(futures, timeout=TOOL_DRAIN_TIMEOUT_SECONDS)
+    for fut in not_done:
+        fut.cancel()
+    return len(not_done)
 
 
 def _describe() -> dict:
@@ -192,20 +208,28 @@ def _pi_event(request: dict) -> dict:
     if not isinstance(event, str) or not event:
         return {"error": "missing_arg"}
     if event == "agent_end":
-        for fut in _run_futures(run_id):
-            try:
-                fut.result()
-            except Exception:
-                pass
+        timed_out = _drain_futures(_run_futures(run_id)) > 0
         with _state_lock:
             recorder = _recorders.get(run_id)
         try:
             if recorder is not None and recorder.enabled:
-                status = request.get("status") or "completed"
-                recorder.complete(status=str(status), answer=str(request.get("answer") or ""))
-                if status == "failed":
-                    meta = {k: v for k, v in request.items() if k not in ("op", "run_id", "event")}
-                    recorder.record_event(EventType.RUN_FAILED, metadata=meta or None)
+                if timed_out:
+                    error_type = "tool_drain_timeout"
+                    error_message = "Tool calls did not finish before the bridge drain timeout"
+                    recorder.complete(
+                        status="failed", answer=str(request.get("answer") or ""),
+                        error_type=error_type, error_message=error_message,
+                    )
+                    recorder.record_event(
+                        EventType.RUN_FAILED,
+                        metadata={"error_type": error_type, "error_message": error_message},
+                    )
+                else:
+                    status = request.get("status") or "completed"
+                    recorder.complete(status=str(status), answer=str(request.get("answer") or ""))
+                    if status == "failed":
+                        meta = {k: v for k, v in request.items() if k not in ("op", "run_id", "event")}
+                        recorder.record_event(EventType.RUN_FAILED, metadata=meta or None)
         except Exception as exc:  # observability never breaks research
             logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
         finally:
@@ -217,6 +241,8 @@ def _pi_event(request: dict) -> dict:
             with _state_lock:
                 _sessions.pop(run_id, None)
                 _recorders.pop(run_id, None)
+        if timed_out:
+            return {"error": "tool_drain_timeout"}
         return {"ok": True}
     try:
         if event == "agent_start":
@@ -297,7 +323,7 @@ def _handle(line: str) -> dict | None:
     return {"id": protocol_id, "error": "unknown_op"}
 
 
-def main() -> None:
+def main() -> bool:
     try:
         for line in sys.stdin:
             if not line.strip():
@@ -309,8 +335,11 @@ def main() -> None:
             if response is not None:
                 _write(response)
     finally:
-        _executor.shutdown(wait=True)
+        unfinished = _drain_futures(_all_futures())
+        _executor.shutdown(wait=False, cancel_futures=True)
+    return unfinished == 0
 
 
 if __name__ == "__main__":
-    main()
+    if not main():
+        os._exit(1)

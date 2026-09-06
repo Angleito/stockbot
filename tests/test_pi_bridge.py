@@ -218,9 +218,90 @@ def test_eof_drains_submitted_work(monkeypatch):
     lines = "".join(json.dumps(p) + "\n" for p in payloads)
     monkeypatch.setattr(pi_bridge.sys, "stdin", io.StringIO(lines))
     try:
-        pi_bridge.main()
+        assert pi_bridge.main() is True
         assert {r["id"] for r in responses} == {p["id"] for p in payloads}
     finally:
+        _teardown_run(run_id)
+
+def test_agent_end_drain_timeout(monkeypatch):
+    run_id = _run_id("timeout")
+    _start_session(run_id)
+    _capture_writes(monkeypatch)
+    release = threading.Event()
+    completed = []
+    failed_events = []
+
+    class _StubRecorder:
+        enabled = True
+
+        def complete(self, **kwargs):
+            completed.append(kwargs)
+
+        def record_event(self, event_type, **kwargs):
+            failed_events.append((event_type, kwargs))
+
+        def __exit__(self, *exc):
+            return False
+
+    pi_bridge._recorders[run_id] = _StubRecorder()
+    worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(pi_bridge, "_executor", worker_pool)
+    monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        pi_bridge, "execute_pi_tool",
+        lambda *a, **k: (release.wait(timeout=30), {"content": "late"})[1],
+    )
+    try:
+        assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
+        assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
+        futures = pi_bridge._run_futures(run_id)
+        assert len(futures) == 2
+        start = time.time()
+        response = pi_bridge._handle(
+            json.dumps({"id": "end-t", "op": "pi_event", "run_id": run_id, "event": "agent_end"})
+        )
+        assert time.time() - start < 5
+        assert response == {"id": "end-t", "error": "tool_drain_timeout"}
+        assert any(f.cancelled() for f in futures)
+        assert len(completed) == 1
+        assert completed[0]["status"] == "failed"
+        assert completed[0]["error_type"] == "tool_drain_timeout"
+        assert completed[0]["error_message"] == "Tool calls did not finish before the bridge drain timeout"
+        assert len(failed_events) == 1
+        assert failed_events[0][0] == "run_failed"
+        assert failed_events[0][1]["metadata"] == {
+            "error_type": "tool_drain_timeout",
+            "error_message": "Tool calls did not finish before the bridge drain timeout",
+        }
+        assert run_id not in pi_bridge._sessions
+        assert run_id not in pi_bridge._recorders
+    finally:
+        release.set()
+        worker_pool.shutdown(wait=True)
+        _teardown_run(run_id)
+
+
+def test_eof_drain_timeout(monkeypatch):
+    run_id = _run_id("eof-timeout")
+    pi_bridge._sessions[run_id] = PiSessionContext(session_id=run_id)
+    _capture_writes(monkeypatch)
+    release = threading.Event()
+    monkeypatch.setattr(
+        pi_bridge, "execute_pi_tool",
+        lambda *a, **k: (release.wait(timeout=30), {"content": "late"})[1],
+    )
+    worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(pi_bridge, "_executor", worker_pool)
+    monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(pi_bridge.sys, "stdin", io.StringIO(""))
+    try:
+        assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
+        start = time.time()
+        assert pi_bridge.main() is False
+        assert time.time() - start < 5
+    finally:
+        release.set()
+        worker_pool.shutdown(wait=True)
         _teardown_run(run_id)
 
 
