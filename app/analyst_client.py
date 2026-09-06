@@ -245,6 +245,24 @@ def get_analyst_estimates(ticker: str) -> dict:
     cache.set(key, value)
     return value
 
+def get_quote_price(ticker: str) -> dict:
+    """Latest Yahoo price with retrieval instant (uncached; 5-min TTL lives in valuation)."""
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return {"price": None, "retrieved_at": None}
+    try:
+        data = _quote_summary(ticker, "price")
+        price = _raw((data.get("price") or {}).get("regularMarketPrice"))
+        if price is None:
+            data = _quote_summary(ticker, "financialData")
+            price = _raw((data.get("financialData") or {}).get("currentPrice"))
+        if price is None:
+            raise ValueError(f"Yahoo returned no price for {ticker}")
+        return {"price": float(price), "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    except Exception as e:
+        logger.warning("quote price failed for %s: %s", ticker, e)
+        return {"price": None, "retrieved_at": None}
+
 
 def get_sp500_weight(ticker: str) -> dict:
     """Return the S&P 500 index weight for ticker (Slickcharts, cached 24h)."""

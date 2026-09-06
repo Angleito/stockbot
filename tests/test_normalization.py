@@ -199,7 +199,7 @@ def test_eps_facts_normalized_with_period_metadata():
     assert diluted_row["fiscal_year"] == 2025
     assert diluted_row["fiscal_period"] == "Q2"
     assert diluted_row["known_at"] == "2025-08-28"
-    assert diluted_row["parser_version"] == "sec-companyfacts-v3"
+    assert diluted_row["parser_version"] == "sec-companyfacts-v6"
     assert diluted_row["parser_version"] == COMPANY_FACTS_PARSER_VERSION
 
 
@@ -247,3 +247,78 @@ def test_eps_rows_dedup_on_rerun(tmp_path):
     table = parquet.read_table("financial_facts", root=root)
     assert table.num_rows == 2
     assert set(table.column("concept").to_pylist()) == {"EarningsPerShareDiluted", "EarningsPerShareBasic"}
+
+def test_ambiguous_xbrl_group_emits_undated_events():
+    payload = {"cik": 21344, "entityName": "CIK21344", "facts": {"us-gaap": {
+        "DividendsPayableAmountPerShare": {"units": {"USD/shares": [
+            {"val": 0.50, "accn": "A1", "filed": "2026-08-01"},
+            {"val": 0.54, "accn": "A1", "filed": "2026-08-01"},
+        ]}},
+        "DividendPayableDateToBePaidDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-09-01", "accn": "A1", "filed": "2026-08-01"},
+            {"val": "2026-10-01", "accn": "A1", "filed": "2026-08-01"},
+        ]}},
+    }}}
+    events = _normalize(payload)["dividend_events"]
+    assert len(events) == 2
+    assert all(e["declaration_date"] is None and e["record_date"] is None
+               and e["payment_date"] is None for e in events)
+    assert len({e["dividend_event_id"] for e in events}) == 2
+
+
+def test_single_amount_single_payment_stays_paired():
+    payload = {"cik": 21344, "entityName": "CIK21344", "facts": {"us-gaap": {
+        "DividendsPayableAmountPerShare": {"units": {"USD/shares": [
+            {"val": 0.54, "accn": "A2", "filed": "2026-08-01"},
+        ]}},
+        "DividendPayableDateToBePaidDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-09-15", "accn": "A2", "filed": "2026-08-01"},
+        ]}},
+        "DividendsPayableDateOfRecordDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-08-29", "accn": "A2", "filed": "2026-08-01"},
+        ]}},
+    }}}
+    (event,) = _normalize(payload)["dividend_events"]
+    assert event["amount_per_share"] == 0.54
+    assert event["payment_date"] == "2026-09-15"
+    assert event["record_date"] == "2026-08-29"
+
+def test_multiple_record_dates_emit_undated():
+    payload = {"cik": 21344, "entityName": "CIK21344", "facts": {"us-gaap": {
+        "DividendsPayableAmountPerShare": {"units": {"USD/shares": [
+            {"val": 0.54, "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+        "DividendPayableDateToBePaidDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-09-15", "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+        "DividendsPayableDateOfRecordDayMonthAndYear": {"units": {"USD": [
+            {"val": "2026-08-29", "accn": "A3", "filed": "2026-08-01"},
+            {"val": "2026-08-30", "accn": "A3", "filed": "2026-08-01"},
+        ]}},
+    }}}
+    (event,) = _normalize(payload)["dividend_events"]
+    assert event["declaration_date"] is None
+    assert event["record_date"] is None
+    assert event["payment_date"] is None
+
+
+def test_store_document_text_extracts_filing_text_event(tmp_path):
+    from app.sec import store as sec_store
+    from app.storage import duckdb
+    parquet.write_rows("sec_filings", [{
+        "accession": "0000999999", "form": "10-Q", "cik": "21344", "company": "KO",
+        "filer_cik": "21344", "filer_name": "KO",
+        "filed_at": "2026-08-01", "known_at": "2026-08-02T00:00:00Z",
+        "retrieved_at": "2026-08-02T00:00:00Z",
+    }], root=tmp_path / "parquet")
+    prose = ("The board declared a quarterly cash dividend of $0.54 per share, "
+             "payable October 1, 2026, to stockholders of record September 1, 2026.")
+    assert sec_store.store_document_text(
+        "d1", prose, accession="0000999999", source_url="u",
+        filed_at="2026-08-01", known_at="2026-08-02T00:00:00Z", root=tmp_path) == 1
+    rows = duckdb.query("SELECT * FROM dividend_events", [], data_root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["source_type"] == "filing_text"
+    assert rows[0]["amount_per_share"] == 0.54
+    assert rows[0]["known_at"] == "2026-08-02T00:00:00Z"
+    assert rows[0]["evidence_excerpt"] == prose

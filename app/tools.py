@@ -40,18 +40,20 @@ TOOLS = [
         "function": {
             "name": "get_fundamentals",
             "description": "Returns a specific numeric fundamental (EPS, "
-                "balance sheet line item, shares outstanding) for a ticker. "
+                "dividends, balance sheet line item, shares outstanding) for a ticker. "
                 "Note: shares_outstanding is SEC-reported shares outstanding, "
                 "not public float. Call this for any request for a specific "
-                "numeric metric.",
+                "numeric metric. Dividends responses include last paid and next "
+                "SEC-declared (upcoming) dividends with filing provenance; "
+                "undeclared estimates are never included.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "metric": {"type": "string", "enum": [
-                        "eps", "balance_sheet", "shares_outstanding", "overview"
+                        "eps", "dividends", "balance_sheet", "shares_outstanding", "overview"
                     ]},
-                    "as_of": {"type": "string", "description": "Point-in-time query date YYYY-MM-DD; store-backed for eps/shares_outstanding; live results are labeled data_source=live."}
+                    "as_of": {"type": "string", "description": "Point-in-time query date YYYY-MM-DD; store-backed for eps/shares_outstanding/dividends; live results are labeled data_source=live."}
                 },
                 "required": ["ticker", "metric"]
             }
