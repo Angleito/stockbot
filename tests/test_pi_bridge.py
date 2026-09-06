@@ -344,7 +344,7 @@ def test_abort_run_fails_live_run(monkeypatch):
             json.dumps({"id": "abort-1", "op": "abort_run", "run_id": run_id, "error_type": "tool_timeout", "error_message": message})
         )
         assert time.time() - start < 5
-        assert response == {"id": "abort-1", "ok": True}
+        assert response == {"id": "abort-1", "ok": True, "finalized": True}
         assert any(f.cancelled() for f in futures)
         assert len(completed) == 1
         assert completed[0]["status"] == "failed"
@@ -367,3 +367,19 @@ def test_requests_without_id_are_rejected():
     assert pi_bridge._handle('{"op": "doctor"}') == {"error": "missing_arg"}
     response = pi_bridge._handle(json.dumps({"id": "x-1", "op": "nope"}))
     assert response == {"id": "x-1", "error": "unknown_op"}
+
+
+def test_abort_run_reports_unconfirmed_finalization(monkeypatch):
+    run_id = _run_id("abort-unconfirmed")
+    _start_session(run_id)
+    monkeypatch.setattr(pi_bridge, "finalize_failed_run", lambda *a, **k: False)
+    try:
+        response = pi_bridge._handle(
+            json.dumps({"id": "abort-2", "op": "abort_run", "run_id": run_id,
+                        "error_type": "tool_timeout", "error_message": "timed out"})
+        )
+        assert response == {"id": "abort-2", "ok": True, "finalized": False}
+        assert run_id not in pi_bridge._sessions
+        assert run_id not in pi_bridge._recorders
+    finally:
+        _teardown_run(run_id)

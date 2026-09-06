@@ -270,11 +270,16 @@ export function createBridgeClient(
    return { error: "run_terminated", error_type: "tool_timeout" };
   }
   let queuedMs = 0;
-  if (isToolCall) {
-   queuedMs = await acquire();
-   req.bridge_queue_ms = queuedMs;
-  }
+  let acquired = false;
   try {
+   if (isToolCall) {
+    queuedMs = await acquire();
+    acquired = true;
+    if (typeof req.run_id === "string" && req.run_id && terminatedRuns.has(req.run_id)) {
+     return { error: "run_terminated", error_type: "tool_timeout" };
+    }
+    req.bridge_queue_ms = queuedMs;
+   }
    if (!ensureBridge() || !proc) return fail("spawn failed");
    const child = proc;
    const { promise, resolve } = Promise.withResolvers<string | null>();
@@ -321,7 +326,7 @@ export function createBridgeClient(
         } catch {
          // already gone
         }
-        if (!ack || (ack as Json).ok !== true) {
+        if (!ack || (ack as Json).finalized !== true) {
          try {
           await callBridge(mkAbort(), 6_000, false);
          } catch {
@@ -355,7 +360,7 @@ export function createBridgeClient(
    }
    return parsed;
   } finally {
-   if (isToolCall) release();
+   if (acquired) release();
   }
  }
 

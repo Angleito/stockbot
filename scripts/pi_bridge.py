@@ -200,10 +200,15 @@ def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
     return recorder
 
 
-def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, answer: str = "") -> None:
-    """Shared fail-stop teardown: live recorder -> failed, RUN_FAILED, close/pop, durable fallback."""
+def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, answer: str = "") -> bool:
+    """Shared fail-stop teardown: live recorder -> failed, RUN_FAILED, close/pop, durable fallback.
+
+    Returns True when durable terminalization is confirmed (live recorder
+    completed, or the orphan fallback updated/found the row).
+    """
     with _state_lock:
         recorder = _recorders.get(run_id)
+    live_completed = False
     try:
         if recorder is not None and recorder.enabled:
             recorder.complete(
@@ -214,8 +219,10 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
                 EventType.RUN_FAILED,
                 metadata={"error_type": error_type, "error_message": error_message},
             )
+            live_completed = True
     except Exception as exc:  # observability never breaks research
         logger.warning("abort_run: dropped (%s: %s)", type(exc).__name__, exc)
+        live_completed = False
     finally:
         try:
             if recorder is not None:
@@ -225,7 +232,9 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
         with _state_lock:
             _sessions.pop(run_id, None)
             _recorders.pop(run_id, None)
-    finalize_failed_run(run_id, error_type=error_type, error_message=error_message)
+    if live_completed:
+        return True
+    return finalize_failed_run(run_id, error_type=error_type, error_message=error_message)
 
 
 def _pi_event(request: dict) -> dict:
@@ -340,10 +349,10 @@ def _abort_run(request: dict) -> dict:
     ):
         return {"error": "missing_arg"}
     _drain_futures(_run_futures(run_id))
-    _teardown_failed_run(
+    finalized = _teardown_failed_run(
         run_id, error_type=error_type, error_message=error_message, answer=""
     )
-    return {"ok": True}
+    return {"ok": True, "finalized": finalized}
 
 
 def _handle(line: str) -> dict | None:

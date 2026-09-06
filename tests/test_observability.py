@@ -15,11 +15,13 @@ from app.runtime import BudgetExhaustedError, ExecutionBudget
 from app.security import quarantine_reader
 from app.storage.runs import (
     RunRecorder,
+    finalize_failed_run,
     reset_current_budget,
     reset_current_recorder,
     set_current_budget,
     set_current_recorder,
 )
+
 
 def _usage(**overrides):
     usage = {
@@ -321,5 +323,43 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path, monkeypatch):
         assert rows[pi_id][:3] == ("proto-9", 7.5, rows[pi_id][2])
         assert rows[pi_id][2] is not None and rows[pi_id][2] >= 0.0
         assert tuple(rows[pi_id][3:]) == (1, "unit_test")
+    finally:
+        conn.close()
+
+
+def test_finalize_failed_run_reconstructs_orphan_summary(tmp_path, monkeypatch):
+    """Orphaned runs terminalize as failed with aggregates rebuilt from child rows."""
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    now = datetime.now(timezone.utc).isoformat()
+    with _recorder("run-orphan-pop") as recorder:
+        recorder.record_model_call(round=2, provider="p", model="t", started_at=now,
+            completed_at=now, usage={"prompt_tokens": 100, "completion_tokens": 50,
+            "total_tokens": 999, "cost": 0.25})
+        recorder.record_tool_call(tool_call_id="tc-1", round=3, tool_name="t",
+            arguments_json="{}", started_at=now, completed_at=now, status="completed",
+            result_row_count=1, returned_count=1, truncated=False, result_bytes=10,
+            result_hash="h", source_names="", source_freshness="", as_of=None,
+            error_type=None, error_message=None)
+        recorder.record_event("turn_end", round=1)
+    with _recorder("run-orphan-empty"):
+        pass
+    assert finalize_failed_run("run-orphan-pop", error_type="tool_timeout",
+        error_message="boom") is True
+    assert finalize_failed_run("run-orphan-empty", error_type="tool_timeout",
+        error_message="boom") is True
+    conn = sqlite3.connect(str(tmp_path / "runs.sqlite"))
+    try:
+        cols = ("status, completed_at, duration_ms, round_count, model_call_count,"
+            " tool_call_count, input_tokens, output_tokens, total_tokens,"
+            " estimated_model_cost, estimated_total_cost, error_type")
+        pop = conn.execute(
+            f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-pop",)).fetchone()
+        assert pop[0] == "failed"
+        assert pop[1] is not None and pop[2] is not None
+        assert tuple(pop[3:]) == (3, 1, 1, 100, 50, 150, 0.25, 0.25, "tool_timeout")
+        empty = conn.execute(
+            f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-empty",)).fetchone()
+        assert empty[0] == "failed"
+        assert tuple(empty[3:]) == (0, 0, 0, 0, 0, 0, 0.0, 0.0, "tool_timeout")
     finally:
         conn.close()

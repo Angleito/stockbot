@@ -587,13 +587,14 @@ class RunRecorder:
 
 def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> bool:
     """Terminalize an orphaned agent_runs row as failed (fail-stop, UPDATE-only).
-    Reads started_at/completed_at via a short-lived connection and updates only
-    completed_at, duration_ms, status, error_type, and redacted/truncated
-    error_message for WHERE run_id = ? AND completed_at IS NULL. Preserves
-    counters, evidence, tool rows, and already-terminal runs. Returns True when
-    this call updated the row or found it already terminal, False when no row
-    exists or storage fails; storage errors are swallowed (observability never
-    breaks research).
+    Reads started_at/completed_at via a short-lived connection and updates
+    completed_at, duration_ms, status, error_type, redacted/truncated
+    error_message, plus the summary aggregates reconstructed from durable
+    child rows (same contract as RunRecorder.complete) for
+    WHERE run_id = ? AND completed_at IS NULL. Preserves evidence, tool rows,
+    and already-terminal runs. Returns True when this call updated the row or
+    found it already terminal, False when no row exists or storage fails;
+    storage errors are swallowed (observability never breaks research).
     """
     try:
         path = get_runs_db_path(DEFAULT_DATA_ROOT)
@@ -613,12 +614,37 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
                 duration = _duration_ms(started_at, now) if started_at else None
             except Exception:
                 duration = None
+            round_count = conn.execute(
+                "SELECT COALESCE(MAX(round), 0) FROM ("
+                " SELECT round FROM model_calls WHERE run_id = ?"
+                " UNION ALL SELECT round FROM tool_calls WHERE run_id = ?"
+                " UNION ALL SELECT round FROM agent_events WHERE run_id = ?)",
+                (run_id, run_id, run_id),
+            ).fetchone()[0]
+            model_row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0),"
+                " COALESCE(SUM(output_tokens), 0), COALESCE(SUM(estimated_cost), 0.0)"
+                " FROM model_calls WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            model_call_count, input_tokens, output_tokens, estimated_cost = model_row
+            tool_call_count = conn.execute(
+                "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+            # model_calls persists input/output/reasoning/cached but not usage.total_tokens,
+            # so total mirrors input + output instead of the live accumulator.
             message = redact_text(error_message)[:2000]
             cur = conn.execute(
                 "UPDATE agent_runs SET completed_at = ?, duration_ms = ?, status = ?,"
+                " round_count = ?, model_call_count = ?, tool_call_count = ?,"
+                " input_tokens = ?, output_tokens = ?, total_tokens = ?,"
+                " estimated_model_cost = ?, estimated_total_cost = ?,"
                 " error_type = ?, error_message = ?"
                 " WHERE run_id = ? AND completed_at IS NULL",
-                (now, duration, "failed", error_type, message, run_id),
+                (now, duration, "failed", round_count, model_call_count,
+                 tool_call_count, input_tokens, output_tokens,
+                 input_tokens + output_tokens, estimated_cost, estimated_cost,
+                 error_type, message, run_id),
             )
             conn.commit()
             return cur.rowcount > 0

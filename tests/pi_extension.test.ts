@@ -261,8 +261,9 @@ test("agent_end timeout recycles even when fatal=false", async () => {
 	}
 });
 
-function hangScript(logFile: string): string {
-	return `const fs=require('fs');const LOG=${JSON.stringify(logFile)};let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);fs.appendFileSync(LOG,l+'\\n');if(o.op==='abort_run'){process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}else if(o.op==='tool_call'){}else{process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}}catch{}}});`;
+function hangScript(logFile: string, finalized = false): string {
+	const ack = finalized ? "{id:o.id,ok:true,finalized:true}" : "{id:o.id,ok:true}";
+	return `const fs=require('fs');const LOG=${JSON.stringify(logFile)};let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);fs.appendFileSync(LOG,l+'\\n');if(o.op==='abort_run'){process.stdout.write(JSON.stringify(${ack})+'\\n');}else if(o.op==='tool_call'){}else{process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}}catch{}}});`;
 }
 
 function healthyLogScript(logFile: string): string {
@@ -270,33 +271,52 @@ function healthyLogScript(logFile: string): string {
 }
 
 test("fatal tool timeout terminates run and recycles", async () => {
-	const logFile = join(mkdtempSync(join(tmpdir(), "stockbot-")), "requests.log");
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-"));
+	const hangLog = join(dir, "hang.log");
+	const nextLog = join(dir, "next.log");
 	const kids: ChildProcessWithoutNullStreams[] = [];
 	let spawns = 0;
 	const { callBridge } = createBridgeClient(() => {
 		spawns++;
-		const child = spawnScript(spawns === 1 ? hangScript(logFile) : healthyLogScript(logFile));
+		const child = spawnScript(spawns === 1 ? hangScript(hangLog) : healthyLogScript(nextLog));
 		kids.push(child);
 		return child;
 	});
 	const runR = "run-R-terminated";
 	const runS = "run-S-clean";
 	try {
-		const results = await Promise.race([
-			Promise.all(
-				[0, 1, 2, 3].map((i) =>
-					callBridge(
-						{ op: "tool_call", run_id: runR, tool_call_id: `c${i}`, name: "search_web", arguments: { query: "q" } },
-						50,
-						true,
-					),
+		const resultsP = Promise.all(
+			[0, 1, 2, 3, 4].map((i) =>
+				callBridge(
+					{ op: "tool_call", run_id: runR, tool_call_id: `c${i}`, name: "search_web", arguments: { query: "q" } },
+					50,
+					true,
 				),
 			),
-			deadline(5000),
-		]);
-		for (const res of results) expect(res).toEqual({ error: "bridge_unavailable" });
+		);
+		// Ordering gate: wait until the hanging bridge holds all four admitted
+		// calls, proving the fifth still waits in the permit queue. Real clock:
+		// the hanging child only advances on wall time (see file header).
+		const admittedAt = Date.now();
+		for (; ;) {
+			let admitted = 0;
+			try {
+				admitted = readFileSync(hangLog, "utf8").trim().split("\n").filter(Boolean)
+					.map((l) => JSON.parse(l)).filter((o) => o.op === "tool_call").length;
+			} catch {
+				admitted = 0;
+			}
+			if (admitted >= 4) break;
+			if (Date.now() - admittedAt > 5000) throw new Error("hanging bridge never admitted four calls");
+			const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
+			setTimeout(wake, 5);
+			await tick;
+		}
+		const results = await Promise.race([resultsP, deadline(5000)]);
+		for (const res of results.slice(0, 4)) expect(res).toEqual({ error: "bridge_unavailable" });
+		expect(results[4]).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
 		expect(await settledKilled(kids[0])).toBe(true);
-		const logged = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		const logged = readFileSync(hangLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 		expect(logged.filter((o) => o.op === "tool_call").length).toBe(4);
 		const aborts = logged.filter((o) => o.op === "abort_run");
 		expect(aborts.length).toBe(1);
@@ -312,7 +332,9 @@ test("fatal tool timeout terminates run and recycles", async () => {
 			deadline(1000),
 		]);
 		expect(late).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
-		expect(spawns).toBe(1);
+		// Unconfirmed abort (no finalized:true) recycles eagerly: the replacement
+		// already exists and holds exactly one retried abort_run.
+		expect(spawns).toBe(2);
 		const agentEnd = await Promise.race([
 			callBridge(
 				{ op: "pi_event", event: "agent_end", run_id: runR, status: "completed", answer: "done" },
@@ -323,7 +345,7 @@ test("fatal tool timeout terminates run and recycles", async () => {
 		]);
 		expect((agentEnd as Json).ok).toBe(true);
 		expect(spawns).toBe(2);
-		const afterEnd = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		const afterEnd = readFileSync(nextLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 		const forwarded = afterEnd.filter((o) => o.op === "pi_event" && o.event === "agent_end" && o.run_id === runR);
 		expect(forwarded.length).toBe(1);
 		expect(forwarded[0].status).toBe("failed");
@@ -339,6 +361,58 @@ test("fatal tool timeout terminates run and recycles", async () => {
 		]);
 		expect((sTool as Json).ok).toBe(true);
 		expect(spawns).toBe(2);
+		const nextLogged = readFileSync(nextLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+		expect(nextLogged.filter((o) => o.op === "tool_call" && o.run_id === runR).length).toBe(0);
+		const nextAborts = nextLogged.filter((o) => o.op === "abort_run" && o.run_id === runR);
+		expect(nextAborts.length).toBe(1);
+		expect(nextAborts[0].error_type).toBe("tool_timeout");
+	} finally {
+		for (const kid of kids) {
+			try {
+				kid.kill("SIGKILL");
+			} catch {
+				// already exited
+			}
+		}
+	}
+});
+
+test("finalized abort ack skips replacement retry", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-"));
+	const hangLog = join(dir, "hang.log");
+	const kids: ChildProcessWithoutNullStreams[] = [];
+	let spawns = 0;
+	const { callBridge } = createBridgeClient(() => {
+		spawns++;
+		const child = spawnScript(spawns === 1 ? hangScript(hangLog, true) : healthyLogScript(join(dir, "next.log")));
+		kids.push(child);
+		return child;
+	});
+	const runId = "run-R-finalized";
+	try {
+		const res = await Promise.race([
+			callBridge(
+				{ op: "tool_call", run_id: runId, tool_call_id: "c0", name: "search_web", arguments: { query: "q" } },
+				50,
+				true,
+			),
+			deadline(5000),
+		]);
+		expect(res).toEqual({ error: "bridge_unavailable" });
+		expect(await settledKilled(kids[0])).toBe(true);
+		const logged = readFileSync(hangLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		expect(logged.filter((o) => o.op === "abort_run").length).toBe(1);
+		expect(spawns).toBe(1);
+		const late = await Promise.race([
+			callBridge(
+				{ op: "tool_call", run_id: runId, tool_call_id: "late", name: "search_web", arguments: {} },
+				500,
+				true,
+			),
+			deadline(1000),
+		]);
+		expect(late).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
+		expect(spawns).toBe(1);
 	} finally {
 		for (const kid of kids) {
 			try {
