@@ -441,23 +441,36 @@ def diff_risk_factors(ticker: str) -> dict:
     return _cached_or_fetch(key, lambda: _fetch_diff_risk_factors(ticker))
 
 
+def _risk_text(filing) -> str | None:
+    try:
+        rf = getattr(filing.obj(), "risk_factors", None)
+    except Exception:
+        return None
+    if rf is None:
+        return None
+    text = rf if isinstance(rf, str) else getattr(rf, "text", lambda: str(rf))()
+    return text if text and str(text).strip() else None
+
+
 def _fetch_diff_risk_factors(ticker: str) -> dict:
     try:
         company = Company(ticker)
-        filings = company.get_filings(form=["10-Q"])
-        if len(filings) < 2:
-            return _no_data(ticker, "fewer than two 10-Q filings found")
-        latest, prior = filings[0], filings[1]
-        texts = []
-        for f in (latest, prior):
-            tenq = f.obj()
-            rf = getattr(tenq, "risk_factors", None)
-            if rf is None:
-                return _no_data(ticker, f"risk factors not present in 10-Q filed {f.filing_date}")
-            texts.append(rf if isinstance(rf, str) else getattr(rf, "text", lambda: str(rf))())
+        with_text: list = []
+        for form in (["10-Q"], ["10-K"]):
+            for f in company.get_filings(form=form)[:8]:
+                text = _risk_text(f)
+                if text is not None:
+                    with_text.append((f, text))
+                if len(with_text) == 2:
+                    break
+            if len(with_text) == 2:
+                break
+        if len(with_text) < 2:
+            return _no_data(ticker, "fewer than two filings with risk factors found")
+        (latest, latest_text), (prior, prior_text) = with_text[0], with_text[1]
         diff = "\n".join(difflib.unified_diff(
-            texts[1].splitlines(), texts[0].splitlines(),
-            fromfile=f"10-Q filed {prior.filing_date}", tofile=f"10-Q filed {latest.filing_date}",
+            prior_text.splitlines(), latest_text.splitlines(),
+            fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
             lineterm="",
         ))
         return {
@@ -465,7 +478,7 @@ def _fetch_diff_risk_factors(ticker: str) -> dict:
             "latest_filed": str(latest.filing_date),
             "prior_filed": str(prior.filing_date),
             "diff": diff if diff.strip() else "No changes in risk factors language between the two filings.",
-            "source": f"10-Qs filed {prior.filing_date} and {latest.filing_date}",
+            "source": f"{prior.form}s filed {prior.filing_date} and {latest.form}s filed {latest.filing_date}",
         }
     except Exception as e:
         logger.warning("diff_risk_factors(%s) failed: %s", ticker, e)
@@ -485,11 +498,11 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
         financials = company.get_financials()
         
         if statement_type == "income_statement":
-            stmt = financials.income if hasattr(financials, "income") else None
+            stmt = getattr(financials, "income_statement", getattr(financials, "income", None))
         elif statement_type == "balance_sheet":
-            stmt = financials.balance if hasattr(financials, "balance") else None
+            stmt = getattr(financials, "balance_sheet", getattr(financials, "balance", None))
         elif statement_type == "cash_flow":
-            stmt = financials.cash_flow if hasattr(financials, "cash_flow") else None
+            stmt = getattr(financials, "cash_flow_statement", getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None)))
         else:
             return {"error": f"Unknown statement type '{statement_type}'"}
         

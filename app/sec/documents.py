@@ -8,8 +8,10 @@ from .normalization import document_from_attachment, filing_from_edgar
 
 def get_by_accession_number(accession_no: str):
     """Seam for tests: monkeypatch this name, never `edgar` itself."""
+    from .client import ensure_identity
     from edgar import get_by_accession_number as _get
 
+    ensure_identity()
     return _get(accession_no)
 
 
