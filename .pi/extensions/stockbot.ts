@@ -131,6 +131,8 @@ export function createBridgeClient(
  let writeChain: Promise<unknown> = Promise.resolve();
  let permits = 4;
  const permitQueue: Array<() => void> = [];
+ const terminatedRuns = new Map<string, Promise<void>>();
+ const terminatedMessages = new Map<string, string>();
 
  function acquire(): Promise<number> {
   if (permits > 0) {
@@ -258,6 +260,15 @@ export function createBridgeClient(
   const id = req.id as string;
   const isToolCall = req.op === "tool_call";
   const isAgentEnd = req.op === "pi_event" && req.event === "agent_end";
+  if (isAgentEnd && typeof req.run_id === "string" && req.run_id && terminatedRuns.has(req.run_id)) {
+   req.status = "failed";
+   req.error_type = "tool_timeout";
+   const stored = terminatedMessages.get(req.run_id);
+   if (stored) req.error_message = stored;
+  }
+  if (isToolCall && typeof req.run_id === "string" && req.run_id && terminatedRuns.has(req.run_id)) {
+   return { error: "run_terminated", error_type: "tool_timeout" };
+  }
   let queuedMs = 0;
   if (isToolCall) {
    queuedMs = await acquire();
@@ -290,6 +301,43 @@ export function createBridgeClient(
      return fail("write failed");
     }
     if (timedOut) {
+     if (isToolCall && fatal && typeof req.run_id === "string" && req.run_id) {
+      const runId = req.run_id as string;
+      const message = `Tool call timed out after ${timeoutMs}ms`;
+      let term = terminatedRuns.get(runId);
+      if (!term) {
+       if (!terminatedMessages.has(runId)) terminatedMessages.set(runId, message);
+       const stored = terminatedMessages.get(runId) as string;
+       term = (async () => {
+        const mkAbort = (): Json => ({ id: crypto.randomUUID(), op: "abort_run", run_id: runId, error_type: "tool_timeout", error_message: stored });
+        let ack: Json | undefined;
+        try {
+         ack = await callBridge(mkAbort(), 6_000, false);
+        } catch {
+         ack = undefined;
+        }
+        try {
+         recycle(child);
+        } catch {
+         // already gone
+        }
+        if (!ack || (ack as Json).ok !== true) {
+         try {
+          await callBridge(mkAbort(), 6_000, false);
+         } catch {
+          // best-effort fallback
+         }
+        }
+       })();
+       terminatedRuns.set(runId, term);
+      }
+      try {
+       await term;
+      } catch {
+       // best-effort termination never breaks the timeout result
+      }
+      return fail(`no response in ${timeoutMs}ms`);
+     }
      if (fatal || isAgentEnd) recycle(child);
      return fail(`no response in ${timeoutMs}ms`);
     }

@@ -476,3 +476,50 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch, tmp_p
         assert call["tool_call_count"] == 2
     finally:
         _end_run(run_id)
+
+def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch, tmp_path):
+    from app.storage.runs import get_run
+
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    run_r = _new_run_id("orphan-r")
+    run_s = _new_run_id("orphan-s")
+    try:
+        assert _start_run(run_r) == {"ok": True}
+        # Simulate a killed predecessor: drop memory without completing.
+        rec = pi_bridge._recorders.pop(run_r, None)
+        if rec is not None:
+            try:
+                rec.__exit__(None, None, None)
+            except Exception:
+                pass
+        pi_bridge._sessions.pop(run_r, None)
+        with pi_bridge._state_lock:
+            pi_bridge._inflight.pop(run_r, None)
+        message = "Tool call timed out after 50ms"
+        terminal = {
+            "op": "pi_event", "run_id": run_r, "event": "agent_end",
+            "status": "failed", "answer": "",
+            "error_type": "tool_timeout", "error_message": message,
+        }
+        assert _bridge_request(terminal) == {"ok": True}
+        run = get_run(run_r)
+        assert run["status"] == "failed"
+        assert run["error_type"] == "tool_timeout"
+        assert run["completed_at"] is not None
+        assert run["duration_ms"] is not None
+        first_completed = run["completed_at"]
+        assert _bridge_request(terminal) == {"ok": True}
+        again = get_run(run_r)
+        assert again["completed_at"] == first_completed
+        assert again["status"] == "failed"
+        assert _start_run(run_s) == {"ok": True}
+        assert _bridge_request(
+            {"op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"}
+        ) == {"ok": True}
+        assert get_run(run_s)["status"] == "completed"
+    finally:
+        for rid in (run_r, run_s):
+            pi_bridge._sessions.pop(rid, None)
+            pi_bridge._recorders.pop(rid, None)
+            with pi_bridge._state_lock:
+                pi_bridge._inflight.pop(rid, None)

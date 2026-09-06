@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -249,6 +249,95 @@ test("agent_end timeout recycles even when fatal=false", async () => {
 			deadline(1000),
 		]);
 		expect(next.ok).toBe(true);
+		expect(spawns).toBe(2);
+	} finally {
+		for (const kid of kids) {
+			try {
+				kid.kill("SIGKILL");
+			} catch {
+				// already exited
+			}
+		}
+	}
+});
+
+function hangScript(logFile: string): string {
+	return `const fs=require('fs');const LOG=${JSON.stringify(logFile)};let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);fs.appendFileSync(LOG,l+'\\n');if(o.op==='abort_run'){process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}else if(o.op==='tool_call'){}else{process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}}catch{}}});`;
+}
+
+function healthyLogScript(logFile: string): string {
+	return `const fs=require('fs');const LOG=${JSON.stringify(logFile)};let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);fs.appendFileSync(LOG,l+'\\n');process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}catch{}}});`;
+}
+
+test("fatal tool timeout terminates run and recycles", async () => {
+	const logFile = join(mkdtempSync(join(tmpdir(), "stockbot-")), "requests.log");
+	const kids: ChildProcessWithoutNullStreams[] = [];
+	let spawns = 0;
+	const { callBridge } = createBridgeClient(() => {
+		spawns++;
+		const child = spawnScript(spawns === 1 ? hangScript(logFile) : healthyLogScript(logFile));
+		kids.push(child);
+		return child;
+	});
+	const runR = "run-R-terminated";
+	const runS = "run-S-clean";
+	try {
+		const results = await Promise.race([
+			Promise.all(
+				[0, 1, 2, 3].map((i) =>
+					callBridge(
+						{ op: "tool_call", run_id: runR, tool_call_id: `c${i}`, name: "search_web", arguments: { query: "q" } },
+						50,
+						true,
+					),
+				),
+			),
+			deadline(5000),
+		]);
+		for (const res of results) expect(res).toEqual({ error: "bridge_unavailable" });
+		expect(await settledKilled(kids[0])).toBe(true);
+		const logged = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		expect(logged.filter((o) => o.op === "tool_call").length).toBe(4);
+		const aborts = logged.filter((o) => o.op === "abort_run");
+		expect(aborts.length).toBe(1);
+		expect(aborts[0].run_id).toBe(runR);
+		expect(aborts[0].error_type).toBe("tool_timeout");
+		expect(aborts[0].error_message).toBe("Tool call timed out after 50ms");
+		const late = await Promise.race([
+			callBridge(
+				{ op: "tool_call", run_id: runR, tool_call_id: "late", name: "search_web", arguments: {} },
+				500,
+				true,
+			),
+			deadline(1000),
+		]);
+		expect(late).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
+		expect(spawns).toBe(1);
+		const agentEnd = await Promise.race([
+			callBridge(
+				{ op: "pi_event", event: "agent_end", run_id: runR, status: "completed", answer: "done" },
+				500,
+				false,
+			),
+			deadline(1000),
+		]);
+		expect((agentEnd as Json).ok).toBe(true);
+		expect(spawns).toBe(2);
+		const afterEnd = readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		const forwarded = afterEnd.filter((o) => o.op === "pi_event" && o.event === "agent_end" && o.run_id === runR);
+		expect(forwarded.length).toBe(1);
+		expect(forwarded[0].status).toBe("failed");
+		expect(forwarded[0].error_type).toBe("tool_timeout");
+		expect(forwarded[0].error_message).toBe("Tool call timed out after 50ms");
+		const sTool = await Promise.race([
+			callBridge(
+				{ op: "tool_call", run_id: runS, tool_call_id: "s1", name: "search_web", arguments: { query: "ok" } },
+				500,
+				true,
+			),
+			deadline(1000),
+		]);
+		expect((sTool as Json).ok).toBe(true);
 		expect(spawns).toBe(2);
 	} finally {
 		for (const kid of kids) {

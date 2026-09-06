@@ -304,6 +304,63 @@ def test_eof_drain_timeout(monkeypatch):
         worker_pool.shutdown(wait=True)
         _teardown_run(run_id)
 
+def test_abort_run_fails_live_run(monkeypatch):
+    run_id = _run_id("abort")
+    _start_session(run_id)
+    _capture_writes(monkeypatch)
+    release = threading.Event()
+    completed = []
+    failed_events = []
+
+    class _StubRecorder:
+        enabled = True
+
+        def complete(self, **kwargs):
+            completed.append(kwargs)
+
+        def record_event(self, event_type, **kwargs):
+            failed_events.append((event_type, kwargs))
+
+        def __exit__(self, *exc):
+            return False
+
+    pi_bridge._recorders[run_id] = _StubRecorder()
+    worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(pi_bridge, "_executor", worker_pool)
+    monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        pi_bridge, "execute_pi_tool",
+        lambda *a, **k: (release.wait(timeout=30), {"content": "late"})[1],
+    )
+    try:
+        assert pi_bridge._handle(json.dumps({"id": "bad-1", "op": "abort_run", "run_id": run_id})) == {"id": "bad-1", "error": "missing_arg"}
+        assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
+        assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
+        futures = pi_bridge._run_futures(run_id)
+        assert len(futures) == 2
+        start = time.time()
+        message = "Tool call timed out after 50ms"
+        response = pi_bridge._handle(
+            json.dumps({"id": "abort-1", "op": "abort_run", "run_id": run_id, "error_type": "tool_timeout", "error_message": message})
+        )
+        assert time.time() - start < 5
+        assert response == {"id": "abort-1", "ok": True}
+        assert any(f.cancelled() for f in futures)
+        assert len(completed) == 1
+        assert completed[0]["status"] == "failed"
+        assert completed[0]["error_type"] == "tool_timeout"
+        assert completed[0]["error_message"] == message
+        assert len(failed_events) == 1
+        assert failed_events[0][0] == "run_failed"
+        assert failed_events[0][1]["metadata"] == {"error_type": "tool_timeout", "error_message": message}
+        assert run_id not in pi_bridge._sessions
+        assert run_id not in pi_bridge._recorders
+    finally:
+        release.set()
+        worker_pool.shutdown(wait=True)
+        _teardown_run(run_id)
+
+
 
 def test_requests_without_id_are_rejected():
     assert pi_bridge._handle('{"op": "describe"}') == {"error": "missing_arg"}

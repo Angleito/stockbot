@@ -585,6 +585,54 @@ class RunRecorder:
             return 0.0
         return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
 
+def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> bool:
+    """Terminalize an orphaned agent_runs row as failed (fail-stop, UPDATE-only).
+    Reads started_at/completed_at via a short-lived connection and updates only
+    completed_at, duration_ms, status, error_type, and redacted/truncated
+    error_message for WHERE run_id = ? AND completed_at IS NULL. Preserves
+    counters, evidence, tool rows, and already-terminal runs. Returns True when
+    this call updated the row or found it already terminal, False when no row
+    exists or storage fails; storage errors are swallowed (observability never
+    breaks research).
+    """
+    try:
+        path = get_runs_db_path(DEFAULT_DATA_ROOT)
+        conn = sqlite3.connect(str(path))
+        try:
+            row = conn.execute(
+                "SELECT started_at, completed_at FROM agent_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            started_at, completed_at = row
+            if completed_at is not None:
+                return True
+            now = _now()
+            try:
+                duration = _duration_ms(started_at, now) if started_at else None
+            except Exception:
+                duration = None
+            message = redact_text(error_message)[:2000]
+            cur = conn.execute(
+                "UPDATE agent_runs SET completed_at = ?, duration_ms = ?, status = ?,"
+                " error_type = ?, error_message = ?"
+                " WHERE run_id = ? AND completed_at IS NULL",
+                (now, duration, "failed", error_type, message, run_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning(
+            "finalize_failed_run dropped (%s: %s)", type(exc).__name__, exc
+        )
+        return False
+
 
 # -- current-recorder contextvar (nested model calls inside tools) ----------
 
