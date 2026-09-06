@@ -34,6 +34,7 @@ from ..edgar_client import (
     _is_recent_dividend_period,
 )
 from ..storage import duckdb
+from .dividend_analysis import analyze_dividends
 
 DEFAULT_DATA_ROOT = duckdb.DEFAULT_DATA_ROOT
 
@@ -329,8 +330,30 @@ def _extreme_event(cands: list[dict], *, earliest: bool) -> Optional[dict]:
     return max(tied, key=lambda r: str(r.get("known_at") or ""))
 
 
-def _dividend_event_payload(events: list[dict], as_of: _dt.date) -> dict[str, Any]:
+def _canonical_dividend_events(events: list[dict]) -> list[dict]:
+    """Collapse amended duplicates; undated rows never merge."""
+    best: dict[tuple[str, str, str], dict] = {}
+    for row in events:
+        if not row.get("payment_date"):
+            continue
+        key = (str(row.get("record_date") or ""), str(row.get("payment_date")),
+               str(row.get("dividend_type") or ""))
+        prev = best.get(key)
+        cur = (str(row.get("known_at") or ""), str(row.get("filed_at") or ""),
+               str(row.get("accession") or ""))
+        if prev is None:
+            best[key] = row
+        else:
+            old = (str(prev.get("known_at") or ""), str(prev.get("filed_at") or ""),
+                   str(prev.get("accession") or ""))
+            if cur >= old:
+                best[key] = row
+    return [r for r in events if not r.get("payment_date")] + list(best.values())
+
+
+def _dividend_event_payload(events: list[dict], as_of: _dt.date, *, growth=None, ttm_dps=None, annual_history=None) -> dict[str, Any]:
     """last/next/past/coverage over classified events (pure; no storage)."""
+    events = _canonical_dividend_events(events)
     upcoming = [
         r for r in events
         if _classify_dividend_event(r, as_of) == "upcoming"
@@ -343,11 +366,6 @@ def _dividend_event_payload(events: list[dict], as_of: _dt.date) -> dict[str, An
     ]
     nxt = _extreme_event(upcoming, earliest=True) if upcoming else None
     last = _extreme_event(paid, earliest=False) if paid else None
-    dated = sorted(
-        (r for r in events if r.get("payment_date")),
-        key=lambda r: str(r["payment_date"]), reverse=True,
-    )
-    undated = [r for r in events if not r.get("payment_date")]
     past = [
         {
             "amount_per_share": r.get("amount_per_share"),
@@ -359,8 +377,16 @@ def _dividend_event_payload(events: list[dict], as_of: _dt.date) -> dict[str, An
             "accession": r.get("accession"),
             "source_url": r.get("source_url"),
         }
-        for r in (dated + undated)[:12]
+        for r in sorted(paid, key=lambda r: str(r["payment_date"]), reverse=True)[:12]
     ]
+    has_xbrl = any(r.get("source_type") == "structured_xbrl" for r in events)
+    has_text = any(r.get("source_type") == "filing_text" for r in events)
+    coverage = (
+        "structured_and_text" if has_xbrl and has_text
+        else "structured_only" if has_xbrl
+        else "text_only" if has_text
+        else "no_structured_events"
+    )
     return {
         "last_dividend": (
             {"amount_per_share": last["amount_per_share"],
@@ -380,11 +406,8 @@ def _dividend_event_payload(events: list[dict], as_of: _dt.date) -> dict[str, An
             if nxt is not None else None
         ),
         "past_events": past,
-        "events_coverage": (
-            "structured_and_text"
-            if any(r.get("source_type") == "structured_xbrl" for r in events)
-            else "no_structured_events"
-        ),
+        "events_coverage": coverage,
+        **analyze_dividends(paid_events=paid, as_of=as_of, ttm_dps=ttm_dps, growth=growth, annual_history=annual_history),
     }
 
 
@@ -638,9 +661,13 @@ def _dividend_fundamental(ticker: str, requested: _dt.date) -> dict:
     entity_id = _resolve_entity(ticker, requested, data_root)
     store_rows = _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, data_root) if entity_id else []
     payload = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
+    events = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
     current = requested == _today()
+    if payload is None and events:
+        payload = {"ticker": ticker, "dividend_status": "unknown",
+                   "ttm_dividend_per_share": None, **_dividend_growth({}),
+                   "annual_history": [], "source": _DIVIDEND_SOURCE}
     if payload is not None:
-        events = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
         valuation = _dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), include_price=current)
         eps_payload = _assemble_eps_payload(ticker, store_rows)
         safety = _assemble_dividend_safety(
@@ -648,7 +675,11 @@ def _dividend_fundamental(ticker: str, requested: _dt.date) -> dict:
             ttm_eps_diluted=(eps_payload or {}).get("ttm_eps_diluted"),
             ttm_yield=valuation.get("ttm_dividend_yield"),
         )
-        payload = {**payload, **_dividend_event_payload(events, requested),
+        payload = {**payload, **_dividend_event_payload(
+            events, requested,
+            growth={"growth_1y": payload.get("growth_1y"), "growth_5y_cagr": payload.get("growth_5y_cagr")},
+            ttm_dps=payload.get("ttm_dividend_per_share"),
+            annual_history=payload.get("annual_history")),
                    **valuation, "safety": safety}
         return _envelope(
             ticker, "dividends", payload,

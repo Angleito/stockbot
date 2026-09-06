@@ -167,7 +167,7 @@ def test_concept_parity_and_parser_bump():
     assert DIVIDEND_PER_SHARE_CONCEPT == "CommonStockDividendsPerShareDeclared"
     assert sec_facts.DIVIDEND_PER_SHARE_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
     assert edgar_client._DIVIDEND_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
-    assert COMPANY_FACTS_PARSER_VERSION == "sec-companyfacts-v5"
+    assert COMPANY_FACTS_PARSER_VERSION == "sec-companyfacts-v6"
 
 
 def test_wrong_unit_and_paid_concept_rejected():

@@ -11,7 +11,7 @@ from typing import Any, Optional
 from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
-COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v5"
+COMPANY_FACTS_PARSER_VERSION = "sec-companyfacts-v6"
 FILING_TEXT_PARSER_VERSION = "sec-filing-text-v1"
 
 SHARES_OUTSTANDING_CONCEPT = "EntityCommonStockSharesOutstanding"
@@ -215,24 +215,56 @@ def _extract_dividend_event_facts(
         for amount, unit, source_concept in groups[(accession, filed)]:
             seen.setdefault(amount, (unit, source_concept))
         group_dates = dates.get((accession, filed), {})
-        declaration = min(group_dates.get("declaration_date") or (), default=None)
-        record = min(group_dates.get("record_date") or (), default=None)
-        payments = sorted(group_dates.get("payment_date") or ()) or [None]
-        for amount in sorted(seen):
-            unit, source_concept = seen[amount]
-            for payment in payments:
+        payments = sorted(group_dates.get("payment_date") or ())
+        payments_nonnull = [p for p in payments if p]
+        if len(seen) == 1 and len(payments_nonnull) <= 1:
+            declaration = min(group_dates.get("declaration_date") or (), default=None)
+            record = min(group_dates.get("record_date") or (), default=None)
+            paired = payments_nonnull[:1] if payments_nonnull else [None]
+            for amount in sorted(seen):
+                unit, source_concept = seen[amount]
+                for payment in paired:
+                    events.append({
+                        "dividend_event_id": ids.sec_dividend_event_id(
+                            cik, amount, record, payment, "unknown", accession, declaration),
+                        "entity_id": entity_id,
+                        "security_id": security_id,
+                        "ticker": None,
+                        "amount_per_share": amount,
+                        "currency": unit.split("/")[0] if "/" in unit else unit,
+                        "dividend_type": "unknown",
+                        "declaration_date": declaration,
+                        "record_date": record,
+                        "payment_date": payment,
+                        "ex_dividend_date": None,
+                        "ex_dividend_date_source": "unknown",
+                        "status": "unknown",
+                        "source_form": None,
+                        "accession": accession,
+                        "filed_at": filed,
+                        "known_at": filed,
+                        "source_url": source_url,
+                        "source_concept": source_concept,
+                        "source_type": "structured_xbrl",
+                        "evidence_excerpt": None,
+                        "content_hash": content_hash,
+                        "parser_version": COMPANY_FACTS_PARSER_VERSION,
+                    })
+        else:
+            for amount in sorted(seen):
+                unit, source_concept = seen[amount]
                 events.append({
                     "dividend_event_id": ids.sec_dividend_event_id(
-                        cik, amount, record, payment, "unknown", accession, declaration),
+                        cik, amount, None, None, "unknown", accession, None),
                     "entity_id": entity_id,
                     "security_id": security_id,
                     "ticker": None,
                     "amount_per_share": amount,
                     "currency": unit.split("/")[0] if "/" in unit else unit,
                     "dividend_type": "unknown",
-                    "declaration_date": declaration,
-                    "record_date": record,
-                    "payment_date": payment,
+                    "declaration_date": None,
+                    "record_date": None,
+                    "payment_date": None,
                     "ex_dividend_date": None,
                     "ex_dividend_date_source": "unknown",
                     "status": "unknown",

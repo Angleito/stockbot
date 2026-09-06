@@ -126,8 +126,8 @@ def test_upcoming_vs_paid_split(store, monkeypatch):
         "status": "upcoming",
         "source_url": result["next_declared_dividend"]["source_url"],
         "accession": "0000000002"}
-    assert [e["payment_date"] for e in result["past_events"]] == ["2026-09-15", "2026-07-01"]
-    assert result["events_coverage"] == "structured_and_text"
+    assert [e["payment_date"] for e in result["past_events"]] == ["2026-07-01"]
+    assert result["events_coverage"] == "structured_only"
     assert result["row_count"] == len(result["annual_history"])
 
 
@@ -156,7 +156,7 @@ def test_duplicate_accessions_dedup_to_one(store, monkeypatch):
                pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000005"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert len(result["past_events"]) == 1
+    assert result["past_events"] == []
     assert result["next_declared_dividend"]["amount_per_share"] == 0.54
 
 
@@ -189,11 +189,8 @@ def test_incomplete_event_excluded_from_last_next(store, monkeypatch):
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["next_declared_dividend"]["payment_date"] == "2026-09-15"
     assert result["last_dividend"] is None
-    partial = next(e for e in result["past_events"] if e["accession"] == "0000000009")
-    assert partial["payment_date"] is None
-    assert partial["status"] == "unknown"
-    # Null payment sorts last.
-    assert result["past_events"][-1]["accession"] == "0000000009"
+    assert result["past_events"] == []
+    assert all(e["accession"] != "0000000009" for e in result["past_events"])
 
 
 def test_restated_q1_still_wins_ttm_while_events_classify(store, monkeypatch):
@@ -216,6 +213,80 @@ def test_restated_q1_still_wins_ttm_while_events_classify(store, monkeypatch):
     assert result["dividend_status"] == "paying"
     assert result["next_declared_dividend"]["amount_per_share"] == 0.53
     assert result["last_dividend"] is None
+
+def test_upcoming_excluded_from_past(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, "ev-paid-2", 0.51, decl="2026-06-15", record="2026-06-30",
+               pay="2026-07-01", accn="0000000011"),
+        _event(KO_CIK, "ev-up-2", 0.54, decl="2026-08-01", record="2026-08-29",
+               pay="2026-09-15", accn="0000000012"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert len(result["past_events"]) == 1
+    assert result["past_events"][0]["payment_date"] == "2026-07-01"
+
+
+def test_amendment_canonicalizes_to_latest(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    old_id = ids.sec_dividend_event_id(KO_CIK, 0.50, "2026-06-30", "2026-07-01", "regular")
+    new_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-06-30", "2026-07-01", "regular")
+    _seed_events(store, [
+        _event(KO_CIK, old_id, 0.50, decl="2026-06-15", record="2026-06-30",
+               pay="2026-07-01", known="2026-08-01T00:00:00Z", accn="0000000013"),
+        _event(KO_CIK, new_id, 0.54, decl="2026-06-15", record="2026-06-30",
+               pay="2026-07-01", known="2026-08-05T00:00:00Z", accn="0000000014"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["last_dividend"]["amount_per_share"] == 0.54
+    assert len(result["past_events"]) == 1
+    assert result["past_events"][0]["amount_per_share"] == 0.54
+
+
+def test_event_only_surfaces_without_aggregate(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_ticker(store, KO_CIK, "KO")
+    _seed_events(store, [
+        _event(KO_CIK, "ev-only", 0.51, decl="2026-06-15", record="2026-06-30",
+               pay="2026-07-01", accn="0000000015"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["data_source"] == "store"
+    assert result["dividend_status"] == "unknown"
+    assert result["ttm_dividend_per_share"] is None
+    assert result["last_dividend"]["amount_per_share"] == 0.51
+    assert result["row_count"] == 0
+
+
+def test_analysis_wired_through_store(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, f"ev-q{i}", 0.50, record=f"2025-0{i+1}-15" if i < 9 else None,
+               pay=pay, accn=f"000000002{i}")
+        for i, pay in enumerate(["2025-04-15", "2025-07-15", "2025-10-15", "2026-01-15", "2026-04-15"])
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    assert result["payment_cadence"] == "quarterly"
+    assert result["growth_basis"] == "total_aggregates"
+    assert "growth_trend" in result
+
+
+def test_coverage_matrix(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, "ev-text", 0.51, decl="2026-06-15", record="2026-06-30",
+               pay="2026-07-01", accn="0000000030", source_type="filing_text"),
+    ])
+    assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "text_only"
+    _seed_events(store, [
+        _event(KO_CIK, "ev-xbrl", 0.54, decl="2026-06-15", record="2026-06-29",
+               pay="2026-07-01", accn="0000000031", source_type="structured_xbrl"),
+    ])
+    assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "structured_and_text"
 
 
 # --- Phase 4: pure lifecycle analysis (app/services/dividend_analysis.py) ---

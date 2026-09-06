@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -16,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .. import normalization
+from ..domain.market import ids
 from ..storage import duckdb, parquet, raw_archive
 from .models import Filing
 
@@ -240,7 +243,27 @@ def store_document_text(
         "retrieved_at": now,
         "parser_version": PARSER_VERSION,
     }
-    return parquet.write_rows("document_text", [row], root=_parquet_root(root))
+    written = parquet.write_rows("document_text", [row], root=_parquet_root(root))
+    try:
+        if accession:
+            filings = duckdb.query(
+                "SELECT filer_cik, filed_at FROM sec_filings WHERE accession = ? LIMIT 1",
+                [str(accession)], data_root=root)
+            if filings and filings[0].get("filer_cik"):
+                cik = int(str(filings[0]["filer_cik"]))
+                filed = filings[0].get("filed_at") or filed_at or row["known_at"]
+                events = normalization._extract_dividend_events_from_text(
+                    row["text"], cik=cik, entity_id=ids.sec_entity_id(cik),
+                    security_id=ids.sec_security_id(cik), accession=str(accession),
+                    filed_at=filed, source_url=source_url,
+                    content_hash=row["content_hash"])
+                for event in events:
+                    event["known_at"] = row["known_at"]
+                if events:
+                    parquet.write_rows("dividend_events", events, root=_parquet_root(root))
+    except Exception as exc:  # never fail the text store
+        logging.getLogger(__name__).debug("dividend text extraction skipped: %s", exc)
+    return written
 
 
 def query_document_text(
