@@ -862,7 +862,7 @@ def store_13f_holding(
         "entity_id": d.get("entity_id"),
         "security_id": d.get("security_id"),
         "class_title": d.get("class_title"),
-        "cusip": str(d["cusip"]).strip().upper() if d.get("cusip") is not None else None,
+        "cusip": "".join(ch for ch in str(d["cusip"]) if ch.isalnum()).upper() if d.get("cusip") is not None else None,
         "isin": str(d["isin"]).strip().upper() if d.get("isin") is not None else None,
         "shares": d.get("shares"),
         "value": d.get("value"),
@@ -987,7 +987,7 @@ def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None
     sql = (
         "WITH holdings AS ("
         " SELECT h.*, CASE WHEN h.security_id IS NOT NULL THEN h.security_id"
-        " WHEN h.cusip IS NOT NULL THEN 'cusip:' || UPPER(h.cusip)"
+        " WHEN h.cusip IS NOT NULL THEN 'cusip:' || UPPER(regexp_replace(h.cusip, '[^A-Za-z0-9]+', '', 'g'))"
         " WHEN h.isin IS NOT NULL THEN 'isin:' || UPPER(h.isin)"
         " ELSE NULL END AS _prov"
         " FROM sec_13f_holdings h WHERE 1=1 " + holding_asof + "), "
