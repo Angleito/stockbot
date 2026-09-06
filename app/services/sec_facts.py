@@ -331,43 +331,69 @@ def _extreme_event(cands: list[dict], *, earliest: bool) -> Optional[dict]:
 
 
 def _canonical_dividend_events(events: list[dict]) -> list[dict]:
-    """Collapse amended duplicates; undated rows never merge."""
+    """Collapse amended duplicates; undated rows never merge.
+
+    Buckets share (record_date, payment_date). Concrete types cluster exactly
+    (regular never merges into special). An unknown row joins a typed cluster
+    only on a unique amount match — or when the bucket holds a single typed
+    identity (amendment); otherwise it stays unresolved instead of attaching
+    to the first compatible bucket.
+    """
     undated = [r for r in events if not r.get("payment_date")]
-    buckets: list[list[dict]] = []
-    keys: list[tuple[str, str]] = []
+    groups: dict[tuple[str, str], list[dict]] = {}
     for row in events:
         if not row.get("payment_date"):
             continue
-        key = (str(row.get("record_date") or ""), str(row.get("payment_date")))
-        rt = str(row.get("dividend_type") or "")
-        placed = False
-        for i, bucket in enumerate(buckets):
-            if keys[i] != key:
-                continue
-            if all(rt == str(m.get("dividend_type") or "") or rt in ("", "unknown") or str(m.get("dividend_type") or "") in ("", "unknown") for m in bucket):
-                bucket.append(row)
-                placed = True
-                break
-        if not placed:
-            buckets.append([row])
-            keys.append(key)
+        groups.setdefault(
+            (str(row.get("record_date") or ""), str(row.get("payment_date"))), []).append(row)
     canonical = []
-    for bucket in buckets:
-        winner = max(bucket, key=lambda r: (str(r.get("known_at") or ""), str(r.get("filed_at") or ""), str(r.get("accession") or "")))
-        out = dict(winner)
-        for mate in bucket:
-            if mate is winner:
+    for group in groups.values():
+        clusters: list[list[dict]] = []
+        for row in group:
+            if str(row.get("dividend_type") or "") in ("", "unknown"):
                 continue
-            if out.get("amount_per_share") is None and mate.get("amount_per_share") is not None:
-                out["amount_per_share"] = mate.get("amount_per_share")
-            if str(out.get("dividend_type") or "") in ("", "unknown") and str(mate.get("dividend_type") or "") not in ("", "unknown"):
-                out["dividend_type"] = mate.get("dividend_type")
-            if not out.get("evidence_excerpt") and mate.get("evidence_excerpt"):
-                out["evidence_excerpt"] = mate.get("evidence_excerpt")
-            if not out.get("source_concept") and mate.get("source_concept"):
-                out["source_concept"] = mate.get("source_concept")
-        out["source_types"] = sorted({str(m.get("source_type")) for m in bucket if m.get("source_type")})
-        canonical.append(out)
+            for cluster in clusters:
+                if all(str(m.get("dividend_type") or "") == str(row.get("dividend_type") or "")
+                       for m in cluster):
+                    cluster.append(row)
+                    break
+            else:
+                clusters.append([row])
+        stray: list[dict] = []
+        for row in group:
+            if str(row.get("dividend_type") or "") not in ("", "unknown"):
+                continue
+            amount = row.get("amount_per_share")
+            matched = [c for c in clusters
+                       if amount is not None and any(m.get("amount_per_share") == amount for m in c)]
+            if len(matched) == 1:
+                matched[0].append(row)
+            elif not matched and len(clusters) <= 1:
+                if clusters:
+                    clusters[0].append(row)
+                else:
+                    stray.append(row)
+            else:
+                stray.append(row)
+        if stray:
+            clusters.append(stray)
+        for bucket in clusters:
+            winner = max(bucket, key=lambda r: (str(r.get("known_at") or ""), str(r.get("filed_at") or ""),
+                                                str(r.get("accession") or "")))
+            out = dict(winner)
+            for mate in bucket:
+                if mate is winner:
+                    continue
+                if out.get("amount_per_share") is None and mate.get("amount_per_share") is not None:
+                    out["amount_per_share"] = mate.get("amount_per_share")
+                if str(out.get("dividend_type") or "") in ("", "unknown") and str(mate.get("dividend_type") or "") not in ("", "unknown"):
+                    out["dividend_type"] = mate.get("dividend_type")
+                if not out.get("evidence_excerpt") and mate.get("evidence_excerpt"):
+                    out["evidence_excerpt"] = mate.get("evidence_excerpt")
+                if not out.get("source_concept") and mate.get("source_concept"):
+                    out["source_concept"] = mate.get("source_concept")
+            out["source_types"] = sorted({str(m.get("source_type")) for m in bucket if m.get("source_type")})
+            canonical.append(out)
     return undated + canonical
 
 

@@ -306,6 +306,47 @@ def test_cross_source_duplicate_merges_to_one_payment(store, monkeypatch):
     assert result["regular_paid_per_share"] == 0.54
     assert result["events_coverage"] == "structured_and_text"
 
+def test_unknown_matches_special_by_amount_not_first_bucket(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, "ev-reg", 0.50, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", accn="0000000050", source_type="filing_text",
+               dtype="regular"),
+        _event(KO_CIK, "ev-spec", 2.00, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", accn="0000000051", source_type="filing_text",
+               dtype="special"),
+        _event(KO_CIK, "ev-xbrl-unk", 2.00, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", accn="0000000052", source_type="structured_xbrl",
+               dtype="unknown"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
+    assert len(result["past_events"]) == 2
+    assert result["regular_paid_per_share"] == 0.50
+    assert result["special_paid_per_share"] == 2.00
+    assert result["total_paid_per_share"] == 2.50
+
+
+def test_unknown_amount_match_ignores_row_order(store, monkeypatch):
+    _fail_on_price(monkeypatch)
+    _seed_quarters(store)
+    _seed_events(store, [
+        _event(KO_CIK, "ev-xbrl-unk", 2.00, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", known="2026-08-06T00:00:00Z", accn="0000000052",
+               source_type="structured_xbrl", dtype="unknown"),
+        _event(KO_CIK, "ev-spec", 2.00, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000051",
+               source_type="filing_text", dtype="special"),
+        _event(KO_CIK, "ev-reg", 0.50, decl="2026-08-01", record="2026-09-01",
+               pay="2026-09-15", known="2026-08-04T00:00:00Z", accn="0000000050",
+               source_type="filing_text", dtype="regular"),
+    ])
+    result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
+    assert len(result["past_events"]) == 2
+    assert result["regular_paid_per_share"] == 0.50
+    assert result["special_paid_per_share"] == 2.00
+    assert result["total_paid_per_share"] == 2.50
+
 
 # --- Phase 4: pure lifecycle analysis (app/services/dividend_analysis.py) ---
 # These tests call the pure module directly with plain dicts: no store fixture,
