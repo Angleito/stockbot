@@ -43,6 +43,7 @@ edgar_cache/
 *.swo
 data/*
 !data/mandate.json
+data/verify/
 
 # Local test and platform artifacts
 .pytest_cache/

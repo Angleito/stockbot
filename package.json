@@ -11,7 +11,11 @@
     "smoke-robinhood": "RUN_ROBINHOOD_SMOKE=1 venv/bin/pytest -m robinhood_smoke -q",
     "smoke": "bun run smoke-mock && bun run smoke-prod",
     "clean-env": "rm -rf venv",
-    "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck",
+    "verify-tools": "venv/bin/python scripts/verify_tool_registry.py",
+    "verify-pi": "venv/bin/python scripts/verify_pi_tools.py",
+    "verify-pi-one": "venv/bin/python scripts/verify_pi_tools.py --tool",
+    "update-tool-inventory": "venv/bin/python scripts/update_tool_inventory.py",
+    "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run verify-tools && bun run verify-pi",
     "stockbot": "pi --no-builtin-tools --extension .pi/extensions/stockbot.ts"
   },
   "dependencies": {
