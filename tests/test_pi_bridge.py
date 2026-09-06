@@ -308,6 +308,9 @@ def test_abort_run_fails_live_run(monkeypatch):
     run_id = _run_id("abort")
     _start_session(run_id)
     _capture_writes(monkeypatch)
+    # Live complete() is never trusted alone; the ack comes from the
+    # idempotent fallback, which sees the already-terminal row here.
+    monkeypatch.setattr(pi_bridge, "finalize_failed_run", lambda *a, **k: True)
     release = threading.Event()
     completed = []
     failed_events = []
@@ -358,6 +361,32 @@ def test_abort_run_fails_live_run(monkeypatch):
     finally:
         release.set()
         worker_pool.shutdown(wait=True)
+        _teardown_run(run_id)
+
+
+def test_abort_run_repairs_silent_live_complete(monkeypatch):
+    from app.storage.runs import get_run
+    run_id = _run_id("abort-silent")
+    _start_session(run_id)
+    recorder = pi_bridge._recorder_for(run_id, question="silent live failure?")
+    assert recorder is not None and recorder.enabled
+    def _silent_complete(**kwargs):
+        recorder._disable(Exception("silent sqlite failure"))
+    monkeypatch.setattr(recorder, "complete", _silent_complete)
+    try:
+        response = pi_bridge._handle(
+            json.dumps({"id": "abort-3", "op": "abort_run", "run_id": run_id,
+                        "error_type": "tool_timeout", "error_message": "timed out"})
+        )
+        assert response == {"id": "abort-3", "ok": True, "finalized": True}
+        row = get_run(run_id)
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["completed_at"] is not None
+        assert row["error_type"] == "tool_timeout"
+        assert run_id not in pi_bridge._sessions
+        assert run_id not in pi_bridge._recorders
+    finally:
         _teardown_run(run_id)
 
 

@@ -203,12 +203,13 @@ def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
 def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, answer: str = "") -> bool:
     """Shared fail-stop teardown: live recorder -> failed, RUN_FAILED, close/pop, durable fallback.
 
-    Returns True when durable terminalization is confirmed (live recorder
-    completed, or the orphan fallback updated/found the row).
+    Returns True only when the idempotent fallback verifies durable
+    terminalization (repaired the row or found it already terminal).
+    A live recorder's non-raising complete() is never trusted on its own
+    because it swallows storage errors by disabling itself.
     """
     with _state_lock:
         recorder = _recorders.get(run_id)
-    live_completed = False
     try:
         if recorder is not None and recorder.enabled:
             recorder.complete(
@@ -219,10 +220,8 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
                 EventType.RUN_FAILED,
                 metadata={"error_type": error_type, "error_message": error_message},
             )
-            live_completed = True
     except Exception as exc:  # observability never breaks research
         logger.warning("abort_run: dropped (%s: %s)", type(exc).__name__, exc)
-        live_completed = False
     finally:
         try:
             if recorder is not None:
@@ -232,8 +231,6 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
         with _state_lock:
             _sessions.pop(run_id, None)
             _recorders.pop(run_id, None)
-    if live_completed:
-        return True
     return finalize_failed_run(run_id, error_type=error_type, error_message=error_message)
 
 
