@@ -373,13 +373,14 @@ DATASETS["sec_13f_holdings"] = Dataset(
         ("manager_name", TEXT), ("report_period", TEXT), ("issuer_name", TEXT),
         ("entity_id", TEXT), ("security_id", TEXT), ("class_title", TEXT),
         ("cusip", TEXT), ("isin", TEXT), ("shares", DOUBLE), ("value", DOUBLE),
-        ("put_call", TEXT), ("discretion", TEXT), ("voting", TEXT),
+        ("put_call", TEXT), ("discretion", TEXT), ("other_manager", TEXT),
+        ("shares_prn_type", TEXT), ("source_row", INTEGER), ("holding_id", TEXT),
+        ("voting", TEXT),
         ("filed_at", TEXT), ("known_at", TEXT), ("retrieved_at", TEXT),
         ("source_url", TEXT), ("raw_archive_path", TEXT),
         ("content_hash", TEXT), ("parser_version", TEXT),
     )),
-    unique_keys=("accession", "manager_cik", "cusip", "issuer_name",
-                 "put_call", "class_title", "discretion", "content_hash"),
+    unique_keys=("holding_id",),
     partition_field="filed_at",
 )
 DATASETS["sec_insider_transactions"] = Dataset(

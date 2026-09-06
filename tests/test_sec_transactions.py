@@ -72,7 +72,7 @@ def test_get_transaction_status_newest_first(monkeypatch):
     out = transactions.get_transaction_status("TGT")
     assert [t.accession_no for t in out] == ["new", "old"]
     assert [t.status for t in out] == ["unknown", "unknown"]
-    assert all(t.target == "TGT" for t in out)
+    assert all(t.target == "" for t in out)
 
 
 def test_store_transaction_unknown_status_both_directions(tmp_path):
@@ -101,3 +101,16 @@ def test_empty_target_falls_back_to_text_span():
     assert txn.target == "Target Co"
     assert txn.event_id.startswith("TARGET CO:")
     assert txn.filer_name == "Acquirer Inc"
+
+def test_get_transaction_status_falls_back_to_text_span(monkeypatch):
+    filings = [SimpleNamespace(accession_no="acc-live", form="S-4",
+                               filed_at="2024-05-01", company="tgt",
+                               subject_name=None, subject_cik=None,
+                               filer_name="Acquirer Inc", filer_cik=111111)]
+    monkeypatch.setattr(transactions, "list_sec_filings",
+                        lambda *a, **k: filings)
+    monkeypatch.setattr(transactions, "load_transaction_text",
+                        lambda acc: "Proposed merger with Target Co; terms disclosed.")
+    out = transactions.get_transaction_status("TGT")
+    assert len(out) == 1
+    assert out[0].target == "Target Co"

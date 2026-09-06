@@ -6,6 +6,7 @@ report_period (the period the filing covers). Every record keeps provenance
 via accession_no + source.
 """
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Optional
 from .cusip import normalize_cusip as normalize_cusip
@@ -406,6 +407,8 @@ class InstitutionalHolding:
     manager_name: Optional[str]
     manager_cik: Optional[str]
     accession_no: str
+    source_row: int
+    holding_id: str
     report_period: Optional[str] = None
     issuer_name: Optional[str] = None
     entity_id: Optional[str] = None
@@ -417,6 +420,8 @@ class InstitutionalHolding:
     value: Optional[int] = None
     put_call: Optional[str] = None
     discretion: Optional[str] = None
+    other_manager: Optional[str] = None
+    shares_prn_type: Optional[str] = None
     voting: Optional[str] = None
     filed_at: Optional[str] = None
     known_at: Optional[str] = None
@@ -425,6 +430,11 @@ class InstitutionalHolding:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def institutional_holding_id(accession_no: str, source_row: int, security_id: Optional[str]) -> str:
+    payload = f"{accession_no}\0{source_row}\0{security_id or ''}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)

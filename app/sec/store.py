@@ -852,9 +852,21 @@ def store_13f_holding(
     row: dict, *, root: Optional[Path | str] = None,
 ) -> int:
     """Typed writer: accepts ``InstitutionalHolding`` or a column row."""
+    from .models import institutional_holding_id
     d = _row_dict(row)
+    cusip_norm = normalize_cusip(d.get("cusip"))
+    isin_norm = normalize_isin(d.get("isin"))
+    raw_row = d.get("source_row")
+    try:
+        source_row = int(str(raw_row).strip()) if raw_row is not None else 0
+    except Exception:
+        source_row = 0
+    if source_row <= 0:
+        raise ValueError("13F holding source_row must be a positive integer")
+    accession = d.get("accession") or d.get("accession_no")
+    canonical_sid = f"cusip:{cusip_norm}" if cusip_norm else (f"isin:{isin_norm}" if isin_norm else None)
     mapped = {
-        "accession": d.get("accession") or d.get("accession_no"),
+        "accession": accession,
         "document_name": d.get("document_name"),
         "manager_cik": str(d["manager_cik"]).strip() if d.get("manager_cik") is not None else None,
         "manager_name": d.get("manager_name"),
@@ -863,12 +875,16 @@ def store_13f_holding(
         "entity_id": d.get("entity_id"),
         "security_id": d.get("security_id"),
         "class_title": d.get("class_title"),
-        "cusip": normalize_cusip(d.get("cusip")),
-        "isin": normalize_isin(d.get("isin")),
+        "cusip": cusip_norm,
+        "isin": isin_norm,
         "shares": d.get("shares"),
         "value": d.get("value"),
         "put_call": d.get("put_call"),
         "discretion": d.get("discretion"),
+        "other_manager": d.get("other_manager"),
+        "shares_prn_type": d.get("shares_prn_type"),
+        "source_row": source_row,
+        "holding_id": institutional_holding_id(str(accession or ""), source_row, canonical_sid),
         "voting": d.get("voting"),
         "filed_at": d.get("filed_at"),
         "known_at": d.get("known_at") or d.get("filed_at"),
@@ -1059,12 +1075,13 @@ def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None
         " AND (a._vt IS NULL OR substr(h.report_period, 1, 10) < substr(a._vt, 1, 10))"
         " GROUP BY h._prov, substr(h.report_period, 1, 10)), "
         "sole AS (SELECT _prov, _period, _sole FROM mapping WHERE _n = 1 AND _sole = ?) "
-        "SELECT * FROM ("
+        "SELECT * EXCLUDE (_rn) FROM ("
         " SELECT h.*, f.form AS filing_form, f.is_amendment AS is_amendment,"
         " f.amendment_of AS amendment_of, f.accepted_at AS accepted_at,"
         " ROW_NUMBER() OVER ("
-        " PARTITION BY h.accession, h.manager_cik, h._prov,"
-        " h.class_title, h.put_call, h.discretion"
+        " PARTITION BY h.accession, h.document_name, h.manager_cik,"
+        " h.report_period, h._prov, h.class_title, h.shares, h.value,"
+        " h.put_call, h.discretion, h.voting"
         " ORDER BY CASE WHEN h.cusip = UPPER(regexp_replace("
         " h.cusip, '[^A-Za-z0-9]+', '', 'g'))"
         " THEN 0 ELSE 1 END,"

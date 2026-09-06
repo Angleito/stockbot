@@ -348,13 +348,12 @@ def get_transaction_status(ticker_or_cik, *, as_of=None,
         subject_cik = getattr(filing, "subject_cik", None)
         # Subject (target) identity comes only from structured filing
         # metadata; the filer is never copied into it.
-        issuer = subject_name or filer_name or str(ticker_or_cik)
         try:
             text = load_transaction_text(accession)
         except Exception:
             text = None
         out.append(normalize_transaction(
-            accession, form, target=str(issuer).upper(), filed_at=filed_at,
+            accession, form, target=str(subject_name or ""), filed_at=filed_at,
             text=text, filer_cik=filer_cik, filer_name=filer_name,
             subject_cik=subject_cik, subject_name=subject_name))
     return out

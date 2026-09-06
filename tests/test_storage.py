@@ -395,3 +395,41 @@ def test_events_evidence_registry_roundtrip(data_root):
     assert evidence.num_rows == 1
     assert evidence.column("span_start").to_pylist() == [10]
     assert evidence.column("span_end").to_pylist() == [45]
+
+
+def test_13f_old_schema_exposes_new_columns_and_appends(data_root):
+    import pyarrow as pa
+    import pyarrow.parquet as parq
+    root = data_root / "parquet"
+    old_schema = pa.schema(
+        [f for f in parquet.DATASETS["sec_13f_holdings"].schema
+         if f.name not in ("source_row", "holding_id", "other_manager",
+                           "shares_prn_type")]
+    )
+    old_tbl = pa.Table.from_pylist(
+        [{"accession": "ACC-OLD", "manager_cik": "5",
+          "cusip": "0378-33100", "filed_at": "2024-05-15",
+          "known_at": "2024-05-15T00:00:00Z"}],
+        schema=old_schema,
+    )
+    part_dir = root / "sec_13f_holdings" / "filed_at_year=2024"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    parq.write_table(old_tbl, str(part_dir / "part-old.parquet"))
+    rows = duckdb.query(
+        "SELECT accession, source_row, holding_id, other_manager, "
+        "shares_prn_type FROM sec_13f_holdings",
+        data_root=data_root,
+    )
+    assert len(rows) == 1
+    assert rows[0]["source_row"] is None
+    assert rows[0]["holding_id"] is None
+    assert rows[0]["other_manager"] is None
+    assert rows[0]["shares_prn_type"] is None
+    assert parquet.write_rows(
+        "sec_13f_holdings",
+        [{"accession": "ACC-NEW", "manager_cik": "5",
+          "cusip": "037833100", "filed_at": "2024-05-15",
+          "known_at": "2024-05-15T00:00:00Z", "source_row": 1,
+          "holding_id": "new-id"}],
+        root=root,
+    ) == 1

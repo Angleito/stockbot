@@ -652,7 +652,8 @@ def test_inverse_returns_manager_with_issuer_entity(tmp_path, monkeypatch):
                                     manager_name="Berkshire", manager_cik="1067983",
                                     accession_no="ACC-INV", report_period="2024-03-31",
                                     filed_at="2024-05-15", document_name="infotable.xml",
-                                    known_at="2024-05-15T00:00:00Z", source_url=None)
+                                    known_at="2024-05-15T00:00:00Z", source_url=None,
+                                    source_row=1)
     _ins.observe_13f_security(h, raw_archive_path="/tmp/p", content_hash="hi",
                               retrieved_at=now, root=tmp_path)
     import app.sec.store as _s

@@ -163,7 +163,8 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path):
                                       manager_name="Berkshire", manager_cik="1067983",
                                       accession_no="ACC-13F-1", report_period="2024-03-31",
                                       filed_at="2024-05-15", document_name="infotable.xml",
-                                      known_at="2024-05-15T00:00:00Z", source_url=None)
+                                      known_at="2024-05-15T00:00:00Z", source_url=None,
+                                      source_row=1)
     assert rec.security_id == "cusip:037833100" and rec.entity_id is None
     assert _ins.observe_13f_security(rec, raw_archive_path="/tmp/p", content_hash="h1",
                                      retrieved_at=now, root=tmp_path) >= 2
@@ -175,7 +176,7 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path):
                                        manager_name="M", manager_cik="1", accession_no="ACC-BAD",
                                        report_period="bad", filed_at="2024-05-15",
                                        document_name="d", known_at="2024-05-15T00:00:00Z",
-                                       source_url=None)
+                                       source_url=None, source_row=1)
     assert _ins.observe_13f_security(rec2, raw_archive_path="/tmp/p", content_hash="h2",
                                      retrieved_at=now, root=tmp_path) == 1
     # Ambiguous candidates exclude mapping.
@@ -188,7 +189,7 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path):
                                        manager_name="M2", manager_cik="2", accession_no="ACC-AMB",
                                        report_period="2024-03-31", filed_at="2024-05-15",
                                        document_name="d", known_at="2024-05-15T00:00:00Z",
-                                       source_url=None)
+                                       source_url=None, source_row=1)
     _ins.observe_13f_security(rec3, raw_archive_path="/tmp/p2", content_hash="h3",
                               retrieved_at=now, root=tmp_path)
     store_13f_holding(rec3.to_dict(), root=tmp_path)

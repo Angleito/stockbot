@@ -489,9 +489,9 @@ def _voting_label(sole=None, shared=None, non=None) -> "str | None":
 
 def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
                            report_period, filed_at, document_name, known_at,
-                           source_url):
+                           source_url, source_row: int):
     """One information-table row -> InstitutionalHolding; raises on bad row."""
-    from .models import InstitutionalHolding
+    from .models import InstitutionalHolding, institutional_holding_id
 
     def _cell(*names):
         for name in names:
@@ -524,15 +524,27 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
         known = filed_at
     isin_raw = _str_or_none(_cell("Isin", "isin", "ISIN"))
     isin_norm = normalize_isin(isin_raw)
+    security_id = _13f_security_id(cusip, isin_norm)
+    raw_type = _str_or_none(_cell("Type", "SSHPRNAMTTYPE", "SshPrnamtType",
+                                  "sshPrnamtType", "shares_prn_type"))
+    shares_prn_type = None
+    if raw_type is not None:
+        t = raw_type.strip().upper()
+        if t in ("SH", "SHARES"):
+            shares_prn_type = "SH"
+        elif t in ("PRN", "PRINCIPAL"):
+            shares_prn_type = "PRN"
     return InstitutionalHolding(
         manager_name=_str_or_none(manager_name),
         manager_cik=str(manager_cik).strip() if manager_cik is not None else None,
         accession_no=accession_no,
+        source_row=source_row,
+        holding_id=institutional_holding_id(accession_no, source_row, security_id),
         report_period=_str_or_none(_cell("ReportPeriod", "report_period")) or _str_or_none(report_period),
         issuer_name=_str_or_none(_cell("Issuer", "issuer_name",
                                               "nameOfIssuer", "issuer")),
         entity_id=None,
-        security_id=_13f_security_id(cusip, isin_norm),
+        security_id=security_id,
         class_title=_str_or_none(_cell("Class", "class_title",
                                               "titleOfClass")),
         cusip=cusip,
@@ -542,7 +554,11 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
         put_call=put_call,
         discretion=_str_or_none(_cell("InvestmentDiscretion", "discretion",
                                              "investment_discretion",
-                                             "OtherManager")),
+                                             "investmentDiscretion",
+                                             "INVESTMENTDISCRETION")),
+        other_manager=_str_or_none(_cell("OtherManager", "other_manager",
+                                         "otherManager", "OTHERMANAGER")),
+        shares_prn_type=shares_prn_type,
         voting=_voting_label(sole, shared, non),
         filed_at=filed_at,
         known_at=known,
@@ -572,13 +588,14 @@ def normalize_13f_holdings(infotable, *, manager_name=None, manager_cik=None,
     except Exception:
         manager_cik = None
     out = []
-    for row in rows:
+    for source_row, row in enumerate(rows, start=1):
         try:
             out.append(_holding_row_to_record(
                 row, manager_name=manager_name, manager_cik=manager_cik,
                 accession_no=accession_no, report_period=report_period,
                 filed_at=filed_at, document_name=document_name,
-                known_at=known_at, source_url=source_url))
+                known_at=known_at, source_url=source_url,
+                source_row=source_row))
         except Exception:
             continue
     return out
