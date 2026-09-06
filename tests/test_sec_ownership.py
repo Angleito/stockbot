@@ -142,3 +142,42 @@ def test_store_queries_13f_both_directions(tmp_path):
     assert by_manager[0]["cusip"] == "594918104"
     by_security = query_13f_holdings(security="594918104", root=tmp_path)
     assert [r["manager_cik"] for r in by_security] == ["103567"]
+
+
+def test_13f_former_name_validity_and_as_of(tmp_path):
+    from app.sec.store import query_13f_holdings_for_issuer, query_13f_issuer_candidates, store_13f_holding
+    from app.storage import parquet as _pq
+    now = "2024-06-01T00:00:00Z"
+    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000000009", "name": "New Co",
+                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
+                                 "known_at": "2024-01-01T00:00:00Z", "retrieved_at": now,
+                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
+    _pq.write_rows("entity_aliases", [{"alias_type": "former_name", "alias_value": "Old Co",
+                                       "entity_id": "sec:cik:0000000009", "security_id": None,
+                                       "source": "sec-submissions", "valid_from": "2020-01-01",
+                                       "valid_to": "2025-01-01", "known_at": "2024-01-01T00:00:00Z",
+                                       "retrieved_at": now, "content_hash": None,
+                                       "parser_version": "1"}], root=tmp_path / "parquet")
+    assert len(query_13f_issuer_candidates("Old Co", report_period="2024-03-31",
+                                           holding_known_at=None, root=tmp_path)) == 1
+    assert query_13f_issuer_candidates("Old Co", report_period="2026-01-01",
+                                       holding_known_at=None, root=tmp_path) == []
+    from app.sec import insider as _ins
+    h = _ins._holding_row_to_record({"Cusip": "123456789", "Issuer": "Old Co",
+                                     "ReportPeriod": "2024-03-31"},
+                                    manager_name="M", manager_cik="5", accession_no="ACC-F",
+                                    report_period="2024-03-31", filed_at="2024-05-15",
+                                    document_name="d", known_at="2024-05-15T00:00:00Z",
+                                    source_url=None)
+    _ins.observe_13f_security(h, raw_archive_path="/tmp/p", content_hash="hf",
+                              retrieved_at=now, root=tmp_path)
+    store_13f_holding(h.to_dict(), root=tmp_path)
+    assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", as_of="2024-06-01", root=tmp_path)) == 1
+    assert query_13f_holdings_for_issuer("sec:cik:0000000009", as_of="2024-01-01", root=tmp_path) == []
+    # Legacy null security_id still maps via CUSIP.
+    store_13f_holding({"accession": "ACC-LEG", "document_name": "d", "manager_cik": "6",
+                       "manager_name": "LM", "report_period": "2024-03-31",
+                       "issuer_name": "Old Co", "entity_id": None, "security_id": None,
+                       "class_title": "COM", "cusip": "123456789", "filed_at": "2024-05-15",
+                       "known_at": "2024-05-15T00:00:00Z"}, root=tmp_path)
+    assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", root=tmp_path)) == 2

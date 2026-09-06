@@ -558,3 +558,255 @@ def test_relationship_search_guard_boundary_marks_partial(tmp_path, monkeypatch)
     out = search_sec_relationships("1234567", exhaustive=True, data_root=tmp_path)
     attempt = next(a for a in out["attempts"] if a["backend"] == "local-workflow")
     assert attempt["status"] == "complete"
+
+def _stub_quiet_routes(monkeypatch):
+    import app.sec.store as sec_store_mod
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_offerings", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", lambda *a, **k: [])
+    monkeypatch.setattr(sec_store_mod, "search_document_text", lambda *a, **k: [])
+    monkeypatch.setattr("app.sec.client.search_sec_filings",
+                        lambda *a, **k: SimpleNamespace(text_hits=[]))
+    monkeypatch.setattr("app.storage.duckdb.query", lambda *a, **k: [])
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+
+
+
+
+def test_relationship_search_efts_partial_propagates(tmp_path, monkeypatch):
+    _stub_quiet_routes(monkeypatch)
+    hits = [SimpleNamespace(accession_no="FACC-1", matched_document="primary", query="1234567")]
+    monkeypatch.setattr("app.sec.client.search_sec_filings",
+                        lambda *a, **k: SimpleNamespace(
+                            text_hits=list(hits),
+                            coverage=SimpleNamespace(status="partial"),
+                            warnings=("efts capped",), errors=()))
+    out = search_sec_relationships("1234567", limit=50, exhaustive=False, data_root=tmp_path)
+    attempt = next(a for a in out["attempts"] if a["backend"] == "efts-mentions")
+    assert attempt["status"] == "partial"
+    assert "efts capped" in out["warnings"]
+
+
+def test_relationship_meta_resolves_single_candidate(tmp_path, monkeypatch):
+    from app.sec.models import EntityCandidate
+    _stub_quiet_routes(monkeypatch)
+    cand = EntityCandidate(cik=320193, name="Meta Platforms Inc", tickers=("META",),
+                           exchange=None, match_source="exact-ticker", match_score=1.0,
+                           match_type="exact_ticker", verification_status="verified",
+                           entity_id="sec:cik:0000320193")
+    monkeypatch.setattr(disc, "find_sec_entities",
+                        lambda q, **k: SimpleNamespace(entities=(cand,), coverage=SimpleNamespace(status="complete"),
+                                                       errors=()))
+    import app.sec.store as _s
+    monkeypatch.setattr(_s, "query_beneficial_ownership",
+                        lambda *a, **k: [{"accession": "ACC-M", "subject_cik": "320193",
+                                          "filer_cik": "123", "subject_name": "Meta",
+                                          "filer_name": "Owner", "known_at": "2024-01-01T00:00:00Z"}])
+    out = search_sec_relationships("META", data_root=tmp_path)
+    assert out["ciks"] == ("320193",)
+    assert out["typed"]
+
+
+def test_relationship_ambiguous_stops_with_no_rows(tmp_path, monkeypatch):
+    from app.sec.models import EntityCandidate
+    _stub_quiet_routes(monkeypatch)
+    cands = tuple(EntityCandidate(cik=i, name=f"Amb {i}", tickers=(), exchange=None,
+                                  match_source="company-search", match_score=0.9,
+                                  match_type="normalized", verification_status="ambiguous",
+                                  entity_id=None) for i in (1, 2))
+    monkeypatch.setattr(disc, "find_sec_entities",
+                        lambda q, **k: SimpleNamespace(entities=cands,
+                                                       coverage=SimpleNamespace(status="complete"),
+                                                       errors=()))
+    out = search_sec_relationships("Ambiguous Co", data_root=tmp_path)
+    assert out["typed"] == [] and out["relationships"] == [] and out["mentions"] == []
+    assert any(a["backend"] == "entity-resolution" and a["status"] == "ambiguous" for a in out["attempts"])
+
+
+def test_inverse_returns_manager_with_issuer_entity(tmp_path, monkeypatch):
+    from app.storage import parquet as _pq
+    import app.sec.store as _smod
+    monkeypatch.setattr(_smod, "query_beneficial_ownership", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_insider_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_13f_holdings", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_transactions", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_offerings", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_relationship_evidence", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "query_relationship_revisions", lambda *a, **k: [])
+    monkeypatch.setattr(_smod, "search_document_text", lambda *a, **k: [])
+    monkeypatch.setattr("app.sec.client.search_sec_filings",
+                        lambda *a, **k: SimpleNamespace(text_hits=[]))
+    monkeypatch.setattr(disc, "get_type_states", lambda **k: {})
+    now = "2024-06-01T00:00:00Z"
+    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000320193", "name": "Apple Inc.",
+                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
+                                 "known_at": "2024-01-01T00:00:00Z", "retrieved_at": now,
+                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
+    from app.sec import insider as _ins
+    h = _ins._holding_row_to_record({"Cusip": "037833100", "Issuer": "Apple Inc.",
+                                     "ReportPeriod": "2024-03-31"},
+                                    manager_name="Berkshire", manager_cik="1067983",
+                                    accession_no="ACC-INV", report_period="2024-03-31",
+                                    filed_at="2024-05-15", document_name="infotable.xml",
+                                    known_at="2024-05-15T00:00:00Z", source_url=None)
+    _ins.observe_13f_security(h, raw_archive_path="/tmp/p", content_hash="hi",
+                              retrieved_at=now, root=tmp_path)
+    import app.sec.store as _s
+    _s.store_13f_holding(h.to_dict(), root=tmp_path)
+    monkeypatch.setattr(disc, "find_sec_entities",
+                        lambda q, **k: (_ for _ in ()).throw(RuntimeError("should use direct CIK")))
+    monkeypatch.setattr(disc, "verify_sec_entity",
+                        lambda cik, **k: SimpleNamespace(cik=int(str(cik).strip()), name="Mgr",
+                                                         verification_status="verified"))
+    out = search_sec_relationships("sec:cik:0000320193", data_root=tmp_path)
+    rows = [r for r in out["typed"] if r.get("relationship_type") == "holding_manager"]
+    assert rows and rows[0]["to_entity_id"] == "sec:cik:0000320193"
+    assert out["managers"]
+    # Unmapped issuer stays partial.
+    out2 = search_sec_relationships("sec:cik:0000000009", data_root=tmp_path)
+    inv_attempts = [a for a in out2["attempts"] if a["backend"] == "local-13f-inverse"]
+    assert inv_attempts and inv_attempts[0]["status"] == "partial"
+    # Query failure records failed.
+    monkeypatch.setattr(_s, "query_13f_holdings_for_issuer",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
+    out3 = search_sec_relationships("sec:cik:0000320193", data_root=tmp_path)
+    assert any(a["backend"] == "local-13f-inverse" and a["status"] == "failed" for a in out3["attempts"])
+
+
+def test_hydrate_transaction_and_offering_real_normalizers(tmp_path, monkeypatch):
+    import app.sec.archive as sec_archive
+    import app.sec.documents as sec_docs
+    import app.sec.store as sec_store_mod
+    monkeypatch.setattr(sec_docs, "get_sec_document",
+                        lambda acc, _: {"text": "Merger with Target Co for $10 per share",
+                                        "document_name": "primary.htm", "url": "http://x"})
+    monkeypatch.setattr(sec_archive, "archive_sec_document",
+                        lambda *a, **k: SimpleNamespace(payload_path="/tmp/p",
+                                                        retrieved_at="2024-01-02T00:00:00Z",
+                                                        sha256="h"))
+    monkeypatch.setattr(sec_docs, "get_by_accession_number",
+                        lambda acc: SimpleNamespace(obj=lambda: None))
+    import app.sec.offerings as _off
+    monkeypatch.setattr(_off, "load_terms", lambda acc: {})
+    f4 = SimpleNamespace(form="S-4", accession_no="ACC-S4", filed_at="2024-02-01",
+                         known_at="2024-02-01T00:00:00Z", source="http://x",
+                         filer_name="Acquirer Inc", filer_cik="111",
+                         subject_cik="222", subject_name="Target Co",
+                         primary_document="primary.htm")
+    n, ok, err = disc._hydrate_relationship_filing(f4, data_root=tmp_path)
+    assert err is None and n >= 1
+    assert sec_store_mod.query_transactions(accession="ACC-S4", root=tmp_path)
+    f3 = SimpleNamespace(form="S-3", accession_no="ACC-S3", filed_at="2024-03-01",
+                         known_at="2024-03-01T00:00:00Z", source="http://x",
+                         filer_name="Issuer Inc", filer_cik="333",
+                         subject_cik=None, subject_name=None,
+                         primary_document="primary.htm")
+    n, ok, err = disc._hydrate_relationship_filing(f3, data_root=tmp_path)
+    assert err is None and sec_store_mod.query_offerings(accession="ACC-S3", root=tmp_path)
+    f424 = SimpleNamespace(form="424B5", accession_no="ACC-424", filed_at="2024-04-01",
+                           known_at="2024-04-01T00:00:00Z", source="http://x",
+                           filer_name="Issuer Inc", filer_cik="333",
+                           subject_cik=None, subject_name=None,
+                           primary_document="primary.htm")
+    n, ok, err = disc._hydrate_relationship_filing(f424, data_root=tmp_path)
+    assert err is None and sec_store_mod.query_offerings(accession="ACC-424", root=tmp_path)
+
+
+def test_warehouse_batch_includes_amendments():
+    seen = {}
+    def _fake_query(*, forms=None, start_date=None, end_date=None, limit=None, root=None):
+        seen["forms"] = forms
+        seen["limit"] = limit
+        return [
+            {"accession": "ACC-1", "form": "4", "filer_cik": "123", "filer_name": "A",
+             "filed_at": "2024-02-15T00:00:00Z", "known_at": "2024-02-15T00:00:00Z"},
+            {"accession": "ACC-2", "form": "4/A", "filer_cik": "123", "filer_name": "A",
+             "filed_at": "2024-02-20T00:00:00Z", "known_at": "2024-02-20T00:00:00Z"},
+        ]
+    store = SimpleNamespace(query_filings=_fake_query)
+    rows, exhausted, error = disc._warehouse_batch(store, "4", "2024-01-01", "2024-03-31")
+    assert error is None and exhausted is True and len(rows) == 2
+    assert seen["forms"] == ["4", "4/A"] and seen["limit"] is None
+    assert {f.form for f in rows} == {"4", "4/A"}
+
+
+def test_warehouse_failure_marks_partial_and_retryable(tmp_path, monkeypatch):
+    import app.sec.store as sec_store_mod
+    source, form = disc.BACKFILL_SOURCE, "10-K"
+    assert not disc._needs_typed_hydration(form)
+    qs, qe = disc._quarter_dates(2024, 1)
+    partition = disc._partition_for_quarter(2024, 1)
+    key = f"{form}/{partition}"
+    sec_store_mod.store_checkpoint("sec-backfill", source, key, "complete", root=tmp_path)
+    job_id = sec_store_mod.enqueue_backfill_job(source, form, qs, qe, root=tmp_path)
+    job = {"id": job_id, "source": source, "form": form,
+           "start_date": qs, "end_date": qe, "batch_size": 50}
+    def _boom(*a, **k):
+        raise RuntimeError("warehouse down")
+    monkeypatch.setattr(sec_store_mod, "query_filings", _boom)
+    assert disc.run_backfill_job(job, data_root=tmp_path) is False
+    from app.storage import duckdb as _duck
+    ck_rows = _duck.query(
+        "SELECT * FROM ingestion_checkpoints WHERE pipeline = ? AND source = ? AND key = ?",
+        ["sec-backfill", source, key], data_root=tmp_path)
+    assert any((r or {}).get("status") in ("partial", "failed") for r in ck_rows)
+    cov = sec_store_mod.query_coverage(source=source, form=form, date_partition=partition,
+                                       root=tmp_path)
+    assert cov and all(r.get("status") != "complete" for r in cov)
+
+def test_hydrate_amendment_forms_use_base_parsers(tmp_path, monkeypatch):
+    import app.sec.archive as sec_archive
+    import app.sec.documents as sec_docs
+    import app.sec.insider as sec_insider
+    import app.sec.ownership as sec_own
+    import app.sec.store as sec_store_mod
+    monkeypatch.setattr(sec_docs, "get_sec_document",
+                        lambda acc, _: {"text": "t", "document_name": "primary",
+                                        "url": "http://x"})
+    monkeypatch.setattr(sec_archive, "archive_sec_document",
+                        lambda *a, **k: SimpleNamespace(
+                            payload_path="/tmp/p", retrieved_at="r", sha256="h"))
+    monkeypatch.setattr(sec_insider, "load_ownership", lambda acc: object())
+    seen4 = {}
+    monkeypatch.setattr(sec_insider, "normalize_ownership_filing",
+                        lambda obj, **kw: (seen4.update(form=kw.get("form")), [{"x": 1}])[1])
+    w4 = []
+    monkeypatch.setattr(sec_store_mod, "store_insider_transaction",
+                        lambda d, **k: (w4.append(d), 1)[1])
+    f4 = SimpleNamespace(form="4/A", accession_no="ACC-4A", filed_at="2024-01-01",
+                         known_at="2024-01-01", source="http://x", filer_name="F",
+                         filer_cik="123", subject_cik=None, subject_name=None,
+                         primary_document="primary")
+    n, _ok, err = disc._hydrate_relationship_filing(f4, data_root=tmp_path)
+    assert "unsupported form" not in (err or "") and n == 1 and w4 and seen4["form"] == "4/A"
+    monkeypatch.setattr(sec_own, "load_schedule", lambda acc: object())
+    seen13 = {}
+    monkeypatch.setattr(sec_own, "normalize_schedule",
+                        lambda sched, **kw: (seen13.update(form=kw.get("form")), [{"x": 1}])[1])
+    wb = []
+    monkeypatch.setattr(sec_store_mod, "store_beneficial_ownership",
+                        lambda d, **k: (wb.append(d), 1)[1])
+    f13 = SimpleNamespace(form="SC 13D/A", accession_no="ACC-13A", filed_at="2024-01-01",
+                          known_at="2024-01-01", source="http://x", filer_name="F",
+                          filer_cik="123", subject_cik=None, subject_name=None,
+                          primary_document="primary")
+    n, _ok, err = disc._hydrate_relationship_filing(f13, data_root=tmp_path)
+    assert "unsupported form" not in (err or "") and n == 1 and wb and seen13["form"] == "SC 13D/A"
+    monkeypatch.setattr(sec_docs, "get_by_accession_number",
+                        lambda acc: SimpleNamespace(obj=lambda: SimpleNamespace(infotable=[{"a": 1}])))
+    seenhf = {}
+    monkeypatch.setattr(sec_insider, "normalize_13f_holdings",
+                        lambda table, **kw: (seenhf.update(form=kw.get("form")), [{"y": 2}])[1])
+    wh = []
+    monkeypatch.setattr(sec_store_mod, "store_13f_holding",
+                        lambda d, **k: (wh.append(d), 1)[1])
+    fh = SimpleNamespace(form="13F-HR/A", accession_no="ACC-HA", filed_at="2024-01-01",
+                         known_at="2024-01-01", source="http://x", filer_name="F",
+                         filer_cik="123", subject_cik=None, subject_name=None,
+                         primary_document="primary", report_period="2024-01-01")
+    n, _ok, err = disc._hydrate_relationship_filing(fh, data_root=tmp_path)
+    assert "unsupported form" not in (err or "") and n == 1 and wh and seenhf["form"] == "13F-HR/A"

@@ -203,7 +203,7 @@ def test_search_sec_filings_dispatch_full_packet(monkeypatch):
     assert result["counts"]["results_reported"] == 3
     assert result["counts"]["pages"] == 2
     assert list(result["evidence_packet_ids"]) == ["entity:1234567"]
-    assert list(result["warnings"]) == ["1 partition queued", "payload truncated to 20 context rows; coverage reports full retrieval"]
+    assert list(result["warnings"]) == ["1 partition queued"]
     assert result["source"] == "SEC EDGAR"
 
 
@@ -231,6 +231,61 @@ def test_search_sec_filings_accepts_person_domain_security(monkeypatch):
 def test_search_sec_filings_rejects_empty_selectors():
     result = tools.execute_tool("search_sec_filings", {}, "test", context=_research_context())
     assert "error" in result
+
+
+def test_search_sec_filings_no_truncation_warning_when_small(monkeypatch):
+    from app.sec.models import Filing
+    hits = tuple(
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme",
+                   accession_no=f"0000000001-26-00000{i}", form="10-K",
+                   filed_at="2024-01-01", filer_cik=123, filer_name="Acme",
+                   matched_document="primary.htm", file_type="10-K", score=1.0)
+        for i in range(5)
+    )
+    filings = tuple(
+        Filing(accession_no=f"0000000001-26-00000{i}", form="10-K", filer_cik=123,
+               filer_name="Acme", filed_at="2024-01-01", accepted_at=None,
+               known_at="2024-01-01T00:00:00Z", report_period=None,
+               primary_document="primary.htm", is_amendment=False,
+               amendment_of=None, source="http://x")
+        for i in range(5)
+    )
+    result_obj = _result(text_hits=hits, filings=filings, warnings=(), errors=())
+    class _FakeService:
+        def search(self, request):
+            return result_obj
+    monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
+    result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
+    assert "payload truncated to 20 context rows; coverage reports full retrieval" not in list(result["warnings"] or [])
+
+
+def test_search_sec_filings_truncation_warning_when_large(monkeypatch):
+    from app.sec.models import Filing
+    hits = tuple(
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme",
+                   accession_no=f"0000000001-26-000{i:03d}", form="10-K",
+                   filed_at="2024-01-01", filer_cik=123, filer_name="Acme",
+                   matched_document="primary.htm", file_type="10-K", score=1.0)
+        for i in range(25)
+    )
+    filings = tuple(
+        Filing(accession_no=f"0000000001-26-000{i:03d}", form="10-K", filer_cik=123,
+               filer_name="Acme", filed_at="2024-01-01", accepted_at=None,
+               known_at="2024-01-01T00:00:00Z", report_period=None,
+               primary_document="primary.htm", is_amendment=False,
+               amendment_of=None, source="http://x")
+        for i in range(25)
+    )
+    result_obj = _result(text_hits=hits, filings=filings, warnings=(), errors=())
+    class _FakeService:
+        def search(self, request):
+            return result_obj
+    monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
+    result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
+    assert len(result["hits"]) == 20
+    assert len(result["filings"]) == 20
+    assert list(result["warnings"]).count("payload truncated to 20 context rows; coverage reports full retrieval") == 1
+
 
 
 def test_search_sec_relationships_dispatch_groups(monkeypatch):
@@ -288,6 +343,46 @@ def test_search_sec_relationships_partial_on_partial_attempt(monkeypatch):
         "test", context=_research_context(),
     )
     assert result["coverage"]["status"] == "partial"
+
+
+def test_search_sec_relationships_partial_on_source_limited_attempt(monkeypatch):
+    payload = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [],
+               "relationships": [], "mentions": [],
+               "attempts": [{"backend": "local-typed", "status": "source_limited"}],
+               "warnings": [], "errors": []}
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    result = tools.execute_tool(
+        "search_sec_relationships", {"entity": "X"},
+        "test", context=_research_context(),
+    )
+    assert result["coverage"]["status"] == "partial"
+
+
+def test_search_sec_relationships_partial_on_failed_attempt_with_rows(monkeypatch):
+    payload = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [{"accession": "ACC-1"}],
+               "relationships": [], "mentions": [],
+               "attempts": [{"backend": "local-typed", "status": "failed"}],
+               "warnings": [], "errors": []}
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    result = tools.execute_tool(
+        "search_sec_relationships", {"entity": "X"},
+        "test", context=_research_context(),
+    )
+    assert result["coverage"]["status"] == "partial"
+
+
+def test_search_sec_relationships_failed_on_failed_attempt_without_rows(monkeypatch):
+    payload = {"entity": "X", "ciks": (), "groups": {}, "typed": [],
+               "relationships": [], "mentions": [],
+               "attempts": [{"backend": "local-typed", "status": "failed"}],
+               "warnings": [], "errors": []}
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    result = tools.execute_tool(
+        "search_sec_relationships", {"entity": "X"},
+        "test", context=_research_context(),
+    )
+    assert result["coverage"]["status"] == "failed"
+
 
 def test_search_sec_relationships_partial_on_errors(monkeypatch):
     payload = {"entity": "X", "ciks": (), "groups": {}, "typed": [],

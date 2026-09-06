@@ -147,3 +147,49 @@ def test_store_queries_insider_both_directions(tmp_path):
     assert [r["issuer_cik"] for r in by_owner] == ["320193"]
     # Roles stay on their own side: issuer is never the owner.
     assert by_owner[0]["issuer_name"] != by_owner[0]["owner_name"]
+
+
+def test_13f_provisional_security_id_and_governed_mapping(tmp_path):
+    from app.sec import insider as _ins
+    from app.sec.store import query_13f_holdings_for_issuer, store_13f_holding
+    from app.storage import parquet as _pq
+    now = "2024-05-20T00:00:00Z"
+    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000320193", "name": "Apple Inc.",
+                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
+                                 "known_at": "2024-01-01T00:00:00Z", "retrieved_at": now,
+                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
+    rec = _ins._holding_row_to_record({"Cusip": "037833100", "Issuer": "Apple Inc.",
+                                       "ReportPeriod": "2024-03-31", "Class": "Common Stock"},
+                                      manager_name="Berkshire", manager_cik="1067983",
+                                      accession_no="ACC-13F-1", report_period="2024-03-31",
+                                      filed_at="2024-05-15", document_name="infotable.xml",
+                                      known_at="2024-05-15T00:00:00Z", source_url=None)
+    assert rec.security_id == "cusip:037833100" and rec.entity_id is None
+    assert _ins.observe_13f_security(rec, raw_archive_path="/tmp/p", content_hash="h1",
+                                     retrieved_at=now, root=tmp_path) >= 2
+    store_13f_holding(rec.to_dict(), root=tmp_path)
+    inv = query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path)
+    assert len(inv) == 1 and inv[0]["entity_id"] == "sec:cik:0000320193"
+    rec2 = _ins._holding_row_to_record({"Cusip": "594918104", "Issuer": "Apple Inc.",
+                                        "ReportPeriod": "bad", "Class": "Common"},
+                                       manager_name="M", manager_cik="1", accession_no="ACC-BAD",
+                                       report_period="bad", filed_at="2024-05-15",
+                                       document_name="d", known_at="2024-05-15T00:00:00Z",
+                                       source_url=None)
+    assert _ins.observe_13f_security(rec2, raw_archive_path="/tmp/p", content_hash="h2",
+                                     retrieved_at=now, root=tmp_path) == 1
+    # Ambiguous candidates exclude mapping.
+    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000000002", "name": "Apple Inc.",
+                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
+                                 "known_at": "2024-02-01T00:00:00Z", "retrieved_at": now,
+                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
+    rec3 = _ins._holding_row_to_record({"Cusip": "037833100", "Issuer": "Apple Inc.",
+                                        "ReportPeriod": "2024-03-31"},
+                                       manager_name="M2", manager_cik="2", accession_no="ACC-AMB",
+                                       report_period="2024-03-31", filed_at="2024-05-15",
+                                       document_name="d", known_at="2024-05-15T00:00:00Z",
+                                       source_url=None)
+    _ins.observe_13f_security(rec3, raw_archive_path="/tmp/p2", content_hash="h3",
+                              retrieved_at=now, root=tmp_path)
+    store_13f_holding(rec3.to_dict(), root=tmp_path)
+    assert query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path) == []

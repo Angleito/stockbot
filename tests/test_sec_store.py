@@ -235,3 +235,20 @@ def test_typed_rows_pit_exclusion(tmp_path):
     assert query_beneficial_ownership(subject_cik=320193, root=tmp_path)
     assert query_beneficial_ownership(
         subject_cik=320193, as_of="2024-01-01", root=tmp_path) == []
+
+
+def test_query_filings_date_bounds_before_limit(tmp_path):
+    from app.sec.store import query_filings, store_filing
+    # Newer Form 4s plus one older 2024-Q1 row; limit=1 must still return Q1 when bounded.
+    for i, day in enumerate(["2024-06-15", "2024-06-10", "2024-05-20"]):
+        store_filing(_filing(f"0000000000-25-00010{i}", form="4", filed_at=day, known_at=day), root=tmp_path)
+    store_filing(_filing("0000000000-25-000109", form="4", filed_at="2024-02-15", known_at="2024-02-15"), root=tmp_path)
+    rows = query_filings(forms=["4"], start_date="2024-01-01", end_date="2024-03-31", limit=1, root=tmp_path)
+    assert len(rows) == 1 and rows[0]["accession"] == "0000000000-25-000109"
+    # Unbounded limit=None returns all.
+    assert len(query_filings(forms=["4"], limit=None, root=tmp_path)) == 4
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        query_filings(forms=["4"], start_date="2024/01/01", root=tmp_path)
+    with _pt.raises(ValueError):
+        query_filings(forms=["4"], end_date="2024-13-01", root=tmp_path)

@@ -345,3 +345,61 @@ def test_discovery_current_feed_page_is_partial(tmp_path, monkeypatch):
     current = [a for a in result.attempts if a.backend == "current-filings"]
     assert current and all(a.status == "partial" for a in current)
     assert result.coverage.status == "partial"
+
+
+def test_exhaustive_filer_and_current_pass_none_and_complete(tmp_path, monkeypatch):
+    from app.sec.discovery.service import SECDiscoveryService
+    from app.sec.models import EntityCandidate, Filing, SECSearchRequest
+    import app.sec.filings as _filings
+    import app.sec.client as client
+    seen = {}
+    def _fake_list(cik, forms=None, start_date=None, end_date=None, as_of=None, limit=50):
+        seen["limit"] = limit
+        return [Filing(accession_no=f"ACC-{i:03d}", form="10-K", filer_cik=int(str(cik)),
+                       filer_name="Acme", filed_at="2024-01-15", accepted_at=None,
+                       known_at="2024-01-15T00:00:00Z", report_period=None,
+                       primary_document="p.htm", is_amendment=False, amendment_of=None,
+                       source="http://x") for i in range(75)]
+    def _fake_current(form, page_size=40, owner="include"):
+        seen["page_size"] = page_size
+        return [Filing(accession_no=f"CUR-{i:03d}", form=form, filer_cik=123,
+                       filer_name="Acme", filed_at="2026-08-01",
+                       accepted_at="2026-08-01T10:00:00Z", known_at="2026-08-01T10:00:00Z",
+                       report_period=None, primary_document="p.htm",
+                       is_amendment=False, amendment_of=None, source="http://x")
+                for i in range(75)]
+    monkeypatch.setattr(_filings, "list_sec_filings", _fake_list)
+    monkeypatch.setattr(client, "get_current_filings", _fake_current)
+    monkeypatch.setattr("app.sec.discovery.service.find_sec_entities",
+                        lambda q, **k: __import__("types").SimpleNamespace(
+                            entities=(EntityCandidate(cik=123, name="Acme", tickers=(),
+                                                      exchange=None, match_source="exact-cik",
+                                                      match_score=1.0, match_type="exact_cik",
+                                                      verification_status="verified",
+                                                      entity_id="sec:cik:0000000123"),),
+                            filings=(), documents=(), relationships=(), text_hits=(),
+                            coverage=__import__("types").SimpleNamespace(status="complete",
+                                                                          source_limits=()),
+                            attempts=(), warnings=(), errors=(),
+                            retrieval_order=(), evidence_packet_ids=()))
+    svc = SECDiscoveryService(data_root=tmp_path)
+    result = svc.search(SECSearchRequest(query="123", forms=("10-K",), exhaustive=True,
+                                        max_results=None, search_relationships=False))
+    assert seen["limit"] is None and seen["page_size"] is None
+    assert len(result.filings) >= 75
+    cur = [a for a in result.attempts if a.backend == "current-filings"]
+    assert cur and all(a.status == "complete" for a in cur)
+
+
+def test_entity_51_row_probe_marks_partial(monkeypatch):
+    import app.sec.discovery.service as _svc
+    rows = [{"cik": 1000000 + i, "name": f"Test Co {i}", "tickers": []} for i in range(51)]
+    monkeypatch.setattr("app.sec.client.get_cik_lookup_candidates", lambda q, limit=50: list(rows))
+    monkeypatch.setattr("app.sec.client.find_sec_company", lambda q, limit=50: [])
+    monkeypatch.setattr("app.sec.client.get_submissions_metadata",
+                        lambda cik: {"cik": cik, "name": f"Test Co", "tickers": [],
+                                     "exchanges": [], "sic": None, "former_names": []})
+    out = _svc.find_sec_entities("Test Co", exhaustive=True)
+    assert out.coverage.status == "partial"
+    assert any(a.backend == "cik-lookup" and a.status == "partial" and a.truncated
+               and a.source_limit == "50 candidates" for a in out.attempts)
