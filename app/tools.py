@@ -1640,19 +1640,21 @@ def _sec_search_result(args: dict) -> dict:
     envelope = _search_envelope(sec.SECDiscoveryService().search(request))
     if explicit_limit is None and request.exhaustive:
         _ctx = 20
+        truncated = False
         for _key in ("hits", "filings"):
             _rows = envelope.get(_key)
-            if isinstance(_rows, list) and len(_rows) > _ctx:
-                envelope[_key] = _rows[:_ctx]
-        envelope["count"] = len(envelope.get("hits") or [])
-        _note = "payload truncated to 20 context rows; coverage reports full retrieval"
-        _warns = envelope.get("warnings")
-        if isinstance(_warns, tuple):
-            envelope["warnings"] = [*_warns, _note]
-        elif isinstance(_warns, list):
-            _warns.append(_note)
-        else:
-            envelope["warnings"] = [_note]
+            if isinstance(_rows, (list, tuple)) and len(_rows) > _ctx:
+                envelope[_key] = list(_rows)[:_ctx]
+                truncated = True
+        if truncated:
+            _note = "payload truncated to 20 context rows; coverage reports full retrieval"
+            _warns = envelope.get("warnings")
+            if isinstance(_warns, tuple):
+                envelope["warnings"] = [*_warns, _note]
+            elif isinstance(_warns, list):
+                _warns.append(_note)
+            else:
+                envelope["warnings"] = [_note]
     return envelope
 
 
@@ -1666,7 +1668,8 @@ def _sec_relationships_result(args: dict) -> dict:
         result.get("relationships") or []) + len(result.get("mentions") or [])
     errors = result.get("errors") or []
     attempts = result.get("attempts") or []
-    incomplete = any((a or {}).get("status") in ("partial", "retrying") for a in attempts)
+    has_partial = any((a or {}).get("status") in ("partial", "source_limited", "complete_within_source_limits", "retrying") for a in attempts)
+    has_failed = any((a or {}).get("status") == "failed" for a in attempts)
     return {
         "subject": args.get("entity"),
         "entity": result.get("entity"),
@@ -1679,8 +1682,8 @@ def _sec_relationships_result(args: dict) -> dict:
         "parties": result.get("typed"),
         "relationships": result.get("relationships"),
         "mentions": result.get("mentions"),
-        "coverage": {"status": "failed" if errors and not found else (
-            "partial" if errors or result.get("warnings") or incomplete else "complete")},
+        "coverage": {"status": "failed" if (errors and not found) or (has_failed and not found) else (
+            "partial" if errors or result.get("warnings") or has_partial or has_failed else "complete")},
         "attempts": result.get("attempts"),
         "counts": {"typed": len(result.get("typed") or []),
                    "workflow": len(result.get("relationships") or []),

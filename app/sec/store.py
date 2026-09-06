@@ -28,14 +28,19 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _validate_as_of(as_of: str) -> str:
-    if not _AS_OF_RE.match(str(as_of)):
-        raise ValueError(f"as_of must be YYYY-MM-DD, got {as_of!r}")
+def _validate_date(value: object, field: str) -> str:
+    text = str(value or "")
+    if not _AS_OF_RE.match(text):
+        raise ValueError(f"{field} must be YYYY-MM-DD, got {value!r}")
     try:
-        datetime.strptime(str(as_of), "%Y-%m-%d")
+        datetime.strptime(text, "%Y-%m-%d")
     except ValueError:
-        raise ValueError(f"as_of must be YYYY-MM-DD, got {as_of!r}") from None
-    return str(as_of)
+        raise ValueError(f"{field} must be YYYY-MM-DD, got {value!r}") from None
+    return text
+
+
+def _validate_as_of(as_of: str) -> str:
+    return _validate_date(as_of, "as_of")
 
 
 def store_filing(
@@ -81,8 +86,10 @@ def query_filings(
     *,
     cik: Optional[int | str] = None,
     forms: Optional[list[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     as_of: Optional[str] = None,
-    limit: int = 200,
+    limit: Optional[int] = 200,
     root: Optional[Path | str] = None,
 ) -> list[dict]:
     """Filings newest ``known_at`` first; ``as_of`` is strict YYYY-MM-DD."""
@@ -94,6 +101,12 @@ def query_filings(
     if forms:
         where.append(f"form IN ({', '.join(['?'] * len(forms))})")
         params.extend(forms)
+    if start_date is not None:
+        where.append("substr(filed_at, 1, 10) >= ?")
+        params.append(_validate_date(start_date, "start_date"))
+    if end_date is not None:
+        where.append("substr(filed_at, 1, 10) <= ?")
+        params.append(_validate_date(end_date, "end_date"))
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -101,7 +114,9 @@ def query_filings(
     sql = "SELECT * FROM sec_filings"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += " ORDER BY known_at DESC"
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
     return duckdb.query(sql, params, data_root=root)
 
 
@@ -868,7 +883,6 @@ def store_13f_holding(
 def query_13f_holdings(
     *,
     manager_cik: "Optional[int | str]" = None,
-    entity_id: Optional[str] = None,
     security_id: Optional[str] = None,
     security: Optional[str] = None,
     cusip: Optional[str] = None,
@@ -887,9 +901,6 @@ def query_13f_holdings(
     if manager_cik is not None:
         where.append("manager_cik = ?")
         params.append(str(manager_cik).strip())
-    if entity_id is not None:
-        where.append("entity_id = ?")
-        params.append(str(entity_id).strip())
     if security_id is not None:
         where.append("security_id = ?")
         params.append(str(security_id).strip())
@@ -910,6 +921,112 @@ def query_13f_holdings(
         sql += " WHERE " + " AND ".join(where)
     sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
     return duckdb.query(sql, params, data_root=root)
+
+
+def query_13f_issuer_candidates(issuer_name: str, *, report_period: str | None, holding_known_at: str | None, root=None) -> list[dict]:
+    """Exact current/former-name issuer candidates for one 13F issuer string."""
+    try:
+        target = str(issuer_name or "").strip()
+    except Exception:
+        target = ""
+    if not target:
+        return []
+    try:
+        period = str(report_period or "").strip()[:10] or None
+    except Exception:
+        period = None
+    if period is not None:
+        try:
+            datetime.strptime(period, "%Y-%m-%d")
+        except Exception:
+            period = None
+    # Current-name exact (trimmed, case-insensitive).
+    try:
+        current = duckdb.query(
+            "SELECT DISTINCT entity_id, name, known_at, retrieved_at FROM entities "
+            "WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))",
+            [target], data_root=root)
+    except Exception:
+        current = []
+    former: list[dict] = []
+    if period is not None:
+        try:
+            former = duckdb.query(
+                "SELECT DISTINCT e.entity_id, e.name, e.known_at, e.retrieved_at "
+                "FROM entity_aliases a JOIN entities e ON e.entity_id = a.entity_id "
+                "WHERE a.alias_type = 'former_name' "
+                "AND LOWER(TRIM(a.alias_value)) = LOWER(TRIM(?)) "
+                "AND (a.valid_from IS NULL OR substr(a.valid_from, 1, 10) <= ?) "
+                "AND (a.valid_to IS NULL OR ? < substr(a.valid_to, 1, 10))",
+                [target, period, period], data_root=root)
+        except Exception:
+            former = []
+    seen: dict[str, dict] = {}
+    for row in list(current or []) + list(former or []):
+        try:
+            eid = str(row.get("entity_id") or "").strip()
+        except Exception:
+            continue
+        if eid and eid not in seen:
+            seen[eid] = row
+    return list(seen.values())
+
+
+def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None, limit: int = 200, root=None) -> list[dict]:
+    """Governed issuer -> holdings via exact CUSIP/ISIN alias mapping (PIT)."""
+    eid = str(entity_id or "").strip()
+    if not eid:
+        return []
+    as_of_val = _validate_as_of(as_of) if as_of is not None else None
+    params: list = []
+    holding_asof = ""
+    alias_asof = ""
+    if as_of_val is not None:
+        holding_asof = "AND (h.known_at IS NULL OR substr(h.known_at, 1, 10) <= ?) "
+        alias_asof = "AND (a.known_at IS NULL OR substr(a.known_at, 1, 10) <= ?) "
+    sql = (
+        "WITH holdings AS ("
+        " SELECT h.*, CASE WHEN h.security_id IS NOT NULL THEN h.security_id"
+        " WHEN h.cusip IS NOT NULL THEN 'cusip:' || UPPER(h.cusip)"
+        " WHEN h.isin IS NOT NULL THEN 'isin:' || UPPER(h.isin)"
+        " ELSE NULL END AS _prov"
+        " FROM sec_13f_holdings h WHERE 1=1 " + holding_asof + "), "
+        "visible_aliases AS ("
+        " SELECT a.security_id AS _skey, a.entity_id AS _eid,"
+        " a.valid_from AS _vf, a.valid_to AS _vt"
+        " FROM entity_aliases a JOIN entities e ON e.entity_id = a.entity_id"
+        " WHERE a.alias_type IN ('cusip', 'isin')"
+        " AND a.security_id IS NOT NULL"
+        " AND a.entity_id LIKE 'sec:cik:%' " + alias_asof + "), "
+        "mapping AS ("
+        " SELECT h._prov AS _prov, substr(h.report_period, 1, 10) AS _period,"
+        " COUNT(DISTINCT a._eid) AS _n, MAX(a._eid) AS _sole"
+        " FROM holdings h JOIN visible_aliases a ON a._skey = h._prov"
+        " WHERE h._prov IS NOT NULL AND h.report_period IS NOT NULL"
+        " AND (a._vf IS NULL OR substr(a._vf, 1, 10) <= substr(h.report_period, 1, 10))"
+        " AND (a._vt IS NULL OR substr(h.report_period, 1, 10) < substr(a._vt, 1, 10))"
+        " GROUP BY h._prov, substr(h.report_period, 1, 10)), "
+        "sole AS (SELECT _prov, _period, _sole FROM mapping WHERE _n = 1 AND _sole = ?) "
+        "SELECT h.*, f.form AS filing_form, f.is_amendment AS is_amendment,"
+        " f.amendment_of AS amendment_of, f.accepted_at AS accepted_at"
+        " FROM holdings h JOIN sole s ON s._prov = h._prov"
+        " AND s._period = substr(h.report_period, 1, 10)"
+        " LEFT JOIN sec_filings f ON f.accession = h.accession"
+        " ORDER BY h.known_at DESC"
+    )
+    if as_of_val is not None:
+        params.extend([as_of_val])
+        params.extend([as_of_val])
+    params.append(eid)
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    rows = duckdb.query(sql, params, data_root=root)
+    for row in rows:
+        try:
+            row["entity_id"] = eid
+        except Exception:
+            pass
+    return rows
 
 
 def store_insider_transaction(
@@ -1310,15 +1427,6 @@ def _jobs_db_path(root: Optional[Path | str] = None) -> Path:
     return base / "sec_backfill.sqlite"
 
 
-def _validate_date(value: object, label: str) -> str:
-    text = str(value or "")
-    if not _AS_OF_RE.match(text):
-        raise ValueError(f"{label} must be YYYY-MM-DD, got {value!r}")
-    try:
-        datetime.strptime(text, "%Y-%m-%d")
-    except ValueError:
-        raise ValueError(f"{label} must be YYYY-MM-DD, got {value!r}") from None
-    return text
 
 def ensure_jobs_table(root: Optional[Path | str] = None) -> Path:
     """Create the jobs table if missing; returns the SQLite path.

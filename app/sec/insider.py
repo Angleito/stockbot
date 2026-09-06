@@ -464,6 +464,22 @@ def is_13f_notice(form) -> bool:
         return False
 
 
+def _13f_security_id(cusip: str | None, isin: str | None) -> str | None:
+    try:
+        c = "".join(ch for ch in str(cusip) if ch.isalnum()).upper() if cusip else None
+    except Exception:
+        c = None
+    try:
+        i = str(isin or "").strip().upper() or None
+    except Exception:
+        i = None
+    if c:
+        return f"cusip:{c}"
+    if i:
+        return f"isin:{i}"
+    return None
+
+
 def _voting_label(sole=None, shared=None, non=None) -> "str | None":
     parts = []
     for label, value in (("sole", sole), ("shared", shared), ("none", non)):
@@ -513,6 +529,11 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
         known = str(known_at) if known_at is not None else filed_at
     except Exception:
         known = filed_at
+    isin_raw = _str_or_none(_cell("Isin", "isin", "ISIN"))
+    try:
+        isin_norm = str(isin_raw or "").strip().upper() or None
+    except Exception:
+        isin_norm = None
     return InstitutionalHolding(
         manager_name=_str_or_none(manager_name),
         manager_cik=str(manager_cik).strip() if manager_cik is not None else None,
@@ -521,11 +542,11 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
         issuer_name=_str_or_none(_cell("Issuer", "issuer_name",
                                               "nameOfIssuer", "issuer")),
         entity_id=None,
-        security_id=None,
+        security_id=_13f_security_id(cusip, isin_norm),
         class_title=_str_or_none(_cell("Class", "class_title",
                                               "titleOfClass")),
         cusip=cusip,
-        isin=_str_or_none(_cell("Isin", "isin", "ISIN")),
+        isin=isin_norm,
         shares=shares,
         value=value,
         put_call=put_call,
@@ -573,16 +594,16 @@ def normalize_13f_holdings(infotable, *, manager_name=None, manager_cik=None,
     return out
 
 
-def observe_13f_security(holding, *, accession_no=None, filed_at=None,
-                         known_at=None, source_url=None, root=None) -> int:
-    """Persist CUSIP/ISIN/ticker/class-title observations as Security + aliases.
+def observe_13f_security(holding, *, raw_archive_path, content_hash, retrieved_at, root=None) -> int:
+    """Persist one 13F security + governed CUSIP/ISIN issuer aliases.
 
-    Identifier evidence only: never derives issuer ``entity_id`` identity.
+    Provisional security only; issuer mapping comes from exact
+    current/former-name candidates valid at the holding report period.
     Returns rows written across the security/alias datasets.
     """
+    from pathlib import Path as _Path
     from ..storage import parquet
     from ..storage.raw_archive import content_hash as _hash
-
     try:
         cusip = getattr(holding, "cusip", None)
         cusip = "".join(ch for ch in str(cusip) if ch.isalnum()).upper() if cusip else None
@@ -596,17 +617,25 @@ def observe_13f_security(holding, *, accession_no=None, filed_at=None,
         class_title = str(getattr(holding, "class_title", None) or "").strip() or None
     except Exception:
         class_title = None
-    if not cusip and not isin:
+    security_id = _13f_security_id(cusip, isin)
+    if not security_id:
         return 0
     try:
-        known = str(known_at or getattr(holding, "known_at", None)
-                    or filed_at or getattr(holding, "filed_at", None))
+        known = str(getattr(holding, "known_at", None) or getattr(holding, "filed_at", None))
     except Exception:
         known = None
-    retrieved = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    security_id = f"cusip:{cusip}" if cusip else f"isin:{isin}"
-    seed = "|".join(part or "" for part in (
-        security_id, class_title or "", str(accession_no or "")))
+    try:
+        accession = str(getattr(holding, "accession_no", None) or getattr(holding, "accession", None) or "")
+    except Exception:
+        accession = ""
+    try:
+        source_url = getattr(holding, "source_url", None)
+    except Exception:
+        source_url = None
+    try:
+        raw_path = str(raw_archive_path) if raw_archive_path is not None else None
+    except Exception:
+        raw_path = None
     security_row = {
         "security_id": security_id,
         "entity_id": None,
@@ -615,47 +644,90 @@ def observe_13f_security(holding, *, accession_no=None, filed_at=None,
         "exchange": None,
         "source": "sec-13f",
         "known_at": known,
-        "retrieved_at": retrieved,
-        "content_hash": _hash(seed.encode("utf-8")),
-        "parser_version": "1",
+        "retrieved_at": retrieved_at,
+        "content_hash": content_hash,
+        "parser_version": "sec-13f-security-v1",
         "cik": None,
-        "accession": accession_no,
-        "source_url": source_url or getattr(holding, "source_url", None),
-        "raw_archive_path": None,
+        "accession": accession or None,
+        "source_url": source_url,
+        "raw_archive_path": raw_path,
         "cusip": cusip,
         "isin": isin,
         "class_title": class_title,
     }
-    written = parquet.write_rows(
-        "securities", [security_row],
-        root=Path(root) / "parquet" if root is not None else None)
-    aliases = []
-    if cusip:
-        aliases.append(("cusip", cusip))
-    if isin:
-        aliases.append(("isin", isin))
-    if class_title:
-        aliases.append(("class_title", class_title))
-    for alias_type, alias_value in aliases:
-        aliases_seed = "|".join((alias_type, alias_value, security_id))
-        written += parquet.write_rows(
-            "entity_aliases", [{
-                "alias_type": alias_type,
-                "alias_value": alias_value,
-                "entity_id": security_id,
-                "security_id": security_id,
-                "source": "sec-13f",
-                "valid_from": None,
-                "valid_to": None,
-                "known_at": known,
-                "retrieved_at": retrieved,
-                "content_hash": _hash(aliases_seed.encode("utf-8")),
-                "parser_version": "1",
-                "cik": None,
-                "accession": accession_no,
-                "source_url": source_url or getattr(holding, "source_url", None),
-            }],
-            root=Path(root) / "parquet" if root is not None else None)
+    parquet_root = _Path(root) / "parquet" if root is not None else None
+    written = parquet.write_rows("securities", [security_row], root=parquet_root)
+    try:
+        issuer_name = str(getattr(holding, "issuer_name", None) or "").strip()
+    except Exception:
+        issuer_name = ""
+    try:
+        report_period = str(getattr(holding, "report_period", None) or "").strip()[:10] or None
+    except Exception:
+        report_period = None
+    valid_period = None
+    if report_period is not None:
+        try:
+            datetime.strptime(report_period, "%Y-%m-%d")
+            valid_period = report_period
+        except Exception:
+            valid_period = None
+    if not issuer_name or valid_period is None:
+        return written
+    try:
+        from . import store as _store
+        candidates = _store.query_13f_issuer_candidates(
+            issuer_name, report_period=valid_period, holding_known_at=known, root=root)
+    except Exception:
+        return written
+    if not candidates:
+        return written
+    try:
+        from datetime import datetime as _dt
+        base = _dt.strptime(valid_period, "%Y-%m-%d")
+        from datetime import timedelta as _td
+        valid_to = (base + _td(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        return written
+    for cand in candidates or []:
+        try:
+            eid = str((cand or {}).get("entity_id") or "").strip()
+        except Exception:
+            continue
+        if not eid:
+            continue
+        try:
+            c_known = str((cand or {}).get("known_at") or "")
+        except Exception:
+            c_known = ""
+        try:
+            c_ret = str((cand or {}).get("retrieved_at") or "")
+        except Exception:
+            c_ret = ""
+        alias_known = max([v for v in [known or "", c_known] if v]) if (known or c_known) else known
+        alias_ret = max([v for v in [str(retrieved_at or ""), c_ret] if v]) if (retrieved_at or c_ret) else retrieved_at
+        for alias_type, alias_value in (("cusip", cusip), ("isin", isin)):
+            if not alias_value:
+                continue
+            seed = "|".join([alias_type, alias_value, eid, security_id, valid_period, valid_to])
+            written += parquet.write_rows(
+                "entity_aliases", [{
+                    "alias_type": alias_type,
+                    "alias_value": alias_value,
+                    "entity_id": eid,
+                    "security_id": security_id,
+                    "source": "sec-13f",
+                    "valid_from": valid_period,
+                    "valid_to": valid_to,
+                    "known_at": alias_known,
+                    "retrieved_at": alias_ret,
+                    "content_hash": _hash(seed.encode("utf-8")),
+                    "parser_version": "sec-13f-security-v1",
+                    "cik": None,
+                    "accession": accession or None,
+                    "source_url": source_url,
+                }],
+                root=parquet_root)
     return written
 
 

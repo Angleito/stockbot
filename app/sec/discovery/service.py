@@ -20,7 +20,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-from ...domain.market.ids import sec_entity_id, sec_security_id
+from ...domain.market.ids import sec_entity_id
 from ..context import TRANSACTION_FORMS
 from ..filings import _check_as_of
 from ..models import (
@@ -336,7 +336,8 @@ def find_sec_entities(query: str, *, as_of=None,
 
     def _attempt(backend: str, reported: int, retrieved: int,
                  status: str = "complete", error: Exception | None = None,
-                 pit_basis: str | None = None) -> None:
+                 pit_basis: str | None = None, truncated: bool = False,
+                 source_limit: str | None = None) -> None:
         attempts.append(SearchAttempt(
             attempt_id=f"{search_id}-{backend}",
             search_id=search_id,
@@ -349,7 +350,8 @@ def find_sec_entities(query: str, *, as_of=None,
             results_reported=reported,
             results_retrieved=retrieved,
             pages_retrieved=1,
-            truncated=False,
+            truncated=truncated,
+            source_limit=source_limit,
             pit_basis=pit_basis,
             error_type=type(error).__name__ if error else None,
             error_message=str(error) if error else None,
@@ -423,7 +425,7 @@ def find_sec_entities(query: str, *, as_of=None,
         else:
             _add(ticker_cik, "", [query.strip().upper()], "exact-ticker")
             _attempt("exact-ticker", 1, 1)
-        fetch_limit = 50 if exhaustive else 10
+        fetch_limit = 51 if exhaustive else 10
         for backend, fetch in (
             ("cik-lookup", lambda: get_cik_lookup_candidates(
                 query, limit=fetch_limit)),
@@ -439,10 +441,18 @@ def find_sec_entities(query: str, *, as_of=None,
                 errors.append(f"{backend} route failed: {exc}")
                 failed += 1
                 continue
-            for row in found:
-                _add(row.get("cik"), row.get("name"),
-                     list(row.get("tickers") or []), backend)
-            _attempt(backend, len(found), len(found))
+            if exhaustive and len(found or []) > 50:
+                for row in list(found or [])[:50]:
+                    _add(row.get("cik"), row.get("name"),
+                         list(row.get("tickers") or []), backend)
+                _attempt(backend, 51, 50, status="partial", truncated=True,
+                         source_limit="50 candidates")
+                warnings.append(f"{backend} candidate retrieval capped at 50; entity coverage partial")
+            else:
+                for row in found:
+                    _add(row.get("cik"), row.get("name"),
+                         list(row.get("tickers") or []), backend)
+                _attempt(backend, len(found), len(found))
         for cik_int, slot in sorted(pool.items()):
             try:
                 meta = get_submissions_metadata(cik_int)
@@ -504,9 +514,10 @@ def find_sec_entities(query: str, *, as_of=None,
                 warnings.append(note)
     if not entities and not errors:
         warnings.append(f"no SEC entity candidates for {query!r}")
+    has_partial = any(getattr(a, "status", None) in ("partial", "source_limited") for a in attempts)
     if failed and not entities:
         status: str = "failed"
-    elif failed:
+    elif failed or has_partial:
         status = "partial"
     else:
         status = "complete"
@@ -956,11 +967,18 @@ def _fetch_typed(query_fn, *, cap, root=None, **filters):
 
 
 
-def _warehouse_batch(store, form, qs, qe, *, root=None, limit=None):
+def _warehouse_batch(store, form, qs, qe, *, root=None):
+    """Date-scoped warehouse read, amendments included.
+
+    Returns (rows, exhausted, error): a limit=None date-scoped read is
+    exhaustive by construction; query failure returns ([], False, str(exc)).
+    Never raises.
+    """
     try:
-        rows = store.query_filings(forms=[form], start_date=qs, end_date=qe, limit=limit, root=root)
-    except Exception:
-        return []
+        forms = [form] if form.endswith("/A") else [form, f"{form}/A"]
+        rows = store.query_filings(forms=forms, start_date=qs, end_date=qe, limit=None, root=root)
+    except Exception as exc:
+        return [], False, str(exc)
     out = []
     for row in rows:
         try:
@@ -971,7 +989,7 @@ def _warehouse_batch(store, form, qs, qe, *, root=None, limit=None):
         if day and not qs <= day <= qe:
             continue
         out.append(filing)
-    return out
+    return out, True, None
 
 
 def _base_form(value: object) -> str:
@@ -1104,7 +1122,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     written += _store.store_insider_transaction(d, root=data_root)
                 return written, True, None
             if form == "13F-HR":
-                from ..insider import normalize_13f_holdings
+                from ..insider import normalize_13f_holdings, observe_13f_security
                 edgar_filing = get_by_accession_number(accession)
                 inner = edgar_filing.obj() if hasattr(edgar_filing, "obj") else edgar_filing
                 infotable = None
@@ -1125,6 +1143,12 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     known_at=known_at, source_url=source_url or None)
                 written = 0
                 for rec in recs or []:
+                    try:
+                        written += observe_13f_security(
+                            rec, raw_archive_path=raw_path, content_hash=content_hash,
+                            retrieved_at=retrieved_at, root=data_root)
+                    except Exception as exc:
+                        raise RuntimeError(f"identity observation failed: {exc}") from exc
                     d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
                     d.setdefault("raw_archive_path", raw_path)
                     d.setdefault("retrieved_at", retrieved_at)
@@ -1239,15 +1263,21 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                         except Exception:
                             pass
                     continue
-                if (year, quarter) == current:
-                    rows = get_current_filings(form, page_size=batch_size)
-                    feed_snapshot = True
-                    filing_skip = False
                 elif filing_done:
                     # Filing stage already complete: hydrate from the
                     # warehouse instead of refetching the live index.
-                    rows = _warehouse_batch(
+                    _batch, _exh, _err = _warehouse_batch(
                         _store, form, qs, qe, root=data_root)
+                    if _err is not None:
+                        _store.store_coverage(
+                            source, form, partition, "partial",
+                            coverage_date=job.get("end_date"), root=data_root)
+                        _store.store_checkpoint(
+                            "sec-backfill", source, key, "partial",
+                            error=_err, root=data_root)
+                        job_failed = True
+                        continue
+                    rows = _batch
                     feed_snapshot = False
                     filing_skip = True
                 else:
@@ -1778,7 +1808,7 @@ class SECDiscoveryService:
                     rows = list_sec_filings(
                         candidate.cik, forms=sub_forms,
                         start_date=request.start_date, end_date=request.end_date,
-                        as_of=as_of, limit=request.max_results or 50)
+                        as_of=as_of, limit=result_limit)
                 except Exception as exc:
                     _record("filer-submissions", str(candidate.cik), "failed",
                             error=exc,
@@ -1936,7 +1966,7 @@ class SECDiscoveryService:
                     for form in ordered_forms:
                         try:
                             rows = get_current_filings(
-                                form, page_size=batch_size)
+                                form, page_size=result_limit)
                         except Exception as exc:
                             _record("current-filings", form, "failed",
                                     error=exc,
@@ -1957,7 +1987,8 @@ class SECDiscoveryService:
                                 continue
                             if _keep(filing):
                                 kept.append(filing)
-                        _record("current-filings", form, "partial",
+                        _record("current-filings", form,
+                                "complete" if result_limit is None else "partial",
                                 reported=len(rows), retrieved=len(kept),
                                 pages=1,
                                 pit_basis="known_at" if as_of else None,
@@ -2708,81 +2739,21 @@ def search_sec_relationships(entity: object, relationship_types=None,
             _inv_open[0] += 1
         return _rows
 
-    # Inverse 13F: verified issuer/entity CIK -> canonical plus alias-mapped
-    # security IDs -> holdings -> manager CIKs. Unmapped issuers stay
-    # partial; holdings are never globally scanned.
+    # Inverse 13F: verified issuer/entity CIK -> governed CUSIP/ISIN mapping
+    # -> holdings -> manager CIKs. Unmapped issuers stay partial; holdings
+    # are never globally scanned.
     if ciks:
         try:
-            from ...storage import duckdb as _duck
             for cik in ciks:
                 try:
                     _eid = sec_entity_id(int(cik))
                 except Exception:
                     _eid = f"sec:cik:{cik}"
-                try:
-                    _canonical = sec_security_id(int(cik))
-                except Exception:
-                    _canonical = None
-                _keys: list[str] = []
-                if _canonical and all(_canonical != _k for _k in _keys):
-                    _keys.append(_canonical)
-                try:
-                    _alias_sql = (
-                        "SELECT alias_value FROM entity_aliases "
-                        "WHERE entity_id = ? AND alias_type IN "
-                        "('cusip', 'isin', 'security')")
-                    _alias_params: list = [_eid]
-                    if as_of is not None:
-                        _alias_sql += " AND (known_at IS NULL OR substr(known_at, 1, 10) <= ?)"
-                        _alias_params.append(as_of)
-                    _alias_rows = _duck.query(
-                        _alias_sql, params=_alias_params, data_root=data_root)
-                except Exception:
-                    _alias_rows = []
-                for _ar in _alias_rows or []:
-                    try:
-                        _v = str((_ar or {}).get("alias_value") or "").strip()
-                    except Exception:
-                        _v = ""
-                    if _v and all(_v != _k for _k in _keys):
-                        _keys.append(_v)
-                _held: list[dict] = []
-                _seen: set = set()
-
-                def _collect(_rows) -> None:
-                    for _row in _rows or []:
-                        _hk = (_row.get("accession"), _row.get("manager_cik"),
-                               _row.get("cusip"), _row.get("issuer_name"),
-                               _row.get("class_title"), _row.get("security_id"))
-                        if _hk not in _seen:
-                            _seen.add(_hk)
-                            _held.append(_row)
-
-                for _key in _keys:
-                    try:
-                        _collect(_inv_rows(_store.query_13f_holdings,
-                            security_id=_key, as_of=as_of))
-                    except Exception:
-                        pass
-                try:
-                    _collect(_inv_rows(_store.query_13f_holdings,
-                        entity_id=_eid, as_of=as_of))
-                except Exception:
-                    pass
-                for _key in _keys:
-                    _upper = str(_key).strip().upper()
-                    if not _upper or _upper == str(_canonical or "").strip().upper():
-                        continue
-                    try:
-                        _collect(_inv_rows(_store.query_13f_holdings,
-                            security=_upper, as_of=as_of))
-                    except Exception:
-                        pass
+                _held = _inv_rows(_store.query_13f_holdings_for_issuer, entity_id=_eid, as_of=as_of)
                 for _row in _held:
                     _emit("holding_manager", "verified", {
                         "from_entity_id": _row.get("manager_cik"),
-                        "to_entity_id": _row.get("issuer_cik")
-                        or _row.get("cusip") or _row.get("security"),
+                        "to_entity_id": _row.get("entity_id"),
                         "accession": _row.get("accession"),
                         "document_name": _row.get("document_name"),
                         "known_at": _row.get("known_at")})
@@ -2903,11 +2874,23 @@ def search_sec_relationships(entity: object, relationship_types=None,
         try:
             from ..client import search_sec_filings
             found = 0
+            _efts_capped = False
+            _efts_failed = False
+            _efts_note = ""
             for cik in ciks:
                 result = search_sec_filings(
                     cik,
                     limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else min(limit, 20),
                     as_of=as_of)
+                _status = getattr(getattr(result, "coverage", None), "status", None)
+                warnings.extend(list(getattr(result, "warnings", None) or []))
+                warnings.extend(list(getattr(result, "errors", None) or []))
+                if _status in ("partial", "source_limited", "complete_within_source_limits"):
+                    _efts_capped = True
+                    _efts_note = f"efts coverage {_status}"
+                elif _status == "failed":
+                    _efts_failed = True
+                    _efts_note = f"efts coverage {_status}"
                 for hit in result.text_hits:
                     mentions.append({
                         "relationship_type": "mention",
@@ -2917,9 +2900,10 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "source_span": hit.query,
                         "known_at": None})
                     found += 1
-            if exhaustive and found >= _LOCAL_EXHAUSTIVE_GUARD:
-                _record("efts-mentions", "partial", found=found,
-                        reason="retrieval capped at local exhaustive guard")
+            if _efts_failed and found == 0:
+                _record("efts-mentions", "failed", found=found, reason=_efts_note)
+            elif _efts_failed or _efts_capped:
+                _record("efts-mentions", "partial", found=found, reason=_efts_note)
             else:
                 _record("efts-mentions", "complete", found=found)
         except Exception as exc:
@@ -2944,9 +2928,16 @@ def search_sec_relationships(entity: object, relationship_types=None,
                 e.get("relationship_type"), _active, _demoted))
     except Exception:
         pass
+    _n_typed, _n_wf, _n_m = len(typed), len(workflow), len(mentions)
     typed = typed[:limit]
     workflow = workflow[:limit]
     mentions = mentions[:limit]
+    if _n_typed > limit:
+        warnings.append(f"typed truncated to limit {limit}")
+    if _n_wf > limit:
+        warnings.append(f"workflow truncated to limit {limit}")
+    if _n_m > limit:
+        warnings.append(f"mentions truncated to limit {limit}")
     groups: dict = {}
     for entry in typed + workflow + mentions:
         rtype = entry.get("relationship_type") or "unknown"
