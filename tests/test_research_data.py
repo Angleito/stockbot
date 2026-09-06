@@ -116,8 +116,7 @@ def test_refresh_data_offline_end_to_end(tmp_path, monkeypatch):
     assert parquet.read_table("financial_facts", root=tmp_path / "parquet").num_rows == 2
 
     # Market-wide screen (P1 promise): the leaderboard is not universe-bound.
-    monkeypatch.setattr(screens, "DEFAULT_DATA_ROOT", tmp_path)
-    result = screens.materialize_short_interest_screen("2026-08-14")
+    result = screens.materialize_short_interest_screen("2026-08-14", data_root=tmp_path)
     assert [e["ticker"] for e in result["entries"]] == ["AAPL", "AMD"]  # 20/100 > 20/200
     assert result["coverage"]["finra_rows"] == 3
     assert result["coverage"]["eligible_rows"] == 2
@@ -137,10 +136,8 @@ def test_cli_refresh_data_coverage_report(tmp_path, monkeypatch, capsys):
         _page([_finra_row("XOM", 5)], 3, 2),
     ]
     _install_mocks(monkeypatch, get_script, page_script, sleeps)
-    monkeypatch.setattr(research_data, "DEFAULT_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(screens, "DEFAULT_DATA_ROOT", tmp_path)
 
-    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [])
+    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=tmp_path)
     out = capsys.readouterr().out
 
     assert "FINRA securities:             3" in out
@@ -252,15 +249,13 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
         _page([_finra_row("XOM", 5)], 4, 3),
     ]
     _install_mocks(monkeypatch, get_script, page_script, sleeps)
-    monkeypatch.setattr(research_data, "DEFAULT_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(screens, "DEFAULT_DATA_ROOT", tmp_path)
 
     # One CLI run drives prepare + materialize; a replay of the screen then
     # re-reads the persisted run (unique-key dedup makes it a no-op write).
-    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [])
+    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=tmp_path)
     out = capsys.readouterr().out
 
-    result = screens.materialize_short_interest_screen("2026-08-14")
+    result = screens.materialize_short_interest_screen("2026-08-14", data_root=tmp_path)
     coverage = result["coverage"]
     assert coverage["finra_rows"] == 4
     assert coverage["valid_short_interest_rows"] == 3  # BAD excluded here

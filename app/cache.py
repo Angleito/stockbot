@@ -5,23 +5,37 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cache.db")
+from .config import get_data_root
+
+DB_PATH = str(get_data_root() / "cache.db")
 
 _local = threading.local()
 
 
+def _db_path() -> str:
+    return str(get_data_root() / "cache.db")
+
+
 def _conn() -> sqlite3.Connection:
+    db_path = _db_path()
     conn = getattr(_local, "conn", None)
-    if conn is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
+    if conn is None or getattr(_local, "path", None) != db_path:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at REAL NOT NULL)"
         )
         conn.commit()
         _local.conn = conn
+        _local.path = db_path
     return conn
 
 

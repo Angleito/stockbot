@@ -209,10 +209,7 @@ def test_evidence_claims_respect_request_context_data_root(monkeypatch, tmp_path
 
 
 def test_evidence_resolution_respects_data_root(monkeypatch, tmp_path):
-    from app.storage import duckdb
     default_root = tmp_path / "default_parquet"
-    monkeypatch.setattr(parquet, "DEFAULT_PARQUET_ROOT", default_root)
-    monkeypatch.setattr(duckdb, "DEFAULT_DATA_ROOT", default_root)
     data_root = tmp_path / "research"
     parquet.write_rows("entity_aliases", [{
         "alias_type": "ticker",
@@ -238,8 +235,8 @@ def test_evidence_resolution_respects_data_root(monkeypatch, tmp_path):
     assert rows[0]["subject_resolution"] == "resolved"
     assert rows[0]["ticker"] == "QTST"
     assert rows[0]["entity_id"] == "sec:cik:0000999999"
-    default_builder = ContextBuilder(run_security=_run_security(), model="test")
+    default_builder = ContextBuilder(run_security=_run_security(), model="test", data_root=default_root)
     assert default_builder.add_tool_result("search_web", {}, "unused", "call_1") is True
-    default_rows = parquet.read_table("evidence_claims", root=default_root).to_pylist()
+    default_rows = parquet.read_table("evidence_claims", root=default_root / "parquet").to_pylist()
     assert len(default_rows) == 1
     assert default_rows[0]["subject_resolution"] == "unresolved"

@@ -54,11 +54,11 @@ def _cmd_runs(limit: int) -> None:
         )
 
 
-def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int]) -> None:
-    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks)
+def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | None = None) -> None:
+    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks, data_root=data_root)
     print(json.dumps(summary, indent=2))
     from app.analytics.screens import materialize_short_interest_screen
-    result = materialize_short_interest_screen(settlement_date)
+    result = materialize_short_interest_screen(settlement_date, data_root=data_root)
     if result.get("error"):
         print(f"Leaderboard error: {result['error']}")
         return
@@ -327,6 +327,7 @@ def _build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
     refresh_parser.add_argument("--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)")
     refresh_parser.add_argument("--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)")
+    refresh_parser.add_argument("--data-root", default=None, help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
     subparsers.add_parser("replay-sec-facts", help="replay archived SEC companyfacts payloads into the Parquet store (offline)")
     obligations_parser = subparsers.add_parser("refresh-obligations", help="extract obligations for a ticker and persist events/evidence into the store")
     obligations_parser.add_argument("ticker", help="ticker, e.g. NVDA")
@@ -390,7 +391,7 @@ def main() -> None:
     elif args.command == "inspect":
         _cmd_inspect(args.run_id)
     elif args.command == "refresh-data":
-        _cmd_refresh_data(args.settlement_date, args.ticker, args.cik)
+        _cmd_refresh_data(args.settlement_date, args.ticker, args.cik, args.data_root or None)
     elif args.command == "replay-sec-facts":
         _cmd_replay_sec_facts()
     elif args.command == "refresh-obligations":

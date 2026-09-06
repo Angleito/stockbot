@@ -19,7 +19,7 @@ from typing import Any, Optional, Sequence
 import requests
 
 from .. import finra_client
-from ..config import finra_use_mock
+from ..config import finra_use_mock, get_data_root
 from ..normalization import (
     normalize_sec_tickers,
     normalize_sec_company_facts,
@@ -27,7 +27,7 @@ from ..normalization import (
 )
 from ..storage import parquet, raw_archive
 
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_ROOT = get_data_root()
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -84,7 +84,7 @@ def _sec_get(url: str) -> bytes:
 
 
 def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict:
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_TICKERS_URL
     payload = _sec_get(url)
@@ -137,7 +137,7 @@ def _normalize_and_write_company_facts(
 
 
 def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict:
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_FACTS_URL.format(cik=cik)
     payload = _sec_get(url)
@@ -166,7 +166,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
     rows are deterministic; existing rows dedup to zero writes.  Failures are
     isolated per payload and reported, never raised mid-iteration.
     """
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     raw_root = data_root / "raw"
     archived_payloads = 0
     written_rows = 0
@@ -201,7 +201,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
 
 
 def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict:
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
     url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
     fields = (

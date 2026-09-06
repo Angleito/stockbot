@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+
+from .config import get_data_root
 
 
 class Capability(StrEnum):
@@ -50,7 +52,7 @@ class RequestContext:
     capabilities: frozenset[Capability]
     model_policy: ModelPolicy = ModelPolicy()
     tool_policy: ToolPolicy = ToolPolicy()
-    data_root: Path = Path(__file__).resolve().parent.parent / "data"
+    data_root: Path = field(default_factory=get_data_root)
     as_of: str | None = None
     run_limits: RunLimits = RunLimits()
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..analytics.screens import _resolve_as_of
+from ..config import get_data_root
 from ..domain.portfolio import PortfolioSnapshot, Position
 from ..storage import duckdb
 
@@ -26,7 +27,7 @@ SEC_CONCEPTS: tuple[str, ...] = (
     "EntityCommonStockSharesOutstanding",
 )
 
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_ROOT = get_data_root()
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ def enrich_portfolio_research(
 ) -> list[PortfolioResearchPosition]:
     """Enrich every snapshot position with its latest SEC facts and FINRA
     short-interest metrics, each restricted to ``known_at <= as_of``."""
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     as_of_str = _resolve_as_of(as_of.isoformat() if as_of is not None else None)
     results: list[PortfolioResearchPosition] = []
     for position in snapshot.positions:

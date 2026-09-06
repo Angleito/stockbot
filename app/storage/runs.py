@@ -21,6 +21,7 @@ from typing import Any, Optional
 import requests
 
 from ..redact import redact_json, redact_text
+from ..config import get_data_root
 from ..runtime import EventType, ExecutionBudget
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def model_error_category(exc: Exception) -> str:
     return "other"
 
 # Default data root when the recorder is not given an explicit one.
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_ROOT = get_data_root()
 
 # Approximate USD per 1M input/output tokens (as of 2025-06); used only when
 # the provider does not report usage.cost.
@@ -142,7 +143,7 @@ class RunRecorder:
         self.prompt_version = prompt_version
         self.tool_registry_version = tool_registry_version
         self.git_sha = git_sha
-        self._data_root = data_root or DEFAULT_DATA_ROOT
+        self._data_root = Path(data_root) if data_root else get_data_root()
         self.max_result_bytes = max_result_bytes
         self.enabled = False
         self._conn: Optional[sqlite3.Connection] = None

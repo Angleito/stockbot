@@ -21,7 +21,9 @@ from typing import Any, Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-DEFAULT_PARQUET_ROOT = Path(__file__).resolve().parent.parent.parent / "data" / "parquet"
+from ..config import get_data_root
+
+DEFAULT_PARQUET_ROOT = get_data_root() / "parquet"
 
 TEXT = pa.string()
 DOUBLE = pa.float64()
@@ -506,7 +508,7 @@ def _unique_key(row: dict, keys: tuple[str, ...]) -> tuple[str, ...]:
 
 def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
     """Read a full dataset (all partitions) as a pyarrow Table."""
-    root = root or DEFAULT_PARQUET_ROOT
+    root = Path(root) if root else get_data_root() / "parquet"
     ds = dataset(name)
     directory = root / ds.name
     if not directory.exists():
@@ -521,7 +523,7 @@ def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
 def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
     """Append rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
-    root = root or DEFAULT_PARQUET_ROOT
+    root = Path(root) if root else get_data_root() / "parquet"
     ds = dataset(name)
     if not rows:
         return 0

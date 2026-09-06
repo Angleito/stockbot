@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-DEFAULT_RAW_ROOT = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
+from ..config import get_data_root
+
+DEFAULT_RAW_ROOT = get_data_root() / "raw"
 
 MANIFEST_SUFFIX = ".manifest.json"
 PAYLOAD_SUFFIX = ".json"
@@ -68,7 +70,7 @@ def archive(
     Idempotent: archiving the same bytes for the same (source, kind, key)
     returns the existing record without rewriting anything.
     """
-    root = root or DEFAULT_RAW_ROOT
+    root = Path(root) if root else get_data_root() / "raw"
     digest = content_hash(payload)
     directory = root / _safe_component(source) / _safe_component(kind) / _safe_component(key)
     payload_path = directory / f"{digest[:16]}{PAYLOAD_SUFFIX}"
@@ -123,7 +125,7 @@ def find(
 ) -> Optional[ArchiveRecord]:
     """Return the archived record for a (source, kind, key), optionally
     narrowed by content hash, or None."""
-    root = root or DEFAULT_RAW_ROOT
+    root = Path(root) if root else get_data_root() / "raw"
     directory = root / _safe_component(source) / _safe_component(kind) / _safe_component(key)
     if not directory.is_dir():
         return None
@@ -144,7 +146,7 @@ def iter_archive(
     root: Optional[Path] = None,
 ) -> Iterable[ArchiveRecord]:
     """All archived payload revisions for one source key, oldest first."""
-    root = root or DEFAULT_RAW_ROOT
+    root = Path(root) if root else get_data_root() / "raw"
     directory = root / _safe_component(source) / _safe_component(kind) / _safe_component(key)
     if not directory.is_dir():
         return

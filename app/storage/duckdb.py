@@ -20,11 +20,12 @@ from typing import Any, Optional, Sequence
 
 import duckdb
 import pyarrow.parquet as pq
+from ..config import get_data_root
 
 from ..domain.market.securities import TickerAlias
 from . import mappers, parquet
 
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_ROOT = get_data_root()
 
 _DATE_GRANULARITY_AS_OF = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 
@@ -50,7 +51,7 @@ def _data_roots(data_root: Path) -> tuple[Path, Path]:
 
 def _connect(data_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
     """Open (creating if needed) the warehouse database for a data root."""
-    parquet_root, db_root = _data_roots(Path(data_root) if data_root else DEFAULT_DATA_ROOT)
+    parquet_root, db_root = _data_roots(Path(data_root) if data_root else get_data_root())
     db_root.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_root / "warehouse.duckdb"))
     _register_views(conn, parquet_root)

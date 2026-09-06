@@ -6,12 +6,25 @@ edgartools identity configuration lives behind the edgar boundary in
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 
 from .log_stream import LogStreamHandler
-from .policy import ChatPolicy
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def get_data_root() -> Path:
+    """Single durable-data root: STOCKBOT_DATA_DIR else <repo>/data."""
+    raw = (os.getenv("STOCKBOT_DATA_DIR") or "").strip()
+    if not raw:
+        return REPO_ROOT / "data"
+    p = Path(os.path.expanduser(raw))
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return p
 
 # Default fallback only when the env var is unset. Keep env/CLI overrides
 # authoritative; this value must be valid on the target OpenRouter account.
@@ -96,8 +109,9 @@ def configure_logging(*, stream_url: str | None = None) -> None:
         logging.getLogger().addHandler(handler)
 
 
-def get_local_chat_policy() -> ChatPolicy:
+def get_local_chat_policy():  # type: ignore[no-untyped-def]
     """Build the single-principal runtime chat policy from local config."""
+    from .policy import ChatPolicy
     configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
     return ChatPolicy(
         allowed_models=frozenset({

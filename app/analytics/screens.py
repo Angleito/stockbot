@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from .. import finra_client
+from ..config import get_data_root
 from ..storage import duckdb, parquet
 
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_ROOT = get_data_root()
 SCREEN_CALC_VERSION = "short-interest-leaderboard-v2"
 SLICE_CALC_VERSION = "short-interest-change-slice-v1"
 DEFAULT_LIMIT = 10
@@ -229,7 +230,7 @@ def materialize_short_interest_screen(
     coverage, exclusions, fact provenance, and calculation version before
     any bounded result is returned.
     """
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     as_of = _resolve_as_of(as_of)
     rows, conflicting = _snapshot_rows(settlement_date, as_of, data_root)
     if not rows:
@@ -375,7 +376,7 @@ def read_short_interest_screen(
     data_root: Optional[Path] = None,
 ) -> dict:
     """Read a published screen run, bounded to ``limit`` entries."""
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     limit = _clamp_limit(limit)
     as_of = _resolve_as_of(as_of)
     runs = duckdb.query(
@@ -564,7 +565,7 @@ def short_interest_change_screen(
     never alter a slice computed at an earlier ``as_of``.  Missing prior
     cycles or facts are reported as None, never as zero.
     """
-    data_root = Path(data_root or DEFAULT_DATA_ROOT)
+    data_root = Path(data_root) if data_root else get_data_root()
     limit = _clamp_limit(limit)
     dates = _cycle_settlement_dates(as_of, data_root)
     if not dates:
