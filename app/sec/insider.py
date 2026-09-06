@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .cusip import normalize_cusip, normalize_isin
 from .models import InsiderTransaction, ProposedInsiderSale
 
 TRANSACTION_KINDS = {
@@ -465,14 +466,8 @@ def is_13f_notice(form) -> bool:
 
 
 def _13f_security_id(cusip: str | None, isin: str | None) -> str | None:
-    try:
-        c = "".join(ch for ch in str(cusip) if ch.isalnum()).upper() if cusip else None
-    except Exception:
-        c = None
-    try:
-        i = str(isin or "").strip().upper() or None
-    except Exception:
-        i = None
+    c = normalize_cusip(cusip)
+    i = normalize_isin(isin)
     if c:
         return f"cusip:{c}"
     if i:
@@ -513,9 +508,7 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
                 return value
         return None
 
-    cusip = _str_or_none(_cell("Cusip", "cusip", "CUSIP"))
-    if cusip is not None:
-        cusip = "".join(ch for ch in cusip if ch.isalnum()).upper() or None
+    cusip = normalize_cusip(_cell("Cusip", "cusip", "CUSIP"))
     put_call = _str_or_none(_cell("PutCall", "put_call", "putCall"))
     if put_call is not None:
         put_call = put_call.strip().title() or None
@@ -530,10 +523,7 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
     except Exception:
         known = filed_at
     isin_raw = _str_or_none(_cell("Isin", "isin", "ISIN"))
-    try:
-        isin_norm = str(isin_raw or "").strip().upper() or None
-    except Exception:
-        isin_norm = None
+    isin_norm = normalize_isin(isin_raw)
     return InstitutionalHolding(
         manager_name=_str_or_none(manager_name),
         manager_cik=str(manager_cik).strip() if manager_cik is not None else None,
@@ -604,15 +594,8 @@ def observe_13f_security(holding, *, raw_archive_path, content_hash, retrieved_a
     from pathlib import Path as _Path
     from ..storage import parquet
     from ..storage.raw_archive import content_hash as _hash
-    try:
-        cusip = getattr(holding, "cusip", None)
-        cusip = "".join(ch for ch in str(cusip) if ch.isalnum()).upper() if cusip else None
-    except Exception:
-        cusip = None
-    try:
-        isin = str(getattr(holding, "isin", None) or "").strip().upper() or None
-    except Exception:
-        isin = None
+    cusip = normalize_cusip(getattr(holding, "cusip", None))
+    isin = normalize_isin(getattr(holding, "isin", None))
     try:
         class_title = str(getattr(holding, "class_title", None) or "").strip() or None
     except Exception:

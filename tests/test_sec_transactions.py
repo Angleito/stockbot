@@ -92,3 +92,12 @@ def test_store_transaction_unknown_status_both_directions(tmp_path):
     # Registration without closing evidence keeps status unknown.
     assert [r["status"] for r in by_subject] == ["unknown"]
     assert by_subject[0]["filer_name"] == "Acquirer Inc"
+
+
+def test_empty_target_falls_back_to_text_span():
+    txn = normalize_transaction("acc-9", "S-4", target="",
+                                filer_name="Acquirer Inc", filer_cik=111111,
+                                text="Proposed merger with Target Co; terms disclosed.")
+    assert txn.target == "Target Co"
+    assert txn.event_id.startswith("TARGET CO:")
+    assert txn.filer_name == "Acquirer Inc"

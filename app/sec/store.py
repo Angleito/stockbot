@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..storage import duckdb, parquet, raw_archive
+from .cusip import normalize_cusip, normalize_isin
 from .models import Filing
 
 PARSER_VERSION = "1"
@@ -862,8 +863,8 @@ def store_13f_holding(
         "entity_id": d.get("entity_id"),
         "security_id": d.get("security_id"),
         "class_title": d.get("class_title"),
-        "cusip": "".join(ch for ch in str(d["cusip"]) if ch.isalnum()).upper() if d.get("cusip") is not None else None,
-        "isin": str(d["isin"]).strip().upper() if d.get("isin") is not None else None,
+        "cusip": normalize_cusip(d.get("cusip")),
+        "isin": normalize_isin(d.get("isin")),
         "shares": d.get("shares"),
         "value": d.get("value"),
         "put_call": d.get("put_call"),
@@ -904,11 +905,62 @@ def query_13f_holdings(
     if security_id is not None:
         where.append("security_id = ?")
         params.append(str(security_id).strip())
-    key = security if security is not None else cusip if cusip is not None else isin
-    if key is not None:
-        normalized = str(key).strip().upper()
-        where.append("(cusip = ? OR isin = ? OR security_id = ?)")
-        params.extend([normalized, normalized, normalized])
+    if cusip is not None:
+        cusip_norm = normalize_cusip(cusip)
+        if cusip_norm is None:
+            # Binds None, matching nothing; never IS NULL.
+            where.append("cusip = ?")
+            params.append(None)
+        else:
+            # regexp arm keeps pre-fix dashed rows resolvable (no migration).
+            where.append(
+                "(cusip = ?"
+                " OR UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?)")
+            params.extend([cusip_norm, cusip_norm])
+    if isin is not None:
+        # Binds None, matching nothing; never IS NULL.
+        where.append("isin = ?")
+        params.append(normalize_isin(isin))
+    if security is not None:
+        raw = str(security).strip().upper()
+        arms: list[str] = []
+        vals: list = []
+        if ":" in raw:
+            _, _, suffix = raw.partition(":")
+            arms.append("UPPER(security_id) = ?")
+            vals.append(raw)
+            suffix_cusip = normalize_cusip(suffix)
+            if suffix_cusip is not None:
+                arms.append("cusip = ?")
+                vals.append(suffix_cusip)
+                arms.append(
+                    "UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?")
+                vals.append(suffix_cusip)
+            suffix_isin = normalize_isin(suffix)
+            if suffix_isin is not None:
+                arms.append("isin = ?")
+                vals.append(suffix_isin)
+        else:
+            sec_cusip = normalize_cusip(security)
+            sec_isin = normalize_isin(security)
+            if sec_cusip is not None:
+                arms.append("cusip = ?")
+                vals.append(sec_cusip)
+                arms.append(
+                    "UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?")
+                vals.append(sec_cusip)
+            if sec_isin is not None:
+                arms.append("isin = ?")
+                vals.append(sec_isin)
+            ids = [raw]
+            if sec_cusip is not None:
+                ids.append(f"CUSIP:{sec_cusip}")
+            if sec_isin is not None:
+                ids.append(f"ISIN:{sec_isin}")
+            arms.append(f"UPPER(security_id) IN ({', '.join(['?'] * len(ids))})")
+            vals.extend(ids)
+        where.append("(" + " OR ".join(arms) + ")")
+        params.extend(vals)
     if accession is not None:
         where.append("accession = ?")
         params.append(str(accession))
@@ -1007,12 +1059,20 @@ def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None
         " AND (a._vt IS NULL OR substr(h.report_period, 1, 10) < substr(a._vt, 1, 10))"
         " GROUP BY h._prov, substr(h.report_period, 1, 10)), "
         "sole AS (SELECT _prov, _period, _sole FROM mapping WHERE _n = 1 AND _sole = ?) "
-        "SELECT h.*, f.form AS filing_form, f.is_amendment AS is_amendment,"
-        " f.amendment_of AS amendment_of, f.accepted_at AS accepted_at"
+        "SELECT * FROM ("
+        " SELECT h.*, f.form AS filing_form, f.is_amendment AS is_amendment,"
+        " f.amendment_of AS amendment_of, f.accepted_at AS accepted_at,"
+        " ROW_NUMBER() OVER ("
+        " PARTITION BY h.accession, h.manager_cik, h._prov,"
+        " h.class_title, h.put_call, h.discretion"
+        " ORDER BY CASE WHEN h.cusip = UPPER(regexp_replace("
+        " h.cusip, '[^A-Za-z0-9]+', '', 'g'))"
+        " THEN 0 ELSE 1 END,"
+        " h.cusip) AS _rn"
         " FROM holdings h JOIN sole s ON s._prov = h._prov"
         " AND s._period = substr(h.report_period, 1, 10)"
         " LEFT JOIN sec_filings f ON f.accession = h.accession"
-        " ORDER BY h.known_at DESC"
+        " ) WHERE _rn = 1 ORDER BY known_at DESC"
     )
     if as_of_val is not None:
         params.extend([as_of_val])

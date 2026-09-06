@@ -232,6 +232,13 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
                           document_name=None, known_at=None,
                           source_url=None) -> Transaction:
     parties = extract_transaction_parties(obj, text=text)
+    resolved_target = (
+        _str_or_none(target)
+        or _str_or_none(subject_name)
+        or _str_or_none(parties.get("subject_name"))
+        or _str_or_none(parties.get("target_name"))
+        or ""
+    )
     # Explicit args win, structured evidence next, spans last; the filer is
     # never copied into subject/target/acquirer.
     acquirer_name = (_str_or_none(acquirer) or _str_or_none(buyer)
@@ -253,8 +260,8 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
             or acquirer is not None or buyer is not None):
         method = "structured-header" if obj is not None else method
     return Transaction(
-        event_id=f"{target.upper()}:{deal_type}:{accession_no}",
-        target=target,
+        event_id=f"{resolved_target.upper()}:{deal_type}:{accession_no}",
+        target=resolved_target,
         buyer=buyer,
         deal_type=deal_type,
         announced_at=announced_at or filed_at,

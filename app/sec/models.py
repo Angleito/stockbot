@@ -8,6 +8,7 @@ via accession_no + source.
 
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Optional
+from .cusip import normalize_cusip as normalize_cusip
 
 
 def pit_of(record) -> tuple[Optional[str], Optional[str]]:
@@ -582,8 +583,9 @@ class Transaction:
     status: str = "unknown"
     source_accessions: tuple = ()
     # Phase 7: filer/subject/target/acquirer/offeror/security split.
-    # Subject/target come only from structured/explicit evidence, never a
-    # filer copy. Status stays unknown without closing evidence.
+    # Subject comes only from structured/explicit evidence; target
+    # additionally falls back to exact document spans, never a filer copy.
+    # Status stays unknown without closing evidence.
     filer_cik: Optional[str] = None
     filer_name: Optional[str] = None
     subject_cik: Optional[str] = None
