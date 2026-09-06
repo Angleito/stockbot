@@ -3,14 +3,23 @@
 RUNS_DB_PATH is isolated per session by the root conftest fixture.
 """
 
+import sqlite3
+import threading
+from datetime import datetime, timezone
+
 import pytest
 
 from app import finra_analysis
 from app.redact import redact_json, redact_text, redact_value
 from app.runtime import BudgetExhaustedError, ExecutionBudget
 from app.security import quarantine_reader
-from app.storage.runs import reset_current_budget, set_current_budget
-
+from app.storage.runs import (
+    RunRecorder,
+    reset_current_budget,
+    reset_current_recorder,
+    set_current_budget,
+    set_current_recorder,
+)
 
 def _usage(**overrides):
     usage = {
@@ -148,3 +157,169 @@ def test_reserve_methods_enforce_runtime(monkeypatch):
             quarantine_reader._llm_complete("test", "prompt")
     finally:
         reset_current_budget(token)
+
+def _recorder(run_id, **overrides):
+    kwargs = {
+        "request_id": "req", "question": "q", "as_of": None, "model": "t",
+        "provider": "p", "model_parameters": {}, "agent_version": "0",
+        "prompt_version": "0", "tool_registry_version": "t", "git_sha": "g",
+    }
+    kwargs.update(overrides)
+    return RunRecorder(run_id=run_id, **kwargs)
+
+
+def test_concurrent_tool_reservations_capped():
+    """8 threads racing for 20 tool slots hand out exactly 20."""
+    budget = ExecutionBudget(
+        max_rounds=8, max_tool_calls=20, max_model_calls=8,
+        max_runtime=600.0, max_evidence_tokens=48000,
+    )
+    granted = []
+    lock = threading.Lock()
+
+    def worker():
+        local = [budget.reserve_tool_call() for _ in range(10)]
+        with lock:
+            granted.extend(local)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(granted) == 20
+    assert budget.tool_calls == 20
+
+
+def test_concurrent_recorder_writes_unique_ids(tmp_path, monkeypatch):
+    """8 threads x 10 tool+evidence rows keep every row with a unique ID."""
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    recorder = _recorder("run-conc-1")
+    with recorder:
+        def worker():
+            for _ in range(10):
+                seq = recorder.next_tool_seq()
+                tc_id = f"{recorder.run_id}:tc:{seq}"
+                now = datetime.now(timezone.utc).isoformat()
+                recorder.record_tool_call(
+                    tool_call_id=tc_id, round=0, tool_name="search_tools",
+                    arguments_json="{}", started_at=now, completed_at=now,
+                    status="completed", result_row_count=0, returned_count=0,
+                    truncated=False, result_bytes=2, result_hash="h",
+                    source_names="[]", source_freshness="{}",
+                    as_of=None, error_type=None, error_message=None,
+                )
+                recorder.record_evidence(
+                    evidence_id=f"{recorder.run_id}:evid:{recorder.next_evidence_seq():04d}",
+                    run_id=recorder.run_id, tool_call_id=tc_id, round=0,
+                    tool_name="search_tools", rendered_hash="h", rendered_bytes=1,
+                    estimated_tokens=1, source_names="[]", source_freshness="{}",
+                    as_of=None, rendered_text="t",
+                )
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    conn = sqlite3.connect(str(tmp_path / "runs.sqlite"))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 80
+        assert conn.execute("SELECT COUNT(DISTINCT tool_call_id) FROM tool_calls").fetchone()[0] == 80
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 80
+        assert conn.execute("SELECT COUNT(DISTINCT evidence_id) FROM evidence").fetchone()[0] == 80
+    finally:
+        conn.close()
+
+
+def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path, monkeypatch):
+    """Pre-telemetry DBs gain the columns on open; queue/handler/cache persist."""
+    path = tmp_path / "runs.sqlite"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,"
+        " started_at TEXT NOT NULL, question TEXT NOT NULL, model_provider TEXT,"
+        " model_name TEXT, model_parameters TEXT, agent_version TEXT,"
+        " prompt_version TEXT, tool_registry_version TEXT, git_sha TEXT, as_of TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE tool_calls (tool_call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL,"
+        " round INTEGER, tool_name TEXT NOT NULL, tool_version TEXT, arguments_json TEXT,"
+        " started_at TEXT NOT NULL, completed_at TEXT, duration_ms REAL, status TEXT,"
+        " result_row_count INTEGER, returned_count INTEGER, truncated INTEGER,"
+        " result_bytes INTEGER, result_hash TEXT, source_names TEXT, source_freshness TEXT,"
+        " as_of TEXT, error_type TEXT, error_message TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("RUNS_DB_PATH", str(path))
+    with _recorder("run-tel-1") as recorder:
+        now = datetime.now(timezone.utc).isoformat()
+        recorder.record_tool_call(
+            tool_call_id="run-tel-1:tc:1", round=0, tool_name="search_tools",
+            arguments_json="{}", started_at=now, completed_at=now,
+            status="completed", result_row_count=0, returned_count=0,
+            truncated=False, result_bytes=2, result_hash="h",
+            source_names="[]", source_freshness="{}", as_of=None,
+            error_type=None, error_message=None, protocol_id="proto-1",
+            bridge_queue_ms=3.5, handler_ms=12.25, cache_hit=True,
+            cache_type="stockbot_parsed",
+        )
+    # Reopen proves the migration is idempotent.
+    with _recorder("run-tel-2"):
+        pass
+    conn = sqlite3.connect(str(path))
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+        assert {"protocol_id", "bridge_queue_ms", "handler_ms", "cache_hit", "cache_type"} <= cols
+        row = conn.execute(
+            "SELECT protocol_id, bridge_queue_ms, handler_ms, cache_hit, cache_type"
+            " FROM tool_calls WHERE tool_call_id = 'run-tel-1:tc:1'"
+        ).fetchone()
+        assert row == ("proto-1", 3.5, 12.25, 1, "stockbot_parsed")
+    finally:
+        conn.close()
+
+
+def test_execute_pi_tool_ids_and_telemetry(tmp_path, monkeypatch):
+    """Pi-supplied call IDs become run-scoped rows; handler/queue/cache persist."""
+    import app.pi_gateway as gateway
+
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    monkeypatch.setattr(
+        gateway, "execute_tool",
+        lambda *a, **k: {"ok": True, "cache_hit": True, "cache_type": "unit_test"},
+    )
+    session = gateway.PiSessionContext(session_id="s1")
+    with _recorder("run-pi-1") as recorder:
+        token = set_current_recorder(recorder)
+        try:
+            fallback = gateway.execute_pi_tool("search_tools", {}, session)
+            assert fallback.get("content")
+            correlated = gateway.execute_pi_tool(
+                "search_tools", {}, session, tool_call_id="call-9",
+                protocol_id="proto-9", bridge_queue_ms=7.5,
+            )
+            assert correlated.get("content")
+            assert "proto-9" not in correlated["content"]
+        finally:
+            reset_current_recorder(token)
+    conn = sqlite3.connect(str(tmp_path / "runs.sqlite"))
+    try:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "SELECT tool_call_id, protocol_id, bridge_queue_ms, handler_ms,"
+                " cache_hit, cache_type FROM tool_calls"
+            )
+        }
+        seq_id, pi_id = "run-pi-1:tc:1", "run-pi-1:tc:call-9"
+        assert rows[seq_id][0] is None
+        assert rows[seq_id][1] == 0.0
+        assert rows[seq_id][2] is not None and rows[seq_id][2] >= 0.0
+        assert tuple(rows[seq_id][3:]) == (1, "unit_test")
+        assert rows[pi_id][:3] == ("proto-9", 7.5, rows[pi_id][2])
+        assert rows[pi_id][2] is not None and rows[pi_id][2] >= 0.0
+        assert tuple(rows[pi_id][3:]) == (1, "unit_test")
+    finally:
+        conn.close()

@@ -13,16 +13,31 @@ import { Type } from "typebox";
 
 export type Json = Record<string, unknown>;
 
-export function toolCallRequest(runId: string, name: string, params: Json): Json {
-	return { op: "tool_call", name, arguments: params, run_id: runId };
+export function toolCallRequest(
+ id: string,
+ runId: string,
+ toolCallId: string,
+ name: string,
+ params: Json,
+ bridgeQueueMs = 0,
+): Json {
+ return {
+  id,
+  op: "tool_call",
+  run_id: runId,
+  tool_call_id: toolCallId,
+  name,
+  arguments: params,
+  bridge_queue_ms: bridgeQueueMs,
+ };
 }
 
 export function bridgeModelText(bridge: Json): string {
-	const result = bridge.result;
-	if (result && typeof result === "object" && typeof (result as Json).content === "string") {
-		return (result as Json).content as string;
-	}
-	return JSON.stringify(bridge);
+ const result = bridge.result;
+ if (result && typeof result === "object" && typeof (result as Json).content === "string") {
+  return (result as Json).content as string;
+ }
+ return JSON.stringify(bridge);
 }
 
 // Absolute bridge paths derived from this file's location: Pi's extension
@@ -36,373 +51,422 @@ const TOOL_TIMEOUT_MS = 120_000;
 // JSON card. argKeys feed the call card; the result card shows PIT
 // (as_of/known_at) + source labels when the payload carries them.
 const CARD_TOOLS: Record<string, { title: string; argKeys: string[] }> = {
-	get_fundamentals: { title: "Fundamentals", argKeys: ["ticker"] },
-	get_filing_section: { title: "Filing section", argKeys: ["ticker", "form", "accession_number"] },
-	get_recent_ownership_filings: { title: "Recent 13D/G", argKeys: ["form_type", "limit"] },
-	get_financial_statements: { title: "Financial statements", argKeys: ["ticker", "form"] },
-	get_xbrl_facts: { title: "XBRL facts", argKeys: ["ticker", "concept"] },
-	get_short_interest: { title: "Short interest", argKeys: ["ticker"] },
-	get_short_interest_leaderboard: { title: "Short leaderboard", argKeys: [] },
-	get_valuation_metrics: { title: "Valuation", argKeys: ["ticker"] },
-	search_web: { title: "Web search", argKeys: ["query"] },
+ get_fundamentals: { title: "Fundamentals", argKeys: ["ticker"] },
+ get_filing_section: { title: "Filing section", argKeys: ["ticker", "form", "accession_number"] },
+ get_recent_ownership_filings: { title: "Recent 13D/G", argKeys: ["form_type", "limit"] },
+ get_financial_statements: { title: "Financial statements", argKeys: ["ticker", "form"] },
+ get_xbrl_facts: { title: "XBRL facts", argKeys: ["ticker", "concept"] },
+ get_short_interest: { title: "Short interest", argKeys: ["ticker"] },
+ get_short_interest_leaderboard: { title: "Short leaderboard", argKeys: [] },
+ get_valuation_metrics: { title: "Valuation", argKeys: ["ticker"] },
+ search_web: { title: "Web search", argKeys: ["query"] },
 };
 
 function short(value: unknown, max = 80): string {
-	const s = typeof value === "string" ? value : JSON.stringify(value);
-	return s.length > max ? `${s.slice(0, max)}…` : s;
+ const s = typeof value === "string" ? value : JSON.stringify(value);
+ return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
 // Shallow PIT/source scan: payload shapes vary per tool, so look at the
 // top level plus one nesting level instead of per-tool parsers.
 export function payloadMeta(details: unknown): { pit: string; sources: string } {
-	let pit = "";
-	let sources = "";
-	// Bridge payload; narrow once, then read known keys.
-	const top: Json = details && typeof details === "object" ? (details as Json) : {};
-	const inner: Json =
-		top.result && typeof top.result === "object" ? (top.result as Json) : top;
-	const meta: Json =
-		inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
-	for (const obj of [meta, inner, top]) {
-		if (!pit && (typeof obj.as_of === "string" || typeof obj.known_at === "string")) {
-			pit = String(obj.as_of ?? obj.known_at);
-		}
-		if (!sources && (obj.source_names ?? obj.sources ?? obj.source)) {
-			sources = short(obj.source_names ?? obj.sources ?? obj.source);
-		}
-	}
-	return { pit, sources };
+ let pit = "";
+ let sources = "";
+ // Bridge payload; narrow once, then read known keys.
+ const top: Json = details && typeof details === "object" ? (details as Json) : {};
+ const inner: Json =
+  top.result && typeof top.result === "object" ? (top.result as Json) : top;
+ const meta: Json =
+  inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
+ for (const obj of [meta, inner, top]) {
+  if (!pit && (typeof obj.as_of === "string" || typeof obj.known_at === "string")) {
+   pit = String(obj.as_of ?? obj.known_at);
+  }
+  if (!sources && (obj.source_names ?? obj.sources ?? obj.source)) {
+   sources = short(obj.source_names ?? obj.sources ?? obj.source);
+  }
+ }
+ return { pit, sources };
 }
 
 function card(title: string, rows: string[], theme: Theme): Text {
-	const head = theme.fg("toolTitle", theme.bold(`${title} `));
-	return new Text([head, ...rows.map((r) => theme.fg("dim", r))].join("\n"), 0, 0);
+ const head = theme.fg("toolTitle", theme.bold(`${title} `));
+ return new Text([head, ...rows.map((r) => theme.fg("dim", r))].join("\n"), 0, 0);
 }
 
 function rawCard(details: unknown, theme: Theme): Text {
-	return new Text(theme.fg("dim", short(details, 500)), 0, 0);
+ return new Text(theme.fg("dim", short(details, 500)), 0, 0);
 }
 
 // Boundary: bridge `describe` entries are OpenAI-style {function:{...}}.
 function describeFn(entry: unknown): { name: string; description: string; parameters: object } | undefined {
-	if (!entry || typeof entry !== "object" || !("function" in entry)) return undefined;
-	const fn: unknown = entry.function;
-	if (!fn || typeof fn !== "object" || !("name" in fn) || typeof fn.name !== "string") {
-		return undefined;
-	}
-	const description =
-		"description" in fn && typeof fn.description === "string" ? fn.description : fn.name;
-	const parameters =
-		"parameters" in fn && fn.parameters && typeof fn.parameters === "object"
-			? (fn.parameters as object)
-			: { type: "object" };
-	return { name: fn.name, description, parameters };
+ if (!entry || typeof entry !== "object" || !("function" in entry)) return undefined;
+ const fn: unknown = entry.function;
+ if (!fn || typeof fn !== "object" || !("name" in fn) || typeof fn.name !== "string") {
+  return undefined;
+ }
+ const description =
+  "description" in fn && typeof fn.description === "string" ? fn.description : fn.name;
+ const parameters =
+  "parameters" in fn && fn.parameters && typeof fn.parameters === "object"
+   ? (fn.parameters as object)
+   : { type: "object" };
+ return { name: fn.name, description, parameters };
 }
 
 export default async function stockbotExtension(pi: ExtensionAPI) {
-	// --- bridge process (JSONL stdio; serialized calls, FIFO responses) ---
-	// ponytail: one in-flight queue, not a request map; parallel Pi calls
-	// resolve in order. Upgrade only if tool latency stacking shows in traces.
-	let proc: ChildProcessWithoutNullStreams | null = null;
-	let buf = "";
-	const waiters: Array<(line: string | null) => void> = [];
-	let tail: Promise<unknown> = Promise.resolve();
+ // --- bridge process (JSONL stdio; ID-correlated, 4 concurrent tool calls) ---
+ let proc: ChildProcessWithoutNullStreams | null = null;
+ let buf = "";
+ const pending = new Map<string, { resolve: (line: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
+ let writeChain: Promise<unknown> = Promise.resolve();
+ let permits = 4;
+ const permitQueue: Array<() => void> = [];
 
-	function markDead() {
-		proc = null;
-		while (waiters.length) waiters.shift()?.(null);
-	}
+ function acquire(): Promise<number> {
+  if (permits > 0) {
+   permits--;
+   return Promise.resolve(0);
+  }
+  const start = Date.now();
+  return new Promise<number>((resolve) => {
+   permitQueue.push(() => {
+    permits--;
+    resolve(Date.now() - start);
+   });
+  });
+ }
 
-	function pump(child: ChildProcessWithoutNullStreams) {
-		child.stdout.on("data", (chunk) => {
-			buf += Buffer.from(chunk).toString("utf8");
-			let i: number;
-			while ((i = buf.indexOf("\n")) >= 0) {
-				const line = buf.slice(0, i).trim();
-				buf = buf.slice(i + 1);
-				if (line) waiters.shift()?.(line);
-			}
-		});
-		// Drain stderr so a chatty bridge can never block on a full pipe.
-		child.stderr.on("data", () => {
-			// discard
-		});
-		const dead = () => {
-			if (proc === child) markDead();
-		};
-		child.on("close", dead);
-		child.on("error", dead);
-	}
+ function release(): void {
+  permits++;
+  permitQueue.shift()?.();
+ }
 
-	function ensureBridge(): boolean {
-		if (proc) return true;
-		try {
-			proc = spawn(BRIDGE_CMD, BRIDGE_ARGS, {
-				cwd: ROOT,
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			buf = "";
-			pump(proc);
-			return true;
-		} catch (err) {
-			console.error(`[stockbot] bridge spawn failed: ${String(err)}`);
-			markDead();
-			return false;
-		}
-	}
+ function markDead() {
+  proc = null;
+  for (const [, entry] of pending) {
+   clearTimeout(entry.timer);
+   entry.resolve(null);
+  }
+  pending.clear();
+ }
 
-	function readLine(timeoutMs: number): Promise<string | null> {
-		const { promise, resolve } = Promise.withResolvers<string | null>();
-		const timer = setTimeout(() => {
-			const i = waiters.indexOf(done);
-			if (i >= 0) waiters.splice(i, 1);
-			resolve(null);
-		}, timeoutMs);
-		function done(line: string | null) {
-			clearTimeout(timer);
-			resolve(line);
-		}
-		waiters.push(done);
-		return promise;
-	}
+ function pump(child: ChildProcessWithoutNullStreams) {
+  child.stdout.on("data", (chunk) => {
+   buf += Buffer.from(chunk).toString("utf8");
+   let i: number;
+   while ((i = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, i).trim();
+    buf = buf.slice(i + 1);
+    if (!line) continue;
+    let id: unknown;
+    try {
+     id = (JSON.parse(line) as Json).id;
+    } catch {
+     continue;
+    }
+    if (typeof id !== "string") continue;
+    const entry = pending.get(id);
+    if (!entry) continue;
+    pending.delete(id);
+    clearTimeout(entry.timer);
+    entry.resolve(line);
+   }
+  });
+  // Drain stderr so a chatty bridge can never block on a full pipe.
+  child.stderr.on("data", () => {
+   // discard
+  });
+  const dead = () => {
+   if (proc === child) markDead();
+  };
+  child.on("close", dead);
+  child.on("error", dead);
+ }
 
-	function callBridge(req: Json, timeoutMs = TOOL_TIMEOUT_MS, fatal = true): Promise<Json> {
-		const run = async (): Promise<Json> => {
-			const fail = (reason: string): Json => {
-				// Single loud surface for every fatal bridge failure; pi_event
-				// passes fatal=false and stays quiet (observability never breaks research).
-				if (fatal) console.error(`[stockbot] bridge ${String(req.op)} failed: ${reason}`);
-				return { error: "bridge_unavailable" };
-			};
-			if (!ensureBridge() || !proc) return fail("spawn failed");
-			try {
-				const ok = proc.stdin.write(`${JSON.stringify(req)}\n`);
-				if (!ok) await once(proc.stdin, "drain");
-			} catch {
-				markDead();
-				return fail("stdin write/flush failed");
-			}
-			const line = await readLine(timeoutMs);
-			if (line === null) {
-				if (fatal) markDead(); // timeout/closed pipe: respawn on next call
-				return fail(`no response in ${timeoutMs}ms`);
-			}
-			try {
-				return JSON.parse(line) as Json;
-			} catch {
-				return fail(`unparseable line: ${line.slice(0, 120)}`);
-			}
-		};
-		const p = tail.then(run, run);
-		tail = p.catch(() => undefined);
-		return p;
-	}
+ function ensureBridge(): boolean {
+  if (proc) return true;
+  try {
+   proc = spawn(BRIDGE_CMD, BRIDGE_ARGS, {
+    cwd: ROOT,
+    stdio: ["pipe", "pipe", "pipe"],
+   });
+   buf = "";
+   pump(proc);
+   return true;
+  } catch (err) {
+   console.error(`[stockbot] bridge spawn failed: ${String(err)}`);
+   markDead();
+   return false;
+  }
+ }
 
-	// --- describe: prompt + RESEARCH tool registry ---
-	const describe = await callBridge({ op: "describe" }, 30_000);
-	const systemPrompt = typeof describe.system_prompt === "string" ? describe.system_prompt : "";
-	const entries = Array.isArray(describe.tools) ? describe.tools : [];
-	// Loud handshake: silent 0-tool mode is unreachable. Any describe/doctor
-	// failure pins the status bar and turns the agent prompt into a refusal.
-	let bridgeDown = false;
-	let bridgeDetail = "";
-	if (typeof describe.error === "string" || !systemPrompt || entries.length === 0) {
-		bridgeDown = true;
-		bridgeDetail = typeof describe.error === "string" ? describe.error : "empty prompt/tools";
-		console.error(`[stockbot] bridge describe failed: ${bridgeDetail}`);
-	} else {
-		const doctor = await callBridge({ op: "doctor" }, 30_000);
-		if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
-			bridgeDown = true;
-			bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
-			console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
-		}
-	}
-	const research = new Set<string>();
+ function writeLine(child: ChildProcessWithoutNullStreams, line: string): Promise<boolean> {
+  const p = writeChain.then(async () => {
+   try {
+    const ok = child.stdin.write(`${line}\n`);
+    if (!ok) await once(child.stdin, "drain");
+    return true;
+   } catch {
+    return false;
+   }
+  });
+  writeChain = p.catch(() => undefined);
+  return p as Promise<boolean>;
+ }
 
-	for (const entry of bridgeDown ? [] : entries) {
-		const fn = describeFn(entry);
-		if (!fn) continue;
-		research.add(fn.name);
-		const cardSpec = CARD_TOOLS[fn.name];
-		pi.registerTool({
-			name: fn.name,
-			label: fn.name,
-			description: fn.description,
-			parameters: Type.Unsafe(fn.parameters),
-			async execute(toolCallId, params) {
-				toolCalls++;
-				const bridge = await callBridge(toolCallRequest(runId, fn.name, params as Json));
-				refreshStatus(lastCtx);
-				return {
-					content: [{ type: "text", text: bridgeModelText(bridge) }],
-					details: bridge,
-				};
-			},
-			renderCall: cardSpec
-				? (args, theme) => {
-						// Pi validates params against the schema before render.
-						const bag: Json = args as Json;
-						return card(
-							cardSpec.title,
-							cardSpec.argKeys.map((k) => `${k}=${short(bag[k])}`),
-							theme,
-						);
-					}
-				: undefined,
-			renderResult: cardSpec
-				? (result, _opts, theme) => {
-						try {
-							// Details are the bridge result object built in execute above.
-							const details: Json =
-								result.details && typeof result.details === "object"
-									? (result.details as Json)
-									: {};
-							const inner: Json =
-								details.result && typeof details.result === "object"
-									? (details.result as Json)
-									: details;
-							if (typeof inner.error === "string") {
-								return card(cardSpec.title, [`error: ${short(inner.error)}`], theme);
-							}
-							const { pit, sources } = payloadMeta(details);
-							const rows = ["ok"];
-							if (pit) rows.push(`as_of ${pit}`);
-							if (sources) rows.push(`sources: ${sources}`);
-							rows.push(`${JSON.stringify(details).length} bytes`);
-							return card(cardSpec.title, rows, theme);
-						} catch {
-							return rawCard(result.details, theme);
-						}
-					}
-				: undefined,
-		});
-	}
+ async function callBridge(req: Json, timeoutMs = TOOL_TIMEOUT_MS, fatal = true): Promise<Json> {
+  const fail = (reason: string): Json => {
+   // Single loud surface for every fatal bridge failure; pi_event
+   // passes fatal=false and stays quiet (observability never breaks research).
+   if (fatal) console.error(`[stockbot] bridge ${String(req.op)} failed: ${reason}`);
+   return { error: "bridge_unavailable" };
+  };
+  if (typeof req.id !== "string" || !req.id) req.id = crypto.randomUUID();
+  const id = req.id as string;
+  const isToolCall = req.op === "tool_call";
+  let queuedMs = 0;
+  if (isToolCall) {
+   queuedMs = await acquire();
+   req.bridge_queue_ms = queuedMs;
+  }
+  try {
+   if (!ensureBridge() || !proc) return fail("spawn failed");
+   const child = proc;
+   const { promise, resolve } = Promise.withResolvers<string | null>();
+   const timer = setTimeout(() => {
+    if (pending.delete(id)) resolve(null);
+   }, timeoutMs);
+   pending.set(id, { resolve, timer });
+   const sent = await writeLine(child, JSON.stringify(req));
+   if (!sent) {
+    if (pending.delete(id)) {
+     clearTimeout(timer);
+     resolve(null);
+    }
+   }
+   const line = await promise;
+   if (line === null) return fail(`no response in ${timeoutMs}ms`);
+   try {
+    return JSON.parse(line) as Json;
+   } catch {
+    return fail(`unparseable line: ${line.slice(0, 120)}`);
+   }
+  } finally {
+   if (isToolCall) release();
+  }
+ }
 
-	// --- prompt replacement (coding prompt -> research prompt) ---
-	pi.on("before_agent_start", async (event) => {
-		pendingQuestion = event.prompt;
-		if (bridgeDown)
-			return {
-				systemPrompt:
-					`Stockbot research tools are unavailable (${bridgeDetail}). ` +
-					"Decline investment-research questions as tool-unavailable; do not answer from model knowledge.",
-			};
-		if (systemPrompt) return { systemPrompt };
-	});
+ // --- describe: prompt + RESEARCH tool registry ---
+ const describe = await callBridge({ op: "describe" }, 30_000);
+ const systemPrompt = typeof describe.system_prompt === "string" ? describe.system_prompt : "";
+ const entries = Array.isArray(describe.tools) ? describe.tools : [];
+ // Loud handshake: silent 0-tool mode is unreachable. Any describe/doctor
+ // failure pins the status bar and turns the agent prompt into a refusal.
+ let bridgeDown = false;
+ let bridgeDetail = "";
+ if (typeof describe.error === "string" || !systemPrompt || entries.length === 0) {
+  bridgeDown = true;
+  bridgeDetail = typeof describe.error === "string" ? describe.error : "empty prompt/tools";
+  console.error(`[stockbot] bridge describe failed: ${bridgeDetail}`);
+ } else {
+  const doctor = await callBridge({ op: "doctor" }, 30_000);
+  if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
+   bridgeDown = true;
+   bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
+   console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
+  }
+ }
+ const research = new Set<string>();
 
-	// --- RESEARCH gate: block anything the bridge did not register ---
-	// (portfolio/broker shapes + builtins when --no-builtin-tools is dropped)
-	pi.on("tool_call", (event) => {
-		if (!research.has(event.toolName)) {
-			emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
-			blocks++;
-			return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
-		}
-	});
+ for (const entry of bridgeDown ? [] : entries) {
+  const fn = describeFn(entry);
+  if (!fn) continue;
+  research.add(fn.name);
+  const cardSpec = CARD_TOOLS[fn.name];
+  pi.registerTool({
+   name: fn.name,
+   label: fn.name,
+   description: fn.description,
+   parameters: Type.Unsafe(fn.parameters),
+   async execute(toolCallId, params) {
+    toolCalls++;
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json));
+    refreshStatus(lastCtx);
+    return {
+     content: [{ type: "text", text: bridgeModelText(bridge) }],
+     details: bridge,
+    };
+   },
+   renderCall: cardSpec
+    ? (args, theme) => {
+     // Pi validates params against the schema before render.
+     const bag: Json = args as Json;
+     return card(
+      cardSpec.title,
+      cardSpec.argKeys.map((k) => `${k}=${short(bag[k])}`),
+      theme,
+     );
+    }
+    : undefined,
+   renderResult: cardSpec
+    ? (result, _opts, theme) => {
+     try {
+      // Details are the bridge result object built in execute above.
+      const details: Json =
+       result.details && typeof result.details === "object"
+        ? (result.details as Json)
+        : {};
+      const inner: Json =
+       details.result && typeof details.result === "object"
+        ? (details.result as Json)
+        : details;
+      if (typeof inner.error === "string") {
+       return card(cardSpec.title, [`error: ${short(inner.error)}`], theme);
+      }
+      const { pit, sources } = payloadMeta(details);
+      const rows = ["ok"];
+      if (pit) rows.push(`as_of ${pit}`);
+      if (sources) rows.push(`sources: ${sources}`);
+      rows.push(`${JSON.stringify(details).length} bytes`);
+      return card(cardSpec.title, rows, theme);
+     } catch {
+      return rawCard(result.details, theme);
+     }
+    }
+    : undefined,
+  });
+ }
 
-	// --- lifecycle forwarding (step 8) + status pane (step 9) ---
-	// run_id per agent turn-chain, monotonic sequence; drops if bridge down.
-	let runId = crypto.randomUUID();
-	let pendingQuestion = "";
-	let seq = 0;
-	let turns = 0;
-	let toolCalls = 0;
-	let blocks = 0;
-	let lastCtx: ExtensionContext | null = null;
+ // --- prompt replacement (coding prompt -> research prompt) ---
+ pi.on("before_agent_start", async (event) => {
+  pendingQuestion = event.prompt;
+  if (bridgeDown)
+   return {
+    systemPrompt:
+     `Stockbot research tools are unavailable (${bridgeDetail}). ` +
+     "Decline investment-research questions as tool-unavailable; do not answer from model knowledge.",
+   };
+  if (systemPrompt) return { systemPrompt };
+ });
 
-	function emit(payload: Json) {
-		// Queued like tool calls so the bridge's {"ok":true} replies are
-		// consumed in order; never fatal (observability never breaks research).
-		void callBridge(
-			{ op: "pi_event", run_id: runId, sequence: seq++, ...payload },
-			10_000,
-			false,
-		).catch(() => undefined);
-	}
+ // --- RESEARCH gate: block anything the bridge did not register ---
+ // (portfolio/broker shapes + builtins when --no-builtin-tools is dropped)
+ pi.on("tool_call", (event) => {
+  if (!research.has(event.toolName)) {
+   emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
+   blocks++;
+   return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
+  }
+ });
 
-	function refreshStatus(ctx: ExtensionContext | null) {
-		if (!ctx) return;
-		try {
-			ctx.ui.setStatus(
-				"stockbot",
-				bridgeDown
-					? "stockbot · bridge unavailable (0 tools)"
-					: `stockbot · ${research.size} tools · ${turns} turns · ${toolCalls} calls · ${blocks} blocked`,
-			);
-		} catch {
-			// non-TUI modes without status: ignore
-		}
-	}
+ // --- lifecycle forwarding (step 8) + status pane (step 9) ---
+ // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
+ let runId = crypto.randomUUID();
+ let pendingQuestion = "";
+ let seq = 0;
+ let turns = 0;
+ let toolCalls = 0;
+ let blocks = 0;
+ let lastCtx: ExtensionContext | null = null;
+ const toolStartedAt = new Map<string, string>();
+ function emit(payload: Json): Promise<Json> {
+  // ID-correlated like tool calls; never fatal (observability never breaks research).
+  return callBridge(
+   { id: crypto.randomUUID(), op: "pi_event", run_id: runId, sequence: seq++, ...payload },
+   10_000,
+   false,
+  ).catch(() => ({ error: "bridge_unavailable" }));
+ }
 
-	pi.on("session_start", (_event, ctx) => {
-		lastCtx = ctx;
-		refreshStatus(ctx);
-	});
-	pi.on("agent_start", () => {
-		runId = crypto.randomUUID();
-		seq = 0;
-		emit({ event: "agent_start", question: pendingQuestion });
-		pendingQuestion = "";
-	});
-	pi.on("tool_execution_start", (event) => {
-		emit({ event: "tool_execution_start", tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args });
-	});
-	pi.on("tool_execution_end", (event, ctx) => {
-		lastCtx = ctx;
-		emit({
-			event: "tool_execution_end",
-			tool: event.toolName,
-			tool_call_id: event.toolCallId,
-			is_error: event.isError,
-		});
-		refreshStatus(ctx);
-	});
-	pi.on("message_end", (event, ctx) => {
-		lastCtx = ctx;
-		const message = event.message as unknown as Json;
-		if (message.role !== "assistant") return;
-		const blocks = Array.isArray(message.content) ? (message.content as Json[]) : [];
-		const usage = (message.usage as unknown as Json) ?? {};
-		const cost = (usage.cost as unknown as Json) ?? {};
-		const num = (v: unknown) => (typeof v === "number" ? v : 0);
-		const input = num(usage.input);
-		const cacheRead = num(usage.cacheRead);
-		const cacheWrite = num(usage.cacheWrite);
-		emit({
-			event: "message_end",
-			role: "assistant",
-			turn: turns,
-			model: typeof message.model === "string" && message.model ? message.model : (ctx.model?.id ?? undefined),
-			finish_reason: typeof message.stopReason === "string" ? message.stopReason : undefined,
-			started_at: typeof message.timestamp === "number" ? new Date(message.timestamp).toISOString() : new Date().toISOString(),
-			completed_at: new Date().toISOString(),
-			tool_call_count: blocks.filter((b) => b.type === "toolCall").length,
-			usage: {
-				prompt_tokens: input + cacheRead + cacheWrite,
-				completion_tokens: num(usage.output),
-				reasoning_tokens: num(usage.reasoning),
-				prompt_tokens_details: { cached_tokens: cacheRead },
-				total_tokens: num(usage.totalTokens),
-				cost: num(cost.total),
-			},
-		});
-	});
-	pi.on("turn_end", (event, ctx) => {
-		lastCtx = ctx;
-		turns++;
-		emit({ event: "turn_end", turn: event.turnIndex });
-		refreshStatus(ctx);
-	});
-	pi.on("agent_end", (event) => {
-		const messages = Array.isArray(event.messages) ? (event.messages as unknown as Json[]) : [];
-		const assistants = messages.filter((m) => m.role === "assistant");
-		const last = assistants[assistants.length - 1] as Json | undefined;
-		const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
-		const answer = blocks
-			.filter((b) => b.type === "text" && typeof b.text === "string")
-			.map((b) => b.text as string)
-			.join("\n");
-		emit({ event: "agent_end", status: "completed", answer });
-	});
+ function refreshStatus(ctx: ExtensionContext | null) {
+  if (!ctx) return;
+  try {
+   ctx.ui.setStatus(
+    "stockbot",
+    bridgeDown
+     ? "stockbot · bridge unavailable (0 tools)"
+     : `stockbot · ${research.size} tools · ${turns} turns · ${toolCalls} calls · ${blocks} blocked`,
+   );
+  } catch {
+   // non-TUI modes without status: ignore
+  }
+ }
+
+ pi.on("session_start", (_event, ctx) => {
+  lastCtx = ctx;
+  refreshStatus(ctx);
+ });
+ pi.on("agent_start", () => {
+  runId = crypto.randomUUID();
+  seq = 0;
+  toolStartedAt.clear();
+  void emit({ event: "agent_start", question: pendingQuestion });
+  pendingQuestion = "";
+ });
+ pi.on("tool_execution_start", (event) => {
+  toolStartedAt.set(event.toolCallId, new Date().toISOString());
+  void emit({ event: "tool_execution_start", tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args, started_at: toolStartedAt.get(event.toolCallId) });
+ });
+ pi.on("tool_execution_end", (event, ctx) => {
+  lastCtx = ctx;
+  const startedAt = toolStartedAt.get(event.toolCallId);
+  toolStartedAt.delete(event.toolCallId);
+  void emit({
+   event: "tool_execution_end",
+   tool: event.toolName,
+   tool_call_id: event.toolCallId,
+   is_error: event.isError,
+   started_at: startedAt,
+   completed_at: new Date().toISOString(),
+  });
+  refreshStatus(ctx);
+ });
+ pi.on("message_end", (event, ctx) => {
+  lastCtx = ctx;
+  const message = event.message as unknown as Json;
+  if (message.role !== "assistant") return;
+  const blocks = Array.isArray(message.content) ? (message.content as Json[]) : [];
+  const usage = (message.usage as unknown as Json) ?? {};
+  const cost = (usage.cost as unknown as Json) ?? {};
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  const input = num(usage.input);
+  const cacheRead = num(usage.cacheRead);
+  const cacheWrite = num(usage.cacheWrite);
+  emit({
+   event: "message_end",
+   role: "assistant",
+   turn: turns,
+   model: typeof message.model === "string" && message.model ? message.model : (ctx.model?.id ?? undefined),
+   finish_reason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+   started_at: typeof message.timestamp === "number" ? new Date(message.timestamp).toISOString() : new Date().toISOString(),
+   completed_at: new Date().toISOString(),
+   tool_call_count: blocks.filter((b) => b.type === "toolCall").length,
+   usage: {
+    prompt_tokens: input + cacheRead + cacheWrite,
+    completion_tokens: num(usage.output),
+    reasoning_tokens: num(usage.reasoning),
+    prompt_tokens_details: { cached_tokens: cacheRead },
+    total_tokens: num(usage.totalTokens),
+    cost: num(cost.total),
+   },
+  });
+ });
+ pi.on("turn_end", (event, ctx) => {
+  lastCtx = ctx;
+  turns++;
+  emit({ event: "turn_end", turn: event.turnIndex });
+  refreshStatus(ctx);
+ });
+ pi.on("agent_end", async (event) => {
+  const messages = Array.isArray(event.messages) ? (event.messages as unknown as Json[]) : [];
+  const assistants = messages.filter((m) => m.role === "assistant");
+  const last = assistants[assistants.length - 1] as Json | undefined;
+  const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
+  const answer = blocks
+   .filter((b) => b.type === "text" && typeof b.text === "string")
+   .map((b) => b.text as string)
+   .join("\n");
+  await emit({ event: "agent_end", status: "completed", answer });
+ });
 }

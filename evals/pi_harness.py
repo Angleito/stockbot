@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,19 +56,36 @@ class Bridge:
             [python, os.path.join(ROOT, "scripts", "pi_bridge.py")],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
         )
+        self._seq = 0
+
+    def _next_id(self, prefix):
+        self._seq += 1
+        return f"{prefix}-{self._seq}-{uuid.uuid4().hex[:8]}"
+
+    def _roundtrip(self, payload, expect_id=True):
+        self.proc.stdin.write(json.dumps(payload) + "\n")
+        self.proc.stdin.flush()
+        while True:
+            line = self.proc.stdout.readline()
+            response = json.loads(line)
+            if not expect_id or response.get("id") == payload["id"]:
+                return response
 
     def call(self, name, arguments, run_id):
-        self.proc.stdin.write(json.dumps({
-            "op": "tool_call", "name": name,
+        payload = {
+            "id": self._next_id("tc"), "op": "tool_call", "name": name,
             "arguments": arguments, "run_id": run_id,
-        }) + "\n")
-        self.proc.stdin.flush()
-        return json.loads(self.proc.stdout.readline()).get("result", {})
+            "tool_call_id": self._next_id("call"),
+            "bridge_queue_ms": 0.0,
+        }
+        return self._roundtrip(payload).get("result", {})
 
     def event(self, run_id, event, **extra):
-        self.proc.stdin.write(json.dumps({
+        payload = {
+            "id": self._next_id("ev"),
             "op": "pi_event", "run_id": run_id, "event": event, **extra,
-        }) + "\n")
+        }
+        self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
         return json.loads(self.proc.stdout.readline())
 

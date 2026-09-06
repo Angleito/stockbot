@@ -206,12 +206,13 @@ def discover() -> tuple[dict, dict]:
     )
     try:
         assert proc.stdin is not None and proc.stdout is not None
-        proc.stdin.write(json.dumps({"op": "describe"}) + "\n")
-        proc.stdin.write(json.dumps({"op": "doctor"}) + "\n")
+        proc.stdin.write(json.dumps({"id": "discover-1", "op": "describe"}) + "\n")
+        proc.stdin.write(json.dumps({"id": "discover-2", "op": "doctor"}) + "\n")
         proc.stdin.flush()
-        describe = json.loads(proc.stdout.readline() or "{}")
-        doctor = json.loads(proc.stdout.readline() or "{}")
-        return describe, doctor
+        first = json.loads(proc.stdout.readline() or "{}")
+        second = json.loads(proc.stdout.readline() or "{}")
+        by_id = {first.get("id"): first, second.get("id"): second}
+        return by_id.get("discover-1", {}), by_id.get("discover-2", {})
     finally:
         try:
             assert proc.stdin is not None

@@ -4,6 +4,7 @@ Pure-stdlib module (no app imports): request/plan/budget/state/result
 dataclasses plus the event/tool/model records and the EventType enum.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -162,69 +163,80 @@ class ExecutionBudget:
     max_search_calls: int = 25
     search_calls: int = 0
     _started: float = field(default_factory=time.perf_counter, init=False, repr=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def elapsed_seconds(self) -> float:
-        return time.perf_counter() - self._started
+        with self._lock:
+            return time.perf_counter() - self._started
 
     def model_calls_remaining(self) -> int:
-        return max(0, self.max_model_calls - self.model_calls)
+        with self._lock:
+            return max(0, self.max_model_calls - self.model_calls)
 
     def tool_calls_remaining(self) -> int:
-        return max(0, self.max_tool_calls - self.tool_calls)
+        with self._lock:
+            return max(0, self.max_tool_calls - self.tool_calls)
 
     def evidence_remaining(self) -> int:
-        return max(0, self.max_evidence_tokens - self.evidence_tokens)
+        with self._lock:
+            return max(0, self.max_evidence_tokens - self.evidence_tokens)
 
     def runtime_remaining(self) -> float:
-        return max(0.0, self.max_runtime - self.elapsed_seconds())
+        with self._lock:
+            return max(0.0, self.max_runtime - (time.perf_counter() - self._started))
 
     def reserve_model_call(self) -> bool:
         """Consume one model-call slot; False when runtime or the call limit
         is exhausted."""
-        if self.runtime_remaining() <= 0:
-            return False
-        if self.model_calls >= self.max_model_calls:
-            return False
-        self.model_calls += 1
-        return True
+        with self._lock:
+            if self.max_runtime - (time.perf_counter() - self._started) <= 0:
+                return False
+            if self.model_calls >= self.max_model_calls:
+                return False
+            self.model_calls += 1
+            return True
 
     def reserve_tool_call(self) -> bool:
         """Consume one tool-call slot; False when runtime or the call limit
         is exhausted."""
-        if self.runtime_remaining() <= 0:
-            return False
-        if self.tool_calls >= self.max_tool_calls:
-            return False
-        self.tool_calls += 1
-        return True
+        with self._lock:
+            if self.max_runtime - (time.perf_counter() - self._started) <= 0:
+                return False
+            if self.tool_calls >= self.max_tool_calls:
+                return False
+            self.tool_calls += 1
+            return True
 
     def reserve_search_call(self) -> bool:
         """Consume one search-call slot; False when runtime or the search limit
         is exhausted."""
-        if self.runtime_remaining() <= 0:
-            return False
-        if self.search_calls >= self.max_search_calls:
-            return False
-        self.search_calls += 1
-        return True
+        with self._lock:
+            if self.max_runtime - (time.perf_counter() - self._started) <= 0:
+                return False
+            if self.search_calls >= self.max_search_calls:
+                return False
+            self.search_calls += 1
+            return True
 
 
     def add_evidence_tokens(self, count: int) -> bool:
         """Register evidence tokens only while within budget; False refuses the addition."""
-        if self.evidence_tokens + count > self.max_evidence_tokens:
-            return False
-        self.evidence_tokens += count
-        return True
+        with self._lock:
+            if self.evidence_tokens + count > self.max_evidence_tokens:
+                return False
+            self.evidence_tokens += count
+            return True
 
     def remaining(self, rounds_used: int = 0) -> BudgetRemaining:
         """Typed view for AgentState.budget_remaining; rounds come from the loop's state.round."""
-        return BudgetRemaining(
-            rounds=max(0, self.max_rounds - rounds_used),
-            tool_calls=self.tool_calls_remaining(),
-            model_calls=self.model_calls_remaining(),
-            runtime_seconds=self.runtime_remaining(),
-            evidence_tokens=self.evidence_remaining(),
-        )
+        with self._lock:
+            return BudgetRemaining(
+                rounds=max(0, self.max_rounds - rounds_used),
+                tool_calls=max(0, self.max_tool_calls - self.tool_calls),
+                model_calls=max(0, self.max_model_calls - self.model_calls),
+                runtime_seconds=max(0.0, self.max_runtime - (time.perf_counter() - self._started)),
+                evidence_tokens=max(0, self.max_evidence_tokens - self.evidence_tokens),
+            )
 
 
 class EventType(StrEnum):

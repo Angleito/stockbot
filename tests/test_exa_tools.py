@@ -137,20 +137,52 @@ def test_search_web_invalid_args_are_soft(monkeypatch):
 
 
 def _bridge_request(payload: dict) -> dict:
-    return pi_bridge._handle(json.dumps(payload))
+    payload = {"id": _next_msg_id("ev"), **payload}
+    if payload.get("op") == "tool_call":
+        responses = []
+        orig_write = pi_bridge._write
+        pi_bridge._write = responses.append
+        try:
+            assert pi_bridge._handle(json.dumps(payload)) is None
+            for fut in pi_bridge._run_futures(payload["run_id"]):
+                fut.result(timeout=60)
+        finally:
+            pi_bridge._write = orig_write
+        return next(r for r in responses if r.get("id") == payload["id"])
+    response = pi_bridge._handle(json.dumps(payload))
+    assert response is not None
+    response = dict(response)
+    response.pop("id", None)
+    return response
+
+
+def _next_msg_id(tag: str) -> str:
+    return f"{tag}-{uuid.uuid4().hex[:8]}"
 
 
 def _start_run(run_id: str) -> dict:
-    return _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_start"})
+    return _bridge_request(
+        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"}
+    )
 
 
 def _end_run(run_id: str) -> dict:
-    return _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_end"})
+    return _bridge_request(
+        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"}
+    )
 
 
 def _bridge_search(run_id: str, query: str) -> dict:
     return _bridge_request(
-        {"op": "tool_call", "run_id": run_id, "name": "search_web", "arguments": {"query": query}}
+        {
+            "id": _next_msg_id("tc"),
+            "op": "tool_call",
+            "run_id": run_id,
+            "tool_call_id": _next_msg_id("call"),
+            "name": "search_web",
+            "arguments": {"query": query},
+            "bridge_queue_ms": 0.0,
+        }
     )
 
 

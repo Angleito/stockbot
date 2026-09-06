@@ -1,29 +1,43 @@
 """Pi bridge: long-lived JSONL stdio between the Pi extension and Stockbot.
 
-Protocol (one JSON object per line on stdin, one per line on stdout):
-  {"op": "describe"} -> {"system_prompt": ..., "tools": [...RESEARCH-only...]}
-  {"op": "doctor"} -> {"bridge_ok": true, "prompt_chars": int,
-    "tool_count": int, "tool_names": [str], "registry_version": str,
-    "python": str, "cwd": str}
-  {"op": "tool_call", "name": str, "arguments": dict, "run_id": str}
-    -> {"result": {...}}
-  {"op": "pi_event", "run_id": str, "event": str, ...} -> {"ok": true}
+Protocol (one JSON object per line on stdin, one per line on stdout).
+Every request carries a client-generated correlation ``id``; every response
+echoes it. Responses may arrive out of request order; clients correlate by
+``id``, never by arrival order. There is no ID-less path: requests without a
+string ``id`` get ``{"error": "missing_arg"}``.
+
+  {"op": "describe", "id": str} -> {"id": str, "system_prompt": ..., "tools": [...RESEARCH-only...]}
+  {"op": "doctor", "id": str} -> {"id": str, "bridge_ok": true, ...}
+  {"op": "tool_call", "id": str, "run_id": str, "tool_call_id": str,
+   "name": str, "arguments": dict, "bridge_queue_ms": float}
+    -> {"id": str, "result": {...}}
+  {"op": "pi_event", "id": str, "run_id": str, "event": str, ...} -> {"id": str, "ok": true}
   (recorded into the existing runs DB via RunRecorder; unknown events or a
   disabled recorder are ignored without breaking research)
+
+``id`` is protocol correlation only. ``tool_call_id`` is Pi's tool-call ID
+used for run tracing (``{run_id}:tc:{tool_call_id}``). ``bridge_queue_ms``
+is the client-side semaphore wait, recorded as telemetry, never shown to
+the model.
 
 Errors never raise: malformed lines -> {"error": "bad_request"}, unknown
 ops/missing keys -> {"error": "unknown_op"|"missing_arg"}, and any unhandled
 per-request exception -> {"error": "bridge_failed"}. The process never exits
-on a single request. Calls are serialized (no threads); parallel Pi calls
-queue and resolve in order.
+on a single request. ``tool_call`` work runs on a 4-worker pool so
+independent calls overlap; ``describe``/``doctor``/lifecycle stay on the
+main thread. ``agent_end`` waits for its run's submitted calls before
+completing/closing the recorder; EOF drains all submitted work before
+executor shutdown.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import logging
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +53,39 @@ from app.tools import TOOL_REGISTRY_VERSION, tools_for_capabilities
 logger = logging.getLogger(__name__)
 
 _sessions: dict[str, PiSessionContext] = {}
+_recorders: dict[str, RunRecorder] = {}
+_inflight: dict[str, set[concurrent.futures.Future]] = {}
+
+_state_lock = threading.Lock()
+_stdout_lock = threading.Lock()
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+
+def _write(response: dict) -> None:
+    with _stdout_lock:
+        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.flush()
+
+
+def _track(run_id: str, fut: concurrent.futures.Future) -> None:
+    with _state_lock:
+        _inflight.setdefault(run_id, set()).add(fut)
+    fut.add_done_callback(lambda f, rid=run_id: _untrack(rid, f))
+
+
+def _untrack(run_id: str, fut: concurrent.futures.Future) -> None:
+    with _state_lock:
+        pending = _inflight.get(run_id)
+        if pending is None:
+            return
+        pending.discard(fut)
+        if not pending:
+            _inflight.pop(run_id, None)
+
+
+def _run_futures(run_id: str) -> list:
+    with _state_lock:
+        return list(_inflight.get(run_id, ()))
 
 
 def _describe() -> dict:
@@ -63,34 +110,63 @@ def _doctor() -> dict:
     }
 
 
-def _tool_call(request: dict) -> dict:
+def _validate_tool_call(request: dict) -> dict | None:
+    """Return an error response (without id) or None when submittable."""
     name = request.get("name")
     if not isinstance(name, str) or not name:
         return {"error": "missing_arg"}
-    arguments = request.get("arguments", {})
-    if not isinstance(arguments, dict):
+    if not isinstance(request.get("arguments", {}), dict):
         return {"error": "missing_arg"}
     run_id = request.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"error": "missing_arg"}
-    session = _sessions.get(run_id)
-    if session is None:
+    with _state_lock:
+        known = run_id in _sessions
+    if not known:
         return {"error": "unknown_run"}
-    recorder = _recorders.get(run_id)
-    if recorder is None:
-        return {"result": execute_pi_tool(name, arguments, session)}
-    token = set_current_recorder(recorder)
+    return None
+
+
+def _run_tool_call(request: dict) -> None:
+    """Executor worker: run one tool call, then write its correlated response."""
+    protocol_id = request.get("id")
+    name = request.get("name")
+    arguments = request.get("arguments", {})
+    run_id = request.get("run_id")
+    tool_call_id = request.get("tool_call_id")
     try:
-        return {"result": execute_pi_tool(name, arguments, session)}
-    finally:
-        reset_current_recorder(token)
-
-
-_recorders: dict[str, RunRecorder] = {}
+        queue_ms = float(request.get("bridge_queue_ms") or 0.0)
+    except (TypeError, ValueError):
+        queue_ms = 0.0
+    try:
+        with _state_lock:
+            session = _sessions.get(run_id)
+            recorder = _recorders.get(run_id)
+        if session is None:
+            _write({"id": protocol_id, "error": "unknown_run"})
+            return
+        token = set_current_recorder(recorder) if recorder is not None else None
+        try:
+            result = execute_pi_tool(
+                name,
+                arguments,
+                session,
+                tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
+                protocol_id=protocol_id if isinstance(protocol_id, str) else None,
+                bridge_queue_ms=queue_ms,
+            )
+        finally:
+            if token is not None:
+                reset_current_recorder(token)
+        _write({"id": protocol_id, "result": result})
+    except Exception:  # per-request failure never breaks the loop
+        logger.exception("tool_call failed")
+        _write({"id": protocol_id, "error": "bridge_failed"})
 
 
 def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
-    recorder = _recorders.get(run_id)
+    with _state_lock:
+        recorder = _recorders.get(run_id)
     if recorder is None:
         try:
             recorder = RunRecorder(
@@ -103,7 +179,8 @@ def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
         except Exception as exc:
             logger.warning("pi_event: recorder unavailable (%s); dropping events", exc)
             return None
-        _recorders[run_id] = recorder
+        with _state_lock:
+            _recorders[run_id] = recorder
     return recorder
 
 
@@ -115,7 +192,13 @@ def _pi_event(request: dict) -> dict:
     if not isinstance(event, str) or not event:
         return {"error": "missing_arg"}
     if event == "agent_end":
-        recorder = _recorders.get(run_id)
+        for fut in _run_futures(run_id):
+            try:
+                fut.result()
+            except Exception:
+                pass
+        with _state_lock:
+            recorder = _recorders.get(run_id)
         try:
             if recorder is not None and recorder.enabled:
                 status = request.get("status") or "completed"
@@ -131,12 +214,14 @@ def _pi_event(request: dict) -> dict:
                     recorder.__exit__(None, None, None)
             except Exception as exc:  # teardown never breaks the response contract
                 logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
-            _sessions.pop(run_id, None)
-            _recorders.pop(run_id, None)
+            with _state_lock:
+                _sessions.pop(run_id, None)
+                _recorders.pop(run_id, None)
         return {"ok": True}
     try:
         if event == "agent_start":
-            _sessions[run_id] = PiSessionContext(session_id=run_id)
+            with _state_lock:
+                _sessions[run_id] = PiSessionContext(session_id=run_id)
         question = request.get("question")
         recorder = _recorder_for(run_id, question if isinstance(question, str) else "")
         if recorder is None or not recorder.enabled:
@@ -183,35 +268,48 @@ def _pi_event(request: dict) -> dict:
         return {"ok": True}
 
 
-def _handle(line: str) -> dict:
+def _handle(line: str) -> dict | None:
+    """Route one input line. Returns a response dict, or None when the
+    response will be written asynchronously by a worker (tool_call)."""
     try:
         request = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return {"error": "bad_request"}
     if not isinstance(request, dict):
         return {"error": "bad_request"}
+    protocol_id = request.get("id")
+    if not isinstance(protocol_id, str) or not protocol_id:
+        return {"error": "missing_arg"}
     op = request.get("op")
     if op == "describe":
-        return _describe()
+        return {"id": protocol_id, **_describe()}
     if op == "doctor":
-        return _doctor()
+        return {"id": protocol_id, **_doctor()}
     if op == "tool_call":
-        return _tool_call(request)
+        error = _validate_tool_call(request)
+        if error is not None:
+            return {"id": protocol_id, **error}
+        fut = _executor.submit(_run_tool_call, dict(request))
+        _track(request.get("run_id"), fut)
+        return None
     if op == "pi_event":
-        return _pi_event(request)
-    return {"error": "unknown_op"}
+        return {"id": protocol_id, **_pi_event(request)}
+    return {"id": protocol_id, "error": "unknown_op"}
 
 
 def main() -> None:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            response = _handle(line)
-        except Exception:  # process never exits on a single request
-            response = {"error": "bridge_failed"}
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+    try:
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            try:
+                response = _handle(line)
+            except Exception:  # process never exits on a single request
+                response = {"error": "bridge_failed"}
+            if response is not None:
+                _write(response)
+    finally:
+        _executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":

@@ -18,10 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
 from .agent import (
     _BUDGET_EXHAUSTED_RESPONSE,
     _is_failed_result,
@@ -83,6 +83,7 @@ class PiSessionContext:
     security_state: SessionSecurityState = field(default_factory=SessionSecurityState)
     run_security: RunSecurityContext = field(init=False)
     budget: ExecutionBudget = field(init=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.security_state.authorization = self.authorization
@@ -117,13 +118,14 @@ def _record_security(
     verdict: str | None = None,
     rule_ids: list[str] | None = None,
 ) -> None:
-    session.run_security.security_events.append(
-        {
-            "source": source,
-            "decision": decision,
-            "reason": reason,
-        }
-    )
+    with session._lock:
+        session.run_security.security_events.append(
+            {
+                "source": source,
+                "decision": decision,
+                "reason": reason,
+            }
+        )
     recorder = get_current_recorder()
     if recorder is not None:
         recorder.record_security_event(
@@ -141,16 +143,39 @@ def _args_json(arguments: dict) -> str:
     return json.dumps(arguments, sort_keys=True)
 
 
-def execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> dict:
+def execute_pi_tool(
+    name: str,
+    arguments: dict,
+    session: PiSessionContext,
+    *,
+    tool_call_id: str | None = None,
+    protocol_id: str | None = None,
+    bridge_queue_ms: float = 0.0,
+) -> dict:
     """Run one Pi-requested tool through all gates. Never raises."""
     try:
-        return _execute_pi_tool(name, arguments, session)
+        return _execute_pi_tool(
+            name,
+            arguments,
+            session,
+            tool_call_id=tool_call_id,
+            protocol_id=protocol_id,
+            bridge_queue_ms=bridge_queue_ms,
+        )
     except Exception as exc:  # never break the bridge loop
         logger.exception("Pi tool gateway failed for '%s'", name)
         return {"error": f"Pi tool gateway failed for tool '{name}': {exc}"}
 
 
-def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> dict:
+def _execute_pi_tool(
+    name: str,
+    arguments: dict,
+    session: PiSessionContext,
+    *,
+    tool_call_id: str | None = None,
+    protocol_id: str | None = None,
+    bridge_queue_ms: float = 0.0,
+) -> dict:
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
     args_for_hash = (
@@ -179,14 +204,19 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
 
     # Gate 8 (reserve): one budget slot per call before any external work.
     # search_web draws from its dedicated pool, not the generic tool pool.
-    if name != "search_web" and not session.budget.reserve_tool_call():
-        return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
-    if name == "search_web" and not session.budget.reserve_search_call():
+    # Session lock held only for the reserve; the handler below runs unlocked.
+    with session._lock:
+        if name != "search_web":
+            reserved = session.budget.reserve_tool_call()
+        else:
+            reserved = session.budget.reserve_search_call()
+    if not reserved:
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
 
     # Gate 3: intent firewall. No approval callback in this plan, so
     # portfolio-shaped calls are always denied (RESEARCH-only).
-    intent_allowed, intent_reason = authorize_tool_call(name, arguments, session.run_security)
+    with session._lock:
+        intent_allowed, intent_reason = authorize_tool_call(name, arguments, session.run_security)
     if not intent_allowed:
         if TOOL_DOMAINS.get(name) == "portfolio_read":
             _record_security(
@@ -206,7 +236,8 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
 
     # Gate 4: search_web egress; every other tool's private-pattern args check.
     if name == "search_web":
-        decision = authorize_egress("exa", arguments, session.run_security)
+        with session._lock:
+            decision = authorize_egress("exa", arguments, session.run_security)
         if not decision.allowed:
             _record_security(
                 session, name, args_for_hash, "egress_blocked", decision.reason
@@ -227,10 +258,18 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
             }
 
     # Gate 6: LOCAL_CONTEXT only, never a broker context, in this plan.
-    t0 = time.perf_counter()
+    # Handler + rendering run OUTSIDE the session lock so calls overlap.
     t0_iso = datetime.now(timezone.utc).isoformat()
+    handler_t0 = time.perf_counter()
     result = execute_tool(name, arguments, PI_MODEL, context=LOCAL_CONTEXT)
-    t1 = time.perf_counter()
+    handler_ms = (time.perf_counter() - handler_t0) * 1000.0
+
+    # Top-level cache metadata only, for the recorder; protocol IDs and
+    # timings stay out of model-visible content.
+    raw_cache_hit = result.get("cache_hit") if isinstance(result, dict) else None
+    cache_hit = raw_cache_hit if isinstance(raw_cache_hit, bool) else None
+    raw_cache_type = result.get("cache_type") if isinstance(result, dict) else None
+    cache_type = raw_cache_type if isinstance(raw_cache_type, str) else None
 
     failed = _is_failed_result(result)
     soft = failed and result.get("soft") is True
@@ -244,10 +283,17 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         )
         error_message = redact_text(str(result.get("error")))[:2000]
     meta = _tool_result_meta(result)
+    if tool_call_id is not None:
+        resolved_tc_id = f"{run_id}:tc:{tool_call_id}"
+        if recorder is not None:
+            recorder.next_tool_seq()  # keep the run's tool-call count truthful
+    elif recorder is not None:
+        resolved_tc_id = f"{run_id}:tc:{recorder.next_tool_seq()}"
+    else:
+        resolved_tc_id = f"{run_id}:tc:0"
     if recorder is not None:
-        tool_call_id = f"{run_id}:tc:{recorder.next_tool_seq()}"
         recorder.record_tool_call(
-            tool_call_id=tool_call_id,
+            tool_call_id=resolved_tc_id,
             round=0,
             tool_name=name,
             arguments_json=json.dumps(arguments),
@@ -266,9 +312,12 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
             as_of=meta.as_of,
             error_type=error_type,
             error_message=error_message,
+            protocol_id=protocol_id,
+            bridge_queue_ms=bridge_queue_ms,
+            handler_ms=handler_ms,
+            cache_hit=cache_hit,
+            cache_type=cache_type,
         )
-    else:
-        tool_call_id = f"{run_id}:tc:0"
 
     if failed:
         if soft:
@@ -287,7 +336,8 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
     envelope = envelope_for_tool(name, result)
     outcome = prepare_context(envelope, rendered)
     if isinstance(outcome, QuarantinedContext):
-        session.run_security.quarantined_items += 1
+        with session._lock:
+            session.run_security.quarantined_items += 1
         _record_security(
             session,
             envelope.source,
@@ -308,19 +358,22 @@ def _execute_pi_tool(name: str, arguments: dict, session: PiSessionContext) -> d
         }
 
     # Gate 7 (success path): DLP over what Pi receives, then record evidence.
-    final_text = guard_response(outcome.text, session.run_security, run_id)
-    if name == "search_web":
-        session.run_security.data_labels.add("external")
-    if envelope.sensitivity is Sensitivity.PRIVATE:
-        session.run_security.data_labels.add("private")
-    if not session.budget.add_evidence_tokens(len(final_text) // 4):
+    # Session lock covers guard_response + label/budget mutations only.
+    with session._lock:
+        final_text = guard_response(outcome.text, session.run_security, run_id)
+        if name == "search_web":
+            session.run_security.data_labels.add("external")
+        if envelope.sensitivity is Sensitivity.PRIVATE:
+            session.run_security.data_labels.add("private")
+        evidence_allowed = session.budget.add_evidence_tokens(len(final_text) // 4)
+    if not evidence_allowed:
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
     if recorder is not None:
         evidence_id = f"{run_id}:evid:{recorder.next_evidence_seq():04d}"
         recorder.record_evidence(
             evidence_id=evidence_id,
             run_id=run_id,
-            tool_call_id=tool_call_id,
+            tool_call_id=resolved_tc_id,
             round=0,
             tool_name=name,
             rendered_hash=hashlib.sha256(final_text.encode()).hexdigest(),
