@@ -1773,6 +1773,9 @@ _DIRECT_HANDLERS = {
         args["ticker"],
     ),
     "search_tools": _search_tools,
+    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(args.get("form_type", "both"), args.get("limit", 10)),
+    "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(args["ticker"]),
+    "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(args["ticker"], args["concept"]),
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
         args["ticker"], args["statement_type"]
     ),
