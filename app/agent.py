@@ -104,12 +104,12 @@ def _tool_result_meta(result) -> ToolResultMeta:
     source = result.get("source") or result.get("dataset_id") or result.get("dataset")
     source_names = [str(source)] if source is not None else []
     freshness_value = next(
-        (result[k] for k in ("data_freshness", "freshness", "as_of_date", "as_of", "retrieved_at")
+        (result[k] for k in ("retrieved_at", "data_freshness", "freshness", "as_of_date", "as_of")
          if result.get(k) is not None),
         None)
     source_freshness = (
         {str(source): str(freshness_value)} if source is not None and freshness_value is not None else {})
-    as_of = next((result[k] for k in ("as_of_date", "as_of", "retrieved_at")
+    as_of = next((result[k] for k in ("as_of_date", "as_of")
                   if result.get(k) is not None), None)
     returned_count = result.get("returned_count") if isinstance(result.get("returned_count"), int) else None
     row_count = result.get("row_count") if isinstance(result.get("row_count"), int) else max(

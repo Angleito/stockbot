@@ -257,6 +257,7 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
 
 def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> dict:
     """Store-first fundamentals with a truthful data_source envelope."""
+    explicit_as_of = as_of is not None
     requested = _validated_as_of(as_of)
     if requested is None:
         return {
@@ -266,15 +267,22 @@ def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> d
     if metric == "shares_float":
         metric = "shares_outstanding"
     if metric == "eps":
-        return _eps_fundamental(ticker, requested)
+        return _eps_fundamental(ticker, requested, explicit_as_of)
     if metric == "shares_outstanding":
-        return _shares_outstanding_fundamental(ticker, requested)
+        return _shares_outstanding_fundamental(ticker, requested, explicit_as_of)
     if metric in ("balance_sheet", "overview"):
-        return _live_only_fundamental(ticker, metric, requested)
+        return _live_only_fundamental(ticker, metric, requested, explicit_as_of)
     return {"error": f"Unknown metric '{metric}'", "error_type": "invalid_tool_arguments"}
 
 
-def _eps_fundamental(ticker: str, requested: _dt.date) -> dict:
+def _pit_unavailable(ticker: str, metric: str, requested: _dt.date) -> dict:
+    return {
+        "error": f"No {metric} data knowable as of {requested.isoformat()} for {ticker}",
+        "error_type": "pit_data_unavailable",
+    }
+
+
+def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
     store_rows = _store_rows(entity_id, _EPS_CONCEPTS, requested, data_root) if entity_id else []
@@ -285,6 +293,8 @@ def _eps_fundamental(ticker: str, requested: _dt.date) -> dict:
             data_source="store", as_of_date=requested.isoformat(),
             row_count=len(payload["quarterly_eps"]),
         )
+    if explicit_as_of:
+        return _pit_unavailable(ticker, "eps", requested)
     payload = edgar_client.get_fundamentals(ticker, "eps")
     if "error" in payload:
         return payload
@@ -296,7 +306,7 @@ def _eps_fundamental(ticker: str, requested: _dt.date) -> dict:
     )
 
 
-def _shares_outstanding_fundamental(ticker: str, requested: _dt.date) -> dict:
+def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
     row: Optional[dict] = None
@@ -329,6 +339,8 @@ def _shares_outstanding_fundamental(ticker: str, requested: _dt.date) -> dict:
             data_source="store", as_of_date=requested.isoformat(),
             row_count=1,
         )
+    if explicit_as_of:
+        return _pit_unavailable(ticker, "shares_outstanding", requested)
     payload = edgar_client.get_fundamentals(ticker, "shares_outstanding")
     if "error" in payload:
         return payload
@@ -340,9 +352,10 @@ def _shares_outstanding_fundamental(ticker: str, requested: _dt.date) -> dict:
     )
 
 
-def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date) -> dict:
-    """balance_sheet/overview are live-only: as_of is accepted but does not
-    filter the data; the envelope echoes the requested as-of."""
+def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
+    """balance_sheet/overview are live-only: explicit as_of never gets current data."""
+    if explicit_as_of:
+        return _pit_unavailable(ticker, metric, requested)
     payload = edgar_client.get_fundamentals(ticker, metric)
     if "error" in payload:
         return payload

@@ -209,15 +209,8 @@ def test_eps_live_fallback_when_store_empty(store, monkeypatch):
         lambda ticker, metric: calls.append((ticker, metric)) or _live_eps(),
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2025-01-15")
-    assert result["data_source"] == "live"
-    assert result["as_of_date"] == date.today().isoformat()
-    assert result["requested_as_of"] == "2025-01-15"  # echo, never a false claim
-    assert result["ttm_eps_diluted"] == 0.76
-    assert result["quarterly_eps"][0]["eps_diluted"] == 0.76
-    assert result["source"] == "sec"
-    assert result["source_label"] == "SEC EDGAR company facts (Basic & Diluted EPS)"
-    assert "source" not in result["quarterly_eps"][0]
-    assert calls == [("NVDA", "eps")]
+    assert result["error_type"] == "pit_data_unavailable"
+    assert calls == []
 
 
 def test_eps_omitted_as_of_defaults_to_today_live(store, monkeypatch):
@@ -242,8 +235,8 @@ def test_ambiguous_ticker_skips_store_never_guesses(store, monkeypatch):
         lambda ticker, metric: calls.append(metric) or _live_eps(),
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
-    assert result["data_source"] == "live"
-    assert calls == ["eps"]
+    assert result["error_type"] == "pit_data_unavailable"
+    assert calls == []
 
 
 def test_invalid_as_of_returns_tool_argument_error(store, monkeypatch):
@@ -295,9 +288,7 @@ def test_shares_live_fallback_empty_store(store, monkeypatch):
         lambda ticker, metric: _live_shares(ticker),
     )
     result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
-    assert result["data_source"] == "live"
-    assert result["shares_outstanding"] == 999.0
-    assert result["source_label"] == "SEC EDGAR company facts"
+    assert result["error_type"] == "pit_data_unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -306,22 +297,27 @@ def test_shares_live_fallback_empty_store(store, monkeypatch):
 
 
 def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store, monkeypatch):
-    monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", lambda ticker, metric: {
-        "ticker": ticker, "balance_sheet": {"totalAssets": 1.0},
-        "source": "SEC EDGAR financials",
-    } if metric == "balance_sheet" else {
-        "ticker": ticker, "name": "NVDA", "cik": "0001045810",
-        "industry": "Semiconductors", "source": "SEC EDGAR",
-    })
+    calls = []
+    def _fake(ticker, metric):
+        calls.append(metric)
+        return {
+            "ticker": ticker, "balance_sheet": {"totalAssets": 1.0},
+            "source": "SEC EDGAR financials",
+        } if metric == "balance_sheet" else {
+            "ticker": ticker, "name": "NVDA", "cik": "0001045810",
+            "industry": "Semiconductors", "source": "SEC EDGAR",
+        }
+    monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _fake)
     bs = sec_facts.get_fundamentals("NVDA", "balance_sheet", as_of="2025-01-15")
-    assert bs["data_source"] == "live"
-    assert bs["balance_sheet"] == {"totalAssets": 1.0}
-    assert bs["requested_as_of"] == "2025-01-15"
-    assert bs["source_label"] == "SEC EDGAR financials"
+    assert bs["error_type"] == "pit_data_unavailable"
     ov = sec_facts.get_fundamentals("NVDA", "overview", as_of="2025-01-15")
-    assert ov["data_source"] == "live"
-    assert ov["name"] == "NVDA"
-    assert ov["source_label"] == "SEC EDGAR"
+    assert ov["error_type"] == "pit_data_unavailable"
+    assert calls == []
+    live_bs = sec_facts.get_fundamentals("NVDA", "balance_sheet")
+    assert live_bs["data_source"] == "live"
+    assert live_bs["balance_sheet"] == {"totalAssets": 1.0}
+    assert live_bs["source_label"] == "SEC EDGAR financials"
+    assert "requested_as_of" not in live_bs
 
 
 def test_get_xbrl_facts_always_live_enveloped(store, monkeypatch):

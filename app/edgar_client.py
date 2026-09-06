@@ -1,13 +1,20 @@
 """All SEC EDGAR access lives here. tools.py never imports edgartools directly."""
 
 import difflib
+import hashlib
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any
+
+from .config import get_data_root, get_sec_edgar_identity, init_config
+
+os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", str(get_data_root() / "edgar"))
 
 from edgar import Company
 
 from . import cache
-from .config import get_sec_edgar_identity, init_config
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +56,61 @@ def get_latest_report(ticker: str, form_type: str = "10-K"):
     return filing, filing.obj()
 
 
+SEC_RESULT_CACHE_TTL_SECONDS = 86_400
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _result_content_hash(payload: dict) -> str:
+    tmp = {k: v for k, v in payload.items() if k not in ("cache_hit", "cache_type")}
+    return hashlib.sha256(json.dumps(tmp, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _companyfacts_url(cik: Any) -> str | None:
+    try:
+        return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
+    except (TypeError, ValueError):
+        return None
+
+
+def _filing_dir_url(cik: Any, accession: Any) -> str | None:
+    try:
+        acc = str(accession).replace("-", "")
+        return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/"
+    except (TypeError, ValueError):
+        return None
+
+
 def _cached_or_fetch(key: str, fetch):
-    """Check cache first; on miss, run fetch() and store the result."""
-    hit = cache.get(key)
+    """24h parsed-result cache; retrieved_at preserved, transient flags unstored."""
+    hit = cache.get(key, ttl=SEC_RESULT_CACHE_TTL_SECONDS)
     if hit is not None:
-        return hit
+        out = dict(hit) if isinstance(hit, dict) else hit
+        if isinstance(out, dict):
+            out["cache_hit"] = True
+            out["cache_type"] = "stockbot_parsed"
+        return out
     value = fetch()
-    cache.set(key, value)
+    if isinstance(value, dict) and "error" not in value:
+        canonical = dict(value)
+        canonical.setdefault("retrieved_at", _utc_now_iso())
+        if "result_content_hash" not in canonical:
+            canonical["result_content_hash"] = _result_content_hash(canonical)
+        try:
+            cache.set(key, canonical)
+        except Exception:
+            pass
+        out = dict(canonical)
+        out["cache_hit"] = False
+        out["cache_type"] = "live_or_edgartools_http"
+        return out
+    if isinstance(value, dict):
+        out = dict(value)
+        out["cache_hit"] = False
+        out["cache_type"] = "live_or_edgartools_http"
+        return out
     return value
 
 
@@ -163,13 +218,18 @@ def get_fundamentals(ticker: str, metric: str) -> dict:
 def _fetch_fundamentals(ticker: str, metric: str) -> dict:
     try:
         company = Company(ticker)
+        _cik = getattr(company, "cik", None)
+        _facts_url = _companyfacts_url(_cik)
         if metric == "overview":
-            return {
+            out = {
                 "ticker": ticker,
                 "name": company.name,
                 "cik": company.cik,
                 "industry": getattr(company, "sic_description", None),
             }
+            if _facts_url:
+                out["source_url"] = _facts_url
+            return out
         if metric == "shares_outstanding":
             facts = company.get_facts()
             df = facts.to_dataframe()
@@ -179,13 +239,30 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             if shares.empty:
                 return _no_data(ticker, "shares outstanding not found in company facts")
             latest = shares.sort_values("period_end").iloc[-1]
-            return {
+            def _col(name, *alts):
+                for k in (name, *alts):
+                    try:
+                        v = latest.get(k)
+                    except Exception:
+                        continue
+                    if v is not None and str(v) not in ("", "nan", "NaT"):
+                        return str(v)
+                return None
+            out = {
                 "ticker": ticker,
                 "shares_outstanding": float(latest["value"]),
                 "as_of": str(latest["period_end"]),
                 "source": "SEC EDGAR company facts",
                 "note": "SEC-reported shares outstanding, not public float",
             }
+            if _cik is not None:
+                out["cik"] = _cik
+            if _facts_url:
+                out["source_url"] = _facts_url
+            for k, v in (("accession", _col("accession", "accn")), ("form", _col("form")), ("filed", _col("filed", "filed_at"))):
+                if v:
+                    out[k] = v
+            return out
         if metric == "eps":
             facts = company.get_facts()
             df = facts.to_dataframe()
@@ -232,18 +309,30 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                     "eps_diluted": round(float(r_diluted["value"]), 2),
                     "period_end": str(r_diluted["period_end"]),
                 }
+                for _k in ("accession", "accn", "form", "filed", "filed_at"):
+                    try:
+                        _v = r_diluted.get(_k)
+                    except Exception:
+                        _v = None
+                    if _v is not None and str(_v) not in ("", "nan", "NaT"):
+                        _out = "accession" if _k in ("accession", "accn") else ("filed" if _k in ("filed", "filed_at") else _k)
+                        q_entry.setdefault(_out, str(_v))
                 # Find matching basic EPS for same period
                 if recent_basic is not None:
                     matching = recent_basic[recent_basic["period_end"] == r_diluted["period_end"]]
                     if not matching.empty:
                         q_entry["eps_basic"] = round(float(matching.iloc[0]["value"]), 2)
                 quarterly_eps.append(q_entry)
-            
+
             result = {
                 "ticker": ticker,
                 "quarterly_eps": quarterly_eps,
                 "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
             }
+            if _cik is not None:
+                result["cik"] = _cik
+            if _facts_url:
+                result["source_url"] = _facts_url
             if len(recent_diluted) == 4:
                 result["ttm_eps_diluted"] = round(sum(float(r["value"]) for _, r in recent_diluted.iterrows()), 2)
             if recent_basic is not None and len(recent_basic) == 4:
@@ -259,7 +348,12 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 data = latest.to_dict() if hasattr(latest, "to_dict") else {"raw": str(latest)}
             except Exception:
                 data = {"raw": str(bs)}
-            return {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
+            out = {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
+            if _cik is not None:
+                out["cik"] = _cik
+            if _facts_url:
+                out["source_url"] = _facts_url
+            return out
         return {"error": f"Unknown metric '{metric}'"}
     except Exception as e:
         logger.warning("get_fundamentals(%s, %s) failed: %s", ticker, metric, e)
@@ -393,6 +487,7 @@ def get_latest_earnings_release(ticker: str) -> dict:
 def _fetch_latest_earnings_release(ticker: str) -> dict:
     try:
         company = Company(ticker)
+        _cik = getattr(company, "cik", None)
         filings = company.get_filings(form=["8-K"])
         for filing in filings:
             eightk = filing.obj()
@@ -405,13 +500,20 @@ def _fetch_latest_earnings_release(ticker: str) -> dict:
                 logger.debug("8-K %s has Item 2.02 but no press_releases attr", filing.accession_no)
                 continue
             text = press_releases[0].text()
-            return {
+            out = {
                 "ticker": ticker,
                 "filed": str(filing.filing_date),
                 "accession_no": filing.accession_no,
+                "accession": filing.accession_no,
                 "text": text,
                 "source": f"8-K Item 2.02 filed {filing.filing_date} (accession {filing.accession_no})",
             }
+            _url = getattr(filing, "filing_url", None) or getattr(filing, "url", None) or _filing_dir_url(_cik, filing.accession_no)
+            if _url:
+                out["source_url"] = str(_url)
+            if _cik is not None:
+                out["cik"] = _cik
+            return out
         # Fallback: try latest 10-Q MD&A as earnings narrative source
         logger.debug("No 8-K Item 2.02 found for %s; falling back to 10-Q MD&A", ticker)
         tenq_filings = company.get_filings(form=["10-Q"])
@@ -421,13 +523,20 @@ def _fetch_latest_earnings_release(ticker: str) -> dict:
             mda = getattr(tenq, "management_discussion", None)
             if mda is not None:
                 text = mda if isinstance(mda, str) else getattr(mda, "text", lambda: str(mda))()
-                return {
+                out = {
                     "ticker": ticker,
                     "filed": str(filing.filing_date),
                     "accession_no": filing.accession_no,
+                    "accession": filing.accession_no,
                     "text": text,
                     "source": f"10-Q MD&A filed {filing.filing_date} (accession {filing.accession_no})",
                 }
+                _url = getattr(filing, "filing_url", None) or getattr(filing, "url", None) or _filing_dir_url(_cik, filing.accession_no)
+                if _url:
+                    out["source_url"] = str(_url)
+                if _cik is not None:
+                    out["cik"] = _cik
+                return out
         return _no_data(ticker, "no 8-K Item 2.02 or 10-Q filing found")
     except Exception as e:
         logger.warning("get_latest_earnings_release(%s) failed: %s", ticker, e)
@@ -455,6 +564,7 @@ def _risk_text(filing) -> str | None:
 def _fetch_diff_risk_factors(ticker: str) -> dict:
     try:
         company = Company(ticker)
+        _cik = getattr(company, "cik", None)
         with_text: list = []
         for form in (["10-Q"], ["10-K"]):
             for f in company.get_filings(form=form)[:8]:
@@ -473,13 +583,27 @@ def _fetch_diff_risk_factors(ticker: str) -> dict:
             fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
             lineterm="",
         ))
-        return {
+        out = {
             "ticker": ticker,
             "latest_filed": str(latest.filing_date),
             "prior_filed": str(prior.filing_date),
+            "latest_accession": getattr(latest, "accession_no", None),
+            "prior_accession": getattr(prior, "accession_no", None),
+            "accessions": [getattr(prior, "accession_no", None), getattr(latest, "accession_no", None)],
             "diff": diff if diff.strip() else "No changes in risk factors language between the two filings.",
             "source": f"{prior.form}s filed {prior.filing_date} and {latest.form}s filed {latest.filing_date}",
         }
+        _urls = []
+        for _f in (prior, latest):
+            _u = getattr(_f, "filing_url", None) or getattr(_f, "url", None) or _filing_dir_url(_cik, getattr(_f, "accession_no", None))
+            if _u:
+                _urls.append(str(_u))
+        if _urls:
+            out["source_urls"] = _urls
+            out["source_url"] = _urls[-1]
+        if _cik is not None:
+            out["cik"] = _cik
+        return out
     except Exception as e:
         logger.warning("diff_risk_factors(%s) failed: %s", ticker, e)
         return _no_data(ticker, f"error diffing risk factors: {e}")
@@ -495,8 +619,10 @@ def get_financial_statements(ticker: str, statement_type: str) -> dict:
 def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
     try:
         company = Company(ticker)
+        _cik = getattr(company, "cik", None)
+        _facts_url = _companyfacts_url(_cik)
         financials = company.get_financials()
-        
+
         if statement_type == "income_statement":
             stmt = getattr(financials, "income_statement", getattr(financials, "income", None))
         elif statement_type == "balance_sheet":
@@ -505,10 +631,10 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
             stmt = getattr(financials, "cash_flow_statement", getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None)))
         else:
             return {"error": f"Unknown statement type '{statement_type}'"}
-        
+
         if stmt is None:
             return _no_data(ticker, f"{statement_type} not available")
-        
+
         # Convert to readable text format
         try:
             if hasattr(stmt, "to_dataframe"):
@@ -519,13 +645,18 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
                 text = str(stmt)
         except Exception:
             text = str(stmt)
-        
-        return {
+
+        out = {
             "ticker": ticker,
             "statement_type": statement_type,
             "text": text,
             "source": f"SEC EDGAR {statement_type}",
         }
+        if _cik is not None:
+            out["cik"] = _cik
+        if _facts_url:
+            out["source_url"] = _facts_url
+        return out
     except Exception as e:
         logger.warning("get_financial_statements(%s, %s) failed: %s", ticker, statement_type, e)
         return _no_data(ticker, f"error retrieving {statement_type}: {e}")
@@ -553,23 +684,37 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict:
         
         # Return recent values (most recent 5)
         recent = matching.sort_values("period_end").tail(5)
-        result_list = [
-            {
+        result_list = []
+        for _, r in recent.iterrows():
+            _row = {
                 "concept": str(r["concept"]),
                 "value": float(r["value"]),
                 "period_end": str(r["period_end"]),
                 "fiscal_period": str(r.get("fiscal_period", "N/A")),
             }
-            for _, r in recent.iterrows()
-        ]
-        
-        return {
+            for _k in ("accession", "accn", "form", "filed", "filed_at"):
+                try:
+                    _v = r.get(_k)
+                except Exception:
+                    _v = None
+                if _v is not None and str(_v) not in ("", "nan", "NaT"):
+                    _row.setdefault("accession" if _k in ("accession", "accn") else ("filed" if _k in ("filed", "filed_at") else _k), str(_v))
+            result_list.append(_row)
+
+        _cik = getattr(company, "cik", None)
+        _facts_url = _companyfacts_url(_cik)
+        out = {
             "ticker": ticker,
             "concept_searched": concept,
             "matching_concepts": result_list,
             "count": len(result_list),
             "source": "SEC EDGAR XBRL facts",
         }
+        if _cik is not None:
+            out["cik"] = _cik
+        if _facts_url:
+            out["source_url"] = _facts_url
+        return out
     except Exception as e:
         logger.warning("get_xbrl_facts(%s, %s) failed: %s", ticker, concept, e)
         return _no_data(ticker, f"error retrieving facts for '{concept}': {e}")
