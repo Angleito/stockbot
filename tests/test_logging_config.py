@@ -2,8 +2,8 @@
 and the INFO security-event line at the recorder choke point.
 
 Root handlers are detached before each configure_logging call so handler
-assertions see only what configure_logging attached (test collection
-imports app.main, which calls configure_logging() at import time).
+assertions see only what configure_logging attached (configure_logging is
+also called at import time by CLI/bridge entry points).
 """
 
 import contextlib

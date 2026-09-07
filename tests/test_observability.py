@@ -7,18 +7,12 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
-import pytest
-
-from app import finra_analysis
 from app.redact import redact_json, redact_text, redact_value
-from app.runtime import BudgetExhaustedError, ExecutionBudget
-from app.security import quarantine_reader
+from app.runtime import ExecutionBudget
 from app.storage.runs import (
     RunRecorder,
     finalize_failed_run,
-    reset_current_budget,
     reset_current_recorder,
-    set_current_budget,
     set_current_recorder,
 )
 
@@ -81,84 +75,19 @@ def test_redact_json_units():
     assert redact_json("not json") == "not json"
 
 
-def test_nested_helpers_reserve_budget(monkeypatch):
-    """Nested model helpers reserve against the active budget before any
-    network call; with capacity they proceed to the call."""
-    budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=64, max_model_calls=1,
-        max_runtime=600.0, max_evidence_tokens=48000,
-    )
-    assert budget.reserve_model_call() is True
-    token = set_current_budget(budget)
-    monkeypatch.setattr(
-        quarantine_reader.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
-    )
-    monkeypatch.setattr(
-        finra_analysis.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
-    )
-    try:
-        with pytest.raises(BudgetExhaustedError):
-            quarantine_reader._llm_complete("test", "prompt")
-        with pytest.raises(BudgetExhaustedError):
-            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
-    finally:
-        reset_current_budget(token)
-
-    # With capacity the helpers run through to the (stubbed) network call.
-    class _FakeResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "id": "req_nested",
-                "usage": _usage(),
-                "choices": [{"message": {"content": "summary text", "finish_reason": "stop"}}],
-            }
-
-    budget2 = ExecutionBudget(
-        max_rounds=8, max_tool_calls=64, max_model_calls=2,
-        max_runtime=600.0, max_evidence_tokens=48000,
-    )
-    token2 = set_current_budget(budget2)
-    monkeypatch.setattr(quarantine_reader.requests, "post", lambda *a, **k: _FakeResp())
-    monkeypatch.setattr(finra_analysis.requests, "post", lambda *a, **k: _FakeResp())
-    try:
-        assert quarantine_reader._llm_complete("test", "prompt") == "summary text"
-        assert (
-            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
-            == "summary text"
-        )
-    finally:
-        reset_current_budget(token2)
-
-
-def test_reserve_methods_enforce_runtime(monkeypatch):
+def test_reserve_methods_enforce_runtime():
     """Reserves refuse once elapsed runtime is gone, even with call slots left."""
     budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=2, max_model_calls=2,
+        max_tool_calls=2,
         max_runtime=1.0, max_evidence_tokens=48000,
     )
-    assert budget.reserve_model_call() is True
     assert budget.reserve_tool_call() is True
+    assert budget.reserve_search_call() is True
     budget._started -= 60  # pretend the budget started 60s ago
     assert budget.runtime_remaining() <= 0
-    assert budget.reserve_model_call() is False
+    assert budget.reserve_search_call() is False
     assert budget.reserve_tool_call() is False
 
-    # The nested-helper path surfaces the same refusal as an exception.
-    token = set_current_budget(budget)
-    monkeypatch.setattr(
-        quarantine_reader.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
-    )
-    try:
-        with pytest.raises(BudgetExhaustedError):
-            quarantine_reader._llm_complete("test", "prompt")
-    finally:
-        reset_current_budget(token)
 
 def _recorder(run_id, **overrides):
     kwargs = {
@@ -170,10 +99,8 @@ def _recorder(run_id, **overrides):
     return RunRecorder(run_id=run_id, **kwargs)
 
 
-def test_concurrent_tool_reservations_capped():
-    """8 threads racing for 20 tool slots hand out exactly 20."""
     budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=20, max_model_calls=8,
+        max_tool_calls=20,
         max_runtime=600.0, max_evidence_tokens=48000,
     )
     granted = []

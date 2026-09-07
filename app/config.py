@@ -26,10 +26,6 @@ def get_data_root() -> Path:
         p = REPO_ROOT / p
     return p
 
-# Default fallback only when the env var is unset. Keep env/CLI overrides
-# authoritative; this value must be valid on the target OpenRouter account.
-FALLBACK_MODEL = "google/gemini-2.5-flash"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 FINRA_TOKEN_URL = (
     "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token"
     "?grant_type=client_credentials"
@@ -57,39 +53,6 @@ def _require_env(name: str) -> str:
     return value
 
 
-def init_config() -> None:
-    """Validate env vars required by the research/chat tool path.
-
-    Raises ValueError if OPENROUTER_API_KEY or SEC_EDGAR_IDENTITY is missing.
-    """
-    _require_env("SEC_EDGAR_IDENTITY")
-    _require_env("OPENROUTER_API_KEY")
-
-
-def get_sec_edgar_identity() -> str:
-    """The SEC EDGAR identity string (validated, placeholder-rejected)."""
-    return _require_env("SEC_EDGAR_IDENTITY")
-
-
-def get_default_model() -> str:
-    return os.getenv("DEFAULT_MODEL", FALLBACK_MODEL)
-
-
-def _positive_env(name: str, default: float, *, integer: bool = False) -> int | float:
-    """Read a positive numeric setting without silently accepting bad limits."""
-    label = "integer" if integer else "number"
-    value = (os.getenv(name) or "").strip()
-    if not value:
-        return default
-    try:
-        parsed = int(value) if integer else float(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a positive {label}") from exc
-    if parsed <= 0:
-        raise ValueError(f"{name} must be a positive {label}")
-    return parsed
-
-
 def _env_bool(name: str) -> bool:
     """True when the env var is set to a truthy value (1/true/yes)."""
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
@@ -109,32 +72,17 @@ def configure_logging(*, stream_url: str | None = None) -> None:
         logging.getLogger().addHandler(handler)
 
 
-def get_local_chat_policy():  # type: ignore[no-untyped-def]
-    """Build the single-principal runtime chat policy from local config."""
-    from .policy import ChatPolicy
-    configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
-    return ChatPolicy(
-        allowed_models=frozenset({
-            get_default_model(),
-            *(item.strip() for item in configured if item.strip()),
-        }),
-        max_messages=_positive_env("CHAT_MAX_MESSAGES", 20, integer=True),
-        max_message_chars=_positive_env("CHAT_MAX_CONTENT_CHARS", 12_000, integer=True),
-        upstream_timeout_seconds=_positive_env("OPENROUTER_TIMEOUT_SECONDS", 60.0),
-    )
+def init_config() -> None:
+    """Validate env vars required by the SEC research path.
 
-
-def get_finra_analysis_model() -> Optional[str]:
-    """Secondary low-cost OpenRouter model used to phrase FINRA briefings.
-
-    Optional: when unset (or blank), FINRA analysis is deterministic-only.
+    Raises ValueError if SEC_EDGAR_IDENTITY is missing.
     """
-    value = (os.getenv("FINRA_ANALYSIS_MODEL") or "").strip()
-    return value or None
+    _require_env("SEC_EDGAR_IDENTITY")
 
 
-def get_openrouter_api_key() -> str:
-    return _require_env("OPENROUTER_API_KEY")
+def get_sec_edgar_identity() -> str:
+    """The SEC EDGAR identity string (validated, placeholder-rejected)."""
+    return _require_env("SEC_EDGAR_IDENTITY")
 
 
 def get_finra_client_id() -> str:

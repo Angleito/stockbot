@@ -1,4 +1,4 @@
-"""Tool implementations + OpenAI-format JSON schemas for OpenRouter."""
+"""Tool implementations + OpenAI-format JSON schemas for Pi."""
 
 import hashlib
 import json
@@ -1183,7 +1183,7 @@ def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
     return {
         "result_type": "portfolio_snapshot",
         # Persistent snapshot/account identifiers stay local. Tool results are
-        # rendered into OpenRouter context, where they are not needed.
+        # rendered into model context, where they are not needed.
         "created_at": snapshot.created_at.isoformat(),
         "created_at_local": snapshot.created_at.astimezone().isoformat(),
         "broker": snapshot.broker,

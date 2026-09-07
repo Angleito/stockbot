@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live Pi tool verification: every describe-visible tool invoked 3/3 by DEFAULT_MODEL.
+"""Live Pi tool verification: every describe-visible tool invoked 3/3 by Pi's configured default model.
 
 Fail-closed at every step. Verdict comes only from per-attempt recorder DBs.
 """
@@ -19,23 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import get_default_model  # noqa: E402  (loads .env via Stockbot dotenv)
 from app.tools import TOOLS  # noqa: E402
 from scripts.verify_tool_registry import get_registry_sets, registry_errors  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 180
 DEFAULT_REPETITIONS = 3
 POLL_S = 2
-
-# Pi may record a canonicalized model id (provider prefix stripped).
-# Explicit map only: expected DEFAULT_MODEL -> accepted observed ids. No fuzzy matching.
-MODEL_ALIASES: dict[str, set[str]] = {
-    "opencode-go/muse-spark-1.3-contributor": {"muse-spark-1.3-contributor"},
-}
-
-
-def model_matches(observed: str, expected: str) -> bool:
-    return observed == expected or observed in MODEL_ALIASES.get(expected, set())
 
 
 VERIFY_CASES: dict[str, dict] = {
@@ -152,7 +141,7 @@ def check_pre_pi(describe_names: list[str]) -> str | None:
     return None
 
 
-def evaluate_attempt(db_path: Path, required_tool: str, expected_model: str, exit_code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
+def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
     if timed_out and not completed_override:
@@ -186,9 +175,8 @@ def evaluate_attempt(db_path: Path, required_tool: str, expected_model: str, exi
             if failed > 0:
                 return False, "TOOL_FAILED present for required tool"
             models = conn.execute("SELECT model FROM model_calls").fetchall()
-            if not any(model_matches(r[0] or "", expected_model) for r in models):
-                seen = sorted({(r[0] or "") for r in models})
-                return False, f"model mismatch: expected {expected_model!r} saw {seen}"
+            if not any((r[0] or "").strip() for r in models):
+                return False, "no model telemetry: model_calls has no non-empty model ID"
             rows = conn.execute("SELECT status FROM agent_runs").fetchall()
             if not rows or any((r[0] or "") != "completed" for r in rows):
                 return False, f"agent_runs not completed: {[r[0] for r in rows]}"
@@ -254,7 +242,7 @@ def db_terminal(db_path: Path) -> bool:
         return False
 
 
-def run_pi(model: str, prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, bool]:
+def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, bool]:
     """Run one Pi attempt. Pi 0.85.0 -p lingers after answering, so outputs go
     to files (never pipes) and completion is detected via the recorder DB;
     the process group is then killed. Returns (exit, timed_out, out, err, saw_complete)."""
@@ -263,7 +251,7 @@ def run_pi(model: str, prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool
     out_log = attempt_dir / f"{attempt_dir.name}.pi.log"
     err_log = attempt_dir / f"{attempt_dir.name}.stderr.log"
     env = dict(os.environ, RUNS_DB_PATH=str(db_path))
-    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", EXTENSION, "--model", model, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", EXTENSION, "--", prompt]
     with open(out_log, "w") as out_f, open(err_log, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env, start_new_session=True)
         deadline = time.monotonic() + TIMEOUT_S
@@ -309,11 +297,8 @@ def main() -> int:
         print("PI_VERIFY_REPETITIONS must be >= 1", file=sys.stderr)
         return 1
 
-    model = get_default_model()
     sha = git_sha()
-    print(f"Model: {model}")
-    print("Config: .env")
-    print(f"Extension: {EXTENSION}")
+    print(f"Extension: {EXTENSION} (Pi configured default model)")
 
     try:
         describe, doctor = discover()
@@ -350,7 +335,7 @@ def main() -> int:
     root = Path("data/verify") / batch
     cwd = Path.cwd()
     results: dict[str, list[dict]] = {}
-    total = passed = procs = model_hits = 0
+    total = passed = procs = 0
     failed_tools: list[str] = []
     for tool in tool_names:
         results[tool] = []
@@ -360,14 +345,12 @@ def main() -> int:
             procs += 1
             prompt = build_attempt_prompt(tool, case_args[tool], n)
             db_path = root / tool / f"attempt-{n}" / "runs.sqlite"
-            code, timed_out, _out, err_text, saw_complete = run_pi(model, prompt, db_path, cwd)
+            code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd)
             if code != 0 and not saw_complete and "model" in err_text.lower():
                 print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
-                print(f"DEFAULT_MODEL={model!r}", file=sys.stderr)
-            ok, reason = evaluate_attempt(db_path, tool, model, code, timed_out, completed_override=saw_complete)
+            ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete)
             if ok:
                 passed += 1
-                model_hits += 1
             else:
                 tool_ok = False
             results[tool].append({"attempt": n, "ok": ok, "reason": reason, "exit": code, "db": str(db_path)})
@@ -382,12 +365,12 @@ def main() -> int:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
     coverage = f"{len([t for t in tool_names if all(r['ok'] for r in results[t])])}/{len(tool_names)} tools"
-    print(f"Model: {model} | git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
-    print(f"Coverage: {coverage} | processes: {procs} | model match: {model_hits}/{total}")
+    print(f"git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
+    print(f"Coverage: {coverage} | processes: {procs} | passed: {passed}/{total}")
     print(f"RESULT: {'PASS' if not failed_tools else 'FAIL'}")
     if failed_tools:
         print(f"failed tools: {failed_tools}")
-    summary = {"model": model, "git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results}
+    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results}
     (root / "summary.json").parent.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     return 0 if not failed_tools else 1

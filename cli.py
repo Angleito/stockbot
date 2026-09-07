@@ -28,7 +28,7 @@ from app.storage.runs import (
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
 _SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
-                "backfill-sec", "resume-sec-backfill", "sec-coverage")
+                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -309,6 +309,407 @@ def _cmd_sec_coverage(source: str | None, form: str | None,
 
 
 
+def _thesis_repo(args):
+    """Thesis root via the existing data-root mechanism (<root>/thesis)."""
+    from app.config import get_data_root
+    from app.thesis.repository import ThesisRepository
+    override = getattr(args, "data_root", None) or None
+    base = Path(override) if override else get_data_root()
+    return ThesisRepository(base / "thesis")
+
+
+def _thesis_ctx():
+    from app.policy import LOCAL_CONTEXT
+    return LOCAL_CONTEXT
+
+
+def _thesis_load(repo, id_or_slug):
+    try:
+        return repo.load_thesis(id_or_slug)
+    except KeyError as exc:
+        raise SystemExit(f"thesis: {exc}") from exc
+
+
+def _print_proposal(proposal) -> None:
+    print(f"Thesis: {proposal.user_thesis}")
+    print(f"Scope: {proposal.scope}")
+    for c in proposal.claims:
+        print(f"- claim [{c['status']}]: {c['statement']}")
+    for e in proposal.expressions:
+        print(f"- expression {e['instrument']}/{e['direction']} "
+              f"({e['structure']}, {e['horizon']}): {e['intent']} [{e['status']}]")
+    for q in proposal.questions:
+        print(f"- question ({q.question_id}): {q.question}")
+    if proposal.unknowns:
+        print(f"Unknowns: {', '.join(proposal.unknowns)}")
+
+
+def _thesis_create(args) -> None:
+    from app.thesis.intake import interpret_idea
+    idea = args.idea
+    if not idea:
+        if sys.stdin.isatty():
+            raise SystemExit("thesis create: provide IDEA as an argument or pipe it on stdin")
+        idea = sys.stdin.read().strip()
+    if not idea:
+        raise SystemExit("thesis create: empty idea")
+    proposal = interpret_idea(idea, None, None, _thesis_ctx())
+    if proposal.questions:
+        answers = {}
+        for q in proposal.questions:
+            try:
+                answers[q.question_id] = input(f"{q.question}\n> ").strip()
+            except EOFError:
+                answers[q.question_id] = ""
+        proposal = interpret_idea(idea, answers, None, _thesis_ctx())
+    _print_proposal(proposal)
+    try:
+        ok = input("Create this thesis? [y/N] ").strip().lower()
+    except EOFError:
+        ok = ""
+    if not ok.startswith("y"):
+        print("Not created.")
+        return
+    repo = _thesis_repo(args)
+    thesis = repo.create_thesis(
+        user_thesis=proposal.user_thesis,
+        scope=proposal.scope,
+        claims=[dict(c) for c in proposal.claims],
+        assumptions=list(proposal.assumptions),
+        invalidators=list(proposal.invalidators),
+        unknowns=list(proposal.unknowns),
+        expressions=[dict(e) for e in proposal.expressions],
+        requirements=[dict(r) for r in proposal.requirements],
+    )
+    print(f"Created {thesis.thesis_id} ({thesis.slug})")
+
+
+def _thesis_list(args) -> None:
+    repo = _thesis_repo(args)
+    rows = repo.list_theses()
+    if not rows:
+        print("No theses.")
+        return
+    for t in rows:
+        one = t.user_thesis.splitlines()[0][:100] if t.user_thesis else ""
+        print(f"{t.thesis_id} {t.slug} [{t.status}] {t.updated_at} {one}")
+
+
+def _thesis_show(args) -> None:
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    state = repo.load_state(thesis.thesis_id)
+    print(f"{thesis.thesis_id} ({thesis.slug}) [{thesis.status}] updated {thesis.updated_at}")
+    print(f"Thesis: {thesis.user_thesis}")
+    print(f"Scope: {thesis.scope}")
+    for c in thesis.claims:
+        print(f"- claim [{c.status}]: {c.statement}")
+    for key in ("assumptions", "invalidators", "unknowns"):
+        vals = getattr(thesis, key)
+        if vals:
+            print(f"{key.capitalize()}: {'; '.join(vals)}")
+    print(f"Assessment: {state.assessment}")
+    print("Expressions:")
+    if not thesis.expressions:
+        print("  (none)")
+    for e in thesis.expressions:
+        print(f"  - {e.intent} {e.instrument}/{e.direction} "
+              f"({e.structure}, {e.horizon}) [{e.status}]")
+
+
+def _thesis_refine(args) -> None:
+    from app.thesis.intake import interpret_idea
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    clarification = args.clarification
+    if not clarification:
+        if sys.stdin.isatty():
+            try:
+                clarification = input("Clarification:\n> ").strip()
+            except EOFError:
+                clarification = ""
+        else:
+            clarification = sys.stdin.read().strip()
+    if not clarification:
+        raise SystemExit("thesis refine: provide CLARIFICATION as an argument or on stdin")
+    proposal = interpret_idea(f"{thesis.user_thesis}\n{clarification}", None, None, _thesis_ctx())
+    old_claims = {c.statement for c in thesis.claims}
+    claims = [c.to_dict() for c in thesis.claims]
+    added_claims = [dict(c) for c in proposal.claims if c["statement"] not in old_claims]
+    old_expr = {(e.intent, e.instrument, e.direction, e.structure, e.horizon)
+                for e in thesis.expressions}
+    expressions = [e.to_dict() for e in thesis.expressions]
+    added_expr = [dict(e) for e in proposal.expressions
+                  if (e["intent"], e["instrument"], e["direction"],
+                      e["structure"], e["horizon"]) not in old_expr]
+    new_ids = {e["expression_id"] for e in added_expr}
+    requirements = [r.to_dict() for r in thesis.requirements]
+    added_reqs = [dict(r) for r in proposal.requirements if r["expression_id"] in new_ids]
+    merged = {
+        "user_thesis": proposal.user_thesis,
+        "scope": proposal.scope if proposal.scope != "unknown" else thesis.scope,
+        "claims": claims + added_claims,
+        "assumptions": list(dict.fromkeys([*thesis.assumptions, *proposal.assumptions])),
+        "invalidators": list(dict.fromkeys([*thesis.invalidators, *proposal.invalidators])),
+        "unknowns": list(dict.fromkeys([*thesis.unknowns, *proposal.unknowns])),
+        "expressions": expressions + added_expr,
+        "requirements": requirements + added_reqs,
+    }
+    print(f"+{len(added_claims)} claims, +{len(added_expr)} expressions, +{len(added_reqs)} requirements")
+    for c in added_claims:
+        print(f"- claim: {c['statement']}")
+    for e in added_expr:
+        print(f"- expression {e['instrument']}/{e['direction']} ({e['structure']}): {e['intent']}")
+    if not added_claims and not added_expr and merged["user_thesis"] == thesis.user_thesis:
+        print("No changes.")
+        return
+    try:
+        ok = input("Apply refinement? [y/N] ").strip().lower()
+    except EOFError:
+        ok = ""
+    if not ok.startswith("y"):
+        print("Not applied.")
+        return
+    updated = repo.update_thesis(args.id, **merged)
+    print(f"Refined {updated.thesis_id} ({updated.slug})")
+
+
+def _thesis_status(args) -> None:
+    repo = _thesis_repo(args)
+    op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis,
+          "close": repo.close_thesis}[args.thesis_command]
+    try:
+        updated = op(args.id)
+    except (KeyError, ValueError) as exc:
+        raise SystemExit(f"thesis: {exc}") from exc
+    print(f"{updated.thesis_id} ({updated.slug}) [{updated.status}]")
+
+
+def _thesis_inspect(args) -> None:
+    from app.thesis.models import Checkpoint, Thesis, ThesisMemory, ThesisQuestion, ThesisState, WatchRule
+    from app.thesis.yaml import load_raw_yaml, load_yaml
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    d = repo.root / thesis.slug
+    problems = []
+
+    def check(name, fn):
+        try:
+            fn()
+            print(f"{name}: ok")
+        except Exception as exc:
+            print(f"{name}: INVALID ({exc})")
+            problems.append(name)
+
+    def owned(name):
+        raw = load_raw_yaml(d / name)
+        if raw.get("thesis_id") != thesis.thesis_id:
+            raise ValueError(f"{d / name}: thesis_id mismatch")
+        return raw
+
+    def check_questions():
+        for q in owned("questions.yaml").get("questions", []):
+            ThesisQuestion.from_dict(q, str(d / "questions.yaml"))
+
+    def check_watch():
+        for r in owned("watch.yaml").get("rules", []):
+            WatchRule.from_dict(r, str(d / "watch.yaml"))
+
+    def check_memory():
+        for m in owned("memory.yaml").get("memories", []):
+            ThesisMemory.from_dict(m, str(d / "memory.yaml"))
+
+    check("thesis.yaml", lambda: load_yaml(d / "thesis.yaml", Thesis))
+    check("state.yaml", lambda: load_yaml(d / "state.yaml", ThesisState))
+    check("questions.yaml", check_questions)
+    check("watch.yaml", check_watch)
+    check("memory.yaml", check_memory)
+    check("checkpoint.yaml", lambda: load_yaml(d / "checkpoint.yaml", Checkpoint))
+    triggers = repo.load_triggers(thesis.thesis_id)
+    pending = sum(1 for t in triggers if t.status == "pending")
+    print(f"triggers: {pending} pending / {len(triggers)} total")
+    for name in ("evidence", "journal"):
+        sub = d / name
+        n = len([p for p in sub.glob("*.md" if name == "journal" else "*") if p.is_file()]) if sub.is_dir() else 0
+        print(f"{name} files: {n}")
+    if problems:
+        raise SystemExit(f"thesis inspect: invalid files: {', '.join(problems)}")
+
+
+def _thesis_inbox(args) -> None:
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    triggers = repo.load_triggers(thesis.thesis_id)
+    if not triggers:
+        print("No triggers.")
+        return
+    for t in triggers:
+        print(f"{t.trigger_id} [{t.status}] {t.trigger_type} ({t.importance}) {t.created_at}")
+        if t.summary:
+            print(f"  {t.summary.splitlines()[0][:120]}")
+
+
+def _journal_head(path):
+    entry_id, created, title = path.stem, "", ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i > 15:
+                    break
+                s = line.strip()
+                if s.startswith("entry_id:"):
+                    entry_id = s.split(":", 1)[1].strip()
+                elif s.startswith("created_at:"):
+                    created = s.split(":", 1)[1].strip()
+                elif s.startswith("# "):
+                    title = s[2:].strip()
+    except OSError:
+        pass
+    return entry_id, created, title
+
+
+def _thesis_journal(args) -> None:
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    jdir = repo.root / thesis.slug / "journal"
+    files = sorted((p for p in jdir.glob("*.md") if p.is_file()),
+                   key=lambda p: p.stat().st_mtime, reverse=True) if jdir.is_dir() else []
+    sel = getattr(args, "entry", None)
+    if sel:
+        norm = sel.replace(":", "_")  # filenames store entry IDs with ':' -> '_'
+        match = next((p for p in files if p.stem == norm or norm in p.stem or sel in p.stem), None)
+        if match is None:
+            raise SystemExit(f"thesis journal: no entry matching {sel!r} ({len(files)} entries)")
+        print(match.read_text(encoding="utf-8"), end="")
+        return
+    if not files:
+        print("No journal entries.")
+        return
+    for p in files:
+        entry_id, created, title = _journal_head(p)
+        print(f"{entry_id} {created} {title}".rstrip())
+
+
+class _UnconfiguredGateway:
+    """Placeholder research gateway: deterministic ticks work, Pi runs wait for wiring."""
+
+    def complete_research(self, prompt, *, request_context, tools):
+        raise RuntimeError(
+            "thesis tick: Pi research gateway is not wired yet; trigger left pending")
+
+
+def _thesis_runtime(args, what="thesis tick"):
+    """Shared tick/monitor wiring: repo, thesis ID, request context, source services."""
+    from app.policy import Capability, RequestContext
+    from app.thesis import monitor
+    from app.thesis.runner import capabilities_for_grants
+
+    try:
+        extra = capabilities_for_grants(list(getattr(args, "grants", None) or []))
+    except ValueError as exc:
+        raise SystemExit(f"{what}: {exc}") from exc
+    repo = _thesis_repo(args)
+    thesis = _thesis_load(repo, args.id)
+    ctx = RequestContext(
+        principal_id=_thesis_ctx().principal_id,
+        capabilities=frozenset({Capability.RESEARCH}) | extra,
+    )
+    targets = monitor.targets_for_thesis(thesis)
+    services = {
+        "sec_filings": monitor.SecFilingsService(targets, since_default=thesis.created_at),
+        "material_events": monitor.MaterialEventsService(targets, since_default=thesis.created_at),
+        "finra_short_interest": monitor.FinraShortInterestService(targets),
+    }
+    return repo, thesis.thesis_id, ctx, services
+
+
+def _thesis_tick(args) -> None:
+    """One deterministic monitor tick; exit 0 always (pauses/no-ops print a message)."""
+    from datetime import datetime, timezone
+
+    from app.thesis import monitor
+
+    repo, thesis_id, ctx, services = _thesis_runtime(args)
+    known_at = getattr(args, "known_at", None) or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = monitor.tick(repo, thesis_id, services, _UnconfiguredGateway(), ctx,
+                          known_at=known_at)
+    if result.no_op:
+        print("no meaningful change" + (f": {result.no_op_reason}" if result.no_op_reason else ""))
+        return
+    print(f"triggers created: {len(result.triggers_created)}"
+          + (f" ({', '.join(result.triggers_created)})" if result.triggers_created else ""))
+    print(f"runs: {len(result.runs)}"
+          + (f" ({', '.join(r.run_id for r in result.runs)})" if result.runs else ""))
+
+def _thesis_monitor(args) -> None:
+    """Loop ticks until stopped or closed; paused sleeps without querying, closed exits 0."""
+    import signal
+    import threading
+
+    from app.thesis.worker import monitor_loop
+
+    interval = getattr(args, "interval_seconds", 900)
+    if interval <= 0:
+        print("thesis monitor: --interval-seconds must be > 0", file=sys.stderr)
+        raise SystemExit(2)
+    repo, thesis_id, ctx, services = _thesis_runtime(args, what="thesis monitor")
+    fixed_known_at = getattr(args, "known_at", None)
+    stop = threading.Event()
+
+    def _stop(signum, frame):
+        stop.set()
+
+    def _report(outcome):
+        if outcome.no_op:
+            print("no meaningful change" + (f": {outcome.no_op_reason}" if outcome.no_op_reason else ""),
+                  flush=True)
+            return
+        print(f"triggers created: {len(outcome.triggers_created)}"
+              + (f" ({', '.join(outcome.triggers_created)})" if outcome.triggers_created else ""),
+              flush=True)
+        print(f"runs: {len(outcome.runs)}"
+              + (f" ({', '.join(r.run_id for r in outcome.runs)})" if outcome.runs else ""),
+              flush=True)
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+    monitor_loop(repository=repo, thesis_id=thesis_id, interval_seconds=interval,
+                 gateway=_UnconfiguredGateway(), request_context=ctx,
+                 source_services=services,
+                 known_at_fn=(lambda: fixed_known_at) if fixed_known_at else None,
+                 stop_event=stop, on_tick=_report)
+
+
+
+def _cmd_thesis(args) -> None:
+    cmd = getattr(args, "thesis_command", None)
+    if cmd == "create":
+        _thesis_create(args)
+    elif cmd == "list":
+        _thesis_list(args)
+    elif cmd == "show":
+        _thesis_show(args)
+    elif cmd == "refine":
+        _thesis_refine(args)
+    elif cmd in ("pause", "resume", "close"):
+        _thesis_status(args)
+    elif cmd == "inspect":
+        _thesis_inspect(args)
+    elif cmd == "inbox":
+        _thesis_inbox(args)
+    elif cmd == "journal":
+        _thesis_journal(args)
+    elif cmd == "tick":
+        _thesis_tick(args)
+    elif cmd == "monitor":
+        _thesis_monitor(args)
+    else:
+        raise SystemExit(
+            "thesis: choose from create, list, show, refine, pause, resume, close, "
+            "inspect, inbox, journal, tick, monitor"
+        )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     subparsers = parser.add_subparsers(dest="command")
@@ -334,7 +735,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mandate_parser = subparsers.add_parser("evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot")
     mandate_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     log_server_parser = subparsers.add_parser(
-        "log-server", help="receive and print log lines from chat/API clients (Ctrl-C to stop)"
+        "log-server", help="receive and print log lines from CLI/Pi-bridge clients (Ctrl-C to stop)"
     )
     log_server_parser.add_argument(
         "--port", type=int, default=DEFAULT_LOG_SERVER_PORT,
@@ -362,11 +763,63 @@ def _build_parser() -> argparse.ArgumentParser:
     coverage_parser.add_argument("--from", dest="from_date", default=None, help="coverage on/after YYYY-MM-DD")
     coverage_parser.add_argument("--to", dest="to_date", default=None, help="coverage on/before YYYY-MM-DD")
     coverage_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
+    thesis_common = argparse.ArgumentParser(add_help=False)
+    thesis_common.add_argument("--data-root", default=None,
+                               help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
+    thesis_parser = subparsers.add_parser("thesis", parents=[thesis_common],
+                                          help="persistent thesis management")
+    thesis_sub = thesis_parser.add_subparsers(dest="thesis_command")
+    create_parser = thesis_sub.add_parser("create", parents=[thesis_common],
+                                          help="normalize an idea and persist a thesis")
+    create_parser.add_argument("idea", nargs="?", default=None,
+                               help="thesis idea (default: read stdin)")
+    thesis_sub.add_parser("list", parents=[thesis_common], help="list theses")
+    show_parser = thesis_sub.add_parser("show", parents=[thesis_common],
+                                        help="show thesis and assessment")
+    show_parser.add_argument("id", help="thesis ID or slug")
+    refine_parser = thesis_sub.add_parser("refine", parents=[thesis_common],
+                                          help="refine a thesis with extra clarification")
+    refine_parser.add_argument("id", help="thesis ID or slug")
+    refine_parser.add_argument("clarification", nargs="?", default=None,
+                               help="extra natural-language clarification (default: stdin)")
+    for _name in ("pause", "resume", "close"):
+        _p = thesis_sub.add_parser(_name, parents=[thesis_common], help=f"{_name} a thesis")
+        _p.add_argument("id", help="thesis ID or slug")
+    inspect_parser = thesis_sub.add_parser("inspect", parents=[thesis_common],
+                                           help="validate thesis files and show counts")
+    inspect_parser.add_argument("id", help="thesis ID or slug")
+    inbox_parser = thesis_sub.add_parser("inbox", parents=[thesis_common],
+                                         help="list triggers and their state")
+    inbox_parser.add_argument("id", help="thesis ID or slug")
+    journal_parser = thesis_sub.add_parser("journal", parents=[thesis_common],
+                                           help="list journal entries (newest first)")
+    journal_parser.add_argument("id", help="thesis ID or slug")
+    journal_parser.add_argument("entry", nargs="?", default=None,
+                                help="print one entry without loading all")
+    tick_parser = thesis_sub.add_parser("tick", parents=[thesis_common],
+                                        help="run one deterministic monitor tick")
+    tick_parser.add_argument("id", help="thesis ID or slug")
+    tick_parser.add_argument("--grant", dest="grants", action="append", default=[],
+                             help="explicit read grant for this tick only "
+                             "(repeatable: broker-market-read | portfolio-read)")
+    tick_parser.add_argument("--known-at", default=None,
+                             help="PIT upper bound ISO timestamp (default: now UTC)")
+    monitor_parser = thesis_sub.add_parser("monitor", parents=[thesis_common],
+                                           help="loop ticks until stopped; paused sleeps without "
+                                           "querying, closed exits 0")
+    monitor_parser.add_argument("id", help="thesis ID or slug")
+    monitor_parser.add_argument("--interval-seconds", type=int, default=900,
+                                help="seconds between ticks (default 900; must be > 0)")
+    monitor_parser.add_argument("--grant", dest="grants", action="append", default=[],
+                                help="explicit read grant for this monitor process only "
+                                "(repeatable: broker-market-read | portfolio-read)")
+    monitor_parser.add_argument("--known-at", default=None,
+                                help="PIT upper bound ISO timestamp (default: now UTC per tick)")
     return parser
 
 
 def _rewrite_bare_log_server(argv: list[str]) -> list[str]:
-    """A bare --log-server directly before the subcommand (cli.py --log-server chat)
+    """A bare --log-server directly before the subcommand (cli.py --log-server runs)
     would be consumed by nargs='?' as its value; rewrite it to the explicit default
     URL so the subcommand still parses and dispatches."""
     for i, arg in enumerate(argv[:-1]):
@@ -413,11 +866,13 @@ def main() -> None:
     elif args.command == "sec-coverage":
         _cmd_sec_coverage(args.source, args.form, args.from_date, args.to_date,
                           args.data_root or None)
+    elif args.command == "thesis":
+        _cmd_thesis(args)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
             "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
-            "backfill-sec, resume-sec-backfill, sec-coverage)"
+            "backfill-sec, resume-sec-backfill, sec-coverage, thesis)"
         )
 
 

@@ -1,9 +1,10 @@
 """SQLite run/event/tool/model observability store. stdlib only.
 
-One RunRecorder per agent run appends rows to agent_runs/agent_events/
+One RunRecorder per Pi run appends rows to agent_runs/agent_events/
 tool_calls/model_calls under data/runs.sqlite (or $RUNS_DB_PATH).
-Observability must never break research: every recorder method swallows
-its own errors, disables the recorder, and logs a single warning.
+Pi emits model telemetry through scripts/pi_bridge.py; there are no nested
+Python completions. Observability must never break research: every recorder
+method swallows its own errors, disables the recorder, and logs a warning.
 """
 
 from __future__ import annotations
@@ -19,25 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
-
 from ..config import get_data_root
 from ..redact import redact_json, redact_text
-from ..runtime import EventType, ExecutionBudget
+from ..runtime import EventType
 
 logger = logging.getLogger(__name__)
-
-def model_error_category(exc: Exception) -> str:
-    """Map an upstream exception to a coarse category for observability."""
-    if isinstance(exc, requests.Timeout):
-        return "timeout"
-    if isinstance(exc, requests.HTTPError):
-        return "http"
-    if isinstance(exc, requests.ConnectionError):
-        return "connection"
-    if isinstance(exc, json.JSONDecodeError):
-        return "parse"
-    return "other"
 
 # Default data root when the recorder is not given an explicit one.
 DEFAULT_DATA_ROOT = get_data_root()
@@ -660,7 +647,7 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
         return False
 
 
-# -- current-recorder contextvar (nested model calls inside tools) ----------
+# -- current-recorder contextvar (Pi bridge + gateway share one recorder) ----------
 
 _current_recorder: ContextVar[Optional[RunRecorder]] = ContextVar(
     "current_recorder", default=None
@@ -677,68 +664,6 @@ def set_current_recorder(recorder: RunRecorder) -> Token:
 
 def reset_current_recorder(token: Token) -> None:
     _current_recorder.reset(token)
-
-
-def record_model_call_from_current(
-    *,
-    provider: str,
-    model: str,
-    started_at: str,
-    completed_at: str,
-    usage: Optional[dict] = None,
-    finish_reason: Optional[str] = None,
-    tool_call_count: int = 0,
-    provider_request_id: Optional[str] = None,
-    status: str = "completed",
-    error_type: Optional[str] = None,
-    error_category: Optional[str] = None,
-) -> float:
-    """Record a nested model call against the active recorder, if any."""
-    recorder = get_current_recorder()
-    if recorder is None:
-        return 0.0
-    return recorder.record_model_call(
-        round=recorder.current_round,
-        provider=provider,
-        model=model,
-        started_at=started_at,
-        completed_at=completed_at,
-        usage=usage,
-        finish_reason=finish_reason,
-        tool_call_count=tool_call_count,
-        provider_request_id=provider_request_id,
-        status=status,
-        error_type=error_type,
-        error_category=error_category,
-    )
-
-
-# -- current-budget contextvar (reserve-before-call inside nested helpers) ---
-
-_current_budget: ContextVar[Optional[ExecutionBudget]] = ContextVar(
-    "current_budget", default=None
-)
-
-
-def get_current_budget() -> Optional[ExecutionBudget]:
-    return _current_budget.get()
-
-
-def set_current_budget(budget: ExecutionBudget) -> Token:
-    return _current_budget.set(budget)
-
-
-def reset_current_budget(token: Token) -> None:
-    _current_budget.reset(token)
-
-
-def reserve_model_call_from_current() -> bool:
-    """Reserve one model call against the active budget, if any. No active
-    budget (standalone tool use) always succeeds."""
-    budget = get_current_budget()
-    if budget is None:
-        return True
-    return budget.reserve_model_call()
 
 
 # -- read-side query helpers -------------------------------------------------

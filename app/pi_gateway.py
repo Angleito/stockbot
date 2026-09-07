@@ -1,16 +1,14 @@
-"""Pi tool gateway: run_chat's security gates without the LLM loop.
+"""Pi tool gateway: Pi-driven tool-call security gates.
 
-Pi is the reasoning model; every tool call it makes still passes the same
-gates as app/agent.py run_chat (permit filter, argument validation, intent
-firewall, egress/private-args checks, ingress scan, LOCAL_CONTEXT-only
-execution, DLP, budget + recorder). Rival pattern to avoid: calling
-execute_tool directly from the bridge (drops all 7 gates).
+Pi is the reasoning model; every tool call it makes still passes these gates:
+permit filter, argument validation, intent firewall, egress/private-args
+checks, ingress scan, LOCAL_CONTEXT-only execution, DLP, budget + recorder.
+Rival pattern to avoid: calling execute_tool directly from the bridge
+(drops all gates).
 
 One deliberate divergence: the ingress scan uses envelope_for_tool +
-prepare_context directly instead of ContextBuilder.add_tool_result, because
-the builder's search_web path runs a nested OpenRouter completion
-(quarantine_reader) and there is no main model in the Pi harness — Pi
-itself reads the rendered evidence.
+prepare_context directly on rendered evidence — Pi itself reads it, and no
+source text is promoted into canonical facts.
 """
 
 from __future__ import annotations
@@ -22,12 +20,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from .agent import (
-    _BUDGET_EXHAUSTED_RESPONSE,
-    _is_failed_result,
-    _tool_result_meta,
-    _unavailable_data_response,
-)
 from .policy import LOCAL_CONTEXT, Capability
 from .redact import redact_json, redact_text
 from .security.action_policy import (
@@ -49,7 +41,7 @@ from .security.context_gateway import (
     prepare_context,
 )
 from .security.response_guard import guard_response
-from .runtime import ExecutionBudget
+from .runtime import ExecutionBudget, ToolResultMeta
 from .storage.runs import get_current_recorder
 from .tool_render import render_tool_result
 from .tools import (
@@ -72,6 +64,76 @@ RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
     tool["function"]["name"]
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH}))
 )
+
+_UNAVAILABLE_HEADER = (
+    "The requested data is unavailable: one or more tool calls failed or "
+    "returned no data, so the exact values cannot be provided. No values "
+    "are estimated, derived, or substituted."
+)
+
+_UNAVAILABLE_NEXT_STEP = (
+    "Next step: correct the request (dataset, fields, filters, or "
+    "credentials) and retry, or use a different dataset/source. The error "
+    "above states exactly what failed."
+)
+
+_BUDGET_EXHAUSTED_RESPONSE = (
+    "The research budget was exhausted before a final answer could be "
+    "produced. Retry with a narrower question or fewer tool calls."
+)
+
+_NON_DATA_LIST_KEYS = frozenset({"source_records", "warnings", "metrics", "trends"})
+
+
+def _is_failed_result(result) -> bool:
+    """A tool result is a failure when it carries an explicit error."""
+    return isinstance(result, dict) and bool(result.get("error"))
+
+
+def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
+    """Deterministic user-facing response when any tool call failed.
+
+    Built from the rendered error context of each failed tool (name,
+    dataset/source, HTTP status, sanitized FINRA response, environment)
+    plus a next step. The model is never consulted, so nothing can be
+    invented, derived, or substituted to fill the gap.
+    """
+    lines = [_UNAVAILABLE_HEADER, ""]
+    for name, result in failed:
+        lines.append(f"Tool: {name}")
+        for line in render_tool_result(result).splitlines():
+            lines.append("  " + line)
+        lines.append("")
+    lines.append(_UNAVAILABLE_NEXT_STEP)
+    return "\n".join(lines)
+
+
+def _tool_result_meta(result) -> ToolResultMeta:
+    """Best-effort telemetry envelope for a tool result: row counts,
+    truncation, source name, and freshness."""
+    if not isinstance(result, dict):
+        return ToolResultMeta(0, None, False, None, [], {})
+    source = result.get("source") or result.get("dataset_id") or result.get("dataset")
+    source_names = [str(source)] if source is not None else []
+    freshness_value = next(
+        (result[k] for k in ("retrieved_at", "data_freshness", "freshness", "as_of_date", "as_of")
+         if result.get(k) is not None),
+        None)
+    source_freshness = (
+        {str(source): str(freshness_value)} if source is not None and freshness_value is not None else {})
+    as_of = next((result[k] for k in ("as_of_date", "as_of")
+                  if result.get(k) is not None), None)
+    returned_count = result.get("returned_count") if isinstance(result.get("returned_count"), int) else None
+    row_count = result.get("row_count") if isinstance(result.get("row_count"), int) else max(
+        (len(v) for k, v in result.items() if isinstance(v, list) and k not in _NON_DATA_LIST_KEYS),
+        default=0)
+    total = result.get("total_records")
+    truncated = (
+        bool(result.get("truncated"))
+        or result.get("may_have_more") is True
+        or (returned_count is not None and isinstance(total, int) and returned_count < total))
+    return ToolResultMeta(row_count, returned_count, truncated,
+                          str(as_of) if as_of is not None else None, source_names, source_freshness)
 
 
 @dataclass
@@ -99,9 +161,7 @@ class PiSessionContext:
         )
         limits = LOCAL_CONTEXT.run_limits
         self.budget = ExecutionBudget(
-            max_rounds=limits.max_rounds,
             max_tool_calls=limits.max_tool_calls,
-            max_model_calls=limits.max_model_calls,
             max_runtime=limits.max_runtime,
             max_evidence_tokens=limits.max_evidence_tokens,
         )
@@ -182,7 +242,7 @@ def _execute_pi_tool(
         _args_json(arguments) if isinstance(arguments, dict) else json.dumps(str(arguments))
     )
 
-    # Gate 1: RESEARCH-only permit filter (same denial shape as run_chat).
+    # Gate 1: RESEARCH-only permit filter; unlisted tools are denied.
     if name not in RESEARCH_TOOL_NAMES or not tool_is_permitted(name, LOCAL_CONTEXT):
         _record_security(
             session, name, args_for_hash, "action_blocked", f"tool not permitted: {name}"
@@ -328,8 +388,8 @@ def _execute_pi_tool(
             "error_type": error_type or "tool_error",
         }
 
-    # Gate 5: ingress scan on the rendered evidence (no quarantine_reader:
-    # its nested OpenRouter completion has no main model in this harness).
+    # Gate 5: ingress scan on the rendered evidence; quarantined or blocked
+    # results are withheld from Pi with a fixed placeholder.
     rendered = render_tool_result(
         result, max_bytes=LOCAL_CONTEXT.run_limits.max_tool_result_bytes
     )

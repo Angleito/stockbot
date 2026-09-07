@@ -80,12 +80,12 @@ def test_missing_fixture_fails_closed():
 
 
 def test_nonzero_exit_fails(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", MODEL, 1, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 1, False)
     assert not ok
 
 
 def test_timeout_fails(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", MODEL, 0, True)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, True)
     assert not ok
 
 
@@ -97,34 +97,34 @@ def test_required_tool_absent_fails(tmp_path):
     conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", (MODEL,))
     conn.commit()
     conn.close()
-    ok, _ = v.evaluate_attempt(p, "get_fundamentals", MODEL, 0, False)
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False)
     assert not ok
 
 
 def test_wrong_tool_only_fails(tmp_path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", MODEL, 0, False)
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", 0, False)
     assert not ok
     assert "absent" in reason
 
 
 def test_error_envelope_fails(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool_error="tool_error"), "get_fundamentals", MODEL, 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool_error="tool_error"), "get_fundamentals", 0, False)
     assert not ok
 
 
 def test_valid_empty_passes(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", MODEL, 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, False)
     assert ok
 
 
-def test_model_mismatch_fails(tmp_path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, model="other-model"), "get_fundamentals", MODEL, 0, False)
+def test_empty_model_telemetry_fails(tmp_path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, model=""), "get_fundamentals", 0, False)
     assert not ok
-    assert "model mismatch" in reason
+    assert "no model telemetry" in reason
 
 
 def test_tool_failed_event_fails(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", MODEL, 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False)
     assert not ok
 
 
@@ -138,29 +138,22 @@ def test_doctor_describe_skew_fails():
     doc = {"bridge_ok": True, "tool_count": 1, "tool_names": ["a"]}
     assert v.check_discovery(desc, doc) is not None
 
-
-def test_model_alias_accepted(tmp_path):
+def test_any_pi_model_id_accepted(tmp_path):
     ok, _ = v.evaluate_attempt(
         _ok(tmp_path, model="muse-spark-1.3-contributor"),
-        "get_fundamentals", "opencode-go/muse-spark-1.3-contributor", 0, False,
+        "get_fundamentals", 0, False,
     )
     assert ok
 
 
-def test_model_matches_exact_and_alias_only():
-    assert v.model_matches("m", "m")
-    assert v.model_matches("muse-spark-1.3-contributor", "opencode-go/muse-spark-1.3-contributor")
-    assert not v.model_matches("other", "opencode-go/muse-spark-1.3-contributor")
-
-
 def test_completed_override_passes_despite_kill(tmp_path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", MODEL, -9, False, completed_override=True)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", -9, False, completed_override=True)
     assert ok
 
 
 def test_completed_override_still_needs_db_evidence(tmp_path):
     p = tmp_path / "missing.sqlite"
-    ok, _ = v.evaluate_attempt(p, "get_fundamentals", MODEL, -9, False, completed_override=True)
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", -9, False, completed_override=True)
     assert not ok
 
 

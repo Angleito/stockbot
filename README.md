@@ -8,7 +8,7 @@ Stockbot is a local-first AI investment research system designed to give individ
 - FINRA datasets, short-interest screens, and Regulation SHO analysis
 - Point-in-time `known_at` data handling, provenance, raw-data archiving, normalized Parquet datasets, and DuckDB analytics
 - Obligation and valuation analysis
-- A tool-using research agent using OpenRouter-backed models
+- A tool-using research agent backed by Pi
 - Analyst-consensus and market-data adapters
 - Optional Robinhood portfolio, quote, option, and saved-scanner **read** integration with portfolio analytics
 - Optional Exa-backed external web research (`search_web`): bounded current-evidence search with highlights; results are research evidence, not canonical financial records
@@ -21,7 +21,7 @@ Stockbot keeps raw source data and normalized analytical data separate, preserve
 
 - Python 3.14
 - An SEC EDGAR identity for SEC requests
-- An OpenRouter API key for chat or LLM-generated summaries
+- A working Pi setup for model inference (Stockbot shells to `pi`)
 - Bun (task runner) — `package.json` scripts are zero-dependency wrappers around Python tooling; required for `bun run setup`, `bun run test`, `bun run verify`.
 
 ## Local setup
@@ -32,37 +32,21 @@ cp .env.example .env
 bun run setup
 ```
 
-Offline tests do not need FINRA, Robinhood, SEC, or OpenRouter credentials.
+Offline tests do not need FINRA, Robinhood, or SEC credentials.
 
 ## Environment variables
 
-See [`.env.example`](.env.example) for the current list and whether each setting is required, optional, or testing-only. `SEC_EDGAR_IDENTITY` and `OPENROUTER_API_KEY` are required only for the features that use them. FINRA and Robinhood are optional integrations.
+See [`.env.example`](.env.example) for the current list and whether each setting is required, optional, or testing-only. `SEC_EDGAR_IDENTITY` is required only for SEC features. FINRA and Robinhood are optional integrations.
 
-## Running the CLI
-
-```bash
-venv/bin/python cli.py
-# or choose a model explicitly
-venv/bin/python cli.py --model provider/model-name
-```
-
-## Running the API
+## Running research
 
 ```bash
-# Keep the development server local.
-venv/bin/uvicorn app.main:app --host 127.0.0.1 --reload
+bun run stockbot
 ```
 
-The API exposes local `POST /chat` and `GET /health`. Chat accepts only
-`user` and `assistant` conversation history, never client `system`, `tool`,
-tool-call, or arbitrary metadata. The server independently injects Stockbot's
-system policy, enforces configured model and message bounds, and exposes tools
-from the local principal's capabilities. Today that principal has research and
-portfolio-read access.
-
-Do not expose this development server publicly. A hosted deployment must
-replace the local context dependency with managed identity and organization
-context, then retain the same capability policy, TLS, and operational controls.
+Pi owns model selection and the agent loop; Stockbot exposes its tools and
+security gates over the stdio bridge. `cli.py` remains for admin tasks only
+(`runs`, `inspect`, `refresh-data`, `log-server`, `robinhood-login`).
 
 ## Running tests
 
@@ -98,7 +82,7 @@ Runtime data is local and ignored by Git under `data/`. Stockbot archives raw so
 
 ## Privacy and external services
 
-Stockbot runs locally, but selected functionality calls external APIs including SEC EDGAR, FINRA, Robinhood MCP, and market-data sources. When an OpenRouter-backed model is used, prompts and selected research/tool context—including applicable portfolio research context—may be sent to OpenRouter for inference. Raw Robinhood OAuth credentials remain local; Stockbot omits brokerage account identifiers from the model-facing portfolio payload.
+Stockbot runs locally, but selected functionality calls external APIs including SEC EDGAR, FINRA, Robinhood MCP, and market-data sources. When Pi runs inference, prompts and selected research/tool context—including applicable portfolio research context—are sent to the user's configured Pi model for inference. Raw Robinhood OAuth credentials remain local; Stockbot omits brokerage account identifiers from the model-facing portfolio payload.
 
 The analyst-consensus adapter uses Yahoo Finance's unofficial `quoteSummary` endpoint with a cookie/crumb workflow. It is isolated in `app/analyst_client.py`, is not required for startup, and fails gracefully; it is not a guaranteed supported API.
 

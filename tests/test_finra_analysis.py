@@ -1,15 +1,14 @@
 """Tests for the private FINRA analysis layer.
 
-Offline and deterministic: FINRA HTTP is mocked via the shared fixtures, and
-the secondary analysis model (FINRA_ANALYSIS_MODEL) is always mocked when
-enabled. No live OpenRouter or FINRA calls.
+Offline and deterministic: FINRA HTTP is mocked via the shared fixtures.
+Briefings are pure deterministic functions of spec plus rows. No live
+FINRA calls.
 """
 
 import json
 from unittest.mock import MagicMock
 
 import pytest
-import requests
 
 from app import finra_analysis
 from app import finra_client
@@ -42,7 +41,6 @@ def _isolation(monkeypatch):
 def fake_cache(monkeypatch):
     fc = FakeCache()
     monkeypatch.setattr(finra_client, "cache", fc)
-    monkeypatch.setattr(finra_analysis, "cache", fc)
     return fc
 
 
@@ -57,33 +55,6 @@ def http(monkeypatch):
         "app.finra_client.get_finra_client_secret", lambda: "secret"
     )
     return {"get": get_mock, "post": post_mock}
-
-
-@pytest.fixture
-def analysis_model(monkeypatch):
-    """Enable and mock the secondary analysis model's completion call."""
-    monkeypatch.setenv("FINRA_ANALYSIS_MODEL", "mock/analysis-model")
-    state = {"calls": [], "error": None, "content": None}
-
-    def _fake_post_completion(model, messages, max_tokens):
-        state["calls"].append(
-            {"model": model, "messages": messages, "max_tokens": max_tokens}
-        )
-        if state["error"] is not None:
-            raise state["error"]
-        if state["content"] is not None:
-            return state["content"]
-        return json.dumps(
-            {
-                "summary": "Short interest declined.",
-                "key_findings": ["Position down 10%"],
-                "caveats": ["Two settlement cycles"],
-                "follow_up_suggestion": "Ask for Reg SHO.",
-            }
-        )
-
-    monkeypatch.setattr("app.finra_analysis._post_completion", _fake_post_completion)
-    return state
 
 
 def _data_body(post_mock):
@@ -400,125 +371,6 @@ def test_coverage_unknown_when_record_total_missing(http):
     assert cov["analysis_complete"] is None
     assert any("estimated" in w.lower() or "Record-Total" in w for w in result["warnings"])
     assert result["pagination_source"] == "estimate"
-
-
-# ---------------------------------------------------------------------------
-# Secondary analysis model
-# ---------------------------------------------------------------------------
-
-
-def test_analysis_model_receives_deterministic_analysis_only(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    result = execute_tool(
-        "query_finra",
-        {
-            "dataset": "otcMarket/consolidatedShortInterest",
-            "ticker": "AAPL",
-            "analysis_goal": "Is short interest trending up?",
-        },
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert "error" not in result, result
-    assert result["briefing"]["summary"] == "Short interest declined."
-    assert result["briefing_source"] == "analysis_model"
-    assert result["analysis_model"] == "mock/analysis-model"
-
-    call = analysis_model["calls"][0]
-    assert call["model"] == "mock/analysis-model"
-    prompt = call["messages"][-1]["content"]
-    # Deterministic metrics + provenance reach the small model...
-    assert "Deterministic metrics" in prompt
-    assert "consolidatedShortInterest" in prompt
-    assert "Is short interest trending up?" in prompt
-    # ...but never raw record content.
-    assert "Apple Inc." not in prompt
-    assert '"symbolCode"' not in prompt
-    assert '"currentShortPositionQuantity": 100' not in prompt
-
-
-def test_analysis_model_http_error_fallback(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    analysis_model["error"] = requests.HTTPError("500 from analysis model")
-
-    result = execute_tool(
-        "query_finra",
-        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert "error" not in result, result
-    assert result["briefing"] is None
-    assert result["briefing_source"] == "deterministic_only"
-    assert result["metrics"]["fields"]["currentShortPositionQuantity"]["max"] == 150
-
-
-def test_analysis_model_timeout_fallback(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    analysis_model["error"] = requests.Timeout("timed out")
-
-    result = execute_tool(
-        "query_finra",
-        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert "error" not in result, result
-    assert result["briefing"] is None
-    assert result["briefing_source"] == "deterministic_only"
-
-
-def test_analysis_model_invalid_json_fallback(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    analysis_model["content"] = "not json at all"
-
-    result = execute_tool(
-        "query_finra",
-        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert "error" not in result, result
-    assert result["briefing"] is None
-    assert result["briefing_source"] == "deterministic_only"
-
-
-def test_analysis_model_malformed_shape_fallback(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    analysis_model["content"] = '{"summary": "", "other": 1}'
-
-    result = execute_tool(
-        "query_finra",
-        {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert "error" not in result, result
-    assert result["briefing"] is None
-    assert result["briefing_source"] == "deterministic_only"
-
-
-def test_analysis_cached_by_query_goal_model(http, analysis_model):
-    rows = _short_interest_rows(2)
-    http["post"].side_effect = [_token_response(), _response(rows)]
-    args = {
-        "dataset": "otcMarket/consolidatedShortInterest",
-        "ticker": "AAPL",
-        "analysis_goal": "Trend direction?",
-    }
-    for _ in range(2):
-        result = execute_tool("query_finra", args, model="test", context=LOCAL_CONTEXT)
-        assert "error" not in result, result
-        assert result["briefing_source"] == "analysis_model"
-    assert len(analysis_model["calls"]) == 1  # second call served from cache
-
-    # A different analysis goal bypasses the cache.
-    execute_tool(
-        "query_finra",
-        {**args, "analysis_goal": "Level vs prior cycle?"},
-        model="test", context=LOCAL_CONTEXT,
-    )
-    assert len(analysis_model["calls"]) == 2
 
 
 # ---------------------------------------------------------------------------
