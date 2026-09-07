@@ -29,6 +29,7 @@ from app.thesis.models import (
     new_memory_id,
     new_question_id,
     new_rule_id,
+    require_watch_targets,
 )
 from app.tools import tools_for_capabilities
 
@@ -183,6 +184,7 @@ class ThesisResearchResult:
             for eid in rule.expression_ids:
                 if eid not in expression_ids:
                     raise ValueError(f"{where}: rule references absent expression {eid!r}")
+            require_watch_targets(rule, where)
             watches.append(rule.to_dict())
         evidence: list[dict] = []
         for i, ref in enumerate(_str_list(d, "evidence_refs", path)):
@@ -196,7 +198,9 @@ class ThesisResearchResult:
             ed.setdefault("evidence_id", new_evidence_id())
             ed["thesis_id"] = thesis_id
             ev = EvidenceRef.from_dict(ed, where)  # requires canonical_ref
-            if not ev.known_at or ev.known_at > known_at:
+            from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
+            dt_ev, dt_cut = _as_dt(ev.known_at), _as_dt(known_at)
+            if dt_ev is None or dt_cut is None or dt_ev > dt_cut:
                 raise ValueError(f"{where}: future or missing known_at {ev.known_at!r} (run known_at {known_at!r})")
             evidence.append(ev.to_dict())
         state = None
@@ -360,16 +364,13 @@ def _fail(run_id: str, exc: Exception) -> None:
         pass
 
 
-def _check_evidence_provenance(
-    evidence_refs: tuple, trigger: Any, repository: Any, thesis_id: str
-) -> None:
-    """Every ref must name the trigger's refs or already-stored evidence."""
-    allowed = set(trigger.canonical_refs) | repository.evidence_canonical_refs(thesis_id)
+def _check_evidence_provenance(evidence_refs: tuple, allowed: set[str], trigger_id: str) -> None:
+    """Pure membership: every ref must name an allowed canonical ref."""
     for ref in evidence_refs:
         if ref.get("canonical_ref") not in allowed:
             raise ValueError(
                 f"<research/gateway>: foreign canonical_ref {ref.get('canonical_ref')!r}"
-                f" (trigger {trigger.trigger_id!r}); refusing writeback")
+                f" (trigger {trigger_id!r}); refusing writeback")
 
 
 def _payload_from_result(
@@ -408,10 +409,10 @@ def _payload_from_result(
 
 def _outcome_from_applied(
     repository: Any, thesis_id: str, trigger_id: str, run_id: str,
-    payload: dict, tool_names: list,
+    payload: dict, tool_names: list, allowed_refs: set[str] | None = None,
 ) -> RunOutcome:
     # Re-read the recorded intent's payload for IDs (replay-safe: same result twice).
-    outcome = repository.apply_research_result(thesis_id, payload, run_id)
+    outcome = repository.apply_research_result(thesis_id, payload, run_id, allowed_refs=allowed_refs)
     repository.clear_pending_result(thesis_id, trigger_id)
     return RunOutcome(
         run_id=run_id,
@@ -456,7 +457,8 @@ def run_trigger(
     if pending is not None:
         return _outcome_from_applied(
             repository, tid, trigger_id, pending["run_id"],
-            pending["payload"], list(pending.get("tool_names", [])))
+            pending["payload"], list(pending.get("tool_names", [])),
+            set(pending["allowed_refs"]) if pending.get("allowed_refs") is not None else None)
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
 
@@ -489,15 +491,17 @@ def run_trigger(
             known_at=known_at,
             path="<research/gateway>",
         )
-        _check_evidence_provenance(result.evidence_refs, trigger, repository, tid)
+        allowed = set(trigger.canonical_refs) | {
+            e["canonical_ref"] for e in context.evidence_refs if e.get("canonical_ref")}
+        _check_evidence_provenance(result.evidence_refs, allowed, trigger.trigger_id)
         payload = _payload_from_result(
             result, run_id=rid, trigger=trigger, known_at=known_at,
             tool_names=tool_names, started_at=started_at)
         repository.write_pending_result(
             tid, trigger_id,
             {"run_id": rid, "known_at": known_at,
-             "tool_names": tool_names, "payload": payload})
-        return _outcome_from_applied(repository, tid, trigger_id, rid, payload, tool_names)
+             "tool_names": tool_names, "payload": payload, "allowed_refs": sorted(allowed)})
+        return _outcome_from_applied(repository, tid, trigger_id, rid, payload, tool_names, allowed)
     except Exception as exc:
         _fail(rid, exc)
         raise

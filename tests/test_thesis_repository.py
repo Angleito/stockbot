@@ -8,7 +8,7 @@ import yaml
 
 from app.thesis.models import Thesis
 from app.thesis.repository import ThesisRepository
-from app.thesis.runner import _apply_answered
+from app.thesis.runner import ThesisResearchResult, _apply_answered
 from app.thesis.yaml import atomic_write_yaml, load_raw_yaml
 
 
@@ -231,3 +231,55 @@ def test_normalize_watch_heals_and_load_watch_rules(tmp_path):
     (rule,) = r.load_watch_rules(t.thesis_id)
     assert rule.rule_id == "rule:odd" and rule.enabled is False
     assert rule.support_status == "unsupported" and rule.support_reason
+
+def _evidence_files(repo: ThesisRepository, thesis_id: str) -> dict:
+    thesis = repo.load_thesis(thesis_id)
+    evdir = repo.dir_for_thesis(thesis.thesis_id) / "evidence"
+    out = {}
+    for f in sorted(evdir.glob("*.yaml")):
+        raw = load_raw_yaml(f)
+        if isinstance(raw, dict) and raw.get("thesis_id") == thesis_id:
+            out[raw.get("evidence_id")] = raw
+    return out
+
+
+def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path):
+    r = _repo(tmp_path)
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
+    cutoff = "2026-01-01T10:00:00+00:00"
+    journal = {"entry_id": "journal:hist", "title": "t", "body": "b", "known_at": cutoff}
+    r.apply_research_result(t.thesis_id, {"evidence_refs": [
+        {"evidence_id": "ev:visible", "canonical_ref": "V", "summary": "v",
+         "known_at": "2026-01-01T09:00:00+00:00"},
+        {"evidence_id": "ev:future", "canonical_ref": "F", "summary": "f",
+         "known_at": "2026-02-01T00:00:00+00:00"}]}, "run:seed")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["V"], summary="s")
+    with pytest.raises(ValueError, match="foreign canonical_ref"):
+        r.apply_research_result(t.thesis_id, {"trigger_id": trig.trigger_id,
+            "evidence_refs": [{"evidence_id": "ev:forged", "canonical_ref": "F",
+                               "summary": "forged", "known_at": "2026-01-01T09:30:00+00:00"}],
+            "journal_entry": dict(journal)}, "run:x")
+    stored = _evidence_files(r, t.thesis_id)
+    assert "ev:forged" not in stored and stored["ev:future"]["canonical_ref"] == "F"
+    out = r.apply_research_result(t.thesis_id, {"trigger_id": trig.trigger_id,
+        "evidence_refs": [{"evidence_id": "ev:ok", "canonical_ref": "V",
+                           "summary": "v2", "known_at": cutoff}],
+        "journal_entry": dict(journal, entry_id="journal:hist-ok")}, "run:y")
+    assert out["evidence"] == 1
+    stored = _evidence_files(r, t.thesis_id)
+    assert stored["ev:ok"]["canonical_ref"] == "V"
+
+
+def test_evidence_pit_compares_chronologically_not_lexically(tmp_path):
+    cutoff = "2026-01-01T10:00:00+00:00"
+
+    def check(known_at: str) -> None:
+        ThesisResearchResult.from_dict(
+            {"evidence_refs": [{"canonical_ref": "V", "summary": "v", "known_at": known_at}]},
+            thesis_id="thesis:t", claim_ids=set(), expression_ids=set(),
+            question_ids=set(), known_at=cutoff)
+    check("2026-01-01T11:00:00+02:00")  # 09:00Z: lexically after, chronologically before
+    check("2026-01-01T12:00:00+02:00")  # equal instant
+    for bad in ("2026-01-01T10:30:00+00:00", "2026-01-01T09:30:00-01:00", "not-a-time", ""):
+        with pytest.raises(ValueError):
+            check(bad)

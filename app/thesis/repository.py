@@ -34,6 +34,7 @@ from app.thesis.models import (
     new_requirement_id,
     new_thesis_id,
     new_trigger_id,
+    require_watch_targets,
     slugify,
 )
 from app.thesis.yaml import (
@@ -289,8 +290,12 @@ class ThesisRepository:
                 r["enabled"] = False
                 r["support_status"] = "unsupported"
                 if not r.get("support_reason"):
-                    r["support_reason"] = (
-                        f"no deterministic monitor backing for {r.get('rule_type')!r}; never queried")
+                    if r.get("rule_type") == "new_external_evidence":
+                        r["support_reason"] = (
+                            "no production source for 'new_external_evidence'; never queried")
+                    else:
+                        r["support_reason"] = (
+                            f"no deterministic monitor backing for {r.get('rule_type')!r}; never queried")
                 changed = True
             if changed:
                 atomic_write_yaml(path, raw, self.root)
@@ -303,7 +308,6 @@ class ThesisRepository:
         raw = load_raw_yaml(thesis_dir / "watch.yaml")
         self._check_file_owner(raw, path, thesis.thesis_id)
         return [WatchRule.from_dict(r, path) for r in raw.get("rules", [])]
-
 
     # -- creation ---------------------------------------------------------
 
@@ -662,15 +666,20 @@ class ThesisRepository:
             return candidate
 
 
-    def apply_research_result(self, thesis_id: str, result: dict, run_id: str = "") -> dict:
+    def apply_research_result(
+        self, thesis_id: str, result: dict, run_id: str = "", *, allowed_refs: set[str] | None = None,
+    ) -> dict:
         """Single replayable research commit; de-dup additions by ID (crash-retry safe).
 
         One lock, fixed order: claim/expression status -> evidence refs -> state
         -> questions -> memory -> watch -> journal -> trigger processed metadata.
         Evidence provenance is validated before any write: refs carrying bodies,
         URLs, or publication/retrieval metadata are rejected, and (when a
-        trigger_id is present) every canonical ref must name the trigger's refs
-        or already-stored evidence. Never deletes triggers.
+        trigger_id is present) every canonical ref must name the run's allowed
+        set. The runner threads its visible-run set through ``allowed_refs``;
+        without it the allowed set is the trigger's refs plus stored refs whose
+        known_at is chronologically at or before the payload time. Never
+        deletes triggers.
         """
         if not isinstance(result, dict):
             raise ValueError(f"<apply>: result must be a mapping, got {type(result).__name__}")
@@ -709,7 +718,34 @@ class ThesisRepository:
             raw_trigger: dict | None = None
             if result.get("trigger_id"):
                 tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
-                allowed = set(raw_trigger.get("canonical_refs", [])) | self.evidence_canonical_refs(thesis_id)
+                if allowed_refs is not None:
+                    allowed = set(allowed_refs)
+                else:
+                    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+                    journal = result.get("journal_entry")
+                    payload_known = journal.get("known_at") if isinstance(journal, dict) else None
+                    if not payload_known:
+                        payload_known = raw_trigger.get("created_at")
+                    dt_cut = _as_dt(payload_known) if payload_known else None
+                    pit_refs: set[str] = set()
+                    if dt_cut is not None:
+                        evdir = thesis_dir / "evidence"
+                        if evdir.is_dir():
+                            for f in sorted(evdir.glob("*.yaml")):
+                                try:
+                                    raw = load_raw_yaml(f)
+                                except Exception:
+                                    continue
+                                if not isinstance(raw, dict) or raw.get("thesis_id") != thesis_id:
+                                    continue
+                                ref, known = raw.get("canonical_ref"), raw.get("known_at")
+                                if not isinstance(ref, str) or not ref:
+                                    continue
+                                dt_known = _as_dt(known) if known else None
+                                if dt_known is not None and dt_known <= dt_cut:
+                                    pit_refs.add(ref)
+                    allowed = set(raw_trigger.get("canonical_refs", [])) | pit_refs
             else:
                 allowed = None  # seed path without a trigger: membership unchecked
             for ref in result.get("evidence_refs", []) or []:
@@ -723,7 +759,6 @@ class ThesisRepository:
                     raise ValueError(
                         f"{thesis_dir}/evidence: foreign canonical_ref {ref.get('canonical_ref')!r}"
                         f" (trigger {result['trigger_id']!r}); refusing writeback")
-
             # 0c. fold the old standalone thesis status mutation into this commit.
             if claim_patch or expr_patch:
                 patched = thesis.to_dict()
@@ -808,6 +843,7 @@ class ThesisRepository:
                     for eid in robj.expression_ids:
                         if eid not in expr_ids:
                             raise ValueError(f"{thesis_dir}/watch.yaml: rule references absent expression {eid!r}")
+                    require_watch_targets(robj, str(thesis_dir / "watch.yaml"))
                     if robj.rule_id in known:
                         continue
                     raw.setdefault("rules", []).append(robj.to_dict())

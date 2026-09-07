@@ -34,6 +34,58 @@ from .storage import duckdb
 
 logger = logging.getLogger(__name__)
 
+# Structured thesis-proposal delta fields shared by thesis_create/refine.
+# IntakeProposal.from_dict remains the source of truth for value shapes.
+_THESIS_DELTA_PROPERTIES = {
+    "scope": {"type": "string", "description": "Ticker scope (e.g. NVDA) or 'unknown'."},
+    "claims": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"statement": {"type": "string"}},
+            "required": ["statement"],
+        },
+    },
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "invalidators": {"type": "array", "items": {"type": "string"}},
+    "unknowns": {"type": "array", "items": {"type": "string"}},
+    "expressions": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "intent": {"type": "string"},
+                "instrument": {"type": "string"},
+                "direction": {"type": "string"},
+                "structure": {"type": "string"},
+                "horizon": {"type": "string"},
+            },
+        },
+    },
+    "requirements": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "expression_id": {"type": "string"},
+                "requirement_type": {"type": "string"},
+                "statement": {"type": "string"},
+            },
+            "required": ["expression_id", "requirement_type", "statement"],
+        },
+    },
+    "questions": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}, "question_type": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+}
+
+_THESIS_PROPOSAL_KEYS = tuple(_THESIS_DELTA_PROPERTIES)
+
 TOOLS = [
     {
         "type": "function",
@@ -947,15 +999,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "thesis_create",
-            "description": "Creates a thesis from a natural-language idea via structured interpretation. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
+            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "idea": {"type": "string", "description": "The user's investment idea in their own words."},
-                    "answers": {"type": "object", "description": "Optional answers to intake questions, keyed by question_id."},
-                    "offline": {"type": "boolean", "description": "Use the deterministic local interpreter (tests/offline only). Default false (Pi)."},
+                    "user_thesis": {"type": "string", "description": "The user's investment thesis in their own words."},
+                    **_THESIS_DELTA_PROPERTIES,
                 },
-                "required": ["idea"],
+                "required": ["user_thesis"],
             },
         },
     },
@@ -977,13 +1028,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "thesis_refine",
-            "description": "Refines a thesis with a clarification via structured interpretation. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses.",
+            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
                     "clarification": {"type": "string", "description": "New information or correction in the user's own words."},
-                    "offline": {"type": "boolean", "description": "Use the deterministic local interpreter (tests/offline only). Default false (Pi)."},
+                    **_THESIS_DELTA_PROPERTIES,
                 },
                 "required": ["id", "clarification"],
             },
@@ -2042,35 +2093,24 @@ def _thesis_repo_for(context: RequestContext):
     return ThesisRepository(Path(base) / "thesis")
 
 
-def _thesis_intake_context(context: RequestContext) -> RequestContext:
-    """RESEARCH-only sub-context for intake (intake rejects broker caps)."""
-    return RequestContext(
-        principal_id=context.principal_id,
-        capabilities=frozenset({Capability.RESEARCH}),
-        data_root=getattr(context, "data_root", None) or get_data_root(),
-        as_of=getattr(context, "as_of", None),
-    )
-
-
-def _thesis_interpret(idea: str, answers: Any, offline: bool, context: RequestContext):
+def _thesis_proposal(arguments: dict, user_thesis: str, path: str):
+    """Structured tool args -> validated IntakeProposal (raises ValueError)."""
     from app.thesis import intake as thesis_intake
 
-    given = dict(answers or {})
-    if offline:
-        return thesis_intake.interpret_idea(idea, given, None, _thesis_intake_context(context))
-    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
-
-    return thesis_intake.interpret_idea(
-        idea, given, PiJsonGateway(), _thesis_intake_context(context))
+    payload = {"user_thesis": user_thesis}
+    for key in _THESIS_PROPOSAL_KEYS:
+        if arguments.get(key) is not None:
+            payload[key] = arguments[key]
+    return thesis_intake.IntakeProposal.from_dict(payload, path)
 
 
 def _thesis_create(arguments: dict, context: RequestContext) -> dict:
     from app.thesis import intake as thesis_intake
 
-    idea = arguments["idea"]
-    if not isinstance(idea, str) or not idea.strip():
-        raise ValueError("thesis_create: 'idea' must be a non-empty string")
-    proposal = _thesis_interpret(idea, arguments.get("answers"), bool(arguments.get("offline")), context)
+    user_thesis = arguments.get("user_thesis")
+    if not isinstance(user_thesis, str) or not user_thesis.strip():
+        raise ValueError("thesis_create: 'user_thesis' must be a non-empty string")
+    proposal = _thesis_proposal(arguments, user_thesis, "<thesis_create>")
     return thesis_intake.create_thesis_from_proposal(_thesis_repo_for(context), proposal)
 
 
@@ -2099,13 +2139,15 @@ def _thesis_refine(arguments: dict, context: RequestContext) -> dict:
     from app.thesis import intake as thesis_intake
 
     repo = _thesis_repo_for(context)
-    thesis = repo.load_thesis(arguments["id"])
-    clarification = arguments["clarification"]
+    thesis_id = arguments.get("id")
+    if not isinstance(thesis_id, str) or not thesis_id.strip():
+        raise ValueError("thesis_refine: 'id' must be a non-empty string")
+    thesis = repo.load_thesis(thesis_id)
+    clarification = arguments.get("clarification")
     if not isinstance(clarification, str) or not clarification.strip():
         raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
-    proposal = _thesis_interpret(
-        f"{thesis.user_thesis}\n{clarification.strip()}", None,
-        bool(arguments.get("offline")), context)
+    proposal = _thesis_proposal(
+        arguments, f"{thesis.user_thesis}\n{clarification.strip()}", "<thesis_refine>")
     plan = thesis_intake.plan_refinement(thesis, proposal)
     if (not plan["added_claims"] and not plan["added_expressions"]
             and plan["merged"]["user_thesis"] == thesis.user_thesis):

@@ -112,15 +112,10 @@ def _run_pi(prompt: str, *, request_context=None, tools: list | None = None) -> 
     db_p = tmp / "run.db"
     done_p = tmp / "done.json"
     prefix = ""
-    if data_root is not None and str(data_root):
-        prefix += f"STOCKBOT_DATA_ROOT={data_root}\n"
-    prefix += f"STOCKBOT_DONE_FILE={done_p}\n"
     if as_of:
         prefix += f"Point-in-time: only use data known at as_of={as_of}. "
     if names:
         prefix += f"You may call only these Stockbot tools: {', '.join(sorted(set(names)))}. "
-    if data_root is not None and str(data_root):
-        prefix += "The STOCKBOT_DATA_ROOT line is machine addressing for tool routing, not research content. "
     full = (prefix + prompt + "\nReturn ONLY JSON.").strip()
     cmd = ["pi", "-p", "--no-session", "--no-builtin-tools",
            "--extension", _EXTENSION]
@@ -130,6 +125,7 @@ def _run_pi(prompt: str, *, request_context=None, tools: list | None = None) -> 
     env = dict(os.environ)
     if data_root is not None and str(data_root):
         env["STOCKBOT_DATA_DIR"] = str(data_root)
+    env["STOCKBOT_DONE_FILE"] = str(done_p)
     env["RUNS_DB_PATH"] = str(db_p)
     with open(out_p, "w") as out_f, open(err_p, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f,

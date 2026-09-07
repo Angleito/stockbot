@@ -543,18 +543,37 @@ def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
 
 def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal) -> dict:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
+    from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
+
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
     if thesis.status != "active":
         raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
     updated = repository.update_thesis(tid, **plan["merged"])
     fresh = repository.load_thesis(tid)
-    have_types = {r.rule_type for r in repository.load_watch_rules(tid)}
-    new_rules = [r for r in build_initial_watch_rules(
-        fresh.scope, proposal.requirements,
-        claim_ids=[c.claim_id for c in fresh.claims],
-        expression_ids=[e.expression_id for e in fresh.expressions])
-        if r["rule_type"] not in have_types]
+    covered_claims: dict[str, set[str]] = {}
+    covered_exprs: dict[str, set[str]] = {}
+    for r in repository.load_watch_rules(tid):
+        if not r.enabled or r.support_status != "supported" or r.rule_type not in SUPPORTED_HANDLERS:
+            continue
+        covered_claims.setdefault(r.rule_type, set()).update(r.claim_ids)
+        covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
+    new_rules = []
+    for cand in build_initial_watch_rules(
+            fresh.scope, proposal.requirements,
+            claim_ids=[c.claim_id for c in fresh.claims],
+            expression_ids=[e.expression_id for e in fresh.expressions]):
+        rt = cand["rule_type"]
+        known_c = covered_claims.setdefault(rt, set())
+        known_e = covered_exprs.setdefault(rt, set())
+        cids = [c for c in cand.get("claim_ids", []) if c not in known_c]
+        eids = [e for e in cand.get("expression_ids", []) if e not in known_e]
+        if not (cids or eids):
+            continue
+        cand = dict(cand, rule_id=new_rule_id(), claim_ids=cids, expression_ids=eids)
+        new_rules.append(cand)
+        known_c.update(cids)
+        known_e.update(eids)
     if new_rules:
         repository.apply_research_result(tid, {"watch_add": new_rules}, "")
     return {

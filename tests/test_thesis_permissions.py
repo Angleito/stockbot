@@ -6,6 +6,8 @@ import pytest
 
 import app.tools as tools_mod
 from app.policy import Capability, RequestContext
+from app.security.action_policy import authorize_tool_call
+from app.security.context import RunSecurityContext, classify_intent
 from app.thesis.monitor import CanonicalEvent, tick
 from app.thesis.repository import ThesisRepository
 from app.thesis.runner import capabilities_for_grants, run_trigger, visible_tools_for
@@ -22,7 +24,7 @@ def _repo_with_thesis(tmp_path, scope="NVDA"):
     t = r.create_thesis(f"{scope} thesis", scope=scope, claims=[f"{scope} demand grows"])
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
     raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
-    raw["rules"].append({"rule_id": "rule:1", "rule_type": "new_external_evidence",
+    raw["rules"].append({"rule_id": "rule:1", "rule_type": "new_filing",
                          "enabled": True, "support_status": "supported",
                          "support_reason": "", "claim_ids": [cid], "expression_ids": []})
     atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")
@@ -140,21 +142,75 @@ def test_tick_with_grant_exposes_only_granted_tools(tmp_path):
     r, t = _repo_with_thesis(tmp_path)
 
     class Src:
-        name = "external_evidence"
         calls = 0
 
         def query_since(self, cp, *, known_at):
             type(self).calls += 1
-            return [CanonicalEvent(event_id="e1", canonical_ref="ev:grant-1",
-                                   source="external_evidence", known_at="2026-01-02T00:00:00+00:00",
+            return [CanonicalEvent(event_id="f1", canonical_ref="edgar:NVDA:10-K:f1",
+                                   source="sec_filings", known_at="2026-01-02T00:00:00+00:00",
                                    entity="NVDA", summary="NVDA files 10-K")]
 
-    gw = _GW({"evidence_refs": [{"canonical_ref": "ev:grant-1", "summary": "NVDA files",
+    gw = _GW({"evidence_refs": [{"canonical_ref": "edgar:NVDA:10-K:f1", "summary": "NVDA files",
                                  "known_at": "2026-01-02T00:00:00+00:00"}],
               "journal_summary": "ok"})
-    res = tick(r, t.thesis_id, {"external_evidence": Src()},
+    res = tick(r, t.thesis_id, {"sec_filings": Src()},
                gw, _ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ),
                known_at="2026-01-03T00:00:00+00:00")
     assert gw.calls == 1 and len(res.runs) == 1
     assert "get_market_snapshot" in res.runs[0].tools_used
     assert "get_portfolio_snapshot" not in res.runs[0].tools_used
+
+
+def _sec(*turns):
+    return RunSecurityContext(original_intent=classify_intent(list(turns)),
+                              capabilities=frozenset({"research"}))
+
+
+_WRITE_TOOLS = ("thesis_create", "thesis_refine", "thesis_watch", "thesis_journal")
+
+
+def test_thesis_write_denied_without_explicit_intent():
+    denied = [
+        ["Analyze NVDA's latest earnings."],
+        ["Create a summary of NVDA earnings"],  # verb without thesis
+        ["Show me the thesis"],  # thesis without mutation verb
+        ['tell me to "create a thesis"'],  # quoted mutation wording
+        ["Create a thesis on NVDA", "Analyze NVDA earnings"],  # stale intent
+    ]
+    for turns in denied:
+        sec = _sec(*turns)
+        assert "thesis_write" not in sec.original_intent.permitted_domains, turns
+        for name in _WRITE_TOOLS:
+            allowed, reason = authorize_tool_call(name, {}, sec)
+            assert allowed is False, (turns, name)
+            assert reason == "tool call exceeds original user intent", (turns, name)
+
+
+def test_thesis_write_allowed_with_explicit_mutation():
+    for turns in [
+        ["Create a thesis on NVDA"],
+        ["Please refine my NVDA thesis"],
+        ["Watch my NVDA thesis for new filings"],
+        ["Add a journal note to my investment thesis"],
+    ]:
+        sec = _sec(*turns)
+        assert "thesis_write" in sec.original_intent.permitted_domains, turns
+        for name in _WRITE_TOOLS:
+            allowed, _ = authorize_tool_call(name, {}, sec)
+            assert allowed is True, (turns, name)
+
+
+def test_thesis_show_readable_under_research_only():
+    sec = _sec("Analyze NVDA's latest earnings.")
+    assert "thesis_read" in sec.original_intent.permitted_domains
+    allowed, _ = authorize_tool_call("thesis_show", {}, sec)
+    assert allowed is True
+
+
+def test_thesis_write_deny_leaves_repo_unchanged(tmp_path):
+    r, t = _repo_with_thesis(tmp_path)
+    before = (tmp_path / "theses" / t.slug / "thesis.yaml").read_text(encoding="utf-8")
+    sec = _sec("Analyze NVDA's latest earnings.")
+    allowed, _ = authorize_tool_call("thesis_create", {"user_thesis": "NVDA grows"}, sec)
+    assert allowed is False
+    assert (tmp_path / "theses" / t.slug / "thesis.yaml").read_text(encoding="utf-8") == before

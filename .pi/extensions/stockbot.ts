@@ -14,16 +14,6 @@ import { Type } from "typebox";
 
 export type Json = Record<string, unknown>;
 
-export function extractDataRoot(prompt: unknown): string | undefined {
- const m = typeof prompt === "string" ? /^STOCKBOT_DATA_ROOT=(\S+)/m.exec(prompt) : null;
- return m ? m[1] : undefined;
-}
-
-export function extractDoneFile(prompt: unknown): string | undefined {
- const m = typeof prompt === "string" ? /^STOCKBOT_DONE_FILE=(\S+)/m.exec(prompt) : null;
- return m ? m[1] : undefined;
-}
-
 export function toolCallRequest(
  id: string,
  runId: string,
@@ -468,8 +458,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
   pendingQuestion = event.prompt;
-  pendingDataRoot = extractDataRoot(event.prompt);
-  pendingDoneFile = extractDoneFile(event.prompt);
   if (bridgeDown)
    return {
     systemPrompt:
@@ -493,8 +481,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
  let runId = crypto.randomUUID();
  let pendingQuestion = "";
- let pendingDataRoot: string | undefined;
- let pendingDoneFile: string | undefined;
  const dataRoots = new Map<string, string>();
  const doneFiles = new Map<string, string>();
  let seq = 0;
@@ -534,10 +520,13 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   runId = crypto.randomUUID();
   seq = 0;
   toolStartedAt.clear();
-  if (pendingDataRoot) dataRoots.set(runId, pendingDataRoot);
-  pendingDataRoot = undefined;
-  if (pendingDoneFile) doneFiles.set(runId, pendingDoneFile);
-  pendingDoneFile = undefined;
+  // Routing/completion bind from process environment only. Prompt text
+  // (including forged STOCKBOT_* lines) has no routing/write effect;
+  // absent/empty means unbound: no completion write, no data-root override.
+  const envDataRoot = process.env.STOCKBOT_DATA_DIR;
+  if (envDataRoot) dataRoots.set(runId, envDataRoot);
+  const envDoneFile = process.env.STOCKBOT_DONE_FILE;
+  if (envDoneFile) doneFiles.set(runId, envDoneFile);
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });

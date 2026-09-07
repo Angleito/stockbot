@@ -315,6 +315,20 @@ class WatchRule:
         )
 
 
+def require_watch_targets(rule_like: Any, where: str) -> None:
+    """Reject targetless watch rules: need >=1 non-empty claim or expression ID."""
+    cids = getattr(rule_like, "claim_ids", None)
+    eids = getattr(rule_like, "expression_ids", None)
+    if cids is None or eids is None:
+        if isinstance(rule_like, dict):
+            cids, eids = rule_like.get("claim_ids", []), rule_like.get("expression_ids", [])
+        else:
+            cids, eids = [], []
+    if not [c for c in (cids or []) if isinstance(c, str) and c]:
+        if not [e for e in (eids or []) if isinstance(e, str) and e]:
+            raise ValueError(f"{where}: watch rule must name at least one claim_id or expression_id")
+
+
 @dataclass(frozen=True)
 class Trigger:
     trigger_id: str

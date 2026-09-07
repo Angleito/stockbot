@@ -20,7 +20,7 @@ def _run_security(user_turns):
 def test_classify_intent_research_only():
     intent = classify_intent(["What's the latest AMD news?"])
     assert intent.request == "What's the latest AMD news?"
-    assert intent.permitted_domains == {"financial_research", "public_web_research"}
+    assert intent.permitted_domains == {"financial_research", "public_web_research", "thesis_read"}
 
 
 def test_classify_intent_portfolio_phrases():
@@ -38,7 +38,7 @@ def test_classify_intent_portfolio_phrases():
         ["how does that affect me?"],
     ]:
         intent = classify_intent(turns)
-        assert intent.permitted_domains == {"financial_research", "public_web_research"}, turns
+        assert intent.permitted_domains == {"financial_research", "public_web_research", "thesis_read"}, turns
 
 
 def test_classify_intent_accumulates_across_turns():

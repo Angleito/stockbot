@@ -328,8 +328,8 @@ def _handle_si_material(*, rule: WatchRule, thesis: Any, source_events: dict,
 
 def _handle_external(*, rule: WatchRule, thesis: Any, source_events: dict,
                      sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
-    # No deterministic production evidence path exists; an injected service may
-    # still supply events (tests), otherwise this stays quiet but supported.
+    # Dead: no production source exists; kept only so old imports don't break.
+    # Never referenced from SUPPORTED_HANDLERS/_SOURCE_FOR_RULE/_STATE_KEY.
     evs = list(source_events.get("external_evidence", []))
     return evs, _cursor_state(evs, known_at)
 
@@ -389,7 +389,6 @@ SUPPORTED_HANDLERS = {
     "new_material_event": _handle_material_event,
     "new_short_interest_cycle": _handle_si_cycle,
     "material_short_interest_change": _handle_si_material,
-    "new_external_evidence": _handle_external,
     "explicit_thesis_invalidator": _handle_invalidator,
     "scheduled_deep_review": _handle_deep_review,
 }
@@ -400,7 +399,6 @@ _SOURCE_FOR_RULE = {
     "new_material_event": "material_events",
     "new_short_interest_cycle": "finra_short_interest",
     "material_short_interest_change": "finra_short_interest",
-    "new_external_evidence": "external_evidence",
     "explicit_thesis_invalidator": None,
     "scheduled_deep_review": None,
 }
@@ -411,7 +409,6 @@ _STATE_KEY = {
     "new_material_event": "material_events",
     "new_short_interest_cycle": "finra_short_interest",
     "material_short_interest_change": "finra_short_interest",
-    "new_external_evidence": "external_evidence",
     "explicit_thesis_invalidator": None,
     "scheduled_deep_review": "scheduled",
 }
