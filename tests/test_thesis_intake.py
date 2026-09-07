@@ -86,7 +86,7 @@ def test_showcase_two_expressions_all_claims_unvalidated():
 def test_fake_gateway_valid_proposal_accepted():
     gw = _GW({"user_thesis": "NVDA thesis", "scope": "NVDA",
               "claims": [{"statement": "demand holds"}],
-              "expressions": [{"structure": "custom collar-ish thing"}],
+              "expressions": [{"key": "e1", "structure": "custom collar-ish thing"}],
               "questions": [{"question": "What horizon?"}]})
     p = interpret_idea("NVDA thesis", {}, gw, _ctx())
     assert gw.calls == 1 and p.expressions[0]["structure"] == "custom collar-ish thing"
@@ -109,7 +109,7 @@ def test_intake_requires_research_only_context():
 def _structured(user_thesis="NVDA demand stays strong", **over) -> dict:
     payload = {"user_thesis": user_thesis, "scope": "NVDA",
                "claims": [{"statement": "demand holds"}],
-               "expressions": [{"intent": "bullish", "instrument": "equity",
+               "expressions": [{"key": "e1", "intent": "bullish", "instrument": "equity",
                                 "direction": "long", "structure": "equity"}],
                "questions": [{"question": "What horizon?"}]}
     payload.update(over)
@@ -142,8 +142,8 @@ def test_structured_dangling_requirement_rejected_pre_write(tmp_path):
     repo = ThesisRepository(tmp_path / "theses")
     with pytest.raises(ValueError, match="absent expression"):
         IntakeProposal.from_dict(_structured(
-            expressions=[{"expression_id": "expr:aaa", "structure": "equity"}],
-            requirements=[{"expression_id": "expr:zzz", "requirement_type": "x",
+            expressions=[{"key": "e1", "structure": "equity"}],
+            requirements=[{"expression_key": "zzz", "requirement_type": "x",
                            "statement": "y"}]), "<thesis_create>")
     assert not (tmp_path / "theses").exists() or repo.list_theses() == []
 

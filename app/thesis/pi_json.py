@@ -104,6 +104,7 @@ def _run_pi(prompt: str, *, request_context=None, tools: list | None = None) -> 
         raise RuntimeError("pi gateway: 'pi' binary not found on PATH")
     names = [t.get("function", {}).get("name") for t in (tools or [])]
     names = [n for n in names if isinstance(n, str) and n]
+    zero_tools = tools is not None and len(tools) == 0
     data_root = getattr(request_context, "data_root", None)
     as_of = getattr(request_context, "as_of", None)
     tmp = Path(tempfile.mkdtemp(prefix="pi-json-"))
@@ -114,11 +115,14 @@ def _run_pi(prompt: str, *, request_context=None, tools: list | None = None) -> 
     prefix = ""
     if as_of:
         prefix += f"Point-in-time: only use data known at as_of={as_of}. "
-    if names:
+    if zero_tools:
+        prefix += "No tools are available; answer from the prompt only, do not call any tools. "
+    elif names:
         prefix += f"You may call only these Stockbot tools: {', '.join(sorted(set(names)))}. "
     full = (prefix + prompt + "\nReturn ONLY JSON.").strip()
-    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools",
-           "--extension", _EXTENSION]
+    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools"]
+    if not zero_tools:
+        cmd += ["--extension", _EXTENSION]
     if names:
         cmd += ["--tools", ",".join(sorted(set(names)))]
     cmd += ["--", full]
@@ -179,7 +183,7 @@ class PiJsonGateway:
     """Implements IntakeGateway.complete_json and ResearchGateway.complete_research."""
 
     def complete_json(self, prompt: str, *, request_context) -> dict:
-        return _extract_largest(_run_pi(prompt, request_context=request_context))
+        return _extract_largest(_run_pi(prompt, request_context=request_context, tools=[]))
 
     def complete_research(self, prompt: str, *, request_context, tools: list) -> dict:
         return _extract_largest(_run_pi(prompt, request_context=request_context, tools=tools))

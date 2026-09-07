@@ -102,13 +102,14 @@ def _validate_claim(c: Any, path: str) -> dict:
     }
 
 
-def _validate_expression(e: Any, path: str) -> dict:
+def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
     if not isinstance(e, dict):
         raise ValueError(f"{path}: expression must be a mapping, got {type(e).__name__}")
-    eid = e.get("expression_id") or new_expression_id()
-    where = f"{path}: expression {eid}"
-    if not isinstance(eid, str) or not eid:
-        raise ValueError(f"{where}: 'expression_id' must be a non-empty string")
+    key = e.get("key")
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError(f"{path}: expression 'key' must be a non-empty string")
+    eid = new_expression_id()
+    where = f"{path}: expression {key}"
     instrument = _unknown_str(e.get("instrument", UNKNOWN), "instrument", where)
     if instrument not in _INSTRUMENTS:
         raise ValueError(f"{where}: 'instrument' must be a known primitive or 'unknown', got {instrument!r}")
@@ -133,17 +134,16 @@ def _validate_expression(e: Any, path: str) -> dict:
         ),
         "status": status,
     }
-    for key in ("leverage", "parameters"):
-        v = e.get(key, {})
+    for k in ("leverage", "parameters"):
+        v = e.get(k, {})
         if v is None:
             v = {}
         if not isinstance(v, dict):
-            raise ValueError(f"{where}: '{key}' must be a mapping, got {type(v).__name__}")
-        out[key] = dict(v)
-    return out
+            raise ValueError(f"{where}: '{k}' must be a mapping, got {type(v).__name__}")
+        out[k] = dict(v)
+    return key, out
 
-
-def _validate_requirement(r: Any, path: str) -> dict:
+def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
     if not isinstance(r, dict):
         raise ValueError(f"{path}: requirement must be a mapping, got {type(r).__name__}")
     rid = r.get("requirement_id") or new_requirement_id()
@@ -153,9 +153,17 @@ def _validate_requirement(r: Any, path: str) -> dict:
     status = _unknown_str(r.get("status", "open"), "status", where)
     if status not in _REQUIREMENT_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_REQUIREMENT_STATUSES)}, got {status!r}")
+    ekey = r.get("expression_key")
+    if not isinstance(ekey, str) or not ekey.strip():
+        raise ValueError(f"{where}: 'expression_key' must be a non-empty string")
+    if ekey not in key_to_id:
+        raise ValueError(
+            f"{where}: requirement {rid!r} references absent expression "
+            f"{ekey!r}"
+        )
     return {
         "requirement_id": rid,
-        "expression_id": _req_str(r, "expression_id", where),
+        "expression_id": key_to_id[ekey],
         "requirement_type": _req_str(r, "requirement_type", where),
         "statement": _req_str(r, "statement", where),
         "status": status,
@@ -230,6 +238,17 @@ class IntakeProposal:
             scope = UNKNOWN
         if not isinstance(scope, str):
             raise ValueError(f"{where}: 'scope' must be a string, got {type(scope).__name__}")
+        key_to_id: dict[str, str] = {}
+        expressions: list[dict] = []
+        for e in _as_list(d, "expressions", where):
+            key, validated = _validate_expression(e, path)
+            if key in key_to_id:
+                raise ValueError(f"{where}: duplicate expression key {key!r}")
+            key_to_id[key] = validated["expression_id"]
+            expressions.append(validated)
+        requirements = tuple(
+            _validate_requirement(r, path, key_to_id) for r in _as_list(d, "requirements", where)
+        )
         return cls(
             user_thesis=_req_str(d, "user_thesis", where),
             scope=scope,
@@ -237,8 +256,8 @@ class IntakeProposal:
             assumptions=tuple(_str_list(d, "assumptions", where)),
             invalidators=tuple(_str_list(d, "invalidators", where)),
             unknowns=tuple(_str_list(d, "unknowns", where)),
-            expressions=tuple(_validate_expression(e, path) for e in _as_list(d, "expressions", where)),
-            requirements=tuple(_validate_requirement(r, path) for r in _as_list(d, "requirements", where)),
+            expressions=tuple(expressions),
+            requirements=requirements,
             questions=tuple(IntakeQuestion.from_dict(q, path) for q in _as_list(d, "questions", where)),
         )
 
@@ -264,10 +283,11 @@ def _build_prompt(text: str, answers: dict) -> str:
         "user_thesis: string (the idea, verbatim-ish).",
         "scope: short string, a ticker like NVDA or the literal unknown; never an object.",
         "assumptions/invalidators/unknowns: lists of strings (empty when none).",
-        "expressions: [{intent: string, instrument: equity|option|future|bond|cash|unknown,",
+        "expressions: [{key: string (local reference like e1), intent: string,",
+        "  instrument: equity|option|future|bond|cash|unknown,",
         "  direction: long|short|neutral|unknown, structure: string, horizon: string,",
         "  status: undecided|active|flagged|closed}] (zero or more; never recommend a trade).",
-        "requirements: [{expression_id: expr:N matching an expression above,",
+        "requirements: [{expression_key: key matching an expression above,",
         "  requirement_type: string, statement: string}] (timing/magnitude conditions only).",
         "questions: [{question: string, question_type: string}] (at most 3 material",
         "  questions whose answers would change scope, horizon, or expression research).",

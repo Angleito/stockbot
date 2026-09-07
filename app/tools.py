@@ -54,12 +54,14 @@ _THESIS_DELTA_PROPERTIES = {
         "items": {
             "type": "object",
             "properties": {
+                "key": {"type": "string"},
                 "intent": {"type": "string"},
                 "instrument": {"type": "string"},
                 "direction": {"type": "string"},
                 "structure": {"type": "string"},
                 "horizon": {"type": "string"},
             },
+            "required": ["key"],
         },
     },
     "requirements": {
@@ -67,11 +69,11 @@ _THESIS_DELTA_PROPERTIES = {
         "items": {
             "type": "object",
             "properties": {
-                "expression_id": {"type": "string"},
+                "expression_key": {"type": "string"},
                 "requirement_type": {"type": "string"},
                 "statement": {"type": "string"},
             },
-            "required": ["expression_id", "requirement_type", "statement"],
+            "required": ["expression_key", "requirement_type", "statement"],
         },
     },
     "questions": {
@@ -2157,7 +2159,8 @@ def _thesis_refine(arguments: dict, context: RequestContext) -> dict:
 
 
 def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
-    from app.thesis.models import KNOWN_WATCH_TYPES, new_rule_id
+    from app.thesis.models import new_rule_id
+    from app.thesis.monitor import SUPPORTED_HANDLERS
 
     repo = _thesis_repo_for(context)
     thesis = repo.load_thesis(arguments["id"])
@@ -2169,8 +2172,8 @@ def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
     rule_type = arguments["rule_type"]
     if not isinstance(rule_type, str) or not rule_type.strip():
         raise ValueError("thesis_watch: 'rule_type' must be a non-empty string")
-    if rule_type not in KNOWN_WATCH_TYPES:
-        raise ValueError(f"thesis_watch: unknown rule_type {rule_type!r}")
+    if rule_type not in SUPPORTED_HANDLERS:
+        raise ValueError(f"thesis_watch: unsupported rule_type {rule_type!r}; supported: {sorted(SUPPORTED_HANDLERS)}")
     if thesis.status != "active":
         raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing watch change")
     for key in ("claim_ids", "expression_ids"):

@@ -31,6 +31,7 @@ from app.thesis.models import (
     new_rule_id,
     require_watch_targets,
 )
+from app.security.action_policy import TOOL_DOMAINS
 from app.tools import tools_for_capabilities
 
 _GRANTS: dict[str, Capability] = {
@@ -170,6 +171,7 @@ class ThesisResearchResult:
             if not isinstance(md.get("text"), str) or not md["text"].strip():
                 raise ValueError(f"{where}: 'text' must be a non-empty string")
             memories.append(md)
+        from app.thesis.monitor import SUPPORTED_HANDLERS  # local: avoid monitor -> runner cycle
         watches: list[dict] = []
         for i, r in enumerate(_str_list(d, "watch_add", path)):
             where = f"{path}: watch_add[{i}]"
@@ -178,6 +180,21 @@ class ThesisResearchResult:
             rd = dict(r)
             rd.setdefault("rule_id", new_rule_id())
             rule = WatchRule.from_dict(rd, where)  # unknown types must stay disabled/unsupported
+            if rule.rule_type not in SUPPORTED_HANDLERS:
+                reason = rule.support_reason or (
+                    "no production source for 'new_external_evidence'; never queried"
+                    if rule.rule_type == "new_external_evidence"
+                    else f"no deterministic monitor backing for {rule.rule_type!r}; never queried"
+                )
+                rule = WatchRule(
+                    rule_id=rule.rule_id,
+                    rule_type=rule.rule_type,
+                    enabled=False,
+                    support_status="unsupported",
+                    support_reason=reason,
+                    claim_ids=rule.claim_ids,
+                    expression_ids=rule.expression_ids,
+                )
             for cid in rule.claim_ids:
                 if cid not in claim_ids:
                     raise ValueError(f"{where}: rule references absent claim {cid!r}")
@@ -470,6 +487,8 @@ def run_trigger(
         as_of=getattr(request_context, "as_of", None),
     )
     visible = visible_tools_for(fresh)  # derived each call, never cached
+    # Trigger sub-runs research only: thesis tools stay interactive-only.
+    visible = [t for t in visible if TOOL_DOMAINS.get(t["function"]["name"]) not in ("thesis_read", "thesis_write")]
     tool_names = [t["function"]["name"] for t in visible]
 
     started_at = _utcnow()
