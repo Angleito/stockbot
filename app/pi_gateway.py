@@ -204,23 +204,28 @@ def _args_json(arguments: dict) -> str:
     return json.dumps(arguments, sort_keys=True)
 
 
-def _override_context(data_root: str | Path | None = None):
+def _override_context(data_root: str | Path | None = None, as_of: str | None = None):
     """LOCAL_CONTEXT with data_root overridden; invalid roots fall back."""
+    def _with_root(root) -> RequestContext:
+        return RequestContext(
+            principal_id=LOCAL_CONTEXT.principal_id,
+            capabilities=LOCAL_CONTEXT.capabilities,
+            tool_policy=LOCAL_CONTEXT.tool_policy,
+            data_root=root,
+            run_limits=LOCAL_CONTEXT.run_limits,
+            as_of=as_of,
+        )
     if data_root is None or not str(data_root):
-        return LOCAL_CONTEXT
+        if as_of is None:
+            return LOCAL_CONTEXT
+        return _with_root(LOCAL_CONTEXT.data_root)
     try:
         root = Path(str(data_root))
     except Exception:
-        return LOCAL_CONTEXT
+        return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
     if not root.is_absolute():
-        return LOCAL_CONTEXT
-    return RequestContext(
-        principal_id=LOCAL_CONTEXT.principal_id,
-        capabilities=LOCAL_CONTEXT.capabilities,
-        tool_policy=LOCAL_CONTEXT.tool_policy,
-        data_root=root,
-        run_limits=LOCAL_CONTEXT.run_limits,
-    )
+        return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
+    return _with_root(root)
 
 
 def execute_pi_tool(
@@ -232,6 +237,7 @@ def execute_pi_tool(
     protocol_id: str | None = None,
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
+    as_of: str | None = None,
 ) -> dict:
     """Run one Pi-requested tool through all gates. Never raises."""
     try:
@@ -243,6 +249,7 @@ def execute_pi_tool(
             protocol_id=protocol_id,
             bridge_queue_ms=bridge_queue_ms,
             data_root=data_root,
+            as_of=as_of,
         )
     except Exception as exc:  # never break the bridge loop
         logger.exception("Pi tool gateway failed for '%s'", name)
@@ -258,6 +265,7 @@ def _execute_pi_tool(
     protocol_id: str | None = None,
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
+    as_of: str | None = None,
 ) -> dict:
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
@@ -346,7 +354,7 @@ def _execute_pi_tool(
     # context carries the validated data_root override.
     t0_iso = datetime.now(timezone.utc).isoformat()
     handler_t0 = time.perf_counter()
-    result = execute_tool(name, arguments, PI_MODEL, context=_override_context(data_root))
+    result = execute_tool(name, arguments, PI_MODEL, context=_override_context(data_root, as_of))
     handler_ms = (time.perf_counter() - handler_t0) * 1000.0
 
     # Top-level cache metadata only, for the recorder; protocol IDs and

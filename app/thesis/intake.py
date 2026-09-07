@@ -427,7 +427,7 @@ def setup_needed_question() -> dict:
     }
 
 
-def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> dict:
+def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict:
     """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
 
     Unresolvable scope persists a setup question instead of a fake active
@@ -447,6 +447,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> di
         expressions=[dict(e) for e in proposal.expressions],
         requirements=[dict(r) for r in proposal.requirements],
         watch_rules=rules,
+        effective_at=effective_at,
     )
     missing: list[dict] = []
     questions_add: list[dict] = []
@@ -461,7 +462,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> di
         missing.append(setup_needed_question())
         questions_add.append(dict(missing[0]))
     if questions_add:
-        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "")
+        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "", effective_at=effective_at)
     return {
         "thesis_id": thesis.thesis_id,
         "slug": thesis.slug,
@@ -504,7 +505,7 @@ def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
     }
 
 
-def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal) -> dict:
+def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
 
@@ -512,7 +513,7 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: Inta
     tid = thesis.thesis_id
     if thesis.status != "active":
         raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
-    updated = repository.update_thesis(tid, **plan["merged"])
+    updated = repository.update_thesis(tid, effective_at=effective_at, **plan["merged"])
     fresh = repository.load_thesis(tid)
     covered_claims: dict[str, set[str]] = {}
     covered_exprs: dict[str, set[str]] = {}
@@ -538,7 +539,7 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: Inta
         known_c.update(cids)
         known_e.update(eids)
     if new_rules:
-        repository.apply_research_result(tid, {"watch_add": new_rules}, "")
+        repository.apply_research_result(tid, {"watch_add": new_rules}, "", effective_at=effective_at)
     return {
         "thesis_id": tid,
         "slug": updated.slug,

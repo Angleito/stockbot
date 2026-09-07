@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.thesis.models import EvidenceRef, ThesisMemory, ThesisQuestion, WatchRule
-from app.thesis.yaml import load_raw_yaml, load_yaml
+from app.thesis.yaml import load_yaml
 
 # ponytail: token estimate is len(text)//4, no tokenizer dependency (pi_gateway uses same).
 
@@ -82,21 +82,19 @@ def build_context(
     if not isinstance(known_at, str) or not known_at:
         raise ValueError("<context>: 'known_at' must be a non-empty ISO string")
     tid, thesis_dir = _thesis_dir(repository, thesis_id)
-    thesis = repository.load_thesis(tid)
+    snapshot = repository.load_state_as_of(tid, known_at)
     tdict = _trigger_dict(trigger)
     if tdict.get("thesis_id", tid) != tid:
         raise ValueError(f"<context>: trigger belongs to {tdict.get('thesis_id')!r}, not {tid!r}")
 
-    state = repository.load_state(tid).to_dict()
-    questions = [q.to_dict() if hasattr(q, "to_dict") else dict(q) for q in repository.load_questions(tid)]
+    state = dict(snapshot.state)
+    questions = [dict(q) for q in snapshot.questions.get("questions", [])]
     for q in questions:
         ThesisQuestion.from_dict(q, str(thesis_dir / "questions.yaml"))
-    watch_raw = load_raw_yaml(thesis_dir / "watch.yaml")
-    rules = [WatchRule.from_dict(r, str(thesis_dir / "watch.yaml")).to_dict() for r in watch_raw.get("rules", [])]
-    memory_raw = load_raw_yaml(thesis_dir / "memory.yaml")
+    rules = [WatchRule.from_dict(r, str(thesis_dir / "watch.yaml")).to_dict() for r in snapshot.watch.get("rules", [])]
     memories = [
         ThesisMemory.from_dict(m, str(thesis_dir / "memory.yaml")).to_dict()
-        for m in memory_raw.get("memories", [])
+        for m in snapshot.memory.get("memories", [])
     ]
     # Memories: PIT-visible by created_at only; undated/unparseable fail closed.
     visible_memories: list[dict] = []
@@ -109,7 +107,7 @@ def build_context(
 
     # Irreducible packet: thesis+trigger+state+watch+questions only.
     packet = {
-        "thesis": thesis.to_dict(),
+        "thesis": dict(snapshot.thesis),
         "state": state,
         "watch": {"thesis_id": tid, "rules": rules},
         "questions": questions,

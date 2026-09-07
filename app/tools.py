@@ -1008,6 +1008,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "as_of": {"type": "string", "description": "Point-in-time cutoff (ISO-8601); omit for current state."},
                 },
                 "required": ["id"],
             },
@@ -2083,6 +2084,10 @@ def _thesis_repo_for(context: RequestContext):
     base = getattr(context, "data_root", None) or get_data_root()
     return ThesisRepository(Path(base) / "thesis")
 
+def _effective_at(context: RequestContext) -> str | None:
+    as_of = getattr(context, "as_of", None)
+    return as_of if isinstance(as_of, str) and as_of else None
+
 
 def _thesis_proposal(arguments: dict, user_thesis: str, path: str):
     """Structured tool args -> validated IntakeProposal (raises ValueError)."""
@@ -2102,13 +2107,32 @@ def _thesis_create(arguments: dict, context: RequestContext) -> dict:
     if not isinstance(user_thesis, str) or not user_thesis.strip():
         raise ValueError("thesis_create: 'user_thesis' must be a non-empty string")
     proposal = _thesis_proposal(arguments, user_thesis, "<thesis_create>")
-    return thesis_intake.create_thesis_from_proposal(_thesis_repo_for(context), proposal)
-
+    return thesis_intake.create_thesis_from_proposal(
+        _thesis_repo_for(context), proposal, effective_at=_effective_at(context))
 
 def _thesis_show(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)
     thesis = repo.load_thesis(arguments["id"])
     tid = thesis.thesis_id
+    as_of = arguments.get("as_of")
+    if isinstance(as_of, str) and as_of:
+        snap = repo.load_state_as_of(tid, as_of)
+        t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
+        rules = list(watch.get("rules", []))
+        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+        return {
+            "thesis_id": tid,
+            "slug": t.get("slug"),
+            "status": t.get("status"),
+            "user_thesis": t.get("user_thesis"),
+            "scope": t.get("scope"),
+            "claims": list(t.get("claims", [])),
+            "expressions": list(t.get("expressions", [])),
+            "assessment": state.get("assessment"),
+            "rules": rules,
+            "setup_needed": not live,
+            "open_questions": [q for q in questions.get("questions", []) if q.get("status") == "open"],
+        }
     rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
     live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
     return {
@@ -2143,7 +2167,8 @@ def _thesis_refine(arguments: dict, context: RequestContext) -> dict:
     if (not plan["added_claims"] and not plan["added_expressions"]
             and plan["merged"]["user_thesis"] == thesis.user_thesis):
         return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
-    out = thesis_intake.apply_refinement(repo, thesis.thesis_id, plan, proposal)
+    out = thesis_intake.apply_refinement(
+        repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
     return {"applied": True, **out}
 
 
@@ -2178,8 +2203,10 @@ def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
         "claim_ids": list(arguments.get("claim_ids", [])),
         "expression_ids": list(arguments.get("expression_ids", [])),
     }
-    repo.apply_research_result(tid, {"watch_add": [rule]}, "")
+    repo.apply_research_result(
+        tid, {"watch_add": [rule]}, "", effective_at=_effective_at(context))
     return {"thesis_id": tid, "added": rule}
+
 
 def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)

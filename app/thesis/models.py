@@ -13,6 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Any
 
 SCHEMA_VERSION = 1
 UNKNOWN = "unknown"
@@ -579,3 +580,104 @@ class Checkpoint:
             raise ValueError(f"{where}: 'recent_hashes' must be a list of strings")
         return cls(thesis_id=_req_str(d, "thesis_id", where), sources=dict(d.get("sources", {})),
                    recent_hashes=list(hashes))
+
+
+class HistoricalStateUnavailable(ValueError):
+    """Raised when no state snapshot exists at or before a requested cutoff."""
+
+
+@dataclass(frozen=True)
+class ThesisStateSnapshot:
+    thesis_id: str
+    version: int
+    effective_at: str
+    recorded_at: str
+    reason: str
+    run_id: str = ""
+    trigger_id: str = ""
+    thesis: dict = field(default_factory=dict)
+    state: dict = field(default_factory=dict)
+    questions: dict = field(default_factory=dict)
+    watch: dict = field(default_factory=dict)
+    memory: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "thesis_id": self.thesis_id,
+            "version": self.version,
+            "effective_at": self.effective_at,
+            "recorded_at": self.recorded_at,
+            "reason": self.reason,
+            "run_id": self.run_id,
+            "trigger_id": self.trigger_id,
+            "thesis": self.thesis,
+            "state": self.state,
+            "questions": self.questions,
+            "watch": self.watch,
+            "memory": self.memory,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict, where: str = "<dict>") -> ThesisStateSnapshot:
+        from app.thesis.monitor import _as_dt  # local: avoid import cycle
+
+        if not isinstance(d, dict):
+            raise ValueError(f"{where}: snapshot must be a mapping, got {type(d).__name__}")
+        version = d.get("version")
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValueError(f"{where}: 'version' must be an int >= 1, got {version!r}")
+        thesis_id = d.get("thesis_id")
+        if not isinstance(thesis_id, str) or not thesis_id:
+            raise ValueError(f"{where}: 'thesis_id' must be a non-empty string")
+        for key in ("effective_at", "recorded_at"):
+            v = d.get(key)
+            if not isinstance(v, str) or not v or _as_dt(v) is None:
+                raise ValueError(f"{where}: '{key}' must be a parseable ISO-8601 timestamp, got {v!r}")
+        reason = d.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(f"{where}: 'reason' must be a non-empty string")
+        try:
+            thesis = d.get("thesis", {})
+            state = d.get("state", {})
+            questions = d.get("questions", {})
+            watch = d.get("watch", {})
+            memory = d.get("memory", {})
+            for key, payload in (
+                ("thesis", thesis),
+                ("state", state),
+                ("questions", questions),
+                ("watch", watch),
+                ("memory", memory),
+            ):
+                if not isinstance(payload, dict):
+                    raise ValueError(f"{where}: '{key}' must be a mapping")
+                pid = payload.get("thesis_id")
+                if pid != thesis_id:
+                    raise ValueError(f"{where}: '{key}' thesis_id {pid!r} != snapshot thesis_id {thesis_id!r}")
+            Thesis.from_dict(dict(thesis), where)
+            ThesisState.from_dict(dict(state), where)
+            for q in questions.get("questions", []):
+                ThesisQuestion.from_dict(q, where)
+            for r in watch.get("rules", []):
+                WatchRule.from_dict(r, where)
+            for m in memory.get("memories", []):
+                ThesisMemory.from_dict(m, where)
+        except ValueError as e:
+            if str(e).startswith(where):
+                raise
+            raise ValueError(f"{where}: {e}") from e
+        return cls(
+            thesis_id=thesis_id,
+            version=version,
+            effective_at=d["effective_at"],
+            recorded_at=d["recorded_at"],
+            reason=reason,
+            run_id=str(d.get("run_id", "") or ""),
+            trigger_id=str(d.get("trigger_id", "") or ""),
+            thesis=dict(thesis),
+            state=dict(state),
+            questions=dict(questions),
+            watch=dict(watch),
+            memory=dict(memory),
+        )

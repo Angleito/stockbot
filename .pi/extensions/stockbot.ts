@@ -23,6 +23,7 @@ export function toolCallRequest(
  params: Json,
  bridgeQueueMs = 0,
  dataRoot?: string,
+ asOf?: string,
 ): Json {
  const req: Json = {
   id,
@@ -34,6 +35,7 @@ export function toolCallRequest(
   bridge_queue_ms: bridgeQueueMs,
  };
  if (dataRoot) req.data_root = dataRoot;
+ if (asOf) req.as_of = asOf;
  return req;
 }
 
@@ -406,10 +408,9 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    name: fn.name,
    label: fn.name,
    description: fn.description,
-   parameters: Type.Unsafe(fn.parameters),
    async execute(toolCallId, params) {
     toolCalls++;
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId)));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text: bridgeModelText(bridge) }],
@@ -500,6 +501,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  let pendingQuestion = "";
  const dataRoots = new Map<string, string>();
  const doneFiles = new Map<string, string>();
+ const asOfs = new Map<string, string>();
  let seq = 0;
  let turns = 0;
  let toolCalls = 0;
@@ -544,6 +546,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (envDataRoot) dataRoots.set(runId, envDataRoot);
   const envDoneFile = process.env.STOCKBOT_DONE_FILE;
   if (envDoneFile) doneFiles.set(runId, envDoneFile);
+  const envAsOf = process.env.STOCKBOT_AS_OF;
+  if (envAsOf) asOfs.set(runId, envAsOf);
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });
@@ -621,5 +625,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   }
   doneFiles.delete(runId);
   dataRoots.delete(runId);
+  asOfs.delete(runId);
  });
 }

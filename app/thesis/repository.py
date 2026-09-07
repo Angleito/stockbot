@@ -15,12 +15,14 @@ from app.thesis.models import (
     SCHEMA_VERSION,
     Checkpoint,
     EvidenceRef,
+    HistoricalStateUnavailable,
     QuestionStatus,
     Thesis,
     ThesisClaim,
     ThesisMemory,
     ThesisQuestion,
     ThesisState,
+    ThesisStateSnapshot,
     TradeExpression,
     Trigger,
     TriggerStatus,
@@ -251,10 +253,97 @@ class ThesisRepository:
         if raw.get("thesis_id") != thesis_id:
             raise ValueError(f"{path}: thesis_id mismatch: file has {raw.get('thesis_id')!r}, expected {thesis_id!r}")
 
-    def answer_questions(self, thesis_id: str, answered: list[dict]) -> None:
+    def _snapshot_state_locked(
+        self, thesis_dir: Path, thesis_id: str, *, effective_at: str, reason: str,
+        run_id: str = "", trigger_id: str = "",
+    ) -> ThesisStateSnapshot:
+        """Write one versioned history snapshot; caller must hold thesis_lock."""
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        if _as_dt(effective_at) is None:
+            raise ValueError(f"{thesis_dir}/history: bad effective_at {effective_at!r}")
+        thesis = load_yaml(thesis_dir / "thesis.yaml", Thesis)
+        if thesis.thesis_id != thesis_id:
+            raise ValueError(
+                f"{thesis_dir}: thesis_id mismatch: file has {thesis.thesis_id!r}, expected {thesis_id!r}")
+        state = load_yaml(thesis_dir / "state.yaml", ThesisState)
+        qpath, wpath, mpath = (str(thesis_dir / "questions.yaml"), str(thesis_dir / "watch.yaml"),
+                                str(thesis_dir / "memory.yaml"))
+        questions = load_raw_yaml(thesis_dir / "questions.yaml")
+        self._check_file_owner(questions, qpath, thesis_id)
+        watch = load_raw_yaml(thesis_dir / "watch.yaml")
+        self._check_file_owner(watch, wpath, thesis_id)
+        memory = load_raw_yaml(thesis_dir / "memory.yaml")
+        self._check_file_owner(memory, mpath, thesis_id)
+        hdir = thesis_dir / "history"
+        hdir.mkdir(parents=True, exist_ok=True)
+        existing = []
+        for f in hdir.glob("*.yaml"):
+            try:
+                existing.append(int(f.stem))
+            except ValueError:
+                continue
+        if not existing and reason != "thesis_created":
+            reason = "history_migration"
+            effective_at = thesis.updated_at if _as_dt(thesis.updated_at) is not None else _utcnow()
+        version = (max(existing) if existing else 0) + 1
+        snap = ThesisStateSnapshot(
+            thesis_id=thesis_id, version=version, effective_at=effective_at, recorded_at=_utcnow(),
+            reason=reason, run_id=run_id or "", trigger_id=trigger_id or "",
+            thesis=thesis.to_dict(), state=state.to_dict(),
+            questions=dict(questions), watch=dict(watch), memory=dict(memory),
+        )
+        dest = hdir / f"{version:08d}.yaml"
+        validated = ThesisStateSnapshot.from_dict(snap.to_dict(), str(dest))
+        atomic_write_yaml(dest, validated.to_dict(), self.root)
+        return validated
+
+    def load_state_as_of(self, thesis_id: str, known_at: str) -> ThesisStateSnapshot:
+        """Latest snapshot with effective_at <= known_at; fail closed before history."""
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        if _as_dt(known_at) is None:
+            raise ValueError(f"<history>: bad known_at {known_at!r}")
+        thesis_dir = self._dir_for(thesis_id)
+        hdir = thesis_dir / "history"
+        files = sorted(hdir.glob("*.yaml")) if hdir.is_dir() else []
+        if not files:
+            raise HistoricalStateUnavailable(
+                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (no history)")
+        snaps = [ThesisStateSnapshot.from_dict(load_raw_yaml(f), str(f)) for f in files]
+        cutoff = _as_dt(known_at)
+        eligible = [s for s in snaps if _as_dt(s.effective_at) is not None and _as_dt(s.effective_at) <= cutoff]
+        if not eligible:
+            earliest = min(s.effective_at for s in snaps)
+            raise HistoricalStateUnavailable(
+                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})")
+        eligible.sort(key=lambda s: (_as_dt(s.effective_at), s.version))  # type: ignore[return-value]
+        return eligible[-1]
+
+    def list_state_versions(self, thesis_id: str) -> list[int]:
+        """Sorted history version ints (debug/tests only)."""
+        thesis_dir = self._dir_for(thesis_id)
+        hdir = thesis_dir / "history"
+        if not hdir.is_dir():
+            return []
+        out = []
+        for f in sorted(hdir.glob("*.yaml")):
+            try:
+                out.append(int(f.stem))
+            except ValueError:
+                continue
+        return sorted(out)
+
+
+    def answer_questions(self, thesis_id: str, answered: list[dict], *, effective_at: str | None = None) -> None:
         """Mark questions answered (validate-then-replace questions.yaml, lock-held)."""
         if not answered:
             return
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<answer>: bad effective_at {effective_at!r}")
         thesis_dir = self.dir_for_thesis(thesis_id)
         with thesis_lock(thesis_dir):
             path = str(thesis_dir / "questions.yaml")
@@ -270,11 +359,15 @@ class ThesisRepository:
             for q in raw.get("questions", []):
                 ThesisQuestion.from_dict(q, path)
             atomic_write_yaml(thesis_dir / "questions.yaml", raw, self.root)
+            self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="questions_answered")
 
-    def normalize_watch(self, thesis_id: str) -> None:
+    def normalize_watch(self, thesis_id: str, *, effective_at: str | None = None) -> None:
         """Heal watch.yaml: rules without a deterministic backing stay disabled/unsupported."""
-        from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
+        from app.thesis.monitor import SUPPORTED_HANDLERS, _as_dt  # local: monitor owns the handler table + clock
 
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<watch>: bad effective_at {effective_at!r}")
         thesis_dir = self.dir_for_thesis(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
@@ -299,6 +392,7 @@ class ThesisRepository:
                 changed = True
             if changed:
                 atomic_write_yaml(path, raw, self.root)
+                self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="watch_normalized")
 
     def load_watch_rules(self, thesis_id: str) -> list[WatchRule]:
         """Read validated watch rules (ID-or-slug lookup)."""
@@ -322,11 +416,18 @@ class ThesisRepository:
         expressions: list = (),
         requirements: list = (),
         watch_rules: list = (),
+        *,
+        effective_at: str | None = None,
     ) -> Thesis:
         if not isinstance(user_thesis, str) or not user_thesis.strip():
             raise ValueError("<create>: 'user_thesis' must be a non-empty string")
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<create>: bad effective_at {effective_at!r}")
         thesis_id = new_thesis_id()
-        now = _utcnow()
+        now = eff
         thesis = Thesis(
             thesis_id=thesis_id,
             slug="tmp",  # replaced below; Thesis.validate does not check slug shape
@@ -417,11 +518,18 @@ class ThesisRepository:
                 thesis_dir / "checkpoint.yaml",
                 Checkpoint(thesis_id=thesis_id).to_dict(), self.root,
             )
+            self._snapshot_state_locked(
+                thesis_dir, thesis_id, effective_at=thesis.created_at, reason="thesis_created")
         return thesis
 
     # -- mutations (all hold the thesis lock + validate candidate first) ---
 
-    def update_thesis(self, id_or_slug: str, **patch: Any) -> Thesis:
+    def update_thesis(self, id_or_slug: str, *, effective_at: str | None = None, **patch: Any) -> Thesis:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<update>: bad effective_at {effective_at!r}")
         thesis_id = self._resolve_id(id_or_slug)
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -434,9 +542,15 @@ class ThesisRepository:
             data["updated_at"] = _utcnow()
             candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
             atomic_write_yaml(thesis_dir / "thesis.yaml", candidate.to_dict(), self.root)
+            self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="thesis_updated")
             return candidate
 
-    def _set_status(self, thesis_id: str, status: str) -> Thesis:
+    def _set_status(self, thesis_id: str, status: str, *, effective_at: str | None = None) -> Thesis:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<status>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
@@ -447,15 +561,21 @@ class ThesisRepository:
             data["updated_at"] = _utcnow()
             candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
             atomic_write_yaml(thesis_dir / "thesis.yaml", candidate.to_dict(), self.root)
+            self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="status_changed")
             return candidate
 
-    def pause_thesis(self, thesis_id: str) -> Thesis:
-        return self._set_status(thesis_id, models.ThesisStatus.PAUSED.value)
+    def pause_thesis(self, thesis_id: str, *, effective_at: str | None = None) -> Thesis:
+        return self._set_status(thesis_id, models.ThesisStatus.PAUSED.value, effective_at=effective_at)
 
-    def resume_thesis(self, thesis_id: str) -> Thesis:
-        return self._set_status(thesis_id, models.ThesisStatus.ACTIVE.value)
+    def resume_thesis(self, thesis_id: str, *, effective_at: str | None = None) -> Thesis:
+        return self._set_status(thesis_id, models.ThesisStatus.ACTIVE.value, effective_at=effective_at)
 
-    def close_thesis(self, thesis_id: str) -> Thesis:
+    def close_thesis(self, thesis_id: str, *, effective_at: str | None = None) -> Thesis:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<status>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
@@ -464,6 +584,7 @@ class ThesisRepository:
             data["updated_at"] = _utcnow()
             candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
             atomic_write_yaml(thesis_dir / "thesis.yaml", candidate.to_dict(), self.root)
+            self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="status_changed")
             return candidate
 
     def append_journal_entry(self, thesis_id: str, entry: dict) -> Path:
@@ -686,6 +807,7 @@ class ThesisRepository:
 
     def apply_research_result(
         self, thesis_id: str, result: dict, run_id: str = "", *, allowed_refs: set[str] | None = None,
+        effective_at: str | None = None,
     ) -> dict:
         """Single replayable research commit; de-dup additions by ID (crash-retry safe).
 
@@ -701,6 +823,11 @@ class ThesisRepository:
         """
         if not isinstance(result, dict):
             raise ValueError(f"<apply>: result must be a mapping, got {type(result).__name__}")
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        eff = effective_at or _utcnow()
+        if _as_dt(eff) is None:
+            raise ValueError(f"<apply>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         outcome: dict[str, Any] = {}
         with thesis_lock(thesis_dir):
@@ -931,4 +1058,7 @@ class ThesisRepository:
                     updated = Trigger.from_dict(raw_trigger, str(tpath))
                     atomic_write_yaml(tpath, {"schema_version": SCHEMA_VERSION, **updated.to_dict()}, self.root)
                     outcome["trigger"] = updated.trigger_id
+            self._snapshot_state_locked(
+                thesis_dir, thesis_id, effective_at=eff, reason="research_result",
+                run_id=run_id, trigger_id=result.get("trigger_id") or "")
         return outcome

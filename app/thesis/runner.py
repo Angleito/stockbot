@@ -64,14 +64,13 @@ def _build_prompt(*, thesis_id: str, trigger: Any, known_at: str, ctx: Any) -> s
             f"trigger summary: {(trigger.summary or '')[:500]}",
             f"trigger canonical refs: {refs[:500]}",
             "Only use evidence known at or before known_at.",
-            "THESIS CURRENT STATE (not point-in-time; may contain newer info; do not cite as known at cutoff):",
+            f"THESIS STATE AS OF {known_at}:",
             json.dumps(ctx.thesis_packet, sort_keys=True),
             f"KNOWN EVIDENCE AS OF {known_at}:",
             json.dumps(ctx.evidence_refs, sort_keys=True),
             f"PRIOR JOURNAL CONTEXT AS OF {known_at}:",
             json.dumps(ctx.journal_excerpts, sort_keys=True),
-            "On conflict, the known evidence and prior journals above win over the current-state packet;",
-            "never cite newer state as known at cutoff. Unknown values stay unknown.",
+            "All sections above are point-in-time as of known_at; unknown values stay unknown.",
             "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
             "Before completing, write a material thesis_journal entry using",
             f"trigger_id {trigger.trigger_id!r} and known_at {known_at!r}.",
@@ -120,7 +119,7 @@ def run_trigger(
     rid = new_run_id()
     try:
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
-                       prompt=prompt, data_root=data_root)
+                       prompt=prompt, data_root=data_root, as_of=known_at)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id):
             raise RuntimeError(

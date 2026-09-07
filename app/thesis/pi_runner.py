@@ -36,7 +36,7 @@ def _db_terminal(db_path: Path) -> bool:
 
 
 def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
-                  data_root, timeout_s: int = 170) -> None:
+                  data_root, timeout_s: int = 170, as_of: str | None = None) -> None:
     """Launch one bounded normal-Pi run for a pending trigger.
 
     Success is exit 0 plus recorder completion; nonzero exit, timeout, or
@@ -54,6 +54,8 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     env = dict(os.environ)
     if data_root is not None and str(data_root):
         env["STOCKBOT_DATA_DIR"] = str(data_root)
+    if isinstance(as_of, str) and as_of:
+        env["STOCKBOT_AS_OF"] = as_of
     env["STOCKBOT_DONE_FILE"] = str(done_p)
     env["RUNS_DB_PATH"] = str(db_p)
     try:

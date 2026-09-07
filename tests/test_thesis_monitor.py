@@ -41,13 +41,17 @@ class _Pi:
         self.calls = 0
         self.prompts = []
 
-    def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170):
+    def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170, as_of=None):
         self.calls += 1
         self.prompts.append(prompt)
+        self.last_as_of = as_of
         if self.fail:
             raise RuntimeError("pi boom")
         if self.write is not None:
-            self.write(thesis_id, trigger_id)
+            try:
+                self.write(thesis_id, trigger_id, as_of)
+            except TypeError:
+                self.write(thesis_id, trigger_id)
 
 
 def _pi(monkeypatch, **kw):
@@ -59,15 +63,13 @@ def _pi(monkeypatch, **kw):
 def _make(tmp_path, scope="NVDA", rule="new_filing", exprs=(), invalidators=()):
     r = ThesisRepository(tmp_path / "theses")
     t = r.create_thesis(f"{scope} thesis", scope=scope, claims=[f"{scope} demand grows"],
-                        expressions=list(exprs), invalidators=list(invalidators))
+                        expressions=list(exprs), invalidators=list(invalidators), effective_at=T0)
     full = r.load_thesis(t.thesis_id)
     cid = full.claims[0].claim_id
     eids = [e.expression_id for e in full.expressions]
-    raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
-    raw["rules"].append({"rule_id": "rule:1", "rule_type": rule, "enabled": True,
+    r.apply_research_result(t.thesis_id, {"watch_add": [{"rule_id": "rule:1", "rule_type": rule, "enabled": True,
                          "support_status": "supported", "support_reason": "",
-                         "claim_ids": [cid], "expression_ids": list(eids)})
-    atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")
+                         "claim_ids": [cid], "expression_ids": list(eids)}]}, "", effective_at=T0)
     return r, t
 
 
@@ -233,13 +235,11 @@ def test_identical_events_within_one_tick_coalesce_to_one_call(tmp_path, monkeyp
 
 def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
     r = ThesisRepository(tmp_path / "theses")
-    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"])
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
-    raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
-    raw["rules"].append({"rule_id": "rule:f", "rule_type": "new_filing", "enabled": True,
+    r.apply_research_result(t.thesis_id, {"watch_add": [{"rule_id": "rule:f", "rule_type": "new_filing", "enabled": True,
                          "support_status": "supported", "support_reason": "",
-                         "claim_ids": [cid], "expression_ids": []})
-    atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")
+                         "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
 
     class FilingSrc:
         calls = 0
@@ -355,15 +355,13 @@ def test_paused_and_closed_query_no_sources(tmp_path, monkeypatch):
 
 def test_two_theses_stay_isolated(tmp_path, monkeypatch):
     r = ThesisRepository(tmp_path / "theses")
-    a = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"])
-    b = r.create_thesis("NVDA second thesis", scope="NVDA", claims=["NVDA demand grows"])
+    a = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
+    b = r.create_thesis("NVDA second thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
     for th in (a, b):
         cid = r.load_thesis(th.thesis_id).claims[0].claim_id
-        raw = load_raw_yaml(tmp_path / "theses" / th.slug / "watch.yaml")
-        raw["rules"].append({"rule_id": "rule:1", "rule_type": "new_filing",
+        r.apply_research_result(th.thesis_id, {"watch_add": [{"rule_id": "rule:1", "rule_type": "new_filing",
                              "enabled": True, "support_status": "supported",
-                             "support_reason": "", "claim_ids": [cid], "expression_ids": []})
-        atomic_write_yaml(tmp_path / "theses" / th.slug / "watch.yaml", raw, tmp_path / "theses")
+                             "support_reason": "", "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
     fake = _pi(monkeypatch)
     tick(r, a.thesis_id, {"sec_filings": _Src([_ev("ev:only-a")])}, known_at=T2)
     assert len(r.load_triggers(a.thesis_id)) == 1
