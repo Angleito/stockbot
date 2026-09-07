@@ -943,6 +943,85 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_create",
+            "description": "Creates a thesis from a natural-language idea via structured interpretation. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "idea": {"type": "string", "description": "The user's investment idea in their own words."},
+                    "answers": {"type": "object", "description": "Optional answers to intake questions, keyed by question_id."},
+                    "offline": {"type": "boolean", "description": "Use the deterministic local interpreter (tests/offline only). Default false (Pi)."},
+                },
+                "required": ["idea"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_show",
+            "description": "Reads one thesis with its assessment, watch rules, and open questions. Nonmutating.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_refine",
+            "description": "Refines a thesis with a clarification via structured interpretation. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "clarification": {"type": "string", "description": "New information or correction in the user's own words."},
+                    "offline": {"type": "boolean", "description": "Use the deterministic local interpreter (tests/offline only). Default false (Pi)."},
+                },
+                "required": ["id", "clarification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_watch",
+            "description": "Lists a thesis's watch rules, or appends one validated supported rule (IDs and domain input only). Never modifies existing rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "rule_type": {"type": "string", "description": "Semantic monitor name to add (omit to only list rules)."},
+                    "claim_ids": {"type": "array", "items": {"type": "string"}},
+                    "expression_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_journal",
+            "description": "Appends one operator note to a thesis journal (active theses only).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "title": {"type": "string"},
+                    "body": {"type": "string", "description": "Note body (Markdown)."},
+                },
+                "required": ["id", "body"],
+            },
+        },
+    },
 ]
 # Content-derived registry version for observability records.
 TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
@@ -1907,6 +1986,11 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,
     "query_finra": Capability.RESEARCH,
+    "thesis_create": Capability.RESEARCH,
+    "thesis_show": Capability.RESEARCH,
+    "thesis_refine": Capability.RESEARCH,
+    "thesis_watch": Capability.RESEARCH,
+    "thesis_journal": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
     "get_option_chain": Capability.BROKER_MARKET_READ,
     "analyze_option_contract": Capability.BROKER_MARKET_READ,
@@ -1950,6 +2034,151 @@ def _validate_tool_arguments(name: str, arguments: Any) -> str | None:
     return None
 
 
+def _thesis_repo_for(context: RequestContext):
+    """Thesis repository rooted at the invocation's data root (never CWD)."""
+    from app.thesis.repository import ThesisRepository
+
+    base = getattr(context, "data_root", None) or get_data_root()
+    return ThesisRepository(Path(base) / "thesis")
+
+
+def _thesis_intake_context(context: RequestContext) -> RequestContext:
+    """RESEARCH-only sub-context for intake (intake rejects broker caps)."""
+    return RequestContext(
+        principal_id=context.principal_id,
+        capabilities=frozenset({Capability.RESEARCH}),
+        data_root=getattr(context, "data_root", None) or get_data_root(),
+        as_of=getattr(context, "as_of", None),
+    )
+
+
+def _thesis_interpret(idea: str, answers: Any, offline: bool, context: RequestContext):
+    from app.thesis import intake as thesis_intake
+
+    given = dict(answers or {})
+    if offline:
+        return thesis_intake.interpret_idea(idea, given, None, _thesis_intake_context(context))
+    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
+
+    return thesis_intake.interpret_idea(
+        idea, given, PiJsonGateway(), _thesis_intake_context(context))
+
+
+def _thesis_create(arguments: dict, context: RequestContext) -> dict:
+    from app.thesis import intake as thesis_intake
+
+    idea = arguments["idea"]
+    if not isinstance(idea, str) or not idea.strip():
+        raise ValueError("thesis_create: 'idea' must be a non-empty string")
+    proposal = _thesis_interpret(idea, arguments.get("answers"), bool(arguments.get("offline")), context)
+    return thesis_intake.create_thesis_from_proposal(_thesis_repo_for(context), proposal)
+
+
+def _thesis_show(arguments: dict, context: RequestContext) -> dict:
+    repo = _thesis_repo_for(context)
+    thesis = repo.load_thesis(arguments["id"])
+    tid = thesis.thesis_id
+    rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
+    live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+    return {
+        "thesis_id": tid,
+        "slug": thesis.slug,
+        "status": thesis.status,
+        "user_thesis": thesis.user_thesis,
+        "scope": thesis.scope,
+        "claims": [c.to_dict() for c in thesis.claims],
+        "expressions": [e.to_dict() for e in thesis.expressions],
+        "assessment": repo.load_state(tid).assessment,
+        "rules": rules,
+        "setup_needed": not live,
+        "open_questions": [q.to_dict() for q in repo.load_questions(tid) if q.status == "open"],
+    }
+
+
+def _thesis_refine(arguments: dict, context: RequestContext) -> dict:
+    from app.thesis import intake as thesis_intake
+
+    repo = _thesis_repo_for(context)
+    thesis = repo.load_thesis(arguments["id"])
+    clarification = arguments["clarification"]
+    if not isinstance(clarification, str) or not clarification.strip():
+        raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
+    proposal = _thesis_interpret(
+        f"{thesis.user_thesis}\n{clarification.strip()}", None,
+        bool(arguments.get("offline")), context)
+    plan = thesis_intake.plan_refinement(thesis, proposal)
+    if (not plan["added_claims"] and not plan["added_expressions"]
+            and plan["merged"]["user_thesis"] == thesis.user_thesis):
+        return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
+    out = thesis_intake.apply_refinement(repo, thesis.thesis_id, plan, proposal)
+    return {"applied": True, **out}
+
+
+def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
+    from app.thesis.models import KNOWN_WATCH_TYPES, new_rule_id
+
+    repo = _thesis_repo_for(context)
+    thesis = repo.load_thesis(arguments["id"])
+    tid = thesis.thesis_id
+    if arguments.get("rule_type") is None:
+        rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
+        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+        return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
+    rule_type = arguments["rule_type"]
+    if not isinstance(rule_type, str) or not rule_type.strip():
+        raise ValueError("thesis_watch: 'rule_type' must be a non-empty string")
+    if rule_type not in KNOWN_WATCH_TYPES:
+        raise ValueError(f"thesis_watch: unknown rule_type {rule_type!r}")
+    if thesis.status != "active":
+        raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing watch change")
+    for key in ("claim_ids", "expression_ids"):
+        vals = arguments.get(key, [])
+        if not isinstance(vals, list) or not all(isinstance(v, str) for v in vals):
+            raise ValueError(f"thesis_watch: '{key}' must be a list of IDs")
+    rule = {
+        "rule_id": new_rule_id(),
+        "rule_type": rule_type,
+        "enabled": True,
+        "support_status": "supported",
+        "support_reason": "",
+        "claim_ids": list(arguments.get("claim_ids", [])),
+        "expression_ids": list(arguments.get("expression_ids", [])),
+    }
+    repo.apply_research_result(tid, {"watch_add": [rule]}, "")
+    return {"thesis_id": tid, "added": rule}
+
+
+def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
+    repo = _thesis_repo_for(context)
+    thesis = repo.load_thesis(arguments["id"])
+    if thesis.status != "active":
+        raise ValueError(f"thesis {thesis.thesis_id!r} is {thesis.status}; refusing journal append")
+    body = arguments["body"]
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("thesis_journal: 'body' must be a non-empty string")
+    title = arguments.get("title", "Operator note")
+    if title is not None and not isinstance(title, str):
+        raise ValueError("thesis_journal: 'title' must be a string")
+    dest = repo.append_journal_entry(thesis.thesis_id, {
+        "title": title or "Operator note",
+        "body": body.strip(),
+    })
+    return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
+
+
+_THESIS_HANDLERS = {
+    "thesis_create": _thesis_create,
+    "thesis_show": _thesis_show,
+    "thesis_refine": _thesis_refine,
+    "thesis_watch": _thesis_watch,
+    "thesis_journal": _thesis_journal,
+}
+
+# Thesis tools are direct local dispatch (no broker) but take
+# (arguments, context) instead of (arguments, model) for data-root scoping.
+_DIRECT_HANDLERS.update(_THESIS_HANDLERS)
+_CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS)
+
 def execute_tool(
     name: str,
     arguments: dict,
@@ -1973,6 +2202,8 @@ def execute_tool(
         )
         if handler is None:
             return {"error": f"Unknown tool '{name}'"}
+        if name in _CONTEXT_CALL_HANDLERS:
+            return handler(arguments, context)
         return handler(arguments, model)
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}

@@ -106,6 +106,12 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "get_sp500_weight": _envelope("analyst", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL),
     # Exa web evidence.
     "search_web": _envelope("exa", SourceType.WEB, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    # Bounded local thesis operations (locally derived, never canonical market data).
+    "thesis_create": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "thesis_show": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "thesis_refine": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "thesis_watch": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "thesis_journal": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     # Robinhood market data (account-connected, public observations).
     "get_market_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
     "get_option_chain": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),

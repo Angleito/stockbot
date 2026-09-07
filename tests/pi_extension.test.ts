@@ -8,6 +8,8 @@ import {
 	bridgeModelText,
 	payloadMeta,
 	toolCallRequest,
+	extractDataRoot,
+	extractDoneFile,
 	type Json,
 } from "../.pi/extensions/stockbot.ts";
 
@@ -422,4 +424,20 @@ test("finalized abort ack skips replacement retry", async () => {
 			}
 		}
 	}
+});
+
+test("STOCKBOT_DATA_ROOT token extracts and attaches to tool calls only when bound", () => {
+	expect(extractDataRoot("STOCKBOT_DATA_ROOT=/tmp/abc\nDo research")).toBe("/tmp/abc");
+	expect(extractDataRoot("Point-in-time: only use data.\nNo token here.")).toBeUndefined();
+	expect(extractDataRoot(undefined)).toBeUndefined();
+	const bound = toolCallRequest("id-1", "run-1", "call-1", "thesis_show", { thesis_id: "x" }, 0, "/tmp/abc");
+	expect(bound.data_root).toBe("/tmp/abc");
+	const unbound = toolCallRequest("id-2", "run-1", "call-2", "thesis_show", { thesis_id: "x" });
+	expect("data_root" in unbound).toBe(false);
+});
+
+test("STOCKBOT_DONE_FILE token extracts alongside data root", () => {
+	expect(extractDoneFile("STOCKBOT_DATA_ROOT=/tmp/abc\nSTOCKBOT_DONE_FILE=/tmp/abc/done.json\nDo research")).toBe("/tmp/abc/done.json");
+	expect(extractDoneFile("STOCKBOT_DATA_ROOT=/tmp/abc\nNo done line.")).toBeUndefined();
+	expect(extractDoneFile(undefined)).toBeUndefined();
 });

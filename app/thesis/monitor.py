@@ -98,18 +98,12 @@ def _day(ts: str) -> str:
     return ts[:10] if len(ts) >= 10 else ts
 
 
-_TICKER_RE = re.compile(r"^[A-Za-z]{1,5}$")
-
-
 def targets_for_thesis(thesis: Any) -> tuple[str, ...]:
-    """Ticker-ish tokens from the thesis scope (``unknown`` yields nothing)."""
-    out: list[str] = []
-    for tok in re.split(r"[^A-Za-z]+", getattr(thesis, "scope", "") or ""):
-        if _TICKER_RE.match(tok or ""):
-            t = tok.upper()
-            if t not in out:
-                out.append(t)
-    return tuple(out)
+    """Explicit scope only: a single 1-5 letter token, else no targets."""
+    scope = str(getattr(thesis, "scope", "") or "").strip()
+    if re.fullmatch(r"[A-Za-z]{1,5}", scope):
+        return (scope.upper(),)
+    return ()
 
 
 def _thesis_blob(thesis: Any) -> str:
@@ -330,6 +324,7 @@ def _handle_si_material(*, rule: WatchRule, thesis: Any, source_events: dict,
         if prior.get("trends") is not None and list(prior.get("trends") or []) != list(meta.get("trends") or []):
             out.append(e)
     return out, _finra_state(source_events.get("finra_short_interest", []), prev, known_at)
+
 
 def _handle_external(*, rule: WatchRule, thesis: Any, source_events: dict,
                      sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:

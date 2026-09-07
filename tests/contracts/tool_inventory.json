@@ -45,5 +45,10 @@
   "search_sec_filings",
   "search_sec_relationships",
   "search_tools",
-  "search_web"
+  "search_web",
+  "thesis_create",
+  "thesis_journal",
+  "thesis_refine",
+  "thesis_show",
+  "thesis_watch"
 ]

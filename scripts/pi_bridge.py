@@ -150,6 +150,7 @@ def _run_tool_call(request: dict) -> None:
     arguments = request.get("arguments", {})
     run_id = request.get("run_id")
     tool_call_id = request.get("tool_call_id")
+    data_root = request.get("data_root")
     try:
         queue_ms = float(request.get("bridge_queue_ms") or 0.0)
     except (TypeError, ValueError):
@@ -170,6 +171,7 @@ def _run_tool_call(request: dict) -> None:
                 tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
                 protocol_id=protocol_id if isinstance(protocol_id, str) else None,
                 bridge_queue_ms=queue_ms,
+                data_root=data_root if isinstance(data_root, str) and data_root else None,
             )
         finally:
             if token is not None:

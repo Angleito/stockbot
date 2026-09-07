@@ -7,11 +7,22 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import { writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 export type Json = Record<string, unknown>;
+
+export function extractDataRoot(prompt: unknown): string | undefined {
+ const m = typeof prompt === "string" ? /^STOCKBOT_DATA_ROOT=(\S+)/m.exec(prompt) : null;
+ return m ? m[1] : undefined;
+}
+
+export function extractDoneFile(prompt: unknown): string | undefined {
+ const m = typeof prompt === "string" ? /^STOCKBOT_DONE_FILE=(\S+)/m.exec(prompt) : null;
+ return m ? m[1] : undefined;
+}
 
 export function toolCallRequest(
  id: string,
@@ -20,8 +31,9 @@ export function toolCallRequest(
  name: string,
  params: Json,
  bridgeQueueMs = 0,
+ dataRoot?: string,
 ): Json {
- return {
+ const req: Json = {
   id,
   op: "tool_call",
   run_id: runId,
@@ -30,6 +42,8 @@ export function toolCallRequest(
   arguments: params,
   bridge_queue_ms: bridgeQueueMs,
  };
+ if (dataRoot) req.data_root = dataRoot;
+ return req;
 }
 
 export function bridgeModelText(bridge: Json): string {
@@ -404,7 +418,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    parameters: Type.Unsafe(fn.parameters),
    async execute(toolCallId, params) {
     toolCalls++;
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId)));
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text: bridgeModelText(bridge) }],
@@ -454,6 +468,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
   pendingQuestion = event.prompt;
+  pendingDataRoot = extractDataRoot(event.prompt);
+  pendingDoneFile = extractDoneFile(event.prompt);
   if (bridgeDown)
    return {
     systemPrompt:
@@ -477,6 +493,10 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
  let runId = crypto.randomUUID();
  let pendingQuestion = "";
+ let pendingDataRoot: string | undefined;
+ let pendingDoneFile: string | undefined;
+ const dataRoots = new Map<string, string>();
+ const doneFiles = new Map<string, string>();
  let seq = 0;
  let turns = 0;
  let toolCalls = 0;
@@ -514,6 +534,10 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   runId = crypto.randomUUID();
   seq = 0;
   toolStartedAt.clear();
+  if (pendingDataRoot) dataRoots.set(runId, pendingDataRoot);
+  pendingDataRoot = undefined;
+  if (pendingDoneFile) doneFiles.set(runId, pendingDoneFile);
+  pendingDoneFile = undefined;
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });
@@ -581,5 +605,15 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    .map((b) => b.text as string)
    .join("\n");
   await emit({ event: "agent_end", status: "completed", answer });
+  const doneFile = doneFiles.get(runId);
+  if (doneFile) {
+   try {
+    writeFileSync(doneFile, JSON.stringify({ status: "completed", answer }));
+   } catch {
+    // observability never breaks research
+   }
+  }
+  doneFiles.delete(runId);
+  dataRoots.delete(runId);
  });
 }

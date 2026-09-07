@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.policy import Capability
-from app.thesis.models import new_claim_id, new_expression_id, new_question_id, new_requirement_id
+from app.thesis.models import (
+    new_claim_id, new_expression_id, new_question_id, new_requirement_id, new_rule_id,
+)
 
 UNKNOWN = "unknown"
 
@@ -256,15 +258,20 @@ def _research_only_context(request_context: Any) -> Any:
 
 def _build_prompt(text: str, answers: dict) -> str:
     lines = [
-        "Normalize the user's investment idea into a single JSON object with keys:",
-        "user_thesis, scope, claims, assumptions, invalidators, unknowns,",
-        "expressions, requirements, questions.",
-        "Rules: preserve the user's belief as unvalidated claims (status 'unvalidated');",
-        "do not strengthen assertions; keep unavailable values the literal 'unknown';",
-        "keep zero or more trade expressions separate from the thesis itself;",
-        "attach timing/magnitude/portfolio-only requirements to expressions, never the thesis;",
-        "never select or recommend a trade; ask at most 3 material questions whose",
-        "answers would change scope, horizon, invalidation research, or expression research.",
+        "Normalize the user's investment idea into a single JSON object.",
+        "No tools are needed; use only the idea text below.",
+        "Exact shapes (omit IDs; they are assigned automatically):",
+        "user_thesis: string (the idea, verbatim-ish).",
+        "scope: short string, a ticker like NVDA or the literal unknown; never an object.",
+        "assumptions/invalidators/unknowns: lists of strings (empty when none).",
+        "expressions: [{intent: string, instrument: equity|option|future|bond|cash|unknown,",
+        "  direction: long|short|neutral|unknown, structure: string, horizon: string,",
+        "  status: undecided|active|flagged|closed}] (zero or more; never recommend a trade).",
+        "requirements: [{expression_id: expr:N matching an expression above,",
+        "  requirement_type: string, statement: string}] (timing/magnitude conditions only).",
+        "questions: [{question: string, question_type: string}] (at most 3 material",
+        "  questions whose answers would change scope, horizon, or expression research).",
+        "Keep unavailable values the literal unknown; do not strengthen assertions.",
         f"Idea: {text}",
     ]
     if answers:
@@ -405,3 +412,156 @@ def interpret_idea(
             f"<intake>: gateway must return a mapping or JSON string, got {type(raw).__name__}"
         )
     return IntakeProposal.from_dict(data, "<intake/gateway>")
+
+_SCOPE_RE = re.compile(r"^[A-Za-z]{1,5}$")
+_SETUP_QUESTION_ID = "setup:scope"
+
+
+def build_initial_watch_rules(
+    scope: str, requirements: Any, *, claim_ids: list = (), expression_ids: list = ()
+) -> list[dict]:
+    """Supported semantic rules only: explicit ticker scope -> ``new_filing`` plus
+    any requirement whose type already names a supported monitor. No thresholds."""
+    from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the table
+
+    cids = [c for c in (claim_ids or []) if isinstance(c, str) and c]
+    eids = [e for e in (expression_ids or []) if isinstance(e, str) and e]
+    rules: list[dict] = []
+    if _SCOPE_RE.fullmatch((scope or "").strip()) and "new_filing" in SUPPORTED_HANDLERS and (cids or eids):
+        rules.append({
+            "rule_id": new_rule_id(),
+            "rule_type": "new_filing",
+            "enabled": True,
+            "support_status": "supported",
+            "support_reason": "",
+            "claim_ids": list(cids),
+            "expression_ids": list(eids),
+        })
+    seen = {r["rule_type"] for r in rules}
+    for r in requirements or []:
+        rt = r.get("requirement_type") if isinstance(r, dict) else getattr(r, "requirement_type", None)
+        eid = r.get("expression_id") if isinstance(r, dict) else getattr(r, "expression_id", None)
+        if not isinstance(rt, str) or rt not in SUPPORTED_HANDLERS or rt in seen or eid not in eids:
+            continue
+        rules.append({
+            "rule_id": new_rule_id(),
+            "rule_type": rt,
+            "enabled": True,
+            "support_status": "supported",
+            "support_reason": "",
+            "claim_ids": [],
+            "expression_ids": [eid],
+        })
+        seen.add(rt)
+    return rules
+
+
+def setup_needed_question() -> dict:
+    return {
+        "question_id": _SETUP_QUESTION_ID,
+        "text": "Which ticker should this thesis monitor? Reply with the single ticker symbol (e.g. NVDA).",
+        "status": "open",
+    }
+
+
+def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> dict:
+    """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
+
+    Unresolvable scope persists a setup question instead of a fake active
+    monitor. Returns thesis_id/slug/scope/rules/setup_needed/missing_questions.
+    """
+    rules = build_initial_watch_rules(
+        proposal.scope, proposal.requirements,
+        claim_ids=[c["claim_id"] for c in proposal.claims],
+        expression_ids=[e["expression_id"] for e in proposal.expressions])
+    thesis = repository.create_thesis(
+        user_thesis=proposal.user_thesis,
+        scope=proposal.scope,
+        claims=[dict(c) for c in proposal.claims],
+        assumptions=list(proposal.assumptions),
+        invalidators=list(proposal.invalidators),
+        unknowns=list(proposal.unknowns),
+        expressions=[dict(e) for e in proposal.expressions],
+        requirements=[dict(r) for r in proposal.requirements],
+        watch_rules=rules,
+    )
+    missing: list[dict] = []
+    questions_add: list[dict] = []
+    for q in proposal.questions or ():
+        if isinstance(q, dict):
+            qid, text = q.get("question_id") or new_question_id(), q.get("question") or q.get("text", "")
+        else:
+            qid, text = q.question_id, q.question
+        if isinstance(text, str) and text.strip():
+            questions_add.append({"question_id": qid, "text": text.strip(), "status": "open"})
+    if not rules:
+        missing.append(setup_needed_question())
+        questions_add.append(dict(missing[0]))
+    if questions_add:
+        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "")
+    return {
+        "thesis_id": thesis.thesis_id,
+        "slug": thesis.slug,
+        "scope": thesis.scope,
+        "setup_needed": not rules,
+        "missing_questions": [dict(m) for m in missing],
+        "rules": [dict(r) for r in rules],
+    }
+
+
+def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
+    """Pure merge preview: added claims/expressions/requirements plus merged payload."""
+    old_claims = {c.statement for c in thesis.claims}
+    claims = [c.to_dict() for c in thesis.claims]
+    added_claims = [dict(c) for c in proposal.claims if c["statement"] not in old_claims]
+    old_expr = {(e.intent, e.instrument, e.direction, e.structure, e.horizon)
+                for e in thesis.expressions}
+    expressions = [e.to_dict() for e in thesis.expressions]
+    added_expr = [dict(e) for e in proposal.expressions
+                  if (e["intent"], e["instrument"], e["direction"],
+                      e["structure"], e["horizon"]) not in old_expr]
+    new_ids = {e["expression_id"] for e in added_expr}
+    requirements = [r.to_dict() for r in thesis.requirements]
+    added_reqs = [dict(r) for r in proposal.requirements if r["expression_id"] in new_ids]
+    merged = {
+        "user_thesis": proposal.user_thesis,
+        "scope": proposal.scope if proposal.scope != UNKNOWN else thesis.scope,
+        "claims": claims + added_claims,
+        "assumptions": list(dict.fromkeys([*thesis.assumptions, *proposal.assumptions])),
+        "invalidators": list(dict.fromkeys([*thesis.invalidators, *proposal.invalidators])),
+        "unknowns": list(dict.fromkeys([*thesis.unknowns, *proposal.unknowns])),
+        "expressions": expressions + added_expr,
+        "requirements": requirements + added_reqs,
+    }
+    return {
+        "merged": merged,
+        "added_claims": added_claims,
+        "added_expressions": added_expr,
+        "added_requirements": added_reqs,
+    }
+
+
+def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal) -> dict:
+    """Apply a refinement plan; watch changes are append-only, never touching user rules."""
+    thesis = repository.load_thesis(thesis_id)
+    tid = thesis.thesis_id
+    if thesis.status != "active":
+        raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
+    updated = repository.update_thesis(tid, **plan["merged"])
+    fresh = repository.load_thesis(tid)
+    have_types = {r.rule_type for r in repository.load_watch_rules(tid)}
+    new_rules = [r for r in build_initial_watch_rules(
+        fresh.scope, proposal.requirements,
+        claim_ids=[c.claim_id for c in fresh.claims],
+        expression_ids=[e.expression_id for e in fresh.expressions])
+        if r["rule_type"] not in have_types]
+    if new_rules:
+        repository.apply_research_result(tid, {"watch_add": new_rules}, "")
+    return {
+        "thesis_id": tid,
+        "slug": updated.slug,
+        "added_claims": len(plan["added_claims"]),
+        "added_expressions": len(plan["added_expressions"]),
+        "added_requirements": len(plan["added_requirements"]),
+        "rules_added": [dict(r) for r in new_rules],
+    }

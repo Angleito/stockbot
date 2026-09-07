@@ -345,7 +345,8 @@ def _print_proposal(proposal) -> None:
 
 
 def _thesis_create(args) -> None:
-    from app.thesis.intake import interpret_idea
+    from app.thesis.intake import create_thesis_from_proposal, interpret_idea
+    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
     idea = args.idea
     if not idea:
         if sys.stdin.isatty():
@@ -353,7 +354,8 @@ def _thesis_create(args) -> None:
         idea = sys.stdin.read().strip()
     if not idea:
         raise SystemExit("thesis create: empty idea")
-    proposal = interpret_idea(idea, None, None, _thesis_ctx())
+    gateway = PiJsonGateway()
+    proposal = interpret_idea(idea, None, gateway, _thesis_ctx())
     if proposal.questions:
         answers = {}
         for q in proposal.questions:
@@ -361,7 +363,7 @@ def _thesis_create(args) -> None:
                 answers[q.question_id] = input(f"{q.question}\n> ").strip()
             except EOFError:
                 answers[q.question_id] = ""
-        proposal = interpret_idea(idea, answers, None, _thesis_ctx())
+        proposal = interpret_idea(idea, answers, gateway, _thesis_ctx())
     _print_proposal(proposal)
     try:
         ok = input("Create this thesis? [y/N] ").strip().lower()
@@ -371,17 +373,14 @@ def _thesis_create(args) -> None:
         print("Not created.")
         return
     repo = _thesis_repo(args)
-    thesis = repo.create_thesis(
-        user_thesis=proposal.user_thesis,
-        scope=proposal.scope,
-        claims=[dict(c) for c in proposal.claims],
-        assumptions=list(proposal.assumptions),
-        invalidators=list(proposal.invalidators),
-        unknowns=list(proposal.unknowns),
-        expressions=[dict(e) for e in proposal.expressions],
-        requirements=[dict(r) for r in proposal.requirements],
-    )
-    print(f"Created {thesis.thesis_id} ({thesis.slug})")
+    out = create_thesis_from_proposal(repo, proposal)
+    print(f"Created {out['thesis_id']} ({out['slug']})")
+    for r in out["rules"]:
+        print(f"- watch {r['rule_type']} [{r['support_status']}]")
+    if out["setup_needed"]:
+        print("Setup needed: no monitorable target resolved.")
+        for q in out["missing_questions"]:
+            print(f"- question ({q['question_id']}): {q['text']}")
 
 
 def _thesis_list(args) -> None:
@@ -418,7 +417,8 @@ def _thesis_show(args) -> None:
 
 
 def _thesis_refine(args) -> None:
-    from app.thesis.intake import interpret_idea
+    from app.thesis.intake import apply_refinement, interpret_idea, plan_refinement
+    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
     repo = _thesis_repo(args)
     thesis = _thesis_load(repo, args.id)
     clarification = args.clarification
@@ -432,35 +432,17 @@ def _thesis_refine(args) -> None:
             clarification = sys.stdin.read().strip()
     if not clarification:
         raise SystemExit("thesis refine: provide CLARIFICATION as an argument or on stdin")
-    proposal = interpret_idea(f"{thesis.user_thesis}\n{clarification}", None, None, _thesis_ctx())
-    old_claims = {c.statement for c in thesis.claims}
-    claims = [c.to_dict() for c in thesis.claims]
-    added_claims = [dict(c) for c in proposal.claims if c["statement"] not in old_claims]
-    old_expr = {(e.intent, e.instrument, e.direction, e.structure, e.horizon)
-                for e in thesis.expressions}
-    expressions = [e.to_dict() for e in thesis.expressions]
-    added_expr = [dict(e) for e in proposal.expressions
-                  if (e["intent"], e["instrument"], e["direction"],
-                      e["structure"], e["horizon"]) not in old_expr]
-    new_ids = {e["expression_id"] for e in added_expr}
-    requirements = [r.to_dict() for r in thesis.requirements]
-    added_reqs = [dict(r) for r in proposal.requirements if r["expression_id"] in new_ids]
-    merged = {
-        "user_thesis": proposal.user_thesis,
-        "scope": proposal.scope if proposal.scope != "unknown" else thesis.scope,
-        "claims": claims + added_claims,
-        "assumptions": list(dict.fromkeys([*thesis.assumptions, *proposal.assumptions])),
-        "invalidators": list(dict.fromkeys([*thesis.invalidators, *proposal.invalidators])),
-        "unknowns": list(dict.fromkeys([*thesis.unknowns, *proposal.unknowns])),
-        "expressions": expressions + added_expr,
-        "requirements": requirements + added_reqs,
-    }
+    proposal = interpret_idea(
+        f"{thesis.user_thesis}\n{clarification}", None, PiJsonGateway(), _thesis_ctx())
+    plan = plan_refinement(thesis, proposal)
+    added_claims, added_expr, added_reqs = (
+        plan["added_claims"], plan["added_expressions"], plan["added_requirements"])
     print(f"+{len(added_claims)} claims, +{len(added_expr)} expressions, +{len(added_reqs)} requirements")
     for c in added_claims:
         print(f"- claim: {c['statement']}")
     for e in added_expr:
         print(f"- expression {e['instrument']}/{e['direction']} ({e['structure']}): {e['intent']}")
-    if not added_claims and not added_expr and merged["user_thesis"] == thesis.user_thesis:
+    if not added_claims and not added_expr and plan["merged"]["user_thesis"] == thesis.user_thesis:
         print("No changes.")
         return
     try:
@@ -470,8 +452,10 @@ def _thesis_refine(args) -> None:
     if not ok.startswith("y"):
         print("Not applied.")
         return
-    updated = repo.update_thesis(args.id, **merged)
-    print(f"Refined {updated.thesis_id} ({updated.slug})")
+    out = apply_refinement(repo, thesis.thesis_id, plan, proposal)
+    print(f"Refined {out['thesis_id']} ({out['slug']})")
+    for r in out["rules_added"]:
+        print(f"- watch {r['rule_type']} [{r['support_status']}]")
 
 
 def _thesis_status(args) -> None:
@@ -590,16 +574,9 @@ def _thesis_journal(args) -> None:
         print(f"{entry_id} {created} {title}".rstrip())
 
 
-class _UnconfiguredGateway:
-    """Placeholder research gateway: deterministic ticks work, Pi runs wait for wiring."""
-
-    def complete_research(self, prompt, *, request_context, tools):
-        raise RuntimeError(
-            "thesis tick: Pi research gateway is not wired yet; trigger left pending")
-
-
 def _thesis_runtime(args, what="thesis tick"):
     """Shared tick/monitor wiring: repo, thesis ID, request context, source services."""
+    from app.config import get_data_root
     from app.policy import Capability, RequestContext
     from app.thesis import monitor
     from app.thesis.runner import capabilities_for_grants
@@ -610,9 +587,13 @@ def _thesis_runtime(args, what="thesis tick"):
         raise SystemExit(f"{what}: {exc}") from exc
     repo = _thesis_repo(args)
     thesis = _thesis_load(repo, args.id)
+    override = getattr(args, "data_root", None) or None
+    base = Path(override) if override else get_data_root()
     ctx = RequestContext(
         principal_id=_thesis_ctx().principal_id,
         capabilities=frozenset({Capability.RESEARCH}) | extra,
+        data_root=base,
+        as_of=getattr(args, "as_of", None),
     )
     targets = monitor.targets_for_thesis(thesis)
     services = {
@@ -628,10 +609,11 @@ def _thesis_tick(args) -> None:
     from datetime import datetime, timezone
 
     from app.thesis import monitor
+    from app.thesis.pi_json import PiJsonGateway
 
     repo, thesis_id, ctx, services = _thesis_runtime(args)
     known_at = getattr(args, "known_at", None) or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    result = monitor.tick(repo, thesis_id, services, _UnconfiguredGateway(), ctx,
+    result = monitor.tick(repo, thesis_id, services, PiJsonGateway(), ctx,
                           known_at=known_at)
     if result.no_op:
         print("no meaningful change" + (f": {result.no_op_reason}" if result.no_op_reason else ""))
@@ -646,6 +628,7 @@ def _thesis_monitor(args) -> None:
     import signal
     import threading
 
+    from app.thesis.pi_json import PiJsonGateway
     from app.thesis.worker import monitor_loop
 
     interval = getattr(args, "interval_seconds", 900)
@@ -674,7 +657,7 @@ def _thesis_monitor(args) -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
     monitor_loop(repository=repo, thesis_id=thesis_id, interval_seconds=interval,
-                 gateway=_UnconfiguredGateway(), request_context=ctx,
+                 gateway=PiJsonGateway(), request_context=ctx,
                  source_services=services,
                  known_at_fn=(lambda: fixed_known_at) if fixed_known_at else None,
                  stop_event=stop, on_tick=_report)
@@ -764,7 +747,7 @@ def _build_parser() -> argparse.ArgumentParser:
     coverage_parser.add_argument("--to", dest="to_date", default=None, help="coverage on/before YYYY-MM-DD")
     coverage_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     thesis_common = argparse.ArgumentParser(add_help=False)
-    thesis_common.add_argument("--data-root", default=None,
+    thesis_common.add_argument("--data-root", default=argparse.SUPPRESS,
                                help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
     thesis_parser = subparsers.add_parser("thesis", parents=[thesis_common],
                                           help="persistent thesis management")

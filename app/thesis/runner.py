@@ -42,6 +42,11 @@ _EXPRESSION_VOCAB = {e.value for e in ExpressionStatus}
 _QUESTION_VOCAB = {e.value for e in QuestionStatus}
 # Evidence refs carry canonical refs + summaries only; reject smuggled bodies.
 _BODY_KEYS = frozenset({"body", "content", "filing_body", "full_text", "document_text"})
+# Model-authored URLs and publication/retrieval metadata are never durable provenance.
+_PROVENANCE_KEYS = frozenset({
+    "url", "urls", "link", "links", "source_url",
+    "provenance", "publication", "published_at", "retrieved_at", "retrieval", "origin",
+})
 
 
 class ResearchGateway(Protocol):
@@ -184,9 +189,9 @@ class ThesisResearchResult:
             where = f"{path}: evidence_refs[{i}]"
             if not isinstance(ref, dict):
                 raise ValueError(f"{where}: must be a mapping")
-            smuggled = [k for k in _BODY_KEYS if ref.get(k)]
+            smuggled = [k for k in _BODY_KEYS | _PROVENANCE_KEYS if ref.get(k)]
             if smuggled:
-                raise ValueError(f"{where}: evidence refs must not carry bodies (got {smuggled})")
+                raise ValueError(f"{where}: evidence refs must not carry bodies/provenance (got {smuggled})")
             ed = dict(ref)
             ed.setdefault("evidence_id", new_evidence_id())
             ed["thesis_id"] = thesis_id
@@ -257,6 +262,22 @@ def _build_prompt(context: Any, trigger: dict, known_at: str) -> str:
             "questions_answered, questions_add, memories_add, watch_add, evidence_refs",
             "(canonical_ref + summary + known_at, no bodies), state, alert,",
             "alert_reason, counterevidence, alternative, journal_summary.",
+            "Exact shapes (IDs for new questions/memories/rules/evidence are assigned",
+            "automatically; every list item MUST be an object, never a bare string):",
+            "claim_updates: [{claim_id (a thesis claim ID from context),",
+            "  status: supported|challenged|invalidated|unresolved}] (empty when none change).",
+            "expression_updates: [{expression_id (a thesis expression ID from context),",
+            "  status: undecided|active|flagged|closed}] (empty when none change).",
+            "questions_answered: [{question_id (an open question ID from context),",
+            "  answer: string}] (empty when none can be answered).",
+            "questions_add: [{text: string}] (at most 3 still-unknown questions).",
+            "memories_add: [{text: string}] (at most 1 durable fact).",
+            "watch_add: [{rule_type (a semantic monitor name like new_filing, never a tool",
+            "  name), claim_ids: [IDs], expression_ids: [IDs]}] (empty when none needed).",
+            "evidence_refs: [{canonical_ref, summary, known_at}] (refs already in context;",
+            "  known_at at or before the run known_at; never invent a ref).",
+            "alert: true/false; alert_reason/counterevidence/alternative/journal_summary:",
+            "strings; state: object only to change thesis status, else null."
             f"known_at: {known_at}",
             f"trigger: {json.dumps(trigger, sort_keys=True)}",
             f"context: {json.dumps(context.thesis_packet, sort_keys=True)}",
@@ -339,6 +360,70 @@ def _fail(run_id: str, exc: Exception) -> None:
         pass
 
 
+def _check_evidence_provenance(
+    evidence_refs: tuple, trigger: Any, repository: Any, thesis_id: str
+) -> None:
+    """Every ref must name the trigger's refs or already-stored evidence."""
+    allowed = set(trigger.canonical_refs) | repository.evidence_canonical_refs(thesis_id)
+    for ref in evidence_refs:
+        if ref.get("canonical_ref") not in allowed:
+            raise ValueError(
+                f"<research/gateway>: foreign canonical_ref {ref.get('canonical_ref')!r}"
+                f" (trigger {trigger.trigger_id!r}); refusing writeback")
+
+
+def _payload_from_result(
+    result: ThesisResearchResult, *, run_id: str, trigger: Any, known_at: str,
+    tool_names: list, started_at: str,
+) -> dict:
+    title, body = _build_journal(
+        run_id=run_id,
+        thesis_id=trigger.thesis_id,
+        trigger=trigger.to_dict(),
+        result=result,
+        tool_names=tool_names,
+        started_at=started_at,
+        completed_at=_utcnow(),
+        known_at=known_at,
+    )
+    return {
+        "claim_updates": list(result.claim_updates),
+        "expression_updates": list(result.expression_updates),
+        "questions_answered": list(result.questions_answered),
+        "evidence_refs": list(result.evidence_refs),
+        "state": result.state,
+        "questions_add": list(result.questions_add),
+        "memories_add": list(result.memories_add),
+        "watch_add": list(result.watch_add),
+        "journal_entry": {
+            "entry_id": f"journal:{run_id}",
+            "title": title,
+            "body": body,
+            "trigger_id": trigger.trigger_id,
+            "known_at": known_at,
+        },
+        "trigger_id": trigger.trigger_id,
+    }
+
+
+def _outcome_from_applied(
+    repository: Any, thesis_id: str, trigger_id: str, run_id: str,
+    payload: dict, tool_names: list,
+) -> RunOutcome:
+    # Re-read the recorded intent's payload for IDs (replay-safe: same result twice).
+    outcome = repository.apply_research_result(thesis_id, payload, run_id)
+    repository.clear_pending_result(thesis_id, trigger_id)
+    return RunOutcome(
+        run_id=run_id,
+        thesis_id=thesis_id,
+        trigger_id=trigger_id,
+        journal_path=str(outcome.get("journal", "")),
+        evidence_ids=tuple(e["evidence_id"] for e in payload.get("evidence_refs", [])),
+        processed=True,
+        tools_used=tuple(tool_names),
+    )
+
+
 def run_trigger(
     repository: Any,
     thesis_id: str,
@@ -348,7 +433,15 @@ def run_trigger(
     *,
     known_at: str,
 ) -> RunOutcome:
-    """Run one pending trigger through the gateway and persist via the repository."""
+    """Run one pending trigger through the gateway and persist via the repository.
+
+    The validated result is recorded as a durable pending intent before any
+    mutation; a retry replays the recorded result without a second model call
+    (existing by-ID dedup keeps journals/questions singular). The trigger is
+    marked processed only after all result files install, then the intent is
+    removed. Invalid/foreign results raise before the intent is written, so
+    they change nothing and leave the trigger pending.
+    """
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
     trigger = next(
@@ -356,6 +449,14 @@ def run_trigger(
     )
     if trigger is None:
         raise KeyError(f"unknown trigger: {trigger_id!r}")
+
+    # Crash-recovery replay comes first: the recorded result wins over trigger
+    # status (a crash can land after processing but before intent removal).
+    pending = repository.read_pending_result(tid, trigger_id)
+    if pending is not None:
+        return _outcome_from_applied(
+            repository, tid, trigger_id, pending["run_id"],
+            pending["payload"], list(pending.get("tool_names", [])))
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
 
@@ -388,57 +489,15 @@ def run_trigger(
             known_at=known_at,
             path="<research/gateway>",
         )
-        if result.claim_updates or result.expression_updates:
-            patched = thesis.to_dict()
-            claim_patch = {c["claim_id"]: c for c in result.claim_updates}
-            patched["claims"] = [
-                {**c, **claim_patch[c["claim_id"]]} if c["claim_id"] in claim_patch else c
-                for c in patched["claims"]
-            ]
-            expr_patch = {e["expression_id"]: e for e in result.expression_updates}
-            patched["expressions"] = [
-                {**e, **expr_patch[e["expression_id"]]} if e["expression_id"] in expr_patch else e
-                for e in patched["expressions"]
-            ]
-            repository.update_thesis(tid, claims=patched["claims"], expressions=patched["expressions"])
-        title, body = _build_journal(
-            run_id=rid,
-            thesis_id=tid,
-            trigger=trigger.to_dict(),
-            result=result,
-            tool_names=tool_names,
-            started_at=started_at,
-            completed_at=_utcnow(),
-            known_at=known_at,
-        )
-        outcome = repository.apply_research_result(
-            tid,
-            {
-                "evidence_refs": list(result.evidence_refs),
-                "state": result.state,
-                "questions_add": list(result.questions_add),
-                "memories_add": list(result.memories_add),
-                "journal_entry": {
-                    "entry_id": f"journal:{rid}",
-                    "title": title,
-                    "body": body,
-                    "trigger_id": trigger_id,
-                    "known_at": known_at,
-                },
-                "trigger_id": trigger_id,
-            },
-            rid,
-        )
-        _apply_answered(repository, tid, result.questions_answered)
-        return RunOutcome(
-            run_id=rid,
-            thesis_id=tid,
-            trigger_id=trigger_id,
-            journal_path=str(outcome.get("journal", "")),
-            evidence_ids=tuple(e["evidence_id"] for e in result.evidence_refs),
-            processed=True,
-            tools_used=tuple(tool_names),
-        )
+        _check_evidence_provenance(result.evidence_refs, trigger, repository, tid)
+        payload = _payload_from_result(
+            result, run_id=rid, trigger=trigger, known_at=known_at,
+            tool_names=tool_names, started_at=started_at)
+        repository.write_pending_result(
+            tid, trigger_id,
+            {"run_id": rid, "known_at": known_at,
+             "tool_names": tool_names, "payload": payload})
+        return _outcome_from_applied(repository, tid, trigger_id, rid, payload, tool_names)
     except Exception as exc:
         _fail(rid, exc)
         raise

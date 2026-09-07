@@ -62,6 +62,14 @@ def _trigger_dict(trigger: Any) -> dict:
     raise ValueError(f"<context>: trigger must be a Trigger or mapping, got {type(trigger).__name__}")
 
 
+def _pit_visible(value: str, cutoff: str) -> bool:
+    """Chronological ``value <= cutoff``; unparseable values fail closed."""
+    from app.thesis.monitor import _as_dt, _le  # local: monitor -> runner -> context
+
+    if _as_dt(value) is None or _as_dt(cutoff) is None:
+        return False
+    return _le(value, cutoff)
+
 def build_context(
     repository: Any,
     thesis_id: str,
@@ -91,47 +99,68 @@ def build_context(
         for m in memory_raw.get("memories", [])
     ]
 
-    # Evidence: compact refs only, PIT-valid known_at (lexicographic ISO compare).
-    evidence: list[dict] = []
+    # Irreducible packet: thesis+trigger+state+watch+questions only.
+    packet = {
+        "thesis": thesis.to_dict(),
+        "state": state,
+        "watch": {"thesis_id": tid, "rules": rules},
+        "questions": questions,
+        "trigger": tdict,
+    }
+    mandatory = _tokens(json.dumps(packet, sort_keys=True))
+    if mandatory > max_tokens:
+        breakdown = ", ".join(
+            f"{k}~{_tokens(json.dumps(v, sort_keys=True))}" for k, v in packet.items()
+        )
+        raise ContextBudgetExceeded(
+            f"<context>: mandatory packet ~{mandatory} tokens exceeds budget of {max_tokens}"
+            f" ({breakdown})"
+        )
+
+    # Evidence: PIT-visible refs only (chronological, fail-closed), pending-trigger
+    # refs first, then newest-first with stable evidence_id tiebreak. Full dicts.
+    from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
+
+    trigger_refs = set(tdict.get("canonical_refs") or [])
+    ordered: list[dict] = []
     evidence_dir = thesis_dir / "evidence"
     if evidence_dir.is_dir():
         for f in sorted(evidence_dir.glob("*.yaml")):
             ref = load_yaml(f, EvidenceRef)
             if ref.thesis_id != tid:
                 raise ValueError(f"{f}: evidence belongs to {ref.thesis_id!r}, not {tid!r}")
-            if not ref.known_at or ref.known_at > known_at:
-                continue  # missing or future-known: never visible
-            evidence.append(ref.to_dict())
+            if not ref.known_at or not _pit_visible(ref.known_at, known_at):
+                continue  # missing, unparseable, or future-known: never visible
+            ordered.append(ref.to_dict())
 
-    packet = {
-        "thesis": thesis.to_dict(),
-        "state": state,
-        "watch": {"thesis_id": tid, "rules": rules},
-        "questions": questions,
-        "memories": memories,
-        "trigger": tdict,
-    }
-    mandatory = _tokens(json.dumps(packet, sort_keys=True))
-    if mandatory > max_tokens:
-        raise ContextBudgetExceeded(
-            f"<context>: mandatory packet ~{mandatory} tokens exceeds budget of {max_tokens}"
-        )
+    def _ev_key(e: dict) -> tuple[int, float, str]:
+        dt = _as_dt(e.get("known_at") or "")
+        ts = dt.timestamp() if dt is not None else float("-inf")
+        return (0 if e.get("canonical_ref") in trigger_refs else 1, -ts, e.get("evidence_id") or "")
+
+    ordered.sort(key=_ev_key)
+
+    included: list[str] = []
+    omitted: list[str] = []
+    used = mandatory
+    evidence: list[dict] = []
+    for e in ordered:
+        cost = _tokens(json.dumps(e, sort_keys=True))
+        if used + cost > max_tokens:
+            omitted.append(e["evidence_id"])
+            continue
+        used += cost
+        evidence.append(e)
+        included.append(e["evidence_id"])
+    evidence_tokens = _tokens(json.dumps(evidence, sort_keys=True))
 
     def _packet_tokens(mem_list: list) -> int:
         return _tokens(json.dumps({**packet, "memories": mem_list}, sort_keys=True))
 
-    evidence_tokens = _tokens(json.dumps(evidence, sort_keys=True))
-    included: list[str] = [e["evidence_id"] for e in evidence]
-    omitted: list[str] = []
-
-    # Over budget before journals: trim oldest memories first (newest-last on disk).
+    # Over budget: trim oldest memories first (newest-last on disk).
     kept = list(memories)
     while kept and _packet_tokens(kept) + evidence_tokens > max_tokens:
         omitted.append(kept.pop(0)["memory_id"])
-    if _packet_tokens(kept) + evidence_tokens > max_tokens:
-        raise ContextBudgetExceeded(
-            f"<context>: mandatory packet with evidence exceeds budget of {max_tokens}"
-        )
     for m in kept:
         included.append(m["memory_id"])
     packet["memories"] = kept
@@ -154,8 +183,8 @@ def build_context(
             omitted.append(f.stem)
             continue
         fm_known_at = _journal_known_at(head)
-        if not fm_known_at or fm_known_at > known_at:
-            omitted.append(f.stem)  # missing or future-known: never visible
+        if not fm_known_at or not _pit_visible(fm_known_at, known_at):
+            omitted.append(f.stem)  # missing, unparseable, or future-known: never visible
             continue
         cost = _tokens(head)
         if used + cost > max_tokens:
@@ -165,6 +194,11 @@ def build_context(
         excerpts.append({"journal": f.stem, "excerpt": head})
         included.append(f"journal:{f.stem}")
 
+    packet["omitted_counts"] = {
+        "evidence": len(ordered) - len(evidence),
+        "memories": len(memories) - len(kept),
+        "journals": len(journal_files) - len(excerpts),
+    }
     total = _tokens(
         json.dumps({"packet": packet, "evidence": evidence, "journals": excerpts}, sort_keys=True)
     )

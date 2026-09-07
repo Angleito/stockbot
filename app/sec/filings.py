@@ -38,7 +38,10 @@ def list_sec_filings(
     if forms is not None:
         kwargs["form"] = forms
     if start_date is not None or end_date is not None:
-        kwargs["filing_date"] = f"{start_date or ''}:{end_date or ''}"
+        # edgartools rejects open-ended ranges ("2026-09-07:"); close them:
+        # missing start means archive beginning, missing end means as_of/today.
+        end = end_date or as_of or date.today().isoformat()
+        kwargs["filing_date"] = f"{start_date or '1994-01-01'}:{end}"
     filings = get_company(ticker_or_cik).get_filings(**kwargs)
     out = [filing_from_edgar(f) for f in filings]
     if as_of is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,9 +36,24 @@ from app.thesis.models import (
     new_trigger_id,
     slugify,
 )
-from app.thesis.yaml import atomic_write_yaml, load_raw_yaml, load_yaml, thesis_lock
+from app.thesis.yaml import (
+    atomic_write_json,
+    atomic_write_text,
+    atomic_write_yaml,
+    load_raw_yaml,
+    load_yaml,
+    thesis_lock,
+)
 
 STATE_FILES = ("thesis.yaml", "state.yaml", "watch.yaml", "questions.yaml", "memory.yaml", "checkpoint.yaml")
+
+# Evidence refs carry canonical refs + summaries only. Anything else smuggles
+# bodies or model-invented provenance (URLs, publication/retrieval metadata).
+_FORBIDDEN_EVIDENCE_KEYS = frozenset({
+    "body", "content", "filing_body", "full_text", "document_text",
+    "url", "urls", "link", "links", "source_url",
+    "provenance", "publication", "published_at", "retrieved_at", "retrieval", "origin",
+})
 
 
 def _utcnow() -> str:
@@ -301,6 +317,7 @@ class ThesisRepository:
         unknowns: list = (),
         expressions: list = (),
         requirements: list = (),
+        watch_rules: list = (),
     ) -> Thesis:
         if not isinstance(user_thesis, str) or not user_thesis.strip():
             raise ValueError("<create>: 'user_thesis' must be a non-empty string")
@@ -337,6 +354,20 @@ class ThesisRepository:
             unknowns=thesis.unknowns, expressions=thesis.expressions, requirements=tuple(req_objs),
         )
         thesis.validate("<create>")
+        # Initial watch rules persist in the same commit; cross-refs must name
+        # claims/expressions created above (never invented thresholds).
+        claim_ids = {c.claim_id for c in thesis.claims}
+        expr_ids = {e.expression_id for e in thesis.expressions}
+        rule_objs = []
+        for r in watch_rules or []:
+            robj = WatchRule.from_dict(dict(r), "<create>")
+            for cid in robj.claim_ids:
+                if cid not in claim_ids:
+                    raise ValueError(f"<create>: rule references absent claim {cid!r}")
+            for eid in robj.expression_ids:
+                if eid not in expr_ids:
+                    raise ValueError(f"<create>: rule references absent expression {eid!r}")
+            rule_objs.append(robj)
 
         words = re.findall(r"[A-Za-z0-9]+", user_thesis)[:8] or ["thesis"]
         try:
@@ -367,7 +398,8 @@ class ThesisRepository:
             )
             atomic_write_yaml(
                 thesis_dir / "watch.yaml",
-                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "rules": []}, self.root,
+                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id,
+                 "rules": [r.to_dict() for r in rule_objs]}, self.root,
             )
             atomic_write_yaml(
                 thesis_dir / "questions.yaml",
@@ -448,14 +480,11 @@ class ThesisRepository:
             title = d.get("title", f"Journal {entry_id}")
             body = d.get("body", d.get("summary", ""))
             dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
-            # Keep journal writes inside root (same traversal guard as YAML).
-            from app.thesis.yaml import _resolve_inside  # local to avoid export churn
-
-            _resolve_inside(self.root, dest)
-            dest.write_text(
+            atomic_write_text(
+                dest,
                 _journal_front_matter(entry_id, thesis_id, created, d)
                 + f"# {title}\n\n{body}\n",
-                encoding="utf-8",
+                self.root,
             )
             return dest
 
@@ -531,6 +560,87 @@ class ThesisRepository:
             atomic_write_yaml(target, {"schema_version": SCHEMA_VERSION, **updated.to_dict()}, self.root)
             return updated
 
+    def _load_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict]:
+        """Locate one trigger's raw mapping (direct name, else inbox scan)."""
+        direct = thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.yaml"
+        if direct.is_file():
+            raw = load_raw_yaml(direct)
+            self._check_file_owner(raw, str(direct), thesis_id)
+            return direct, raw
+        for f in sorted((thesis_dir / "inbox").glob("*.yaml")):
+            try:
+                raw = load_raw_yaml(f)
+            except Exception:
+                continue
+            if raw.get("trigger_id") == trigger_id:
+                self._check_file_owner(raw, str(f), thesis_id)
+                return f, raw
+        raise KeyError(f"unknown trigger: {trigger_id!r}")
+
+    def evidence_canonical_refs(self, thesis_id: str) -> set[str]:
+        """Canonical refs of stored evidence files (provenance pool for writeback)."""
+        thesis_dir = self._dir_for(thesis_id)
+        out: set[str] = set()
+        evdir = thesis_dir / "evidence"
+        if evdir.is_dir():
+            for f in sorted(evdir.glob("*.yaml")):
+                try:
+                    raw = load_raw_yaml(f)
+                except Exception:
+                    continue
+                if not isinstance(raw, dict) or raw.get("thesis_id") != thesis_id:
+                    continue
+                ref = raw.get("canonical_ref")
+                if isinstance(ref, str) and ref:
+                    out.add(ref)
+        return out
+
+    def _pending_path(self, thesis_dir: Path, trigger_id: str) -> Path:
+        return thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.pending.json"
+
+    def read_pending_result(self, thesis_id: str, trigger_id: str) -> dict | None:
+        """Durable research-result intent for crash replay (None when absent)."""
+        thesis_dir = self._dir_for(thesis_id)
+        with thesis_lock(thesis_dir):
+            self._check_owner(thesis_dir, thesis_id)
+            p = self._pending_path(thesis_dir, trigger_id)
+            if not p.is_file():
+                return None
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"{p}: unreadable pending result intent: {exc}") from exc
+            if (
+                not isinstance(raw, dict)
+                or raw.get("thesis_id") != thesis_id
+                or raw.get("trigger_id") != trigger_id
+                or not isinstance(raw.get("payload"), dict)
+                or not isinstance(raw.get("run_id"), str)
+                or not raw["run_id"]
+            ):
+                raise ValueError(f"{p}: foreign or corrupt pending result intent; operator review required")
+            return raw
+
+    def write_pending_result(self, thesis_id: str, trigger_id: str, intent: dict) -> Path:
+        """Persist the validated result before mutating (replay skips the model call)."""
+        thesis_dir = self._dir_for(thesis_id)
+        with thesis_lock(thesis_dir):
+            self._check_owner(thesis_dir, thesis_id)
+            body = dict(intent)
+            body["thesis_id"] = thesis_id
+            body["trigger_id"] = trigger_id
+            return atomic_write_json(self._pending_path(thesis_dir, trigger_id), body, self.root)
+
+    def clear_pending_result(self, thesis_id: str, trigger_id: str) -> None:
+        thesis_dir = self._dir_for(thesis_id)
+        with thesis_lock(thesis_dir):
+            self._check_owner(thesis_dir, thesis_id)
+            try:
+                self._pending_path(thesis_dir, trigger_id).unlink()
+            except FileNotFoundError:
+                pass
+
+
     def load_checkpoint(self, id_or_slug: str) -> Checkpoint:
         """Read validated checkpoint.yaml (lock-held; KeyError on unknown thesis)."""
         thesis_id = self._resolve_id(id_or_slug)
@@ -553,17 +663,82 @@ class ThesisRepository:
 
 
     def apply_research_result(self, thesis_id: str, result: dict, run_id: str = "") -> dict:
-        """Runner writeback in fixed order; de-dup additions by ID (crash-retry safe).
+        """Single replayable research commit; de-dup additions by ID (crash-retry safe).
 
-        Order: evidence refs -> state -> questions -> memory -> watch -> journal
-        -> trigger processed metadata. Never deletes triggers.
+        One lock, fixed order: claim/expression status -> evidence refs -> state
+        -> questions -> memory -> watch -> journal -> trigger processed metadata.
+        Evidence provenance is validated before any write: refs carrying bodies,
+        URLs, or publication/retrieval metadata are rejected, and (when a
+        trigger_id is present) every canonical ref must name the trigger's refs
+        or already-stored evidence. Never deletes triggers.
         """
+        if not isinstance(result, dict):
+            raise ValueError(f"<apply>: result must be a mapping, got {type(result).__name__}")
         thesis_dir = self._dir_for(thesis_id)
         outcome: dict[str, Any] = {}
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
             if thesis.status == models.ThesisStatus.CLOSED.value:
                 raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
+
+            # 0a. claim/expression updates: IDs must belong here, statuses known.
+            claim_patch: dict[str, dict] = {}
+            for c in result.get("claim_updates", []) or []:
+                if not isinstance(c, dict) or not c.get("claim_id"):
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
+                if c["claim_id"] not in {x.claim_id for x in thesis.claims}:
+                    raise ValueError(
+                        f"{thesis_dir}/thesis.yaml: claim {c['claim_id']!r} does not belong to thesis {thesis_id!r}")
+                if c.get("status") is not None and c["status"] not in {e.value for e in models.ClaimStatus}:
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim status {c.get('status')!r}")
+                claim_patch[c["claim_id"]] = c
+            expr_patch: dict[str, dict] = {}
+            for e in result.get("expression_updates", []) or []:
+                if not isinstance(e, dict) or not e.get("expression_id"):
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
+                if e["expression_id"] not in {x.expression_id for x in thesis.expressions}:
+                    raise ValueError(
+                        f"{thesis_dir}/thesis.yaml: expression {e['expression_id']!r}"
+                        f" does not belong to thesis {thesis_id!r}")
+                if e.get("status") is not None and e["status"] not in {e2.value for e2 in models.ExpressionStatus}:
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression status {e.get('status')!r}")
+                expr_patch[e["expression_id"]] = e
+
+            # 0b. evidence provenance before any write (foreign/invalid changes nothing).
+            tpath: Path | None = None
+            raw_trigger: dict | None = None
+            if result.get("trigger_id"):
+                tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
+                allowed = set(raw_trigger.get("canonical_refs", [])) | self.evidence_canonical_refs(thesis_id)
+            else:
+                allowed = None  # seed path without a trigger: membership unchecked
+            for ref in result.get("evidence_refs", []) or []:
+                if not isinstance(ref, dict):
+                    raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
+                smuggled = [k for k in _FORBIDDEN_EVIDENCE_KEYS if ref.get(k)]
+                if smuggled:
+                    raise ValueError(
+                        f"{thesis_dir}/evidence: evidence refs must not carry bodies/provenance (got {smuggled})")
+                if allowed is not None and ref.get("canonical_ref") not in allowed:
+                    raise ValueError(
+                        f"{thesis_dir}/evidence: foreign canonical_ref {ref.get('canonical_ref')!r}"
+                        f" (trigger {result['trigger_id']!r}); refusing writeback")
+
+            # 0c. fold the old standalone thesis status mutation into this commit.
+            if claim_patch or expr_patch:
+                patched = thesis.to_dict()
+                patched["claims"] = [
+                    {**c, **claim_patch[c["claim_id"]]} if c["claim_id"] in claim_patch else c
+                    for c in patched["claims"]
+                ]
+                patched["expressions"] = [
+                    {**e, **expr_patch[e["expression_id"]]} if e["expression_id"] in expr_patch else e
+                    for e in patched["expressions"]
+                ]
+                patched["thesis_id"] = thesis_id
+                patched["updated_at"] = _utcnow()
+                thesis = Thesis.from_dict(patched, str(thesis_dir / "thesis.yaml"))
+                atomic_write_yaml(thesis_dir / "thesis.yaml", thesis.to_dict(), self.root)
 
             # 1. evidence refs (one file per ref, skip existing IDs)
             for ref in result.get("evidence_refs", []) or []:
@@ -639,7 +814,28 @@ class ThesisRepository:
                     known.add(robj.rule_id)
                 atomic_write_yaml(thesis_dir / "watch.yaml", raw, self.root)
 
-            # 6. journal (idempotent by entry id)
+            # 5b. questions answered (folded; same lock, validated inline).
+            if result.get("questions_answered"):
+                qpath = thesis_dir / "questions.yaml"
+                qraw = load_raw_yaml(qpath)
+                self._check_file_owner(qraw, str(qpath), thesis_id)
+                by_id = {q.get("question_id"): q for q in qraw.get("questions", [])}
+                for a in result["questions_answered"]:
+                    if (
+                        not isinstance(a, dict)
+                        or not isinstance(a.get("question_id"), str)
+                        or a["question_id"] not in by_id
+                    ):
+                        raise ValueError(f"{qpath}: answer names absent question {a!r}")
+                    if not isinstance(a.get("answer"), str) or not a["answer"]:
+                        raise ValueError(f"{qpath}: answer for {a['question_id']!r} must be a non-empty string")
+                    by_id[a["question_id"]]["status"] = QuestionStatus.ANSWERED.value
+                    by_id[a["question_id"]]["answer"] = a["answer"]
+                for q in qraw.get("questions", []):
+                    ThesisQuestion.from_dict(q, str(qpath))
+                atomic_write_yaml(qpath, qraw, self.root)
+
+            # 6. journal (idempotent by entry id; atomic replace keeps Markdown intact)
             if result.get("journal_entry") is not None:
                 jd = dict(result["journal_entry"])
                 jd.setdefault("run_id", run_id)
@@ -656,23 +852,21 @@ class ThesisRepository:
                     except (OSError, IndexError):
                         continue
                 if existing is None:
-                    from app.thesis.yaml import _resolve_inside  # local to avoid export churn
-
                     dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
-                    _resolve_inside(self.root, dest)
-                    dest.write_text(
+                    atomic_write_text(
+                        dest,
                         _journal_front_matter(entry_id, thesis_id, _utcnow(), jd)
                         + f"# {jd.get('title', 'Research run')}\n\n{jd.get('body', jd.get('summary', ''))}\n",
-                        encoding="utf-8",
+                        self.root,
                     )
                     outcome["journal"] = str(dest)
                 else:
                     outcome["journal"] = str(existing)
 
-            # 7. trigger processed metadata (never delete)
+            # 7. trigger processed metadata (never delete; last write of the commit)
             if result.get("trigger_id"):
-                raw_trigger = None
-                tpath = thesis_dir / "inbox" / f"{_safe_name(result['trigger_id'])}.yaml"
+                if raw_trigger is None or tpath is None:  # trigger_id validated in 0b; reload only if unset
+                    tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
                 if tpath.is_file():
                     raw_trigger = load_raw_yaml(tpath)
                     self._check_file_owner(raw_trigger, str(tpath), thesis_id)

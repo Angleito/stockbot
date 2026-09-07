@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -98,6 +99,52 @@ def atomic_write_yaml(path: Path | str, value: dict, root: Path | str) -> Path:
             raise ValueError(f"{dest}: staged write failed validation (malformed YAML): {exc}") from None
         if not isinstance(back, dict):
             raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return dest
+
+
+def atomic_write_json(path: Path | str, value: dict, root: Path | str) -> Path:
+    """Same temp/flush/fsync/atomic-replace discipline as YAML, for JSON intents."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")
+    dest = _resolve_inside(root, path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(value, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            back = json.loads(Path(tmp).read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise ValueError(f"{dest}: staged write failed validation (malformed JSON): {exc}") from None
+        if not isinstance(back, dict):
+            raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return dest
+
+
+def atomic_write_text(path: Path | str, content: str, root: Path | str) -> Path:
+    """Same temp/flush/fsync/atomic-replace discipline as YAML, for journal Markdown."""
+    if not isinstance(content, str):
+        raise ValueError(f"{path}: content must be text, got {type(content).__name__}")
+    dest = _resolve_inside(root, path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, dest)
     except BaseException:
         with contextlib.suppress(OSError):
