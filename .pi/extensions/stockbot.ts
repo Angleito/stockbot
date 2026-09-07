@@ -467,15 +467,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (systemPrompt) return { systemPrompt };
  });
 
- // --- RESEARCH gate: block anything the bridge did not register ---
- // (portfolio/broker shapes + builtins when --no-builtin-tools is dropped)
- pi.on("tool_call", (event) => {
-  if (!research.has(event.toolName)) {
-   emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
-   blocks++;
-   return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
-  }
- });
+ // Normal Pi: built-in tools pass through; Stockbot tool auth stays in bridge/policy.
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.

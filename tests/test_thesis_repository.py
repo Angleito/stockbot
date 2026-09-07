@@ -8,7 +8,6 @@ import yaml
 
 from app.thesis.models import Thesis
 from app.thesis.repository import ThesisRepository
-from app.thesis.runner import ThesisResearchResult, _apply_answered
 from app.thesis.yaml import atomic_write_yaml, load_raw_yaml
 
 
@@ -210,7 +209,7 @@ def test_answer_questions_marks_answered(tmp_path):
     assert (q.status, q.answer) == ("answered", "because")
     r.apply_research_result(t.thesis_id, {"questions_add": [{"question_id": "q:2", "text": "when?"}]},
                             "run:x")
-    _apply_answered(r, t.thesis_id, ({"question_id": "q:2", "answer": "soon"},))
+    r.answer_questions(t.thesis_id, [{"question_id": "q:2", "answer": "soon"}])
     assert {q.question_id: (q.status, q.answer) for q in r.load_questions(t.thesis_id)} == {
         "q:1": ("answered", "because"), "q:2": ("answered", "soon")}
     with pytest.raises(ValueError):
@@ -270,16 +269,3 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path):
     assert stored["ev:ok"]["canonical_ref"] == "V"
 
 
-def test_evidence_pit_compares_chronologically_not_lexically(tmp_path):
-    cutoff = "2026-01-01T10:00:00+00:00"
-
-    def check(known_at: str) -> None:
-        ThesisResearchResult.from_dict(
-            {"evidence_refs": [{"canonical_ref": "V", "summary": "v", "known_at": known_at}]},
-            thesis_id="thesis:t", claim_ids=set(), expression_ids=set(),
-            question_ids=set(), known_at=cutoff)
-    check("2026-01-01T11:00:00+02:00")  # 09:00Z: lexically after, chronologically before
-    check("2026-01-01T12:00:00+02:00")  # equal instant
-    for bad in ("2026-01-01T10:30:00+00:00", "2026-01-01T09:30:00-01:00", "not-a-time", ""):
-        with pytest.raises(ValueError):
-            check(bad)

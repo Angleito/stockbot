@@ -64,18 +64,6 @@ _THESIS_DELTA_PROPERTIES = {
             "required": ["key"],
         },
     },
-    "requirements": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "expression_key": {"type": "string"},
-                "requirement_type": {"type": "string"},
-                "statement": {"type": "string"},
-            },
-            "required": ["expression_key", "requirement_type", "statement"],
-        },
-    },
     "questions": {
         "type": "array",
         "items": {

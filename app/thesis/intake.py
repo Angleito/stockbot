@@ -1,16 +1,14 @@
 """User-idea intake: normalize a natural-language thesis into a validated proposal.
 
-# ponytail: the CLI default is a deterministic local read covering the plan's
-# showcase + intake-table phrases; a Pi-backed JSON completion can plug the same
-# IntakeGateway Protocol later with no migration.
+# ponytail: deterministic local read covering the plan's showcase + intake-table
+# phrases; Pi-facing tools validate through IntakeProposal.from_dict instead.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from app.policy import Capability
 from app.thesis.models import (
@@ -25,13 +23,6 @@ _DIRECTIONS = frozenset({"long", "short", "neutral", UNKNOWN})
 _EXPRESSION_STATUSES = frozenset({"undecided", "active", "flagged", "closed"})
 _REQUIREMENT_STATUSES = frozenset({"open", "answered"})
 _MAX_QUESTIONS = 3
-
-
-class IntakeGateway(Protocol):
-    """Injectable structured-completion gateway (Pi plugs in later)."""
-
-    def complete_json(self, prompt: str, *, request_context: Any) -> dict | str:
-        ...
 
 
 def _req_str(d: dict, key: str, where: str) -> str:
@@ -143,7 +134,7 @@ def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
         out[k] = dict(v)
     return key, out
 
-def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
+def _validate_requirement(r: Any, path: str, expression_ids: set) -> dict:
     if not isinstance(r, dict):
         raise ValueError(f"{path}: requirement must be a mapping, got {type(r).__name__}")
     rid = r.get("requirement_id") or new_requirement_id()
@@ -153,17 +144,17 @@ def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
     status = _unknown_str(r.get("status", "open"), "status", where)
     if status not in _REQUIREMENT_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_REQUIREMENT_STATUSES)}, got {status!r}")
-    ekey = r.get("expression_key")
-    if not isinstance(ekey, str) or not ekey.strip():
-        raise ValueError(f"{where}: 'expression_key' must be a non-empty string")
-    if ekey not in key_to_id:
+    eid = r.get("expression_id")
+    if not isinstance(eid, str) or not eid.strip():
+        raise ValueError(f"{where}: 'expression_id' must be a non-empty string")
+    if eid not in expression_ids:
         raise ValueError(
             f"{where}: requirement {rid!r} references absent expression "
-            f"{ekey!r}"
+            f"{eid!r}"
         )
     return {
         "requirement_id": rid,
-        "expression_id": key_to_id[ekey],
+        "expression_id": eid,
         "requirement_type": _req_str(r, "requirement_type", where),
         "statement": _req_str(r, "statement", where),
         "status": status,
@@ -247,7 +238,8 @@ class IntakeProposal:
             key_to_id[key] = validated["expression_id"]
             expressions.append(validated)
         requirements = tuple(
-            _validate_requirement(r, path, key_to_id) for r in _as_list(d, "requirements", where)
+            _validate_requirement(r, path, {e["expression_id"] for e in expressions})
+            for r in _as_list(d, "requirements", where)
         )
         return cls(
             user_thesis=_req_str(d, "user_thesis", where),
@@ -273,31 +265,6 @@ def _research_only_context(request_context: Any) -> Any:
             name = cap.value if isinstance(cap, Capability) else str(cap)
             raise ValueError(f"<intake>: request_context must not include broker capability {name!r}")
     return request_context
-
-
-def _build_prompt(text: str, answers: dict) -> str:
-    lines = [
-        "Normalize the user's investment idea into a single JSON object.",
-        "No tools are needed; use only the idea text below.",
-        "Exact shapes (omit IDs; they are assigned automatically):",
-        "user_thesis: string (the idea, verbatim-ish).",
-        "scope: short string, a ticker like NVDA or the literal unknown; never an object.",
-        "assumptions/invalidators/unknowns: lists of strings (empty when none).",
-        "expressions: [{key: string (local reference like e1), intent: string,",
-        "  instrument: equity|option|future|bond|cash|unknown,",
-        "  direction: long|short|neutral|unknown, structure: string, horizon: string,",
-        "  status: undecided|active|flagged|closed}] (zero or more; never recommend a trade).",
-        "requirements: [{expression_key: key matching an expression above,",
-        "  requirement_type: string, statement: string}] (timing/magnitude conditions only).",
-        "questions: [{question: string, question_type: string}] (at most 3 material",
-        "  questions whose answers would change scope, horizon, or expression research).",
-        "Keep unavailable values the literal unknown; do not strengthen assertions.",
-        f"Idea: {text}",
-    ]
-    if answers:
-        lines.append(f"Answers: {json.dumps(answers)}")
-    lines.append("Return JSON only.")
-    return "\n".join(lines)
 
 
 def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict:
@@ -405,33 +372,16 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
 def interpret_idea(
     text: str,
     answers: dict | None = None,
-    gateway: IntakeGateway | None = None,
     request_context: Any = None,
 ) -> IntakeProposal:
     """Normalize ``text`` (+ optional ``answers``) into a validated IntakeProposal."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("<intake>: 'text' must be a non-empty string")
-    ctx = _research_only_context(request_context)
+    _research_only_context(request_context)
     clean = text.strip()
     given = dict(answers or {})
-    if gateway is None:
-        # ponytail: deterministic local default (see module docstring).
-        return _local_interpret(clean, given)
-    # The gateway gets a prompt string plus the RESEARCH-only context only:
-    # no filesystem/repo tools and no financial-research calls happen during intake.
-    raw = gateway.complete_json(_build_prompt(clean, given), request_context=ctx)
-    if isinstance(raw, str):
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"<intake>: gateway returned invalid JSON: {exc}") from exc
-    elif isinstance(raw, dict):
-        data = raw
-    else:
-        raise ValueError(
-            f"<intake>: gateway must return a mapping or JSON string, got {type(raw).__name__}"
-        )
-    return IntakeProposal.from_dict(data, "<intake/gateway>")
+    # ponytail: deterministic local read (see module docstring).
+    return _local_interpret(clean, given)
 
 _SCOPE_RE = re.compile(r"^[A-Za-z]{1,5}$")
 _SETUP_QUESTION_ID = "setup:scope"

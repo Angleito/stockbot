@@ -4,15 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import re
 from typing import Sequence
-
-_THESIS_RE = re.compile(r"\bthesis\b", re.IGNORECASE)
-_THESIS_WRITE_RE = re.compile(
-    r"\b(?:create|make|save|write|record|add|refine|update|modify|revise|watch|monitor|track|journal|note)\b",
-    re.IGNORECASE,
-)
-_QUOTED_RE = re.compile(r'"[^"]*"|\'[^\']*\'')
 
 
 class InstructionAuthority(StrEnum):
@@ -97,21 +89,15 @@ class OriginalIntent:
 
 def classify_intent(user_turns: Sequence[str]) -> OriginalIntent:
     """Deterministic classifier: the request is the last user turn; permitted
-    domains always include financial/public-web research plus thesis reads.
-    `thesis_write` is granted only when the last user turn (unquoted text)
-    names a thesis alongside an explicit mutation verb. `portfolio_read` is
-    never granted here — only explicit session approval creates a
-    `SessionAuthorization`.
+    domains are always the base research set. Neither `thesis_write` nor
+    `portfolio_read` is ever synthesized here — portfolio authorization lives
+    only in `SessionAuthorization`.
     """
     turns = [t for t in user_turns if isinstance(t, str)]
     request = turns[-1] if turns else ""
-    domains = {"financial_research", "public_web_research", "thesis_read"}
-    unquoted = _QUOTED_RE.sub(" ", request)
-    if _THESIS_RE.search(unquoted) and _THESIS_WRITE_RE.search(unquoted):
-        domains.add("thesis_write")
     return OriginalIntent(
         request=request,
-        permitted_domains=frozenset(domains),
+        permitted_domains=frozenset({"financial_research", "public_web_research", "thesis_read"}),
     )
 
 

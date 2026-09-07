@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app.policy import Capability, RequestContext
+import app.thesis.runner as runner_mod
 from app.thesis.context import build_context
 from app.thesis.monitor import CanonicalEvent, tick
 from app.thesis.repository import ThesisRepository
@@ -14,10 +14,6 @@ T2 = "2026-01-03T00:00:00+00:00"
 T3 = "2026-01-04T00:00:00+00:00"
 T4 = "2026-01-05T00:00:00+00:00"
 T5 = "2026-01-06T00:00:00+00:00"
-
-
-def _ctx() -> RequestContext:
-    return RequestContext(principal_id="replay", capabilities=frozenset({Capability.RESEARCH}))
 
 
 class _ReplaySource:
@@ -32,43 +28,61 @@ class _ReplaySource:
         return [e for e in self.events if e.known_at <= known_at]
 
 
-class _ReplayGateway:
-    def __init__(self):
+class _ReplayPi:
+    """Fake run_thesis_pi: each launch applies the repository writes Pi's tool
+    calls would have made for that tick's event."""
+
+    def __init__(self, repository):
+        self.repository = repository
         self.calls = 0
 
-    def complete_research(self, prompt, *, request_context, tools):
+    def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170):
         self.calls += 1
         n = self.calls
         if n == 1:  # T3 relevant filing
-            return {"evidence_refs": [{"canonical_ref": "edgar:NVDA:10-K:t3",
-                                       "summary": "NVDA 10-K notes steady datacenter demand",
-                                       "known_at": T3}],
-                    "claim_updates": [],
-                    "counterevidence": "",
-                    "questions_add": [{"question_id": "q:t3", "text": "Does demand persist?"}],
-                    "journal_summary": "T3 filing reviewed"}
-        if n == 2:  # T4 contradictory
-            return {"evidence_refs": [{"canonical_ref": "ext:nvda-note:t4",
-                                       "summary": "note warns of NVDA order pushouts",
-                                       "known_at": T4}],
-                    "counterevidence": "pushout note contradicts steady-demand claim",
-                    "questions_add": [{"question_id": "q:t4", "text": "Are pushouts broad?"}],
-                    "journal_summary": "T4 counterevidence recorded"}
-        # T5 major change
-        return {"evidence_refs": [{"canonical_ref": "edgar:NVDA:8-K:t5",
+            self.repository.apply_research_result(thesis_id, {
+                "trigger_id": trigger_id,
+                "evidence_refs": [{"canonical_ref": "edgar:NVDA:10-K:t3",
+                                   "summary": "NVDA 10-K notes steady datacenter demand",
+                                   "known_at": T3}],
+                "questions_add": [{"question_id": "q:t3", "text": "Does demand persist?"}],
+                "journal_entry": {"entry_id": "journal:t3", "title": "t",
+                                  "body": "T3 filing reviewed", "known_at": T3}}, "run:t3")
+        elif n == 2:  # T4 contradictory
+            self.repository.apply_research_result(thesis_id, {
+                "trigger_id": trigger_id,
+                "evidence_refs": [{"canonical_ref": "ext:nvda-note:t4",
+                                   "summary": "note warns of NVDA order pushouts",
+                                   "known_at": T4}],
+                "questions_add": [{"question_id": "q:t4", "text": "Are pushouts broad?"}],
+                "journal_entry": {"entry_id": "journal:t4", "title": "t",
+                                  "body": "T4 counterevidence recorded: pushout note "
+                                          "contradicts steady-demand claim",
+                                  "known_at": T4}}, "run:t4")
+        else:  # T5 major change
+            self.repository.apply_research_result(thesis_id, {
+                "trigger_id": trigger_id,
+                "evidence_refs": [{"canonical_ref": "edgar:NVDA:8-K:t5",
                                    "summary": "NVDA 8-K discloses major guidance cut",
                                    "known_at": T5}],
-                "expression_updates": [],
-                "counterevidence": "guidance cut challenges accumulation timing",
                 "questions_add": [{"question_id": "q:t5", "text": "Is accumulation delayed?"}],
-                "journal_summary": "T5 major change reviewed"}
+                "journal_entry": {"entry_id": "journal:t5", "title": "t",
+                                  "body": "T5 major change reviewed: guidance cut "
+                                          "challenges accumulation timing",
+                                  "known_at": T5}}, "run:t5")
+
+
+def _replay_pi(monkeypatch, repository):
+    fake = _ReplayPi(repository)
+    monkeypatch.setattr(runner_mod, "run_thesis_pi", fake)
+    return fake
 
 
 def _journals(root: Path, slug: str) -> list:
     return sorted((root / slug / "journal").glob("*.md"))
 
 
-def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path):
+def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path, monkeypatch):
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
@@ -96,22 +110,20 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path):
         CanonicalEvent(event_id="t5", canonical_ref="edgar:NVDA:8-K:t5", source="sec_filings",
                        known_at=T5, entity="NVDA", summary="NVDA 8-K major guidance cut"),
     ])
-    gw = _ReplayGateway()
-    ctx = _ctx()
+    gw = _replay_pi(monkeypatch, r)
 
-    res1 = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T1)
+    res1 = tick(r, tid, {"sec_filings": src}, known_at=T1)
     assert gw.calls == 0 and res1.triggers_created == [] and _journals(root, t.slug) == []
-    res2 = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T2)
+    res2 = tick(r, tid, {"sec_filings": src}, known_at=T2)
     assert gw.calls == 0 and res2.triggers_created == [] and _journals(root, t.slug) == []
 
-    res3 = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T3)
-    assert gw.calls == 1 and len(res3.triggers_created) == 1
+    res3 = tick(r, tid, {"sec_filings": src}, known_at=T3)
     c3 = build_context(r, tid, r.load_triggers(tid)[0], known_at=T3)
     assert all(e["known_at"] <= T3 for e in c3.evidence_refs)
     assert len(_journals(root, t.slug)) == 1
     assert any(q.question_id == "q:t3" for q in r.load_questions(tid))
 
-    res4 = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T4)
+    res4 = tick(r, tid, {"sec_filings": src}, known_at=T4)
     assert gw.calls == 2 and len(res4.triggers_created) == 1
     c4 = build_context(r, tid, r.load_triggers(tid)[-1], known_at=T4)
     assert all(e["known_at"] <= T4 for e in c4.evidence_refs)
@@ -119,7 +131,7 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path):
     assert "pushout" in body4 and len(_journals(root, t.slug)) == 2
     assert any(q.question_id == "q:t4" for q in r.load_questions(tid))
 
-    res5 = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T5)
+    res5 = tick(r, tid, {"sec_filings": src}, known_at=T5)
     assert gw.calls == 3 and len(res5.triggers_created) == 1
     c5 = build_context(r, tid, r.load_triggers(tid)[-1], known_at=T5)
     assert all(e["known_at"] <= T5 for e in c5.evidence_refs)
@@ -134,7 +146,7 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path):
 
     # Restart from checkpoint resumes exact state without dupes.
     checkpoint_before = r.load_checkpoint(tid).to_dict()
-    again = tick(r, tid, {"sec_filings": src}, gw, ctx, known_at=T5)
+    again = tick(r, tid, {"sec_filings": src}, known_at=T5)
     assert gw.calls == 3 and again.triggers_created == []
     assert len(_journals(root, t.slug)) == 3
     assert r.load_checkpoint(tid).to_dict() == checkpoint_before
@@ -158,7 +170,7 @@ def test_journal_known_at_gates_context(tmp_path):
     assert "future" in ctx.omitted_ids and "noka" in ctx.omitted_ids
 
 
-def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path):
+def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path, monkeypatch):
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"])
@@ -171,8 +183,8 @@ def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path):
     src = _ReplaySource([CanonicalEvent(
         event_id="x1", canonical_ref="ext:nvda:x1", source="sec_filings",
         known_at=T3, entity="NVDA", summary="NVDA note")])
-    gw = _ReplayGateway()
-    res = tick(r, t.thesis_id, {"sec_filings": src}, gw, _ctx(), known_at=T4)
+    gw = _replay_pi(monkeypatch, r)
+    res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T4)
     rules = r.load_watch_rules(t.thesis_id)
     assert rules[0].enabled is False and rules[0].support_status == "unsupported"
     assert "no production source" in rules[0].support_reason

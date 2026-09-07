@@ -1,4 +1,4 @@
-"""Intake table: local interpretation + fake-gateway validation (no network)."""
+"""Intake table: local interpretation + structured validation (no network)."""
 
 import pytest
 
@@ -18,31 +18,21 @@ def _ctx(*caps) -> RequestContext:
                           capabilities=frozenset(caps or (Capability.RESEARCH,)))
 
 
-class _GW:
-    def __init__(self, payload):
-        self.payload = payload
-        self.calls = 0
-
-    def complete_json(self, prompt, *, request_context):
-        self.calls += 1
-        return self.payload
-
-
 def test_belief_preserved_as_unvalidated_claim():
-    p = interpret_idea("I think NVDA demand stays strong", {}, None, _ctx())
+    p = interpret_idea("I think NVDA demand stays strong", {}, _ctx())
     assert p.claims[0]["statement"] == "I think NVDA demand stays strong"
     assert all(c["status"] == "unvalidated" for c in p.claims)
 
 
 def test_objective_claims_expression_separated():
-    p = interpret_idea("I want to own NVDA for ten years", {}, None, _ctx())
+    p = interpret_idea("I want to own NVDA for ten years", {}, _ctx())
     assert p.user_thesis.startswith("I want to own NVDA")
     assert len(p.claims) == 1 and len(p.expressions) == 1
     assert p.claims[0]["statement"] != p.expressions[0]["structure"]
 
 
 def test_ten_years_maps_to_long_equity_without_options_questions():
-    p = interpret_idea("I want to own NVDA for ten years", {}, None, _ctx())
+    p = interpret_idea("I want to own NVDA for ten years", {}, _ctx())
     (e,) = p.expressions
     assert (e["instrument"], e["direction"], e["horizon"]) == ("equity", "long", "long-term")
     assert all("option" not in q.question.lower() and "put" not in q.question.lower()
@@ -50,19 +40,19 @@ def test_ten_years_maps_to_long_equity_without_options_questions():
 
 
 def test_profit_if_drops_without_strategy_asks_expression_choice():
-    p = interpret_idea("I want to profit if NVDA drops", {}, None, _ctx())
+    p = interpret_idea("I want to profit if NVDA drops", {}, _ctx())
     assert p.expressions == ()
     assert len(p.questions) == 1 and p.questions[0].question_type == "expression_choice"
 
 
 def test_still_deciding_persists_zero_expressions_nothing_chosen():
-    p = interpret_idea("I am still deciding how to play NVDA", {}, None, _ctx())
+    p = interpret_idea("I am still deciding how to play NVDA", {}, _ctx())
     assert p.expressions == ()
     assert all(e.get("status", "undecided") == "undecided" for e in p.expressions)
 
 
 def test_unknowns_preserved_as_literal_unknown():
-    p = interpret_idea("NVDA might do something", {}, None, _ctx())
+    p = interpret_idea("NVDA might do something", {}, _ctx())
     assert p.scope == "unknown" and "unknown" in p.unknowns
 
 
@@ -70,7 +60,7 @@ def test_never_a_recommendation_or_trade_selection():
     for text in ("I want to own NVDA for ten years",
                  "I want to profit if NVDA drops",
                  "I am still deciding how to play NVDA"):
-        p = interpret_idea(text, {}, None, _ctx())
+        p = interpret_idea(text, {}, _ctx())
         assert all(e["status"] == "undecided" for e in p.expressions)
         assert len(p.questions) <= 3
 
@@ -78,32 +68,15 @@ def test_never_a_recommendation_or_trade_selection():
 def test_showcase_two_expressions_all_claims_unvalidated():
     p = interpret_idea(
         "I think AI infrastructure expectations are too high and valuations eventually reprice.",
-        {"a": "buy puts and accumulate after the selloff"}, None, _ctx())
+        {"a": "buy puts and accumulate after the selloff"}, _ctx())
     assert len(p.expressions) == 2
     assert all(c["status"] == "unvalidated" for c in p.claims)
-
-
-def test_fake_gateway_valid_proposal_accepted():
-    gw = _GW({"user_thesis": "NVDA thesis", "scope": "NVDA",
-              "claims": [{"statement": "demand holds"}],
-              "expressions": [{"key": "e1", "structure": "custom collar-ish thing"}],
-              "questions": [{"question": "What horizon?"}]})
-    p = interpret_idea("NVDA thesis", {}, gw, _ctx())
-    assert gw.calls == 1 and p.expressions[0]["structure"] == "custom collar-ish thing"
-    assert p.claims[0]["status"] == "unvalidated"
-
-
-def test_invalid_gateway_json_rejected():
-    with pytest.raises(ValueError):
-        interpret_idea("NVDA thesis", {}, _GW("not json {{{"), _ctx())
-    with pytest.raises(ValueError):
-        interpret_idea("NVDA thesis", {}, _GW({"user_thesis": ""}), _ctx())
 
 
 def test_intake_requires_research_only_context():
     broker = _ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ)
     with pytest.raises(ValueError):
-        interpret_idea("NVDA thesis", {}, None, broker)
+        interpret_idea("NVDA thesis", {}, broker)
 
 
 def _structured(user_thesis="NVDA demand stays strong", **over) -> dict:
@@ -143,7 +116,7 @@ def test_structured_dangling_requirement_rejected_pre_write(tmp_path):
     with pytest.raises(ValueError, match="absent expression"):
         IntakeProposal.from_dict(_structured(
             expressions=[{"key": "e1", "structure": "equity"}],
-            requirements=[{"expression_key": "zzz", "requirement_type": "x",
+            requirements=[{"expression_id": "zzz", "requirement_type": "x",
                            "statement": "y"}]), "<thesis_create>")
     assert not (tmp_path / "theses").exists() or repo.list_theses() == []
 
@@ -173,3 +146,23 @@ def test_structured_refine_persists_and_refuses_paused_closed(tmp_path):
     with pytest.raises(ValueError):
         apply_refinement(repo, thesis.thesis_id, plan_refinement(repo.load_thesis(thesis.thesis_id),
                                                                  proposal), proposal)
+
+
+def test_thesis_tool_create_preserves_belief_and_watch_rejects_unsupported(tmp_path):
+    from app import tools as tools_mod
+
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path)
+    created = tools_mod.execute_tool(
+        "thesis_create",
+        {"user_thesis": "I think NVDA AI demand will stay strong.",
+         "claims": [{"statement": "AI demand holds"}]},
+        "test-model", context=ctx)
+    assert "error" not in created
+    thesis = ThesisRepository(tmp_path / "thesis").load_thesis(created["thesis_id"])
+    assert thesis.user_thesis == "I think NVDA AI demand will stay strong."
+    assert thesis.claims and all(c.status == "unvalidated" for c in thesis.claims)
+    denied = tools_mod.execute_tool(
+        "thesis_watch",
+        {"id": created["thesis_id"], "rule_type": "new_external_evidence"},
+        "test-model", context=ctx)
+    assert "unsupported" in denied.get("error", "")

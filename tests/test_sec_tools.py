@@ -90,11 +90,10 @@ def test_every_new_tool_has_handler_capability_domain_envelope():
 def test_thesis_domains_split_from_sec_suite():
     from app.security.action_policy import TOOL_DOMAINS
 
-    thesis_write = {"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"}
-    assert not (set(SEC_SUITE) & (thesis_write | {"thesis_show"}))
-    assert TOOL_DOMAINS["thesis_show"] == "thesis_read"
-    assert {TOOL_DOMAINS[name] for name in thesis_write} == {"thesis_write"}
-    assert {tools.TOOL_CAPABILITIES[name] for name in thesis_write | {"thesis_show"}} == {Capability.RESEARCH}
+    thesis = {"thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"}
+    assert not (set(SEC_SUITE) & thesis)
+    assert {TOOL_DOMAINS[name] for name in thesis} == {"financial_research"}
+    assert {tools.TOOL_CAPABILITIES[name] for name in thesis} == {Capability.RESEARCH}
 
 
 def test_get_filing_section_retired():

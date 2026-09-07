@@ -16,7 +16,7 @@
     "verify-pi-one": "venv/bin/python scripts/verify_pi_tools.py --tool",
     "update-tool-inventory": "venv/bin/python scripts/update_tool_inventory.py",
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run verify-tools && bun run verify-pi",
-    "stockbot": "pi --no-builtin-tools --extension .pi/extensions/stockbot.ts"
+    "stockbot": "pi --extension .pi/extensions/stockbot.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.85.0"

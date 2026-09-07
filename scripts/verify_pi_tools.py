@@ -19,12 +19,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import TOOLS  # noqa: E402
+from app.tools import TOOLS, execute_tool  # noqa: E402
+from app.policy import Capability, RequestContext  # noqa: E402
 from scripts.verify_tool_registry import get_registry_sets, registry_errors  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 180
 DEFAULT_REPETITIONS = 3
 POLL_S = 2
+THESIS_ID_PLACEHOLDER = "thesis-placeholder"
+THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
+
+
+def ensure_thesis_fixture(store: Path) -> str:
+    """Create one verification thesis in the batch store; returns its ID."""
+    ctx = RequestContext(principal_id="verify", capabilities=frozenset({Capability.RESEARCH}), data_root=store)
+    out = execute_tool("thesis_create", {"user_thesis": "Verify wiring: NVDA AI demand stays strong."}, "verify", context=ctx)
+    if not isinstance(out, dict) or not out.get("thesis_id"):
+        raise RuntimeError(f"thesis fixture setup failed: {str(out)[:300]}")
+    return str(out["thesis_id"])
 
 
 VERIFY_CASES: dict[str, dict] = {
@@ -66,6 +78,11 @@ VERIFY_CASES: dict[str, dict] = {
     "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "Describe the FINRA consolidated short interest dataset."},
     "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show recent FINRA short interest datapoints for Apple."},
     "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "Query the FINRA weekly summary dataset for Apple."},
+    "thesis_create": {"arguments": {"user_thesis": "I think NVDA AI demand will stay strong."}, "natural_question": "Record my thesis that NVDA AI demand will stay strong."},
+    "thesis_show": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "Show thesis thesis-placeholder with its assessment and watch rules."},
+    "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_question": "Refine thesis thesis-placeholder: AI datacenter capex keeps growing."},
+    "thesis_watch": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "List the watch rules for thesis thesis-placeholder."},
+    "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_question": "Journal on thesis thesis-placeholder: still watching NVDA datacenter demand."},
 }
 
 
@@ -251,7 +268,7 @@ def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, 
     out_log = attempt_dir / f"{attempt_dir.name}.pi.log"
     err_log = attempt_dir / f"{attempt_dir.name}.stderr.log"
     env = dict(os.environ, RUNS_DB_PATH=str(db_path))
-    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", EXTENSION, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--extension", EXTENSION, "--", prompt]
     with open(out_log, "w") as out_f, open(err_log, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env, start_new_session=True)
         deadline = time.monotonic() + TIMEOUT_S
@@ -334,6 +351,20 @@ def main() -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     root = Path("data/verify") / batch
     cwd = Path.cwd()
+    # Contain live side effects (e.g. thesis_create) in the batch dir; never
+    # the operator's durable store. run_pi children inherit this env.
+    store = root / "store"
+    os.environ.setdefault("STOCKBOT_DATA_DIR", str(store.resolve()))
+    if any(t in THESIS_ID_TOOLS for t in tool_names):
+        try:
+            fixture_id = ensure_thesis_fixture(store.resolve())
+        except Exception as exc:
+            print(f"thesis fixture setup failed: {exc}", file=sys.stderr)
+            return 1
+        for t in tool_names:
+            args = case_args.get(t, {})
+            if args.get("id") == THESIS_ID_PLACEHOLDER:
+                args["id"] = fixture_id
     results: dict[str, list[dict]] = {}
     total = passed = procs = 0
     failed_tools: list[str] = []

@@ -65,11 +65,11 @@ TOOL_DOMAINS: dict[str, str] = {
     # Exa web research.
     "search_web": "public_web_research",
     # Bounded local thesis operations (RESEARCH-scoped, never broker data).
-    "thesis_create": "thesis_write",
-    "thesis_show": "thesis_read",
-    "thesis_refine": "thesis_write",
-    "thesis_watch": "thesis_write",
-    "thesis_journal": "thesis_write",
+    "thesis_create": "financial_research",
+    "thesis_show": "financial_research",
+    "thesis_refine": "financial_research",
+    "thesis_watch": "financial_research",
+    "thesis_journal": "financial_research",
     # Robinhood portfolio data (private).
     "evaluate_mandate": "portfolio_read",
     "get_portfolio_snapshot": "portfolio_read",

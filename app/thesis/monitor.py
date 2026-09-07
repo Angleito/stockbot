@@ -2,8 +2,8 @@
 
 A tick queries canonical Stockbot sources from persisted checkpoints, normalizes
 hits to stable canonical events, persists one pending trigger per new meaningful
-event, then runs each pending trigger oldest-first through Pi. The gateway is
-only ever called via ``run_trigger``; ticks with nothing new make zero Pi calls.
+event, then runs each pending trigger oldest-first via ``run_trigger`` (one
+normal-Pi launch each). Ticks with nothing new make zero Pi calls.
 
 No broker, price, Greeks, or options monitoring exists here on purpose: rules
 without a reliable canonical backing stay ``enabled: false``/``unsupported``
@@ -414,8 +414,7 @@ _STATE_KEY = {
 }
 
 
-def tick(repository: Any, thesis_id: str, source_services: Any = None,
-         gateway: Any = None, request_context: Any = None, *,
+def tick(repository: Any, thesis_id: str, source_services: Any = None, *,
          known_at: str | None = None) -> TickResult:
     """Run one deterministic monitor tick; see module docstring for the order."""
     known_at = known_at or _utcnow()
@@ -554,8 +553,7 @@ def tick(repository: Any, thesis_id: str, source_services: Any = None,
     runs = []
     for t in pending:
         try:
-            runs.append(run_trigger(repository, tid, t.trigger_id, gateway,
-                                    request_context, known_at=known_at))
+            runs.append(run_trigger(repository, tid, t.trigger_id, known_at=known_at))
         except Exception:
             break
 
