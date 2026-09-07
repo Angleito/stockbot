@@ -64,6 +64,12 @@ TOOL_DOMAINS: dict[str, str] = {
     "get_scanner_filter_specs": "financial_research",
     # Exa web research.
     "search_web": "public_web_research",
+    # Google public data (optional, bounded research).
+    "find_alternative_signals": "financial_research",
+    "get_trend_evidence": "financial_research",
+    "investigate_social_arbitrage_candidate": "financial_research",
+    "get_macro_context": "financial_research",
+    "search_company_patents": "financial_research",
     # Bounded local thesis operations (RESEARCH-scoped, never broker data).
     "thesis_create": "thesis_write",
     "thesis_show": "thesis_read",

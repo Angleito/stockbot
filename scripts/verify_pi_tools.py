@@ -66,6 +66,11 @@ VERIFY_CASES: dict[str, dict] = {
     "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "Describe the FINRA consolidated short interest dataset."},
     "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show recent FINRA short interest datapoints for Apple."},
     "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "Query the FINRA weekly summary dataset for Apple."},
+    "find_alternative_signals": {"arguments": {}, "natural_question": "What alternative signals have been collected?"},
+    "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_question": "Show collected trend evidence for early September 2026."},
+    "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Investigate the Stanley discovery candidate."},
+    "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "Show macro context for California."},
+    "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "Show recent Apple patent publications."},
 }
 
 

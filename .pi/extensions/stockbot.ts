@@ -9,6 +9,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -64,6 +65,11 @@ const CARD_TOOLS: Record<string, { title: string; argKeys: string[] }> = {
  get_short_interest_leaderboard: { title: "Short leaderboard", argKeys: [] },
  get_valuation_metrics: { title: "Valuation", argKeys: ["ticker"] },
  search_web: { title: "Web search", argKeys: ["query"] },
+ find_alternative_signals: { title: "Alt signals", argKeys: ["query"] },
+ get_trend_evidence: { title: "Trend evidence", argKeys: ["geos"] },
+ investigate_social_arbitrage_candidate: { title: "Arbitrage check", argKeys: ["term"] },
+ get_macro_context: { title: "Macro context", argKeys: ["geos"] },
+ search_company_patents: { title: "Patents", argKeys: ["company_id"] },
 };
 
 function short(value: unknown, max = 80): string {
@@ -372,6 +378,7 @@ export function createBridgeClient(
 }
 
 export default async function stockbotExtension(pi: ExtensionAPI) {
+ registerYoutubeAnalytics(pi);
  const { callBridge } = createBridgeClient();
 
  // --- describe: prompt + RESEARCH tool registry ---

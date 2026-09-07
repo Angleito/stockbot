@@ -28,7 +28,7 @@ from app.storage.runs import (
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
 _SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
-                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis")
+                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis", "google-data")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -693,6 +693,51 @@ def _cmd_thesis(args) -> None:
         )
 
 
+def _cmd_google_data(args) -> None:
+    """Manual Google public-data collection; per-source status, never raises."""
+    if getattr(args, "google_data_command", None) != "collect":
+        raise SystemExit("google-data: choose 'collect' (e.g. google-data collect --source trends ...)")
+    geos = args.geo or ["US"]
+    limit = max(1, min(args.limit or 25, 1000))
+    out: dict = {}
+    sources = ("trends", "patents", "macro", "geo", "stackoverflow") if args.source == "all" else (args.source,)
+    for src in sources:
+        try:
+            if src == "trends":
+                from app.google_data import trends as _trends
+                out[src] = _trends.collect_trends(
+                    start_date=args.start_date, end_date=args.end_date,
+                    geos=list(geos), limit=limit, data_root=args.data_root or None)
+            elif src == "patents":
+                if not args.company:
+                    out[src] = {"status": "error", "source": "patents",
+                                "error": "company id required (--company) for patents collection"}
+                else:
+                    from app.google_data import patents as _patents
+                    out[src] = _patents.search_company_patents(
+                        args.company, start_date=args.start_date, end_date=args.end_date,
+                        limit=min(limit, 20))
+            elif src == "macro":
+                from app.google_data import datacommons as _dc
+                out[src] = _dc.get_macro_context(
+                    list(geos), list(args.variable or []),
+                    start_date=args.start_date, end_date=args.end_date, limit=min(limit, 100))
+            elif src == "geo":
+                from app.google_data import geo_context as _geo
+                out[src] = _geo.get_geo_context(
+                    list(geos), variables=list(args.variable or []),
+                    start_date=args.start_date, end_date=args.end_date,
+                    limit=min(limit, 100))
+            elif src == "stackoverflow":
+                from app.google_data import stackoverflow as _so
+                out[src] = _so.get_tag_activity(
+                    list(args.tag or []), start_date=args.start_date,
+                    end_date=args.end_date, limit=min(limit, 100))
+        except Exception as exc:
+            out[src] = {"status": "error", "source": src, "error": f"{type(exc).__name__}: {exc}"}
+    print(json.dumps({"sources": out}, indent=2, default=str))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     subparsers = parser.add_subparsers(dest="command")
@@ -746,6 +791,26 @@ def _build_parser() -> argparse.ArgumentParser:
     coverage_parser.add_argument("--from", dest="from_date", default=None, help="coverage on/after YYYY-MM-DD")
     coverage_parser.add_argument("--to", dest="to_date", default=None, help="coverage on/before YYYY-MM-DD")
     coverage_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
+    gd_parser = subparsers.add_parser(
+        "google-data", help="manual Google public-data collection (optional; never affects SEC/FINRA)")
+    gd_sub = gd_parser.add_subparsers(dest="google_data_command")
+    gd_collect = gd_sub.add_parser("collect", help="collect one Google source (manual only)")
+    gd_collect.add_argument("--source", required=True,
+                            choices=["trends", "patents", "macro", "geo", "stackoverflow", "all"],
+                            help="source to collect")
+    gd_collect.add_argument("--start-date", default=None, help="range start YYYY-MM-DD")
+    gd_collect.add_argument("--end-date", default=None, help="range end YYYY-MM-DD")
+    gd_collect.add_argument("--geo", action="append", default=None,
+                            help="geography, e.g. US (repeatable; default US)")
+    gd_collect.add_argument("--company", default=None,
+                            help="documented assignee for --source patents")
+    gd_collect.add_argument("--variable", action="append", default=[],
+                            help="Data Commons variable ID for --source macro, census column or weather hint for --source geo (repeatable)")
+    gd_collect.add_argument("--tag", action="append", default=[],
+                            help="Stack Overflow tag for --source stackoverflow (repeatable)")
+    gd_collect.add_argument("--limit", type=int, default=25,
+                            help="max rows (default 25, capped at 1000)")
+    gd_collect.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     thesis_common = argparse.ArgumentParser(add_help=False)
     thesis_common.add_argument("--data-root", default=argparse.SUPPRESS,
                                help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
@@ -851,11 +916,13 @@ def main() -> None:
                           args.data_root or None)
     elif args.command == "thesis":
         _cmd_thesis(args)
+    elif args.command == "google-data":
+        _cmd_google_data(args)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
             "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
-            "backfill-sec, resume-sec-backfill, sec-coverage, thesis)"
+            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data)"
         )
 
 

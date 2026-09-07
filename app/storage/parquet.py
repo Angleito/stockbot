@@ -493,6 +493,22 @@ DATASETS["relationship_type_evaluations"] = Dataset(
 )
 
 
+DATASETS["google_observations"] = Dataset(
+    name="google_observations",
+    schema=pa.schema(_fields(
+        ("observation_id", TEXT), ("source", TEXT), ("table", TEXT),
+        ("term", TEXT), ("geo", TEXT), ("list_kind", TEXT),
+        ("period", TEXT), ("observed_at", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_record_id", TEXT),
+        ("content_hash", TEXT), ("collector_version", TEXT),
+        ("calc_version", TEXT), ("metrics_json", TEXT),
+        ("evidence_json", TEXT), ("source_url", TEXT),
+    )),
+    unique_keys=("observation_id", "content_hash"),
+    partition_field="known_at",
+)
+
+
 def dataset(name: str) -> Dataset:
     try:
         return DATASETS[name]

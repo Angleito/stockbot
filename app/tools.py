@@ -1075,6 +1075,94 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_alternative_signals",
+            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with deterministic persistence/diffusion features. Candidates only, never materiality or investment claims.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Substring filter over candidate terms."},
+                    "geo": {"type": "string", "description": "Geography filter, e.g. US."},
+                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; candidates known after it are excluded."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max candidates (default 20)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trend_evidence",
+            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geographies, e.g. [US]."},
+                    "geo": {"type": "string", "description": "Single geography shorthand for geos."},
+                    "term": {"type": "string", "description": "Optional substring filter over collected terms."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Max rows (default 100)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "investigate_social_arbitrage_candidate",
+            "description": "Bounded enrichment for one discovery term: local signal evidence and SEC-confirmed/unresolved entity mappings plus a pointer to transient YouTube corroboration. Returns evidence and explicit gaps; never fabricates causality and never trades.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string", "description": "Discovery term to investigate."},
+                    "geo": {"type": "string", "description": "Geography, e.g. US."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Max evidence rows per source (default 5; YouTube never above 5)."},
+                },
+                "required": ["term"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_macro_context",
+            "description": "Bounded Data Commons statistical observations for explicit geography/variable IDs with unit/facet/provider provenance. Distinct facets stay distinct; never splices incompatible series.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geography DCIDs, e.g. [geoId/06]."},
+                    "variables": {"type": "array", "items": {"type": "string"}, "description": "Statistical variable IDs, e.g. [Count_Person]."},
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max observations (default 100)."},
+                },
+                "required": ["geos", "variables"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_company_patents",
+            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string", "description": "Documented assignee name from existing company evidence."},
+                    "assignees": {"type": "array", "items": {"type": "string"}, "description": "Documented assignee aliases; never inferred from matching text."},
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max publications (default 20)."},
+                },
+                "required": ["company_id"],
+            },
+        },
+    },
 ]
 # Content-derived registry version for observability records.
 TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
@@ -1637,6 +1725,149 @@ def suggest_public_search_queries(
     return plan_public_search_queries(primary_name, primary_ticker, related)
 
 
+def _google_soft(result: dict) -> dict:
+    """Collector passthrough: error dicts get soft:true like _search_web."""
+    if isinstance(result, dict) and "error" in result and "soft" not in result:
+        result = dict(result)
+        result["soft"] = True
+    return result
+
+
+def _google_import_error(source: str, exc: Exception) -> dict:
+    return {"status": "unavailable", "source": source, "soft": True,
+            "error": f"Google data unavailable: {exc}", "error_type": "source_unavailable"}
+
+
+def _find_alternative_signals(args: dict, model: str) -> dict:
+    """Local collected candidates only; disabled without credentials, never raises."""
+    try:
+        from .google_data import signals as _signals
+    except Exception as exc:
+        return _google_import_error("google", exc)
+    try:
+        limit = args.get("limit", 20)
+        rows = _signals.query_signals(
+            query=args.get("query"), geo=args.get("geo"), as_of=args.get("as_of"),
+            limit=limit, data_root=get_data_root(),
+        )
+        try:
+            capped = len(rows) >= max(1, int(limit))
+        except (TypeError, ValueError):
+            capped = False
+        return {"status": "ok", "source": "google", "signals": rows,
+                "count": len(rows),
+                "coverage": {"query": args.get("query"), "geo": args.get("geo"),
+                             "as_of": args.get("as_of")},
+                "warnings": [], "continuation": capped}
+    except Exception as exc:
+        logger.exception("find_alternative_signals failed")
+        return {"error": f"Tool 'find_alternative_signals' failed: {exc}", "soft": True, "source": "google"}
+
+
+def _get_trend_evidence(args: dict, model: str) -> dict:
+    try:
+        from .google_data import trends as _trends
+    except Exception as exc:
+        return _google_import_error("trends", exc)
+    try:
+        geos = args.get("geos") or ([args["geo"]] if args.get("geo") else ["US"])
+        result = _google_soft(_trends.collect_trends(
+            start_date=args.get("start_date"), end_date=args.get("end_date"),
+            geos=list(geos), limit=args.get("limit", 100),
+            data_root=get_data_root(),
+        ))
+        term = args.get("term")
+        if term and isinstance(result, dict) and result.get("status") == "ok":
+            rows = [o for o in result.get("observations", [])
+                    if str(term).lower() in str(o.get("term", "")).lower()]
+            result = dict(result)
+            result["observations"] = rows
+            result["rows"] = rows
+            result["count"] = len(rows)
+        return result
+    except Exception as exc:
+        logger.exception("get_trend_evidence failed")
+        return {"error": f"Tool 'get_trend_evidence' failed: {exc}", "soft": True, "source": "trends"}
+
+
+def _investigate_social_arbitrage_candidate(args: dict, model: str) -> dict:
+    """Evidence + gaps for one term; corroboration capped, causality never claimed."""
+    term = args.get("term", "")
+    geo = args.get("geo") or "US"
+    per_source = min(max(int(args.get("limit", 5)), 1), 25)
+    result: dict = {"term": term, "geo": geo, "source": "google",
+                     "status": "ok", "evidence": {}, "entities": {"confirmed": [], "unresolved": []}, "gaps": []}
+    try:
+        from .google_data import signals as _signals
+        result["evidence"]["signals"] = _signals.query_signals(
+            query=term, geo=geo, limit=per_source, data_root=get_data_root())
+    except Exception as exc:
+        result["gaps"].append(f"signals unavailable: {exc}")
+    try:
+        from datetime import datetime, timezone
+        from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
+        from .sec.discovery.service import find_sec_entities as _find_sec
+        from .storage.duckdb import ticker_alias_candidates as _alias_cands
+        sec = _find_sec(query=term, max_results=5, data_root=get_data_root())
+        for ent in list(getattr(sec, "entities", None) or []):
+            cik = getattr(ent, "cik", None)
+            entry = {"name": getattr(ent, "name", None) or term,
+                     "cik": cik,
+                     "verification_status": getattr(ent, "verification_status", None)}
+            if getattr(ent, "verification_status", None) == "verified" and cik:
+                result["entities"]["confirmed"].append(entry)
+            else:
+                result["entities"]["unresolved"].append(entry)
+        as_of = datetime.now(timezone.utc)
+        resolution = _resolve_alias(str(term).upper(),
+                                    _alias_cands(str(term).upper(), as_of, get_data_root()),
+                                    as_of=as_of)
+        if resolution.resolved:
+            result["entities"]["confirmed"].append(
+                {"ticker": str(term).upper(), "entity_id": resolution.entity_id,
+                 "security_id": resolution.security_id, "via": "ticker_alias"})
+        elif not result["entities"]["confirmed"] and not result["entities"]["unresolved"]:
+            result["entities"]["unresolved"].append({"ticker": str(term).upper(), "reason": "unresolved"})
+    except Exception as exc:
+        result["gaps"].append(f"entity resolution unavailable: {exc}")
+    # ponytail: no YouTube imports/calls/data here — evidence table has no expiry, so API content must not enter tool results
+    result["gaps"].append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
+    if len(result["gaps"]) >= 3 and not result["evidence"]:
+        result.update({"status": "unavailable", "soft": True, "error": "; ".join(result["gaps"])})
+    return result
+
+
+def _get_macro_context(args: dict, model: str) -> dict:
+    try:
+        from .google_data import datacommons as _dc
+    except Exception as exc:
+        return _google_import_error("datacommons", exc)
+    try:
+        return _google_soft(_dc.get_macro_context(
+            args.get("geos", []), args.get("variables", []),
+            start_date=args.get("start_date"), end_date=args.get("end_date"),
+            limit=args.get("limit", 100),
+        ))
+    except Exception as exc:
+        logger.exception("get_macro_context failed")
+        return {"error": f"Tool 'get_macro_context' failed: {exc}", "soft": True, "source": "datacommons"}
+
+
+def _search_company_patents(args: dict, model: str) -> dict:
+    try:
+        from .google_data import patents as _patents
+    except Exception as exc:
+        return _google_import_error("patents", exc)
+    try:
+        return _google_soft(_patents.search_company_patents(
+            args["company_id"], start_date=args.get("start_date"), end_date=args.get("end_date"),
+            limit=args.get("limit", 20), assignees=args.get("assignees"),
+        ))
+    except Exception as exc:
+        logger.exception("search_company_patents failed")
+        return {"error": f"Tool 'search_company_patents' failed: {exc}", "soft": True, "source": "patents"}
+
+
 def _wrap_list(identifier, records, key: str) -> dict:
     """SEC list results: identifier echo, count, to_dict records, source."""
     items = [r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in records or []]
@@ -1665,6 +1896,11 @@ _SEC_TOOL_TAGS = {
     "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
     "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
     "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
+    "find_alternative_signals": ("alternative", "trends discovery candidate signal persistence diffusion social arbitrage term geography"),
+    "get_trend_evidence": ("alternative", "trends evidence term geography rank list retrieval batch"),
+    "investigate_social_arbitrage_candidate": ("alternative", "social arbitrage candidate evidence entity exposure gap youtube corroboration"),
+    "get_macro_context": ("macro", "datacommons macro census geography statistical variable observation facet provider unit"),
+    "search_company_patents": ("patents", "patents publication assignee classification publication count assignee alias"),
 }
 
 _SEC_DOMAIN_PACKS = {
@@ -1929,6 +2165,11 @@ _DIRECT_HANDLERS = {
     "get_obligations": lambda args, model: obligations.get_obligations(args["ticker"]),
     "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(args["ticker"]),
     "search_web": _search_web,
+    "find_alternative_signals": _find_alternative_signals,
+    "get_trend_evidence": _get_trend_evidence,
+    "investigate_social_arbitrage_candidate": _investigate_social_arbitrage_candidate,
+    "get_macro_context": _get_macro_context,
+    "search_company_patents": _search_company_patents,
 }
 
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
@@ -2035,6 +2276,11 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "get_obligations": Capability.RESEARCH,
     "get_valuation_metrics": Capability.RESEARCH,
     "search_web": Capability.RESEARCH,
+    "find_alternative_signals": Capability.RESEARCH,
+    "get_trend_evidence": Capability.RESEARCH,
+    "investigate_social_arbitrage_candidate": Capability.RESEARCH,
+    "get_macro_context": Capability.RESEARCH,
+    "search_company_patents": Capability.RESEARCH,
     "list_finra_datasets": Capability.RESEARCH,
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,

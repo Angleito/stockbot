@@ -106,6 +106,12 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "get_sp500_weight": _envelope("analyst", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL),
     # Exa web evidence.
     "search_web": _envelope("exa", SourceType.WEB, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    # Google public data (external, bounded research).
+    "find_alternative_signals": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    "get_trend_evidence": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    "investigate_social_arbitrage_candidate": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    "get_macro_context": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    "search_company_patents": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
     # Bounded local thesis operations (locally derived, never canonical market data).
     "thesis_create": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "thesis_show": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
