@@ -93,14 +93,11 @@ def _validate_claim(c: Any, path: str) -> dict:
     }
 
 
-def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
+def _validate_expression(e: Any, path: str) -> dict:
     if not isinstance(e, dict):
         raise ValueError(f"{path}: expression must be a mapping, got {type(e).__name__}")
-    key = e.get("key")
-    if not isinstance(key, str) or not key.strip():
-        raise ValueError(f"{path}: expression 'key' must be a non-empty string")
     eid = new_expression_id()
-    where = f"{path}: expression {key}"
+    where = f"{path}: expression {eid}"
     instrument = _unknown_str(e.get("instrument", UNKNOWN), "instrument", where)
     if instrument not in _INSTRUMENTS:
         raise ValueError(f"{where}: 'instrument' must be a known primitive or 'unknown', got {instrument!r}")
@@ -132,7 +129,7 @@ def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
         if not isinstance(v, dict):
             raise ValueError(f"{where}: '{k}' must be a mapping, got {type(v).__name__}")
         out[k] = dict(v)
-    return key, out
+    return out
 
 def _validate_requirement(r: Any, path: str, expression_ids: set) -> dict:
     if not isinstance(r, dict):
@@ -229,13 +226,9 @@ class IntakeProposal:
             scope = UNKNOWN
         if not isinstance(scope, str):
             raise ValueError(f"{where}: 'scope' must be a string, got {type(scope).__name__}")
-        key_to_id: dict[str, str] = {}
         expressions: list[dict] = []
         for e in _as_list(d, "expressions", where):
-            key, validated = _validate_expression(e, path)
-            if key in key_to_id:
-                raise ValueError(f"{where}: duplicate expression key {key!r}")
-            key_to_id[key] = validated["expression_id"]
+            validated = _validate_expression(e, path)
             expressions.append(validated)
         requirements = tuple(
             _validate_requirement(r, path, {e["expression_id"] for e in expressions})

@@ -492,6 +492,24 @@ class ThesisRepository:
             )
             return dest
 
+    def has_journal_for_trigger(self, thesis_id: str, trigger_id: str) -> bool:
+        """True when a durable journal entry names this thesis and trigger."""
+        thesis_dir = self._dir_for(thesis_id)
+        journal_dir = thesis_dir / "journal"
+        if not journal_dir.is_dir():
+            return False
+        for f in journal_dir.glob("*.md"):
+            try:
+                head = f.read_text(encoding="utf-8").split("---")
+                fm = head[1] if len(head) >= 3 else ""
+            except OSError:
+                continue
+            lines = {ln.split(":", 1)[0].strip(): ln.split(":", 1)[1].strip()
+                     for ln in fm.splitlines() if ":" in ln}
+            if lines.get("thesis_id") == thesis_id and lines.get("trigger_id") == trigger_id:
+                return True
+        return False
+
     def create_trigger(
         self,
         thesis_id: str,

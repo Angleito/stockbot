@@ -54,14 +54,13 @@ _THESIS_DELTA_PROPERTIES = {
         "items": {
             "type": "object",
             "properties": {
-                "key": {"type": "string"},
                 "intent": {"type": "string"},
                 "instrument": {"type": "string"},
                 "direction": {"type": "string"},
                 "structure": {"type": "string"},
                 "horizon": {"type": "string"},
             },
-            "required": ["key"],
+            "required": [],
         },
     },
     "questions": {
@@ -1058,6 +1057,8 @@ TOOLS = [
                     "id": {"type": "string", "description": "Thesis ID or slug."},
                     "title": {"type": "string"},
                     "body": {"type": "string", "description": "Note body (Markdown)."},
+                    "trigger_id": {"type": "string", "description": "Trigger this entry completes (omit for ordinary notes)."},
+                    "known_at": {"type": "string", "description": "PIT cutoff this entry is known at (ISO-8601)."},
                 },
                 "required": ["id", "body"],
             },
@@ -2180,7 +2181,6 @@ def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
     repo.apply_research_result(tid, {"watch_add": [rule]}, "")
     return {"thesis_id": tid, "added": rule}
 
-
 def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)
     thesis = repo.load_thesis(arguments["id"])
@@ -2192,10 +2192,25 @@ def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
     title = arguments.get("title", "Operator note")
     if title is not None and not isinstance(title, str):
         raise ValueError("thesis_journal: 'title' must be a string")
-    dest = repo.append_journal_entry(thesis.thesis_id, {
+    entry: dict = {
         "title": title or "Operator note",
         "body": body.strip(),
-    })
+    }
+    trigger_id = arguments.get("trigger_id")
+    if trigger_id is not None:
+        if not isinstance(trigger_id, str) or not trigger_id:
+            raise ValueError("thesis_journal: 'trigger_id' must be a non-empty string")
+        if not any(t.trigger_id == trigger_id for t in repo.load_triggers(thesis.thesis_id)):
+            raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis.thesis_id!r}")
+        entry["trigger_id"] = trigger_id
+    known_at = arguments.get("known_at")
+    if known_at is not None:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+            raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
+        entry["known_at"] = known_at
+    dest = repo.append_journal_entry(thesis.thesis_id, entry)
     return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
 
 

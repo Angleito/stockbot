@@ -1,0 +1,28 @@
+schema_version: 1
+thesis_workflow:
+  on_new_thesis:
+    - Record the user's thesis before researching it.
+    - Preserve the user's wording and beliefs.
+    - User claims begin unvalidated.
+    - Ask at most 3 materially important clarification questions.
+    - Unknown information stays unknown.
+  research:
+    - Investigate evidence supporting the thesis.
+    - Deliberately investigate evidence contradicting the thesis.
+    - Look for alternative explanations.
+    - Prefer Stockbot canonical financial tools for exact facts.
+    - Use web research for current external evidence when appropriate.
+  assessment:
+    - Keep the user's thesis separate from Stockbot's assessment.
+    - Claims may be supported, challenged, invalidated, or unresolved.
+    - Do not silently rewrite the user's thesis.
+  persistence:
+    - Use thesis tools rather than directly editing thesis YAML.
+    - Journal material findings.
+    - Preserve known_at and source information.
+  monitoring:
+    - Only add monitors Stockbot actually supports.
+    - Never invent thresholds.
+  expressions:
+    - Keep thesis and trade expression separate.
+    - Do not choose a trade expression for the user.

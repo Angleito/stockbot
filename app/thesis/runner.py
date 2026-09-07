@@ -4,13 +4,15 @@ Automated monitoring launches one normal-Pi subprocess per pending trigger
 (see app.thesis.pi_runner); Pi persists its own findings through the
 canonical thesis tools. The runner only selects the trigger, builds a small
 bounded prompt, launches Pi without holding any lock across the subprocess,
-and acknowledges the stable trigger ID afterwards. A failed launch leaves
+and acknowledges the stable trigger ID only once a durable trigger-linked
+journal entry exists. A failed launch (or a run with no such journal) leaves
 the trigger pending with valid partial tool writes intact (at-least-once
 retry; no rollback).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -52,7 +54,7 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _build_prompt(*, thesis_id: str, trigger: Any, known_at: str) -> str:
+def _build_prompt(*, thesis_id: str, trigger: Any, known_at: str, ctx: Any) -> str:
     refs = ", ".join(trigger.canonical_refs) or "(none)"
     return "\n".join(
         [
@@ -61,10 +63,18 @@ def _build_prompt(*, thesis_id: str, trigger: Any, known_at: str) -> str:
             f"known_at: {known_at}",
             f"trigger summary: {(trigger.summary or '')[:500]}",
             f"trigger canonical refs: {refs[:500]}",
-            "Only use evidence known at or before known_at. Inspect the thesis",
-            "with the thesis_show tool and record material findings, supporting",
-            "and counterevidence, with the thesis_journal tool. Unknown values",
-            "stay unknown.",
+            "Only use evidence known at or before known_at.",
+            "THESIS CURRENT STATE (not point-in-time; may contain newer info; do not cite as known at cutoff):",
+            json.dumps(ctx.thesis_packet, sort_keys=True),
+            f"KNOWN EVIDENCE AS OF {known_at}:",
+            json.dumps(ctx.evidence_refs, sort_keys=True),
+            f"PRIOR JOURNAL CONTEXT AS OF {known_at}:",
+            json.dumps(ctx.journal_excerpts, sort_keys=True),
+            "On conflict, the known evidence and prior journals above win over the current-state packet;",
+            "never cite newer state as known at cutoff. Unknown values stay unknown.",
+            "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
+            "Before completing, write a material thesis_journal entry using",
+            f"trigger_id {trigger.trigger_id!r} and known_at {known_at!r}.",
         ]
     )
 
@@ -87,9 +97,10 @@ def run_trigger(
 ) -> RunOutcome:
     """Launch normal Pi for one pending trigger; ack that trigger ID only.
 
-    Failure (bad state, over-budget context, Pi launch/timeout/nonzero)
-    raises before acknowledgement, so the trigger stays pending and valid
-    partial tool writes are retained for the retry.
+    Failure (bad state, over-budget context, Pi launch/timeout/nonzero, or no
+    durable trigger-linked journal) raises before acknowledgement, so the
+    trigger stays pending and valid partial tool writes are retained for the
+    retry.
     """
     known_at = known_at or _utcnow()
     thesis = repository.load_thesis(thesis_id)
@@ -102,15 +113,22 @@ def run_trigger(
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
     # PIT/budget gate: raises before any Pi call when context is over budget.
-    build_context(repository, tid, trigger, known_at=known_at)
+    ctx = build_context(repository, tid, trigger, known_at=known_at)
     root = getattr(repository, "root", None)
     data_root = root.parent if root is not None else get_data_root()
-    prompt = _build_prompt(thesis_id=tid, trigger=trigger, known_at=known_at)
+    prompt = _build_prompt(thesis_id=tid, trigger=trigger, known_at=known_at, ctx=ctx)
     rid = new_run_id()
     try:
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
                        prompt=prompt, data_root=data_root)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
+        if not repository.has_journal_for_trigger(tid, trigger.trigger_id):
+            raise RuntimeError(
+                f"<runner>: no durable journal for trigger {trigger.trigger_id!r} (thesis {tid!r});"
+                f" Pi must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
+                f" and known_at {known_at!r} before the trigger can be acknowledged;"
+                " leaving pending for retry"
+            )
         repository.mark_trigger_processed(tid, trigger.trigger_id, rid)
     except Exception as exc:
         _fail(rid, exc)

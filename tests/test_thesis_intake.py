@@ -82,7 +82,7 @@ def test_intake_requires_research_only_context():
 def _structured(user_thesis="NVDA demand stays strong", **over) -> dict:
     payload = {"user_thesis": user_thesis, "scope": "NVDA",
                "claims": [{"statement": "demand holds"}],
-               "expressions": [{"key": "e1", "intent": "bullish", "instrument": "equity",
+               "expressions": [{"intent": "bullish", "instrument": "equity",
                                 "direction": "long", "structure": "equity"}],
                "questions": [{"question": "What horizon?"}]}
     payload.update(over)
@@ -115,7 +115,7 @@ def test_structured_dangling_requirement_rejected_pre_write(tmp_path):
     repo = ThesisRepository(tmp_path / "theses")
     with pytest.raises(ValueError, match="absent expression"):
         IntakeProposal.from_dict(_structured(
-            expressions=[{"key": "e1", "structure": "equity"}],
+            expressions=[{"structure": "equity"}],
             requirements=[{"expression_id": "zzz", "requirement_type": "x",
                            "statement": "y"}]), "<thesis_create>")
     assert not (tmp_path / "theses").exists() or repo.list_theses() == []

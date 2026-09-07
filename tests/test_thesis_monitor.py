@@ -123,7 +123,8 @@ def test_bullish_equity_asks_no_options_questions(tmp_path, monkeypatch):
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             canonical_refs=["ev:e"], summary="s")
-    fake = _pi(monkeypatch)
+    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     questions = r.load_questions(t.thesis_id)
@@ -184,6 +185,8 @@ def test_unknown_and_processed_triggers_raise(tmp_path, monkeypatch):
     with pytest.raises(KeyError):
         run_trigger(r, t.thesis_id, "trigger:nope", known_at=T2)
     trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     with pytest.raises(ValueError):
@@ -264,7 +267,8 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
 
 def test_simultaneous_meaningful_events_produce_bounded_calls(tmp_path, monkeypatch):
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch)
+    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
     src = _Src([_ev("ev:a", summary="NVDA files 10-K"), _ev("ev:b", summary="NVDA 8-K event")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert len(res.triggers_created) == 2 and fake.calls == 2

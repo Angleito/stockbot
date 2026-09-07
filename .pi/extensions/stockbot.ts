@@ -2,12 +2,13 @@
  *
  * Single source of truth stays in Python (app/tools.py TOOLS); tool schemas
  * pass through untouched via Type.Unsafe, and the system prompt comes from
- * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT).
+ * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT) plus
+ * the raw `.pi/stockbot.yaml` thesis workflow text appended at startup.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -455,6 +456,24 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   });
  }
 
+ // --- thesis workflow (raw text, never YAML-parsed in TS) ---
+ const WORKFLOW_PATH = `${ROOT}/.pi/stockbot.yaml`;
+ let workflowText = "";
+ let workflowDown = false;
+ let workflowDetail = "";
+ try {
+  workflowText = readFileSync(WORKFLOW_PATH, "utf-8");
+  if (!workflowText.trim()) {
+   workflowDown = true;
+   workflowDetail = `empty workflow file ${WORKFLOW_PATH}`;
+   console.error(`[stockbot] thesis workflow unreadable: ${workflowDetail}`);
+  }
+ } catch (err) {
+  workflowDown = true;
+  workflowDetail = `cannot read workflow file ${WORKFLOW_PATH}: ${err instanceof Error ? err.message : String(err)}`;
+  console.error(`[stockbot] thesis workflow unreadable: ${workflowDetail}`);
+ }
+
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
   pendingQuestion = event.prompt;
@@ -464,7 +483,13 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      `Stockbot research tools are unavailable (${bridgeDetail}). ` +
      "Decline investment-research questions as tool-unavailable; do not answer from model knowledge.",
    };
-  if (systemPrompt) return { systemPrompt };
+  if (workflowDown)
+   return {
+    systemPrompt:
+     `Stockbot thesis workflow is unavailable (${workflowDetail}). ` +
+     "Decline thesis work until the workflow file is restored; do not answer from model knowledge.",
+   };
+  if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
  });
 
  // Normal Pi: built-in tools pass through; Stockbot tool auth stays in bridge/policy.

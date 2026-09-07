@@ -98,6 +98,14 @@ def build_context(
         ThesisMemory.from_dict(m, str(thesis_dir / "memory.yaml")).to_dict()
         for m in memory_raw.get("memories", [])
     ]
+    # Memories: PIT-visible by created_at only; undated/unparseable fail closed.
+    visible_memories: list[dict] = []
+    pit_omitted: list[str] = []
+    for m in memories:
+        if (m.get("created_at") or "") and _pit_visible(m["created_at"], known_at):
+            visible_memories.append(m)
+        else:
+            pit_omitted.append(m["memory_id"])
 
     # Irreducible packet: thesis+trigger+state+watch+questions only.
     packet = {
@@ -141,7 +149,7 @@ def build_context(
     ordered.sort(key=_ev_key)
 
     included: list[str] = []
-    omitted: list[str] = []
+    omitted: list[str] = list(pit_omitted)
     used = mandatory
     evidence: list[dict] = []
     for e in ordered:
@@ -158,7 +166,7 @@ def build_context(
         return _tokens(json.dumps({**packet, "memories": mem_list}, sort_keys=True))
 
     # Over budget: trim oldest memories first (newest-last on disk).
-    kept = list(memories)
+    kept = list(visible_memories)
     while kept and _packet_tokens(kept) + evidence_tokens > max_tokens:
         omitted.append(kept.pop(0)["memory_id"])
     for m in kept:

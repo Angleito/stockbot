@@ -477,12 +477,7 @@ def _thesis_journal(args) -> None:
 def _thesis_runtime(args, what="thesis tick"):
     """Shared tick/monitor wiring: repo, thesis ID, source services."""
     from app.thesis import monitor
-    from app.thesis.runner import capabilities_for_grants
 
-    try:
-        capabilities_for_grants(list(getattr(args, "grants", None) or []))
-    except ValueError as exc:
-        raise SystemExit(f"{what}: {exc}") from exc
     repo = _thesis_repo(args)
     thesis = _thesis_load(repo, args.id)
     targets = monitor.targets_for_thesis(thesis)
@@ -518,6 +513,7 @@ def _thesis_monitor(args) -> None:
 
     from app.thesis.worker import monitor_loop
 
+    interval = args.interval_seconds
     if interval <= 0:
         print("thesis monitor: --interval-seconds must be > 0", file=sys.stderr)
         raise SystemExit(2)
@@ -654,9 +650,6 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser = thesis_sub.add_parser("tick", parents=[thesis_common],
                                         help="run one deterministic monitor tick")
     tick_parser.add_argument("id", help="thesis ID or slug")
-    tick_parser.add_argument("--grant", dest="grants", action="append", default=[],
-                             help="explicit read grant for this tick only "
-                             "(repeatable: broker-market-read | portfolio-read)")
     tick_parser.add_argument("--known-at", default=None,
                              help="PIT upper bound ISO timestamp (default: now UTC)")
     monitor_parser = thesis_sub.add_parser("monitor", parents=[thesis_common],
@@ -665,9 +658,6 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor_parser.add_argument("id", help="thesis ID or slug")
     monitor_parser.add_argument("--interval-seconds", type=int, default=900,
                                 help="seconds between ticks (default 900; must be > 0)")
-    monitor_parser.add_argument("--grant", dest="grants", action="append", default=[],
-                                help="explicit read grant for this monitor process only "
-                                "(repeatable: broker-market-read | portfolio-read)")
     monitor_parser.add_argument("--known-at", default=None,
                                 help="PIT upper bound ISO timestamp (default: now UTC per tick)")
     return parser
