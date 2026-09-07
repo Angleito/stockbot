@@ -605,6 +605,13 @@ def test_patents_require_aliases_and_count_publications(monkeypatch):
     assert result["status"] == "ok"
     assert [p["publication_id"] for p in result["publications"]] == ["US-1"]
     assert "invention" not in json.dumps(result).lower()
+    assert "start_yyyymmdd" in calls[0][1] and "end_yyyymmdd" in calls[0][1]
+    assert calls[0][1]["end_yyyymmdd"] >= calls[0][1]["start_yyyymmdd"]
+    n_calls = len(calls)
+    half_open = patents.search_company_patents(
+        "Acme", assignees=["Acme Corp"], start_date="2024-01-01", executor=_run)
+    assert half_open["error_type"] == "invalid_params"
+    assert len(calls) == n_calls
 
 
 def test_geo_mismatch_is_explicit(monkeypatch):
@@ -648,7 +655,7 @@ def test_tool_schemas_bounded():
         assert name in TOOL_ENVELOPES
     assert set(schemas["investigate_social_arbitrage_candidate"]["parameters"]["required"]) == {"term"}
     assert set(schemas["get_macro_context"]["parameters"]["required"]) == {"geos", "variables"}
-    assert schemas["search_company_patents"]["parameters"]["required"] == ["company_id"]
+    assert schemas["search_company_patents"]["parameters"]["required"] == ["company_id", "assignees"]
 
 
 def test_handler_disabled_passthrough_makes_no_network_call():

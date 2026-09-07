@@ -311,10 +311,7 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> Non
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{obs['table']}",
         })
-    try:
-        _parquet.write_rows("google_observations", warehouse_rows, root=proot)
-    except Exception:
-        pass
+    _parquet.write_rows("google_observations", warehouse_rows, root=proot)
 
 
 def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict, rows: list) -> None:
@@ -334,16 +331,13 @@ def _mark_complete(data_root, template: str, refresh: str, payload_hash: str, co
     if proot is None:
         return
     now = datetime.now(timezone.utc).isoformat()
-    try:
-        _parquet.write_rows("ingestion_checkpoints", [{
-            "pipeline": _CHECKPOINT_PIPELINE, "source": "bigquery",
-            "key": f"{template}|{refresh}", "payload_hash": payload_hash,
-            "status": "complete", "record_count": count,
-            "started_at": now, "finished_at": now, "parser_version": _COLLECTOR_VERSION,
-            "last_key": refresh, "error": None, "totals_json": "{}",
-        }], root=proot)
-    except Exception:
-        pass
+    _parquet.write_rows("ingestion_checkpoints", [{
+        "pipeline": _CHECKPOINT_PIPELINE, "source": "bigquery",
+        "key": f"{template}|{refresh}", "payload_hash": payload_hash,
+        "status": "complete", "record_count": count,
+        "started_at": now, "finished_at": now, "parser_version": _COLLECTOR_VERSION,
+        "last_key": refresh, "error": None, "totals_json": "{}",
+    }], root=proot)
 
 
 def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, data_root) -> list | None:
@@ -460,6 +454,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     merged: dict = {}
     used_templates: list = []
     refresh_seen: set = set()
+    fetched: list = []
     for group in groups:
         pair = _US_TEMPLATES if group["kind"] == "us" else _INTL_TEMPLATES
         for template in pair:
@@ -474,13 +469,24 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             for refresh in refreshes:
                 refresh_seen.add(refresh)
                 if (template, refresh) in completed:
-                    for cached in _warehouse_rows(data_root, table, refresh):
-                        key = (cached["table"], str(cached.get("week") or cached.get("period")),
-                               str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
-                        merged.setdefault(key, cached)
-                    if template not in used_templates:
-                        used_templates.append(template)
-                    continue
+                    cached_rows = _warehouse_rows(data_root, table, refresh)
+                    if cached_rows:
+                        for cached in cached_rows:
+                            crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
+                            if not crefresh:
+                                parts = str(cached.get("source_record_id") or "").split("|")
+                                if len(parts) >= 2 and parts[0] == cached.get("table"):
+                                    crefresh = parts[1]
+                            if not crefresh:
+                                crefresh = str(cached.get("week") or cached.get("period") or refresh)
+                            key = (cached["table"], crefresh,
+                                   str(cached.get("week") or cached.get("period")),
+                                   str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
+                            merged.setdefault(key, cached)
+                        if template not in used_templates:
+                            used_templates.append(template)
+                        continue
+                    # Checkpointed but warehouse empty: fall through to a fresh fetch.
                 if group["kind"] == "us":
                     params = {"start_date": refresh, "end_date": refresh,
                               "dmas": [] if group["national"] else group["dmas"],
@@ -501,13 +507,11 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 job_id = result.get("job_id")
                 if data_root is not None:
                     _archive_raw(data_root, template, job_id or template, table, params, rows)
-                    _mark_complete(
-                        data_root, template, refresh,
-                        hashlib.sha256(json.dumps(
-                            rows, sort_keys=True, default=str).encode()).hexdigest(),
-                        len(rows))
+                    payload_hash = hashlib.sha256(json.dumps(
+                        rows, sort_keys=True, default=str).encode()).hexdigest()
                 if template not in used_templates:
                     used_templates.append(template)
+                tables_seen = set()
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
@@ -529,9 +533,13 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         if not row.get("country_code"):
                             row["_geo"] = row.get("geo") or row["_geo"]
                     row["job_id"] = job_id
-                    key = (row["_table"], row["_week"], str(row["_geo"]),
+                    key = (row["_table"], row["_refresh"], row["_week"], str(row["_geo"]),
                            str(row.get("term")), row["_kind"])
                     merged.setdefault(key, row)
+                    tables_seen.add(row["_table"])
+                if data_root is not None:
+                    fetched.append((template, refresh, payload_hash, len(rows),
+                                    sorted(tables_seen)))
 
     # Cached warehouse rows carry plain dicts (no _-markers); normalize keys.
     def _as_staged(row: dict) -> dict:
@@ -539,10 +547,13 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         if "_table" not in staged_row:
             staged_row["_table"] = staged_row.get("table")
             staged_row["_week"] = str(staged_row.get("week") or staged_row.get("period"))
+            _parts = str(staged_row.get("source_record_id") or "").split("|")
+            _id_refresh = _parts[1] if len(_parts) >= 2 and _parts[0] == staged_row.get("table") else ""
             staged_row["_refresh"] = str((staged_row.get("metrics") or {}).get("refresh_date")
-                                         or staged_row.get("period"))
+                                         or _id_refresh or staged_row.get("period"))
             staged_row["_kind"] = staged_row.get("list_kind")
             staged_row["_geo"] = staged_row.get("geo")
+            staged_row["_cached"] = True
         return staged_row
 
     us_tables = {_template_table("trends_us_top"), _template_table("trends_us_rising"),
@@ -594,7 +605,17 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     if continuation:
         observations = observations[:limit]
     if data_root is not None and observations:
-        _store_observations(data_root, observations, retrieved_at)
+        try:
+            _store_observations(data_root, observations, retrieved_at)
+            for _template, _refresh, _hash, _count, _tables in fetched:
+                for _table in _tables:
+                    if not _warehouse_rows(data_root, _table, _refresh):
+                        raise RuntimeError(f"warehouse verify failed for {_table}|{_refresh}")
+            for _template, _refresh, _hash, _count, _tables in fetched:
+                _mark_complete(data_root, _template, _refresh, _hash, _count)
+        except Exception as exc:
+            return _wrap_error({"error": f"{SOURCE} store failed: {exc}",
+                                "error_type": "source_unavailable"})
     weeks = sorted({str(o["period"]) for o in observations})
     geos_covered = sorted({str(o["geo"]) for o in observations})
     return {"status": "ok", "source": SOURCE, "observations": observations,
@@ -614,19 +635,25 @@ def _normalize_row(row: dict, retrieved_at: str, data_root, features=None) -> di
     term = row.get("term")
     kind = row.get("_kind") or row.get("list_kind") or "top"
     refresh = str(row.get("_refresh") or row.get("refresh_date") or week)
-    metrics = {"rank": row.get("rank"), "score": row.get("score"),
-               "percent_gain": row.get("percent_gain"),
-               "refresh_date": refresh, "week": week,
-               "dma_id": row.get("dma_id"),
-               "dma_name": row.get("dma_name"),
-               "country_name": row.get("country_name"),
-               "country_code": row.get("country_code"),
-               "region_name": row.get("region_name"),
-               "region_code": row.get("region_code")}
-    if row.get("dma_count") is not None:
-        metrics["dma_count"] = row["dma_count"]
-    evidence = [{"table": table, "row": {k: v for k, v in row.items() if not k.startswith("_")},
-                 "job_id": row.get("job_id"), "template": row.get("_template")}]
+    if row.get("_cached") and isinstance(row.get("metrics"), dict):
+        # Warehouse roundtrip: reuse stored metrics/evidence verbatim so a
+        # recollect re-hashes identically (durable dedup, first known_at kept).
+        metrics = dict(row["metrics"])
+        evidence = list(row.get("evidence") or [])
+    else:
+        metrics = {"rank": row.get("rank"), "score": row.get("score"),
+                   "percent_gain": row.get("percent_gain"),
+                   "refresh_date": refresh, "week": week,
+                   "dma_id": row.get("dma_id"),
+                   "dma_name": row.get("dma_name"),
+                   "country_name": row.get("country_name"),
+                   "country_code": row.get("country_code"),
+                   "region_name": row.get("region_name"),
+                   "region_code": row.get("region_code")}
+        if row.get("dma_count") is not None:
+            metrics["dma_count"] = row["dma_count"]
+        evidence = [{"table": table, "row": {k: v for k, v in row.items() if not k.startswith("_")},
+                     "job_id": row.get("job_id"), "template": row.get("_template")}]
     return _signals.normalize_candidate(
         table=table, period=week, geo=geo, term=term,
         list_kind=kind, rank=row.get("rank"), source=SOURCE,

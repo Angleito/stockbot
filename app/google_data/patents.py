@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 try:
     from .. import config as _config
@@ -102,6 +103,10 @@ def _check_dates(start_date, end_date):
     """Validated (start, end) or (error, None, None); absent dates stay unbounded."""
     if start_date is None and end_date is None:
         return None, None, None
+    if (start_date is None) != (end_date is None):
+        return ({"status": "error", "source": SOURCE,
+                 "error": "start_date and end_date must both be set or both omitted (YYYY-MM-DD)",
+                 "error_type": "invalid_params"}, None, None)
     for label, value in (("start_date", start_date), ("end_date", end_date)):
         if value is None:
             continue
@@ -146,6 +151,11 @@ def search_company_patents(company_id: str, *, start_date=None, end_date=None,
     date_error, start_date, end_date = _check_dates(start_date, end_date)
     if date_error is not None:
         return date_error
+    # Dateless -> bounded trailing 5-year window (5x365, deterministic).
+    if start_date is None and end_date is None:
+        _today = datetime.now(timezone.utc).date()
+        end_date = _today.isoformat()
+        start_date = (_today - timedelta(days=1825)).isoformat()
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
     params: dict = {"assignees": assignees, "country_codes": countries,
                     "limit": limit, "collector_version": "1", "sql_version": "1"}
@@ -200,6 +210,11 @@ def get_assignee_stats(company_id: str, *, start_date=None, end_date=None,
     date_error, start_date, end_date = _check_dates(start_date, end_date)
     if date_error is not None:
         return date_error
+    # Dateless -> bounded trailing 5-year window (5x365, deterministic).
+    if start_date is None and end_date is None:
+        _today = datetime.now(timezone.utc).date()
+        end_date = _today.isoformat()
+        start_date = (_today - timedelta(days=1825)).isoformat()
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
     params: dict = {"assignees": assignees, "country_codes": countries,
                     "limit": _MAX_STATS, "collector_version": "1", "sql_version": "1"}

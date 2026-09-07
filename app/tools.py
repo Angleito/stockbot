@@ -3,7 +3,7 @@
 import hashlib
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal
 from typing import Any
@@ -1100,8 +1100,8 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
-                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
                     "geos": {"type": "array", "items": {"type": "string"}, "description": "Geographies, e.g. [US]."},
                     "geo": {"type": "string", "description": "Single geography shorthand for geos."},
                     "term": {"type": "string", "description": "Optional substring filter over collected terms."},
@@ -1154,12 +1154,12 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "company_id": {"type": "string", "description": "Documented assignee name from existing company evidence."},
-                    "assignees": {"type": "array", "items": {"type": "string"}, "description": "Documented assignee aliases; never inferred from matching text."},
+                    "assignees": {"type": "array", "items": {"type": "string"}, "description": "Documented assignee aliases (verified, never inferred from matching text)."},
                     "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
                     "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max publications (default 20)."},
                 },
-                "required": ["company_id"],
+                "required": ["company_id", "assignees"],
             },
         },
     },
@@ -1771,8 +1771,13 @@ def _get_trend_evidence(args: dict, model: str) -> dict:
         return _google_import_error("trends", exc)
     try:
         geos = args.get("geos") or ([args["geo"]] if args.get("geo") else ["US"])
+        start_date, end_date = args.get("start_date"), args.get("end_date")
+        if start_date is None and end_date is None:
+            _today = datetime.now(timezone.utc).date()
+            end_date = _today.isoformat()
+            start_date = (_today - timedelta(days=6)).isoformat()
         result = _google_soft(_trends.collect_trends(
-            start_date=args.get("start_date"), end_date=args.get("end_date"),
+            start_date=start_date, end_date=end_date,
             geos=list(geos), limit=args.get("limit", 100),
             data_root=get_data_root(),
         ))

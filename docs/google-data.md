@@ -13,6 +13,7 @@ offline without credentials; every failure is explicit.
 - BigQuery uses **ADC plus `GOOGLE_CLOUD_PROJECT`** and never an API key,
   against a dedicated billing-disabled project (verified before every
   submission; enabled/unknown billing refuses).
+The BigQuery project must also have the Cloud Billing API (`cloudbilling.googleapis.com`) enabled: `_billing_state()` calls `v1/projects/{project}/billingInfo` before every real query and fails closed (`billing_unknown`) otherwise; queries themselves stay in the free tier against a billing-disabled project.
 
 There is no `YOUTUBE_API_KEY`, `BIGQUERY_ENABLED`, `DATACOMMONS_ENABLED`, or
 `YOUTUBE_ENABLED`. There is no `GOOGLE_KG_API_KEY`: Knowledge Graph entity
