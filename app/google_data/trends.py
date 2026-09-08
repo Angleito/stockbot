@@ -18,8 +18,10 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Callable
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional, cast
 
 try:
     from .. import config as _config
@@ -104,7 +106,7 @@ def _data_enabled() -> bool:
     return _env_flag("GOOGLE_DATA_ENABLED")
 
 
-def _setting(fn_name: str, env_name: str, default=None):
+def _setting(fn_name: str, env_name: str, default: Optional[str | int] = None):
     fn = getattr(_config, fn_name, None)
     if callable(fn):
         try:
@@ -121,7 +123,7 @@ def _bq_ready() -> bool:
     return bool(_data_enabled() and _setting("get_google_cloud_project", "GOOGLE_CLOUD_PROJECT"))
 
 
-def _check_bq_limits():
+def _check_bq_limits() -> Optional[dict[str, object]]:
     try:
         per_q = int(_setting("get_bq_max_bytes_per_query", "BIGQUERY_MAX_BYTES_PER_QUERY", 1073741824))
         per_m = int(_setting("get_bq_monthly_bytes_limit", "BIGQUERY_MONTHLY_BYTES_LIMIT", 536870912000))
@@ -135,7 +137,8 @@ def _check_bq_limits():
     return None
 
 
-def _submit(template: str, params: dict, executor, data_root) -> dict:
+def _submit(template: str, params: dict[str, object], executor: Optional[object],
+            data_root: Optional[Path | str]) -> dict[str, object]:
     if executor is None:
         try:
             from . import bigquery_client as _client
@@ -146,16 +149,18 @@ def _submit(template: str, params: dict, executor, data_root) -> dict:
                 return {"error": "bigquery client unavailable",
                         "error_type": "source_unavailable", "source": "bigquery"}
         try:
-            return _client.submit_template(template, params, data_root=data_root)
+            narrowed_root: Optional[Path] = Path(data_root) if isinstance(data_root, str) else data_root
+            return _client.submit_template(template, params, data_root=narrowed_root)
         except Exception as exc:
             if type(exc).__name__ == "LedgerCorrupt":
                 raise
             return {"status": "error", "source": SOURCE,
                     "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
     try:
-        if callable(executor):
+        if isinstance(executor, Callable):
             return executor(template, params)
-        return executor.submit_template(template, params)
+        submit = getattr(executor, "submit_template")
+        return submit(template, params)
     except Exception as exc:
         if type(exc).__name__ == "LedgerCorrupt":
             raise
@@ -168,7 +173,7 @@ _UNAVAILABLE = frozenset({"billing_enabled", "billing_unknown", "cost_limit_exce
                           "source_unavailable", "ledger_corrupt"})
 
 
-def _wrap_error(result: dict) -> dict:
+def _wrap_error(result: dict[str, object]) -> dict[str, object]:
     if "status" in result:
         return result
     out = dict(result)
@@ -193,37 +198,38 @@ def _is_country_code(value: str) -> bool:
     return len(value) == 2 and value.isalpha() and value.isupper()
 
 
-def _plan_groups(geos: list) -> list:
+def _plan_groups(geos: list[str]) -> list[dict[str, object]]:
     """Split geos into a US group (national or DMA names) plus per-country groups."""
     dmas = [g for g in geos if g != "US" and not _is_country_code(g)]
     countries = [g for g in geos if g != "US" and _is_country_code(g)]
-    groups = []
+    groups: list[dict[str, object]] = []
     if "US" in geos:
-        groups.append({"kind": "us", "national": True, "dmas": []})
+        groups.append({"kind": "us", "national": True, "dmas": cast("list[str]", [])})
     if dmas:
         groups.append({"kind": "us", "national": False, "dmas": dmas})
     for country in countries:
         groups.append({"kind": "intl", "country": country})
     if not groups:  # e.g. geos == [] handled earlier; defensive: treat as national
-        groups.append({"kind": "us", "national": True, "dmas": []})
+        groups.append({"kind": "us", "national": True, "dmas": cast("list[str]", [])})
     return groups
 
 
-def _parquet_root(data_root) -> Path | None:
+def _parquet_root(data_root: Optional[Path | str]) -> Optional[Path]:
     if data_root is None or _parquet is None:
         return None
     return Path(data_root) / "parquet"
 
 
-def _checkpoint_key(template: str, refresh: str, params: dict) -> str:
+def _checkpoint_key(template: str, refresh: str, params: dict[str, object]) -> str:
     """Scoped completion key for the exact canonical query submitted."""
     scope_hash = hashlib.sha256(
         json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return f"{template}|{refresh}|{scope_hash}"
 
 
-def _observation_identity(table: str, period: str, geo: str, term: str,
-                          list_kind: str, metrics: dict, evidence: list) -> tuple:
+def _observation_identity(table: object, period: object, geo: object, term: object,
+                          list_kind: object, metrics: dict[str, object],
+                          evidence: list[object]) -> tuple[str, str]:
     """Durable (observation_id, content_hash) identity shared by store and verify."""
     content_hash = hashlib.sha256(
         json.dumps({"metrics": metrics, "evidence": evidence,
@@ -234,20 +240,20 @@ def _observation_identity(table: str, period: str, geo: str, term: str,
     return observation_id, content_hash
 
 
-def _feature_scope_json(*, week_start: str, week_end: str, geos: list,
-                        table: str, list_kind: str) -> dict:
+def _feature_scope_json(*, week_start: str, week_end: str, geos: list[str],
+                        table: str, list_kind: str) -> dict[str, object]:
     return {"week_start": week_start, "week_end": week_end, "geos": sorted(geos),
             "table": table, "list_kind": list_kind}
 
 
-def _feature_scope_hash(scope: dict) -> str:
+def _feature_scope_hash(scope: dict[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _series_basis(staged_row: dict) -> str:
-    metrics = staged_row.get("metrics")
-    metrics = metrics if isinstance(metrics, dict) else {}
+def _series_basis(staged_row: dict[str, object]) -> str:
+    metrics_raw: object = staged_row.get("metrics")
+    metrics: dict[str, object] = metrics_raw if isinstance(metrics_raw, dict) else {}
     basis = metrics.get("score_basis")
     if basis:
         return str(basis)
@@ -259,15 +265,15 @@ def _series_basis(staged_row: dict) -> str:
     return ""
 
 
-def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
-                          basis: str, geo: str, candidates: list) -> str:
+def expected_inputs_hash(scope: dict[str, object], term: str, table: str, list_kind: str,
+                          basis: str, geo: str, candidates: list[dict[str, object]]) -> str:
     """Scope-complete input identity shared by writes and PIT reads."""
-    geos = scope.get("geos") or []
+    geos: list[str] = cast("list[str]", scope.get("geos") or [])
     week_start = str(scope.get("week_start") or "")
     week_end = str(scope.get("week_end") or "")
     scope_table = str(scope.get("table") or "")
     scope_kind = str(scope.get("list_kind") or "")
-    pairs = []
+    pairs: list[list[str]] = []
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
@@ -291,7 +297,7 @@ def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
     target_kind = str(list_kind or "")
     target_geo = str(geo or "")
     target_basis = str(basis or "")
-    periods: set = set()
+    periods: set[str] = set()
     if target_geo.split(":")[0] in geos or (not geos and not target_geo):
         for cand in candidates:
             if not isinstance(cand, dict):
@@ -314,18 +320,20 @@ def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
     elif target_geo:
         geos_covered = [target_geo]
     else:
-        geos_covered = []
+        geos_covered = cast("list[str]", [])
     payload = {"source_pairs": sorted(pairs), "periods_covered": periods_covered,
                "geos_covered": geos_covered}
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _completed_refreshes(data_root, templates: list) -> set:
+def _completed_refreshes(data_root: Optional[Path | str], templates: list[str]) -> set[str]:
     """Completed scoped checkpoint keys; missing warehouse reads as none."""
-    done = set()
+    done: set[str] = set()
     proot = _parquet_root(data_root)
     if proot is None:
+        return done
+    if _parquet is None:
         return done
     try:
         table = _parquet.read_table("ingestion_checkpoints", proot)
@@ -350,25 +358,27 @@ def _completed_refreshes(data_root, templates: list) -> set:
     return done
 
 
-def _warehouse_rows(data_root, table: str, refresh: str) -> list:
+def _warehouse_rows(data_root: Optional[Path | str], table: str, refresh: str) -> list[dict[str, object]]:
     """Normalized observations already stored for one table/refresh partition."""
     proot = _parquet_root(data_root)
     if proot is None:
+        return []
+    if _parquet is None:
         return []
     try:
         rows = _parquet.read_table("google_observations", proot).to_pylist()
     except Exception:
         return []
     prefix = f"{table}|{refresh}|"
-    collapsed: dict = {}
+    collapsed: dict[tuple[str, str, str, str, str, str, str, str], dict[str, object]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         if not str(row.get("source_record_id") or "").startswith(prefix):
             continue
         try:
-            metrics = json.loads(row.get("metrics_json") or "{}")
-            evidence = json.loads(row.get("evidence_json") or "[]")
+            metrics = json.loads(cast("str", row.get("metrics_json") or "{}"))
+            evidence = json.loads(cast("str", row.get("evidence_json") or "[]"))
         except ValueError:
             continue
         try:
@@ -400,7 +410,7 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
     return list(collapsed.values())
 
 
-def backfill_legacy_feature_rows(data_root) -> int:
+def backfill_legacy_feature_rows(data_root: Optional[Path | str]) -> int:
     if data_root is None or _parquet is None:
         return 0
     proot = _parquet_root(data_root)
@@ -412,11 +422,12 @@ def backfill_legacy_feature_rows(data_root) -> int:
             return 0
     except OSError:
         pass
+    rows: list[dict[str, object]] = []
     try:
         rows = _parquet.read_table("google_observations", proot).to_pylist()
     except Exception:
         rows = []
-    feature_rows = []
+    feature_rows: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -424,7 +435,7 @@ def backfill_legacy_feature_rows(data_root) -> int:
         if raw is None or raw == "":
             continue
         try:
-            decoded = json.loads(raw)
+            decoded = json.loads(cast("str", raw))
         except ValueError:
             continue
         if not isinstance(decoded, dict):
@@ -453,7 +464,7 @@ def backfill_legacy_feature_rows(data_root) -> int:
     return written
 
 
-def _cache_in_scope(cached: dict, params: dict) -> bool:
+def _cache_in_scope(cached: dict[str, object], params: dict[str, object]) -> bool:
     """Keep only cached rows matching the current canonical query scope."""
     week = str(cached.get("week") or cached.get("period") or "")
     if week < str(params.get("week_start") or "") or week > str(params.get("week_end") or ""):
@@ -466,27 +477,40 @@ def _cache_in_scope(cached: dict, params: dict) -> bool:
     if "all_dmas" in params:
         if params.get("all_dmas"):
             return geo == "US"
-        return geo in set(params.get("dmas") or [])
+        return geo in set(cast("list[str]", params.get("dmas") or []))
     if "country_code" in params:
         country = str(params.get("country_code") or "")
         return geo == country or geo.startswith(country + ":")
     return True
 
 
-def _store_observations(data_root, observations: list, retrieved_at: str) -> dict:
+def _cached_record_id(row: dict[str, object]) -> str:
+    return str(row.get("source_record_id") or "")
+
+
+def _cached_rank_key(row: dict[str, object]) -> int | float:
+    rank = row.get("rank")
+    return rank if isinstance(rank, (int, float)) else float("inf")
+def _cached_week_str(row: dict[str, object]) -> str:
+    return str(row.get("week") or row.get("period") or "")
+
+
+def _store_observations(data_root: Optional[Path | str], observations: list[dict[str, object]],
+                        retrieved_at: str) -> dict[tuple[object, str], set[tuple[str, str]]]:
     """Write normalized observations; return expected identities per (table, refresh)."""
     proot = _parquet_root(data_root)
-    if proot is None:
+    if proot is None or _parquet is None:
         return {}
     try:
         backfill_legacy_feature_rows(data_root)
     except Exception:
         pass
+    stored: list[dict[str, object]] = []
     try:
         stored = _parquet.read_table("google_observations", proot).to_pylist()
     except Exception:
         stored = []
-    first_known: dict = {}
+    first_known: dict[tuple[str, str], str] = {}
     for row in stored:
         if not isinstance(row, dict):
             continue
@@ -494,11 +518,11 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
         known = str(row.get("known_at") or "")
         if key not in first_known or known < first_known[key]:
             first_known[key] = known
-    warehouse_rows = []
-    expected: dict = {}
+    warehouse_rows: list[dict[str, object]] = []
+    expected: dict[tuple[object, str], set[tuple[str, str]]] = {}
     for obs in observations:
-        metrics = dict(obs.get("metrics") or {})
-        evidence = list(obs.get("evidence") or [])
+        metrics = dict(cast("dict[str, object]", obs.get("metrics") or {}))
+        evidence = list(cast("list[object]", obs.get("evidence") or []))
         observation_id, content_hash = _observation_identity(
             obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"],
             metrics, evidence)
@@ -527,7 +551,8 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
     return expected
 
 
-def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict, rows: list) -> None:
+def _archive_raw(data_root: Optional[Path | str], template: str, job_id: str, table: str,
+                 params: dict[str, object], rows: list[object]) -> None:
     if data_root is None or _raw_archive is None:
         return
     try:
@@ -539,10 +564,11 @@ def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict
         pass
 
 
-def _archived_rows(data_root, template: str, job_id: str, params: dict) -> list | None:
+def _archived_rows(data_root: Optional[Path | str], template: str, job_id: str,
+                   params: dict[str, object]) -> Optional[list[object]]:
     if data_root is None or _raw_archive is None:
         return None
-    best: list | None = None
+    best: Optional[list[object]] = None
     try:
         records = _raw_archive.iter_archive(
             "google", template, job_id, root=Path(data_root) / "raw")
@@ -562,9 +588,10 @@ def _archived_rows(data_root, template: str, job_id: str, params: dict) -> list 
     return best
 
 
-def _mark_complete(data_root, checkpoint_key: str, refresh: str, payload_hash: str, count: int) -> None:
+def _mark_complete(data_root: Optional[Path | str], checkpoint_key: str, refresh: str,
+                   payload_hash: str, count: int) -> None:
     proot = _parquet_root(data_root)
-    if proot is None:
+    if proot is None or _parquet is None:
         return
     now = datetime.now(timezone.utc).isoformat()
     _parquet.write_rows("ingestion_checkpoints", [{
@@ -576,7 +603,8 @@ def _mark_complete(data_root, checkpoint_key: str, refresh: str, payload_hash: s
     }], root=proot)
 
 
-def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, data_root) -> list | None:
+def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor: Optional[object],
+                         data_root: Optional[Path | str]) -> Optional[list[str]]:
     """Known refresh_date partitions for one table; None when the executor errors."""
     result = _submit("trends_refreshes", {
         "table": table, "start_date": start_date, "end_date": end_date,
@@ -584,14 +612,16 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, d
         "sql_version": _SQL_VERSION}, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return None
-    refreshes = sorted({str(r.get("refresh_date")) for r in (result.get("rows") or [])
+    refreshes = sorted({str(r.get("refresh_date")) for r in cast("list[object]", result.get("rows") or [])
                         if isinstance(r, dict) and r.get("refresh_date")})
     return refreshes
 
 
-def collect_trends(*, start_date, end_date, geos, limit=100,
-                   data_root=None, executor=None, week_start=None,
-                   week_end=None, interval="daily", term=None) -> dict:
+def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: list[str] | str,
+                   limit: int = 100, data_root: Optional[Path | str] = None,
+                   executor: Optional[object] = None, week_start: Optional[str] = None,
+                   week_end: Optional[str] = None, interval: Optional[str] = "daily",
+                   term: Optional[str] = None) -> dict[str, object]:
     """Collect top/rising lists; each row becomes an idempotent candidate."""
     if isinstance(geos, str):
         geos = [geos]
@@ -616,6 +646,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             return {"status": "error", "source": SOURCE,
                     "error": f"invalid {label}: {value!r} (YYYY-MM-DD)",
                     "error_type": "invalid_params"}
+    assert isinstance(start_date, str) and isinstance(end_date, str)
     if start_date > end_date:
         return {"status": "error", "source": SOURCE,
                 "error": "start_date after end_date", "error_type": "invalid_params"}
@@ -648,36 +679,38 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     if week_start is None and week_end is None:
         week_end = end_date
         week_start = (date.fromisoformat(end_date) - timedelta(days=13)).isoformat()
-    elif week_start is None:
+    elif week_start is None and week_end is not None:
         week_start = (date.fromisoformat(week_end) - timedelta(days=13)).isoformat()
-    elif week_end is None:
+    elif week_start is not None and week_end is None:
         week_end = (date.fromisoformat(week_start) + timedelta(days=13)).isoformat()
 
-    def _pair_for(group: dict) -> tuple:
+    def _pair_for(group: dict[str, object]) -> tuple[str, ...]:
         if group["kind"] == "us":
             return _US_NATIONAL_TEMPLATES if group.get("national") else _US_TEMPLATES
         return _INTL_NATIONAL_TEMPLATES
     groups = _plan_groups(geos)
     templates = [t for g in groups for t in _pair_for(g)]
-    completed = _completed_refreshes(data_root, templates) if data_root is not None else set()
+    completed: set[str] = (_completed_refreshes(data_root, templates)
+                           if data_root is not None else set())
 
-    merged: dict = {}
-    used_templates: list = []
-    refresh_seen: set = set()
-    fetched: list = []
+    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]] = {}
+    used_templates: list[str] = []
+    refresh_seen: set[str] = set()
+    fetched: list[tuple[str, str, str, str, int, list[str]]] = []
     for group in groups:
         pair = _pair_for(group)
         for template in pair:
             table = _template_table(template)
             refreshes = _enumerate_refreshes(table, start_date, end_date, executor, data_root)
             if refreshes is None:
-                enum_result = {"error": "refresh enumeration failed",
+                enum_result: dict[str, object] = {"error": "refresh enumeration failed",
                                "error_type": "source_unavailable", "source": "bigquery"}
                 return _wrap_error(enum_result)
             if not refreshes:
                 refreshes = [end_date]
             for refresh in refreshes:
                 refresh_seen.add(refresh)
+                params: dict[str, object]
                 if group["kind"] == "us" and group.get("national"):
                     params = {"start_date": refresh, "end_date": refresh,
                               "week_start": week_start, "week_end": week_end,
@@ -685,7 +718,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                               "sql_version": _SQL_VERSION, "national": "US"}
                 elif group["kind"] == "us":
                     params = {"start_date": refresh, "end_date": refresh,
-                              "dmas": sorted(group["dmas"]),
+                              "dmas": sorted(cast("list[str]", group["dmas"])),
                               "all_dmas": False,
                               "week_start": week_start, "week_end": week_end,
                               "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
@@ -705,15 +738,13 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                 "reason": "query_scope_too_large",
                                 "error": f"{template} query scope exceeds 1000 rows for {refresh}",
                                 "error_type": "missing_coverage"}
-                    cached_rows.sort(key=lambda c: str(c.get("source_record_id") or ""))
-                    cached_rows.sort(key=lambda c: (c.get("rank") if isinstance(
-                        c.get("rank"), (int, float)) else float("inf")))
-                    cached_rows.sort(key=lambda c: str(c.get("week") or c.get("period") or ""),
-                                     reverse=True)
+                    cached_rows.sort(key=_cached_record_id)
+                    cached_rows.sort(key=_cached_rank_key)
+                    cached_rows.sort(key=_cached_week_str, reverse=True)
                     cached_rows = cached_rows[:_MAX_LIMIT]
                     if cached_rows:
                         for cached in cached_rows:
-                            crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
+                            crefresh = str(cast("dict[str, object]", cached.get("metrics") or {}).get("refresh_date") or "")
                             if not crefresh:
                                 parts = str(cached.get("source_record_id") or "").split("|")
                                 if len(parts) >= 2 and parts[0] == cached.get("table"):
@@ -732,16 +763,17 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 if not isinstance(result, dict) or "error" in result:
                     return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
                 cached = bool(result.get("cached"))
-                rows = result.get("rows", []) or []
+                rows: list[object] = cast("list[object]", result.get("rows", []) or [])
                 job_id = result.get("job_id")
                 if cached and not rows:
-                    recovered = _archived_rows(data_root, template, job_id or template, params)
+                    recovered = _archived_rows(data_root, template, str(job_id or template), params)
                     if recovered is None:
                         return _wrap_error({"error": f"cached Trends result unavailable for {template}|{refresh}; refusing to checkpoint",
                                             "error_type": "source_unavailable", "source": "bigquery"})
                     rows = recovered
                 if data_root is not None and not cached:
-                    _archive_raw(data_root, template, job_id or template, table, params, rows)
+                    _archive_raw(data_root, template, str(job_id or template), table, params, rows)
+                payload_hash = ""
                 if data_root is not None:
                     payload_hash = hashlib.sha256(json.dumps(
                         rows, sort_keys=True, default=str).encode()).hexdigest()
@@ -752,7 +784,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                             "error_type": "missing_coverage"}
                 if template not in used_templates:
                     used_templates.append(template)
-                tables_seen = set()
+                tables_seen: set[str] = set()
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
@@ -775,7 +807,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         region = row.get("region_code") or ""
                         row["_geo"] = (row.get("country_code") or group["country"])
                         if region:
-                            row["_geo"] += f":{region}"
+                            row["_geo"] = str(row.get("_geo") or "") + f":{region}"
                         if not row.get("country_code"):
                             row["_geo"] = row.get("geo") or row["_geo"]
                     row["job_id"] = job_id
@@ -788,14 +820,14 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                     sorted(tables_seen)))
 
     # Cached warehouse rows carry plain dicts (no _-markers); normalize keys.
-    def _as_staged(row: dict) -> dict:
+    def _as_staged(row: dict[str, object]) -> dict[str, object]:
         staged_row = dict(row)
         if "_table" not in staged_row:
             staged_row["_table"] = staged_row.get("table")
             staged_row["_week"] = str(staged_row.get("week") or staged_row.get("period"))
             _parts = str(staged_row.get("source_record_id") or "").split("|")
             _id_refresh = _parts[1] if len(_parts) >= 2 and _parts[0] == staged_row.get("table") else ""
-            staged_row["_refresh"] = str((staged_row.get("metrics") or {}).get("refresh_date")
+            staged_row["_refresh"] = str(cast("dict[str, object]", staged_row.get("metrics") or {}).get("refresh_date")
                                          or _id_refresh or staged_row.get("period"))
             staged_row["_kind"] = staged_row.get("list_kind")
             staged_row["_geo"] = staged_row.get("geo")
@@ -807,9 +839,11 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     intl_tables = {_template_table("trends_intl_top"), _template_table("trends_intl_rising")}
     national = any(g.get("kind") == "us" and g.get("national") for g in groups)
     dma_set = {d for g in groups if g.get("kind") == "us" and not g.get("national")
-               for d in (g.get("dmas") or [])}
+               for d in cast("list[str]", g.get("dmas") or [])}
     national_templates = _US_NATIONAL_TEMPLATES + _INTL_NATIONAL_TEMPLATES
-    national_rows, dma_rows, intl_rows = [], [], []
+    national_rows: list[dict[str, object]] = []
+    dma_rows: list[dict[str, object]] = []
+    intl_rows: list[dict[str, object]] = []
     for key, row in merged.items():
         table = row.get("_table") or row.get("table")
         staged_row = _as_staged(row)
@@ -828,7 +862,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             intl_rows.append(staged_row)
 
     staged_all = national_rows + dma_rows + intl_rows
-    winners: dict = {}
+    winners: dict[tuple[object, object, object, object, object], dict[str, object]] = {}
     for staged_row in staged_all:
         wkey = (staged_row.get("_table"), staged_row.get("_kind"),
                 staged_row.get("_geo"), staged_row.get("term"), staged_row.get("_week"))
@@ -836,7 +870,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         if prev is None or str(staged_row.get("_refresh") or "") > str(prev.get("_refresh") or ""):
             winners[wkey] = staged_row
 
-    def _series_score(staged_row: dict):
+    def _series_score(staged_row: dict[str, object]) -> object:
         score = staged_row.get("score")
         if isinstance(score, bool):
             score = None
@@ -846,7 +880,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 score = metrics.get("score")
         return score
 
-    def _series_rank(staged_row: dict):
+    def _series_rank(staged_row: dict[str, object]) -> object:
         rank = staged_row.get("rank")
         if rank is None:
             metrics = staged_row.get("metrics")
@@ -854,8 +888,8 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 rank = metrics.get("rank")
         return rank
 
-    by_series: dict = {}
-    periods_by_series: dict = {}
+    by_series: dict[tuple[object, object, object, object, str], list[dict[str, object]]] = {}
+    periods_by_series: dict[tuple[object, object, object, str], set[str]] = {}
     for staged_row in winners.values():
         basis = _series_basis(staged_row)
         skey = (staged_row.get("term"), staged_row.get("_table"), staged_row.get("_kind"),
@@ -867,14 +901,14 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             "score": _series_score(staged_row)})
         pkey = (staged_row.get("_table"), staged_row.get("_kind"), staged_row.get("_geo"), basis)
         periods_by_series.setdefault(pkey, set()).add(str(staged_row.get("_week")))
-    series_features: dict = {}
-    for skey, rows in by_series.items():
+    series_features: dict[tuple[object, object, object, object, str], dict[str, object]] = {}
+    for skey, _srows in by_series.items():
         _term, _table, _kind, _geo, _basis = skey
         pkey = (_table, _kind, _geo, _basis)
         periods = sorted(periods_by_series.get(pkey) or set())
-        series_features[skey] = _signals.compute_candidate_features(rows, periods_covered=periods)
+        series_features[skey] = _signals.compute_candidate_features(_srows, periods_covered=periods)
     if dma_set:
-        dma_groups: dict = {}
+        dma_groups: dict[tuple[object, object, object, str], list[dict[str, object]]] = {}
         for staged_row in winners.values():
             if str(staged_row.get("_geo")) not in dma_set:
                 continue
@@ -886,25 +920,35 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 "geo": staged_row.get("_geo"), "term": staged_row.get("term"),
                 "list_kind": staged_row.get("_kind"), "rank": _series_rank(staged_row),
                 "score": _series_score(staged_row)})
-        for gkey, rows in dma_groups.items():
-            diff = _signals.compute_candidate_features(rows, geos_covered=sorted(dma_set))
+        for gkey, _grows in dma_groups.items():
+            diff = _signals.compute_candidate_features(_grows, geos_covered=sorted(dma_set))
             for skey in [k for k in series_features
                          if k[0] == gkey[0] and k[1] == gkey[1] and k[2] == gkey[2]
                          and k[4] == gkey[3] and str(k[3]) in dma_set]:
                 feat = series_features[skey]
                 feat["diffusion"] = diff.get("diffusion")
-                feat["rules"]["diffusion"] = dict(diff.get("rules", {}).get("diffusion", {}))
-                feat["coverage"]["geos_covered"] = list(
-                    diff.get("coverage", {}).get("geos_covered", []))
-    observations = []
-    effective_observations = []
+                _rules: object = feat.get("rules")
+                if isinstance(_rules, dict):
+                    _diff_rules: object = diff.get("rules", {})
+                    _diff_entry: object = (_diff_rules.get("diffusion", {})
+                                           if isinstance(_diff_rules, dict) else {})
+                    _rules["diffusion"] = dict(cast("dict[str, object]", _diff_entry))
+                _cov: object = feat.get("coverage")
+                if isinstance(_cov, dict):
+                    _cov_diff: object = diff.get("coverage", {})
+                    _cov_geos: object = (_cov_diff.get("geos_covered", [])
+                                         if isinstance(_cov_diff, dict) else [])
+                    _cov["geos_covered"] = list(cast("list[object]", _cov_geos))
+    observations: list[dict[str, object]] = []
+    effective_observations: list[dict[str, object]] = []
     winner_ids = {id(_w) for _w in winners.values()}
     retrieved_at = datetime.now(timezone.utc).isoformat()
     for row in national_rows + dma_rows + intl_rows:
         basis = _series_basis(row)
         skey = (row.get("term"), row.get("_table"), row.get("_kind"), row.get("_geo"), basis)
         features = series_features.get(skey)
-        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        _mrow: object = row.get("metrics")
+        metrics: dict[str, object] = _mrow if isinstance(_mrow, dict) else {}
         is_aggregate = (row.get("dma_count") is not None
                         or row.get("region_count") is not None
                         or metrics.get("dma_count") is not None
@@ -912,8 +956,16 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         if is_aggregate and isinstance(features, dict):
             features = copy.deepcopy(features)
             features["diffusion"] = None
-            features["rules"]["diffusion"]["value"] = None
-            features["coverage"]["missing"]["diffusion"] = "subregion rows aggregated"
+            _arules: object = features["rules"]
+            if isinstance(_arules, dict):
+                _ardiff: object = _arules.get("diffusion")
+                if isinstance(_ardiff, dict):
+                    _ardiff["value"] = None
+            _acov: object = features["coverage"]
+            if isinstance(_acov, dict):
+                _amissing: object = _acov.get("missing")
+                if isinstance(_amissing, dict):
+                    _amissing["diffusion"] = "subregion rows aggregated"
         _norm = _normalize_row(row, retrieved_at, data_root, features=features)
         observations.append(_norm)
         if id(row) in winner_ids:
@@ -924,13 +976,13 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             expected = _store_observations(data_root, observations, retrieved_at)
             proot = _parquet_root(data_root)
             if proot is not None and _parquet is not None:
-                infos = []
+                infos: list[tuple[dict[str, object], str, str, dict[str, object], str, str, dict[str, object]]] = []
                 for _obs in observations:
                     _feats = _obs.get("features")
                     if not isinstance(_feats, dict):
                         continue
-                    _metrics = dict(_obs.get("metrics") or {})
-                    _evidence = list(_obs.get("evidence") or [])
+                    _metrics = dict(cast("dict[str, object]", _obs.get("metrics") or {}))
+                    _evidence = list(cast("list[object]", _obs.get("evidence") or []))
                     _oid, _ch = _observation_identity(
                         _obs["table"], _obs["period"], _obs["geo"], _obs["term"],
                         _obs["list_kind"], _metrics, _evidence)
@@ -956,15 +1008,16 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         "geo": str(_obs.get("geo") or ""),
                         "term": str(_obs.get("term") or ""),
                         "list_kind": str(_obs.get("list_kind") or ""),
-                        "metrics": _obs.get("metrics") or {},
+                        "metrics": cast("dict[str, object]", _obs.get("metrics") or {}),
                     } for _obs, _oid, _ch, _, _, _, _ in infos if id(_obs) in _effective_ids]
                     _empty_hash = expected_inputs_hash({}, "", "", "", "", "", [])
+                    _existing: list[dict[str, object]] = []
                     try:
                         _existing = _parquet.read_table(
                             "google_signal_features", proot).to_pylist()
                     except Exception:
                         _existing = []
-                    _first_calc: dict = {}
+                    _first_calc: dict[tuple[str, str, str, str], str] = {}
                     for _row in _existing:
                         if not isinstance(_row, dict):
                             continue
@@ -975,12 +1028,13 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         _c = str(_row.get("calculated_at") or "")
                         if _k not in _first_calc or _c < _first_calc[_k]:
                             _first_calc[_k] = _c
-                    _feature_rows = []
+                    _feature_rows: list[dict[str, object]] = []
                     for _obs, _oid, _ch, _scope, _shash, _basis, _feats in infos:
                         _expected = expected_inputs_hash(
                             _scope, str(_obs.get("term") or ""),
                             str(_obs.get("table") or ""),
-                            str(_obs.get("list_kind") or ""), _basis, str(_obs.get("geo") or ""), _candidates)
+                            str(_obs.get("list_kind") or ""), _basis, str(_obs.get("geo") or ""),
+                            cast("list[dict[str, object]]", _candidates))
                         if _expected == _empty_hash:
                             continue
                         _k = (_oid, _shash, _signals.CALC_VERSION, _expected)
@@ -999,10 +1053,10 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                     _parquet.write_rows("google_signal_features", _feature_rows, root=proot)
             for _key, _template, _refresh, _hash, _count, _tables in fetched:
                 for _table in _tables:
-                    actual = set()
+                    actual: set[tuple[str, str]] = set()
                     for _cached in _warehouse_rows(data_root, _table, _refresh):
-                        _metrics = _cached.get("metrics") or {}
-                        _evidence = _cached.get("evidence") or []
+                        _metrics = cast("dict[str, object]", _cached.get("metrics") or {})
+                        _evidence = cast("list[object]", _cached.get("evidence") or [])
                         actual.add(_observation_identity(
                             _cached.get("table") or _table,
                             str(_cached.get("period") or _cached.get("week") or ""),
@@ -1032,7 +1086,8 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             "warnings": ["truncated"] if continuation else []}
 
 
-def _normalize_row(row: dict, retrieved_at: str, data_root, features=None) -> dict:
+def _normalize_row(row: dict[str, object], retrieved_at: str, data_root: Optional[Path | str],
+                   features: object = None) -> dict[str, object]:
     """Map one merged row to a persisted candidate observation."""
     table = row.get("_table") or row.get("table") or "trends"
     week = str(row.get("_week") or row.get("week") or row.get("period"))
@@ -1040,11 +1095,13 @@ def _normalize_row(row: dict, retrieved_at: str, data_root, features=None) -> di
     term = row.get("term")
     kind = row.get("_kind") or row.get("list_kind") or "top"
     refresh = str(row.get("_refresh") or row.get("refresh_date") or week)
+    metrics: dict[str, object]
+    evidence: list[object]
     if row.get("_cached") and isinstance(row.get("metrics"), dict):
         # Warehouse roundtrip: reuse stored metrics/evidence verbatim so a
         # recollect re-hashes identically (durable dedup, first known_at kept).
-        metrics = dict(row["metrics"])
-        evidence = list(row.get("evidence") or [])
+        metrics = dict(cast("dict[str, object]", row["metrics"]))
+        evidence = list(cast("list[object]", row.get("evidence") or []))
     else:
         metrics = {"rank": row.get("rank"), "score": row.get("score"),
                    "percent_gain": row.get("percent_gain"),

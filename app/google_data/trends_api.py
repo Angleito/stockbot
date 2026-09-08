@@ -13,6 +13,8 @@ rows like the BigQuery path.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
+from typing import Optional
 
 try:
     from .. import config as _config
@@ -46,8 +48,10 @@ def _api_enabled() -> bool:
     return os.getenv("GOOGLE_TRENDS_API_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 
-def get_interest_over_time(*, terms, interval="weekly", start_date=None,
-                           end_date=None, country="US", subregion=None) -> dict:
+def get_interest_over_time(*, terms: str | Sequence[str] | None, interval: str = "weekly",
+                           start_date: Optional[str] = None,
+                           end_date: Optional[str] = None, country: str = "US",
+                           subregion: Optional[str] = None) -> dict[str, object]:
     """Reserved interest-over-time lookup; pending alpha access, never networked."""
     if isinstance(terms, str):
         terms = [terms]

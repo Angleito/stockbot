@@ -11,9 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any, Optional
 
 import pytest
 import requests
+
+from app.thesis.models import Thesis
 
 from app.google_data import bigquery_client as bq
 from app.google_data import (
@@ -35,14 +40,34 @@ GOOGLE_ENV = (
     "YOUTUBE_SEARCH_DAILY_LIMIT",
 )
 
+_Params = dict[str, Any]
+_Row = dict[str, Any]
+_Seen = list[tuple[str, _Params]]
+_Executor = Callable[[str, _Params], _Row]
+_RowsFor = Callable[[str, _Params], list[_Row]]
+
+
+def _observations(result: _Row) -> list[_Row]:
+    """Narrow a collect_trends observations payload for strict typing."""
+    obs = result.get("observations")
+    assert isinstance(obs, list)
+    return obs
+
+
+def _metrics(row: _Row) -> _Row:
+    """Narrow a warehouse/signal row metrics payload for strict typing."""
+    metrics = row.get("metrics")
+    assert isinstance(metrics, dict)
+    return metrics
+
 
 @pytest.fixture(autouse=True)
-def _clean_google_env(monkeypatch):
+def _clean_google_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in GOOGLE_ENV:
         monkeypatch.delenv(key, raising=False)
 
 
-def _enable(monkeypatch, project="test-proj"):
+def _enable(monkeypatch: pytest.MonkeyPatch, project: str = "test-proj") -> None:
     monkeypatch.setenv("GOOGLE_DATA_ENABLED", "true")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", project)
 
@@ -50,52 +75,52 @@ def _enable(monkeypatch, project="test-proj"):
 class FakeBQ:
     """Boundary fake: dry_run(params)->bytes, submit(params, max_bytes, job_id)."""
 
-    def __init__(self, total_bytes=10, rows=None, state="DONE",
-                 billed=None, billing_enabled=False):
+    def __init__(self, total_bytes: int = 10, rows: Optional[list[_Row]] = None, state: str = "DONE",
+                 billed: Optional[int] = None, billing_enabled: Optional[bool] = False) -> None:
         self.total_bytes = total_bytes
         self._rows = rows if rows is not None else [{"n": 1}]
         self.state = state
         self.billed = total_bytes if billed is None else billed
         self.billing_enabled = billing_enabled
-        self.submits: list = []
-        self.dry_runs: list = []
+        self.submits: list[_Row] = []
+        self.dry_runs: list[_Row] = []
 
-    def dry_run(self, params):
+    def dry_run(self, params: _Params) -> int:
         self.dry_runs.append(dict(params))
         return self.total_bytes
 
-    def submit(self, params, max_bytes, job_id):
+    def submit(self, params: _Params, max_bytes: int, job_id: str) -> _Row:
         self.submits.append(
             {"params": dict(params), "max_bytes": max_bytes, "job_id": job_id})
         return {"job_id": job_id, "total_bytes_billed": self.billed,
                 "rows": list(self._rows), "state": self.state}
 
 
-def _factory(fake):
-    def _make(*args, **kwargs):
+def _factory(fake: FakeBQ) -> Callable[..., FakeBQ]:
+    def _make(*args: Any, **kwargs: Any) -> FakeBQ:
         return fake
     return _make
 
 
-def _ledger(tmp_path):
+def _ledger(tmp_path: Path) -> _Row:
     return json.loads((tmp_path / "google_data" / "bq_ledger.json").read_text())
 
 
 class _Resp:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload: _Row, status: int = 200) -> None:
         self._payload = payload
         self.status_code = status
 
-    def json(self):
+    def json(self) -> _Row:
         return self._payload
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         return None
 
 
 # BigQuery executor ------------------------------------------------------
 
-def test_billing_enabled_refuses_submit(monkeypatch, tmp_path):
+def test_billing_enabled_refuses_submit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     fake = FakeBQ(billing_enabled=True)
     result = bq.submit_template("trends_top", {"limit": 5},
@@ -105,7 +130,7 @@ def test_billing_enabled_refuses_submit(monkeypatch, tmp_path):
     assert fake.submits == [] and fake.dry_runs == []
 
 
-def test_billing_unknown_refuses_submit(monkeypatch, tmp_path):
+def test_billing_unknown_refuses_submit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     fake = FakeBQ(billing_enabled=None)
     result = bq.submit_template("trends_top", {"limit": 5},
@@ -114,7 +139,7 @@ def test_billing_unknown_refuses_submit(monkeypatch, tmp_path):
     assert fake.submits == []
 
 
-def test_check_billing_disabled_states():
+def test_check_billing_disabled_states() -> None:
     assert bq.check_billing_disabled({"billingEnabled": False}) is True
     assert bq.check_billing_disabled({"billingEnabled": True}) is False
     assert bq.check_billing_disabled({}) is False
@@ -122,7 +147,7 @@ def test_check_billing_disabled_states():
     assert bq.check_billing_disabled(FakeBQ(billing_enabled=True)) is False
 
 
-def test_dry_run_above_cap_refuses(monkeypatch, tmp_path):
+def test_dry_run_above_cap_refuses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv("BIGQUERY_MAX_BYTES_PER_QUERY", "1000")
     fake = FakeBQ(total_bytes=5000)
@@ -132,7 +157,7 @@ def test_dry_run_above_cap_refuses(monkeypatch, tmp_path):
     assert fake.submits == []
 
 
-def test_monthly_ceiling_includes_pending(monkeypatch, tmp_path):
+def test_monthly_ceiling_includes_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv("BIGQUERY_MONTHLY_BYTES_LIMIT", "3000")
     fake = FakeBQ(total_bytes=2000)
@@ -145,7 +170,7 @@ def test_monthly_ceiling_includes_pending(monkeypatch, tmp_path):
     assert len(fake.submits) == 1
 
 
-def test_retry_reuses_job_id(monkeypatch, tmp_path):
+def test_retry_reuses_job_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     fake = FakeBQ(total_bytes=100)
     first = bq.submit_template("trends_top", {"k": 1},
@@ -157,7 +182,7 @@ def test_retry_reuses_job_id(monkeypatch, tmp_path):
     assert len(_ledger(tmp_path)["jobs"]) == 1
 
 
-def test_corrupt_ledger_refuses(monkeypatch, tmp_path):
+def test_corrupt_ledger_refuses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     root = tmp_path / "google_data"
     root.mkdir(parents=True, exist_ok=True)
@@ -171,7 +196,7 @@ def test_corrupt_ledger_refuses(monkeypatch, tmp_path):
                            client_factory=_factory(FakeBQ()), data_root=tmp_path)
 
 
-def test_cross_month_retains_unresolved(monkeypatch, tmp_path):
+def test_cross_month_retains_unresolved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     fake = FakeBQ(total_bytes=100, state="RUNNING")
     bq.submit_template("trends_top", {"k": "old"},
@@ -191,14 +216,14 @@ def test_cross_month_retains_unresolved(monkeypatch, tmp_path):
     assert len(kept) == 2
 
 
-def test_allowlist_rejects_unknown_template(tmp_path):
+def test_allowlist_rejects_unknown_template(tmp_path: Path) -> None:
     result = bq.submit_template("definitely_not_a_template", {},
                                 client_factory=_factory(FakeBQ()), data_root=tmp_path)
     assert "error" in result
     assert result["source"] == "bigquery"
 
 
-def test_patent_template_over_cap(monkeypatch, tmp_path):
+def test_patent_template_over_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv("BIGQUERY_MAX_BYTES_PER_QUERY", "1000")
     fake = FakeBQ(total_bytes=10 ** 9)
@@ -217,8 +242,8 @@ PERIODS = ["2026-W01", "2026-W02", "2026-W03", "2026-W04"]
 GEOS = ["US", "GB", "DE", "FR"]
 
 
-def _math_batch():
-    rows = []
+def _math_batch() -> list[_Row]:
+    rows: list[_Row] = []
     for period in PERIODS:
         for geo in GEOS:
             hit = period in PERIODS[:3] and geo in GEOS[:2]
@@ -231,14 +256,14 @@ def _math_batch():
     return rows
 
 
-def test_candidate_math_persistence_diffusion():
+def test_candidate_math_persistence_diffusion() -> None:
     features = signals.compute_candidate_features(_math_batch())
     assert features["persistence"] == pytest.approx(0.75)
     assert features["diffusion"] == pytest.approx(0.5)
 
 
-def test_rank_improvement_within_same_table_list_geo():
-    rows = [
+def test_rank_improvement_within_same_table_list_geo() -> None:
+    rows: list[dict[str, object]] = [
         {"table": "t", "period": "2026-W01", "geo": "US",
          "term": "alpha", "list_kind": "rising", "rank": 9},
         {"table": "t", "period": "2026-W02", "geo": "US",
@@ -247,9 +272,9 @@ def test_rank_improvement_within_same_table_list_geo():
     assert signals.compute_candidate_features(rows)["rank_improvement"] == 5
 
 
-def test_normalize_signal_id_and_first_known_at():
-    record = {"table": "t", "period": "2026-W01", "geo": "US",
-              "term": "alpha", "list_kind": "rising", "rank": 3}
+def test_normalize_signal_id_and_first_known_at() -> None:
+    record: dict[str, object] = {"table": "t", "period": "2026-W01", "geo": "US",
+                                     "term": "alpha", "list_kind": "rising", "rank": 3}
     first = signals.normalize_candidate(record, retrieved_at="2026-09-01T00:00:00+00:00",
                                         persist=False)
     assert first["signal_id"] == hashlib.sha256(
@@ -262,7 +287,7 @@ def test_normalize_signal_id_and_first_known_at():
     assert recollected["known_at"] == first["known_at"]
 
 
-def _trend_rows():
+def _trend_rows() -> list[_Row]:
     return [
         {"table": "trends_top", "period": "2026-W01", "geo": "US",
          "term": "alpha", "list_kind": "top", "rank": 3},
@@ -271,13 +296,13 @@ def _trend_rows():
     ]
 
 
-def _trend_executor(rows):
-    def _run(template, params):
+def _trend_executor(rows: list[_Row]) -> _Executor:
+    def _run(template: str, params: _Params) -> _Row:
         return {"status": "ok", "rows": [dict(r) for r in rows], "source": "bigquery"}
     return _run
 
 
-def test_trends_usable_without_other_keys(monkeypatch, tmp_path):
+def test_trends_usable_without_other_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     result = trends.collect_trends(
         start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
@@ -287,7 +312,7 @@ def test_trends_usable_without_other_keys(monkeypatch, tmp_path):
     assert "alpha" in json.dumps(result)
 
 
-def test_asof_excludes_future_evidence_and_recollect_idempotent(monkeypatch, tmp_path):
+def test_asof_excludes_future_evidence_and_recollect_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     run = lambda: trends.collect_trends(  # noqa: E731
         start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
@@ -298,7 +323,7 @@ def test_asof_excludes_future_evidence_and_recollect_idempotent(monkeypatch, tmp
     assert before == []
     after = signals.query_signals(data_root=tmp_path)
     assert after, "expected retained evidence"
-    first_ids = sorted(s["signal_id"] for s in signals.query_signals(data_root=tmp_path))
+    first_ids = sorted(str(s["signal_id"]) for s in signals.query_signals(data_root=tmp_path))
     assert [s["signal_id"] for s in after] == first_ids
     known = {s["signal_id"]: s["known_at"] for s in after}
     rerun = {s["signal_id"]: s["known_at"]
@@ -309,9 +334,9 @@ def test_asof_excludes_future_evidence_and_recollect_idempotent(monkeypatch, tmp
 
 # Trends durability regressions -------------------------------------------------
 
-def _scoped_trend_executor(*, refreshes, rows_for, seen):
+def _scoped_trend_executor(*, refreshes: list[str], rows_for: _RowsFor, seen: _Seen) -> _Executor:
     """Params-aware executor: partitions for trends_refreshes, per-refresh rows otherwise."""
-    def _run(template, params):
+    def _run(template: str, params: _Params) -> _Row:
         seen.append((template, dict(params)))
         if template == "trends_refreshes":
             return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
@@ -321,31 +346,31 @@ def _scoped_trend_executor(*, refreshes, rows_for, seen):
     return _run
 
 
-def _dma_row(dma, term="alpha", week="2026-08-24", refresh="2026-09-02",
-             rank=1, score=90, kind="top"):
+def _dma_row(dma: str, term: str = "alpha", week: str = "2026-08-24", refresh: str = "2026-09-02",
+             rank: int = 1, score: float = 90, kind: str = "top") -> _Row:
     return {"term": term, "week": week, "refresh_date": refresh,
             "dma_name": dma, "rank": rank, "score": score, "list_kind": kind}
 
 
-def _three_dma_rows():
+def _three_dma_rows() -> list[_Row]:
     return [_dma_row(dma, term, refresh="2026-09-02", rank=i + 1, score=90 - 10 * i)
             for i, (dma, term) in enumerate(
                 [("Chicago", "alpha"), ("Los Angeles", "beta"), ("New York", "gamma")])]
 
 
-def _national_row(term="alpha", week="2026-08-24", refresh="2026-09-02",
-                 dma_count=2, score=85.0, kind="top"):
+def _national_row(term: str = "alpha", week: str = "2026-08-24", refresh: str = "2026-09-02",
+                 dma_count: int = 2, score: float = 85.0, kind: str = "top") -> _Row:
     return {"term": term, "week": week, "refresh_date": refresh,
             "dma_count": dma_count, "score": score, "list_kind": kind}
 
 
-def _intl_national_row(term="alpha", week="2026-08-24", refresh="2026-09-02",
-                      country="GB", region_count=5, score=80.0, kind="top"):
+def _intl_national_row(term: str = "alpha", week: str = "2026-08-24", refresh: str = "2026-09-02",
+                      country: str = "GB", region_count: int = 5, score: float = 80.0, kind: str = "top") -> _Row:
     return {"term": term, "week": week, "refresh_date": refresh,
             "country_code": country, "region_count": region_count,
             "score": score, "list_kind": kind}
 
-def test_plan_groups_keeps_national_us_with_other_geos():
+def test_plan_groups_keeps_national_us_with_other_geos() -> None:
     assert trends._plan_groups(["US", "GB"]) == [
         {"kind": "us", "national": True, "dmas": []},
         {"kind": "intl", "country": "GB"},
@@ -362,12 +387,12 @@ def test_plan_groups_keeps_national_us_with_other_geos():
 
 
 
-def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
+def test_national_rollup_emits_every_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-01", "2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top_national":
             return []
         refresh = params["start_date"]
@@ -383,8 +408,8 @@ def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
     assert result["status"] == "ok"
     assert {t for t, _ in seen if t != "trends_refreshes"} <= {
         "trends_us_top_national", "trends_us_rising_national"}
-    by_refresh = {}
-    for obs in result["observations"]:
+    by_refresh: dict[str, list[_Row]] = {}
+    for obs in _observations(result):
         assert obs["geo"] == "US"
         assert obs.get("rank") is None
         assert (obs.get("metrics") or {}).get("rank") is None
@@ -406,15 +431,15 @@ def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
     for refresh in refreshes:
         durable = trends._warehouse_rows(tmp_path, table, refresh)
         assert durable, f"expected durable rows for {refresh}"
-        assert {str((r.get("metrics") or {}).get("refresh_date")) for r in durable} == {refresh}
-        assert {(r.get("metrics") or {}).get("dma_count") for r in durable} == {2, 3}
+        assert {str(_metrics(r).get("refresh_date")) for r in durable} == {refresh}
+        assert {_metrics(r).get("dma_count") for r in durable} == {2, 3}
 
-def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch, tmp_path):
+def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_intl_top_national":
             return []
         return [_intl_national_row("alpha", refresh="2026-09-02",
@@ -426,7 +451,7 @@ def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch, tmp_pa
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] == "ok"
     assert result["observations"]
-    for obs in result["observations"]:
+    for obs in _observations(result):
         assert obs["metrics"]["region_count"] == 5
         assert obs["metrics"]["score_basis"] == "mean_list_score_where_listed"
         assert obs["features"]["diffusion"] is None
@@ -434,12 +459,12 @@ def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch, tmp_pa
         assert obs["features"]["rules"]["diffusion"]["value"] is None
 
 
-def test_explicit_dma_keeps_numeric_diffusion(monkeypatch, tmp_path):
+def test_explicit_dma_keeps_numeric_diffusion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return [_dma_row("New York", refresh=params["start_date"], rank=1)]
@@ -450,21 +475,24 @@ def test_explicit_dma_keeps_numeric_diffusion(monkeypatch, tmp_path):
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] == "ok"
     assert result["observations"]
-    for obs in result["observations"]:
+    for obs in _observations(result):
         assert obs["features"]["diffusion"] == pytest.approx(1.0)
         assert "score_basis" not in (obs.get("metrics") or {})
 
 
-def test_national_default_scope_is_bounded(monkeypatch, tmp_path):
+def test_national_default_scope_is_bounded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
+
+    def _no_rows(template: str, params: _Params) -> list[_Row]:
+        return []
 
     result = trends.collect_trends(
         start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
         limit=10, data_root=tmp_path,
         executor=_scoped_trend_executor(
-            refreshes=refreshes, rows_for=lambda template, params: [], seen=seen))
+            refreshes=refreshes, rows_for=_no_rows, seen=seen))
     assert result["status"] == "ok"
     data_calls = [(t, p) for t, p in seen if t != "trends_refreshes"]
     assert data_calls
@@ -477,7 +505,7 @@ def test_national_default_scope_is_bounded(monkeypatch, tmp_path):
         assert params["week_start"] == "2026-08-20"
 
 
-def test_national_sentinel_fires_post_aggregation(monkeypatch, tmp_path):
+def test_national_sentinel_fires_post_aggregation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     big_us = [_national_row(term=f"term-{i}", refresh="2026-09-02",
@@ -486,10 +514,10 @@ def test_national_sentinel_fires_post_aggregation(monkeypatch, tmp_path):
                                  country="GB", region_count=12, score=50.0)
               for i in range(1001)]
 
-    def _collect(geos, big, template):
-        seen: list = []
+    def _collect(geos: list[str], big: list[_Row], template: str) -> tuple[_Row, _Seen]:
+        seen: _Seen = []
 
-        def _rows(t, params):
+        def _rows(t: str, params: _Params) -> list[_Row]:
             if t == template:
                 return [dict(r) for r in big]
             return []
@@ -507,26 +535,28 @@ def test_national_sentinel_fires_post_aggregation(monkeypatch, tmp_path):
         assert result["reason"] == "query_scope_too_large"
         assert result["error_type"] == "missing_coverage"
         assert template in {t for t, _ in seen}
+    assert trends._parquet is not None
     try:
-        observations = trends._parquet.read_table(
+        observations: list[_Row] = trends._parquet.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
     except Exception:
         observations = []
     assert observations == []
+    assert trends._parquet is not None
     try:
-        stored = trends._parquet.read_table(
+        stored: list[_Row] = trends._parquet.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
     assert [r for r in stored if r.get("status") == "complete"] == []
 
 
-def test_national_ok_below_sentinel_preserves_counts(monkeypatch, tmp_path):
+def test_national_ok_below_sentinel_preserves_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template == "trends_us_top_national":
             return [_national_row(term=f"term-{i}", refresh="2026-09-02",
                                   dma_count=210, score=50.0) for i in range(1000)]
@@ -539,15 +569,15 @@ def test_national_ok_below_sentinel_preserves_counts(monkeypatch, tmp_path):
     assert result["status"] == "ok"
     assert result["count"] == 1000
     assert all((o.get("metrics") or {}).get("dma_count") == 210
-               for o in result["observations"])
+               for o in _observations(result))
 
 
-def test_explicit_dma_keeps_row_level_sql(monkeypatch, tmp_path):
+def test_explicit_dma_keeps_row_level_sql(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return [_dma_row("New York", refresh=params["start_date"], rank=1)]
@@ -564,16 +594,16 @@ def test_explicit_dma_keeps_row_level_sql(monkeypatch, tmp_path):
     assert top_calls and all(p["all_dmas"] is False for p in top_calls)
     assert all(p["week_start"] == "2026-08-01" and p["week_end"] == "2026-08-31"
                for p in top_calls)
-    assert {o["geo"] for o in result["observations"]} == {"New York"}
+    assert {o["geo"] for o in _observations(result)} == {"New York"}
 
 
 
-def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):
+def test_limit_truncates_response_not_warehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return _three_dma_rows()
@@ -586,19 +616,21 @@ def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):
     assert result["status"] == "ok"
     data_calls = [params for template, params in seen if template != "trends_refreshes"]
     assert data_calls and all(params["limit"] == 1001 for params in data_calls)
-    assert result["count"] == 1 and len(result["observations"]) == 1
-    assert result["continuation"] is True and "truncated" in result["warnings"]
+    assert result["count"] == 1 and len(_observations(result)) == 1
+    warnings = result["warnings"]
+    assert isinstance(warnings, list)
+    assert result["continuation"] is True and "truncated" in warnings
     retained = signals.query_signals(data_root=tmp_path)
-    assert sorted(s["term"] for s in retained) == ["alpha", "beta", "gamma"]
+    assert sorted(str(s["term"]) for s in retained) == ["alpha", "beta", "gamma"]
 
 
-def test_term_filter_applies_before_limit_slice(monkeypatch, tmp_path):
+def test_term_filter_applies_before_limit_slice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
     dmas = ["Chicago", "Los Angeles", "New York"]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         fillers = [_dma_row(dmas[i % 3], term=f"filler-{i:03d}", rank=i + 1,
@@ -614,12 +646,12 @@ def test_term_filter_applies_before_limit_slice(monkeypatch, tmp_path):
         week_start="2026-08-01", week_end="2026-08-31",
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] == "ok"
-    assert result["count"] == 1 and len(result["observations"]) == 1
-    assert "Stanley" in result["observations"][0]["term"]
+    assert result["count"] == 1 and len(_observations(result)) == 1
+    assert "Stanley" in str(_observations(result)[0]["term"])
     assert result["continuation"] is False
     retained = signals.query_signals(data_root=tmp_path)
     assert len(retained) == 101
-    assert any("Stanley" in s["term"] for s in retained)
+    assert any("Stanley" in str(s["term"]) for s in retained)
 
     unfiltered = trends.collect_trends(
         start_date="2026-09-02", end_date="2026-09-02",
@@ -631,19 +663,20 @@ def test_term_filter_applies_before_limit_slice(monkeypatch, tmp_path):
     assert unfiltered["continuation"] is True
 
 
-def test_partial_write_does_not_checkpoint(monkeypatch, tmp_path):
+def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return _three_dma_rows()
 
+    assert trends._parquet is not None
     orig_write = trends._parquet.write_rows
 
-    def _drop_one(name, rows, root=None, **kwargs):
+    def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: Any) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
@@ -655,31 +688,32 @@ def test_partial_write_does_not_checkpoint(monkeypatch, tmp_path):
         limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] in ("unavailable", "error")
-    assert "warehouse verify failed" in result.get("error", "")
+    assert "warehouse verify failed" in str(result.get("error", ""))
+    assert trends._parquet is not None
     try:
-        stored = trends._parquet.read_table(
+        stored: list[_Row] = trends._parquet.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
     complete = {row.get("key") for row in stored if row.get("status") == "complete"}
-    scoped = {trends._checkpoint_key(template, params["start_date"], params)
+    scoped = {trends._checkpoint_key(template, str(params["start_date"]), params)
               for template, params in seen if template != "trends_refreshes"}
     assert scoped
     assert not (scoped & complete)
 
 
-def test_checkpoint_scope_distinguishes_dmas(monkeypatch, tmp_path):
+def test_checkpoint_scope_distinguishes_dmas(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen = []
+    seen: _Seen = []
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return [_dma_row(dma, refresh=params["start_date"], rank=1)
                 for dma in params.get("dmas", [])]
 
-    def _collect(geos):
+    def _collect(geos: list[str]) -> _Row:
         return trends.collect_trends(
             start_date="2026-09-01", end_date="2026-09-02", geos=geos,
             limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
@@ -695,19 +729,20 @@ def test_checkpoint_scope_distinguishes_dmas(monkeypatch, tmp_path):
     assert {obs["geo"] for obs in second["observations"]} == {"Los Angeles"}
     assert [t for t, _ in seen[first_seen:] if t != "trends_refreshes"], \
         "scoped miss must re-execute data templates"
-    scoped = lambda calls: {trends._checkpoint_key(t, p["start_date"], p)
-                            for t, p in calls if t != "trends_refreshes"}
-    ny_keys, la_keys = scoped(seen[:first_seen]), scoped(seen[first_seen:])
+    def _scoped_keys(calls: _Seen) -> set[str]:
+        return {trends._checkpoint_key(t, str(p["start_date"]), p)
+                for t, p in calls if t != "trends_refreshes"}
+    ny_keys, la_keys = _scoped_keys(seen[:first_seen]), _scoped_keys(seen[first_seen:])
     assert ny_keys and la_keys and not (ny_keys & la_keys)
 
 
-def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch, tmp_path):
+def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen: list = []
-    calls: dict = {}
+    seen: _Seen = []
+    calls: dict[tuple[str, str], int] = {}
 
-    def _run(template, params):
+    def _run(template: str, params: _Params) -> _Row:
         seen.append((template, dict(params)))
         if template == "trends_refreshes":
             return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
@@ -717,22 +752,23 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch, tmp
         calls[key] = n + 1
         job_id = f"job-{template}-{params['start_date']}"
         if n == 0:
-            rows = _three_dma_rows() if template == "trends_us_top" else []
+            rows: list[_Row] = _three_dma_rows() if template == "trends_us_top" else []
             return {"status": "ok", "rows": [dict(r) for r in rows],
                     "source": "bigquery", "job_id": job_id}
-        return {"status": "ok", "cached": True, "job_id": job_id, "rows": [],
+        return {"status": "ok", "cached": True, "job_id": job_id, "rows": list[_Row](),
                 "source": "bigquery"}
 
+    assert trends._parquet is not None
     orig_write = trends._parquet.write_rows
 
-    def _drop_one(name, rows, root=None, **kwargs):
+    def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: Any) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
 
     monkeypatch.setattr(trends._parquet, "write_rows", _drop_one)
 
-    def _collect():
+    def _collect() -> _Row:
         return trends.collect_trends(
             start_date="2026-09-02", end_date="2026-09-02",
             geos=["Chicago", "Los Angeles", "New York"],
@@ -742,29 +778,30 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch, tmp
     first, second = _collect(), _collect()
     for result in (first, second):
         assert result["status"] in ("unavailable", "error")
-        assert "warehouse verify failed" in result.get("error", "")
+        assert "warehouse verify failed" in str(result.get("error", ""))
+    assert trends._parquet is not None
     try:
-        stored = trends._parquet.read_table(
+        stored: list[_Row] = trends._parquet.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
     complete = {row.get("key") for row in stored if row.get("status") == "complete"}
-    scoped = {trends._checkpoint_key(template, params["start_date"], params)
+    scoped = {trends._checkpoint_key(template, str(params["start_date"]), params)
               for template, params in seen if template != "trends_refreshes"}
     assert scoped
     assert not (scoped & complete)
 
 
-def test_query_scope_over_1000_never_checkpoints(monkeypatch, tmp_path):
+def test_query_scope_over_1000_never_checkpoints(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
-    seen: list = []
-    calls: dict = {}
+    seen: _Seen = []
+    calls: dict[tuple[str, str], int] = {}
     big = [_dma_row("New York", term=f"term-{i}", week="2026-08-24",
                     refresh="2026-09-02", rank=i + 1, score=90)
            for i in range(1001)]
 
-    def _run(template, params):
+    def _run(template: str, params: _Params) -> _Row:
         seen.append((template, dict(params)))
         if template == "trends_refreshes":
             return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
@@ -774,13 +811,13 @@ def test_query_scope_over_1000_never_checkpoints(monkeypatch, tmp_path):
         calls[key] = n + 1
         job_id = f"job-{template}-{params['start_date']}"
         if n == 0:
-            rows = big if template == "trends_us_top" else []
+            rows: list[_Row] = big if template == "trends_us_top" else []
             return {"status": "ok", "rows": [dict(r) for r in rows],
                     "source": "bigquery", "job_id": job_id}
-        return {"status": "ok", "cached": True, "job_id": job_id, "rows": [],
+        return {"status": "ok", "cached": True, "job_id": job_id, "rows": list[_Row](),
                 "source": "bigquery"}
 
-    def _collect():
+    def _collect() -> _Row:
         return trends.collect_trends(
             start_date="2026-09-02", end_date="2026-09-02", geos=["New York"],
             limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
@@ -791,27 +828,29 @@ def test_query_scope_over_1000_never_checkpoints(monkeypatch, tmp_path):
         assert result["status"] == "unavailable"
         assert result["error_type"] == "missing_coverage"
         assert result["reason"] == "query_scope_too_large"
+    assert trends._parquet is not None
     try:
-        observations = trends._parquet.read_table(
+        observations: list[_Row] = trends._parquet.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
     except Exception:
         observations = []
     assert observations == []
+    assert trends._parquet is not None
     try:
-        stored = trends._parquet.read_table(
+        stored: list[_Row] = trends._parquet.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
     assert [r for r in stored if r.get("status") == "complete"] == []
 
 
-def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path):
+def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-01", "2026-09-02"]
-    seen: list = []
+    seen: _Seen = []
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template == "trends_us_top":
             refresh = params["start_date"]
             if refresh == "2026-09-01":
@@ -835,7 +874,7 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path)
         limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
         executor=executor)
     assert result["status"] == "ok"
-    alpha = [o for o in result["observations"] if o.get("term") == "alpha"]
+    alpha = [o for o in _observations(result) if o.get("term") == "alpha"]
     assert alpha
     features = alpha[0].get("features") or {}
     assert features["velocity"] == pytest.approx(7.5)
@@ -847,38 +886,44 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path)
     new = trends._warehouse_rows(tmp_path, table, "2026-09-02")
     assert {r.get("week") for r in old} >= {w4}
     assert {r.get("week") for r in new} == {w4}
-    assert {(r.get("metrics") or {}).get("score") for r in old if r.get("week") == w4} == {100}
-    assert {(r.get("metrics") or {}).get("score") for r in new if r.get("week") == w4} == {40}
+    assert {_metrics(r).get("score") for r in old if r.get("week") == w4} == {100}
+    assert {_metrics(r).get("score") for r in new if r.get("week") == w4} == {40}
     queried = signals.query_signals(query="alpha", geo="New York", data_root=tmp_path)
     week4 = [s for s in queried if s.get("period") == w4]
     assert len(week4) == 1
     latest = week4[0]
-    assert (latest.get("metrics") or {}).get("refresh_date") == "2026-09-02"
-    assert (latest.get("metrics") or {}).get("score") == 40
+    latest_metrics = latest.get("metrics")
+    assert isinstance(latest_metrics, dict)
+    assert latest_metrics.get("refresh_date") == "2026-09-02"
+    assert latest_metrics.get("score") == 40
     assert latest.get("features") == features
-    assert len(latest.get("available_feature_scopes") or []) == 1
+    latest_scopes = latest.get("available_feature_scopes")
+    assert isinstance(latest_scopes, list)
+    assert len(latest_scopes) == 1
     seen.clear()
     replayed = trends.collect_trends(
         start_date="2026-09-01", end_date="2026-09-02", geos=["New York"],
         limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
         executor=executor)
     assert replayed["status"] == "ok"
-    strip = lambda o: {k: v for k, v in o.items() if k not in ("known_at", "retrieved_at")}
-    skey = lambda o: (o.get("signal_id"), o.get("period"),
-                       str((o.get("metrics") or {}).get("refresh_date")), o.get("term"))
-    assert sorted((strip(o) for o in replayed["observations"]), key=skey) == \
-        sorted((strip(o) for o in result["observations"]), key=skey)
-    replayed_alpha = [o for o in replayed["observations"] if o.get("term") == "alpha"]
+    def _strip(o: _Row) -> _Row:
+        return {k: v for k, v in o.items() if k not in ("known_at", "retrieved_at")}
+    def _skey(o: _Row) -> tuple[Any, ...]:
+        return (o.get("signal_id"), o.get("period"),
+                str((o.get("metrics") or {}).get("refresh_date")), o.get("term"))
+    assert sorted((_strip(o) for o in _observations(replayed)), key=_skey) == \
+        sorted((_strip(o) for o in _observations(result)), key=_skey)
+    replayed_alpha = [o for o in _observations(replayed) if o.get("term") == "alpha"]
     assert replayed_alpha and (replayed_alpha[0].get("features") or {}) == features
     assert seen and all(t == "trends_refreshes" for t, _ in seen)
 
 
-def test_trend_features_persist_through_query_signals(monkeypatch, tmp_path):
+def test_trend_features_persist_through_query_signals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         return [_dma_row("New York", term="alpha", week=w, refresh=params["start_date"],
@@ -891,7 +936,7 @@ def test_trend_features_persist_through_query_signals(monkeypatch, tmp_path):
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]))
     assert result["status"] == "ok"
     assert result["observations"]
-    collected = {o["term"]: o["features"] for o in result["observations"]}
+    collected = {o["term"]: o["features"] for o in _observations(result)}
     assert collected["alpha"]
     queried = {s["term"]: s for s in signals.query_signals(data_root=tmp_path)}
     assert queried["alpha"]["features"] == collected["alpha"]
@@ -920,7 +965,7 @@ def test_trend_features_persist_through_query_signals(monkeypatch, tmp_path):
     assert by_term["legacy-term"]["features"] is None
 
 
-def test_feature_calculation_isolates_mixed_geographies(monkeypatch, tmp_path):
+def test_feature_calculation_isolates_mixed_geographies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
@@ -929,7 +974,7 @@ def test_feature_calculation_isolates_mixed_geographies(monkeypatch, tmp_path):
     ny_scores, ny_ranks = [100, 70, 60, 40], [1, 2, 3, 4]
     gb_scores = [5, 5, 10, 30]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         refresh = params["start_date"]
         if template == "trends_us_top_national":
             return [_national_row("alpha", week=w, refresh=refresh,
@@ -950,8 +995,8 @@ def test_feature_calculation_isolates_mixed_geographies(monkeypatch, tmp_path):
         limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]))
     assert result["status"] == "ok"
-    by_geo: dict = {}
-    for obs in result["observations"]:
+    by_geo: dict[str, list[_Row]] = {}
+    for obs in _observations(result):
         by_geo.setdefault(obs["geo"], []).append(obs)
     assert set(by_geo) == {"US", "New York", "GB"}
     us_features = by_geo["US"][0]["features"]
@@ -981,14 +1026,14 @@ def test_feature_calculation_isolates_mixed_geographies(monkeypatch, tmp_path):
     assert ny_features["coverage"]["geos_covered"] == ["New York"]
 
 
-def test_scope_change_does_not_duplicate_source_observations(monkeypatch, tmp_path):
+def test_scope_change_does_not_duplicate_source_observations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     from app.storage import parquet as _pq
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
     weeks = [w1, w2, w3, w4]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         refresh = params["start_date"]
@@ -1029,13 +1074,13 @@ def test_scope_change_does_not_duplicate_source_observations(monkeypatch, tmp_pa
     assert diffusions == pytest.approx([0.5, 1.0])
 
 
-def test_checkpoint_replay_is_scope_exact(monkeypatch, tmp_path):
+def test_checkpoint_replay_is_scope_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
     weeks = [w1, w2, w3, w4]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         refresh = params["start_date"]
@@ -1043,7 +1088,7 @@ def test_checkpoint_replay_is_scope_exact(monkeypatch, tmp_path):
                          rank=r, score=s)
                 for w, r, s in zip(weeks, [4, 3, 2, 1], [10, 20, 30, 50])]
 
-    def _collect(geos):
+    def _collect(geos: list[str]) -> _Row:
         return trends.collect_trends(
             start_date="2026-09-02", end_date="2026-09-02", geos=geos,
             limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
@@ -1061,11 +1106,11 @@ def test_checkpoint_replay_is_scope_exact(monkeypatch, tmp_path):
         assert obs["features"]["coverage"]["geos_covered"] == ["New York"]
 
 
-def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path):
+def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path: Path) -> None:
     from app.storage import parquet as _pq
     table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
 
-    def _rev(refresh, known, marker, content_hash, tag):
+    def _rev(refresh: str, known: str, marker: str, content_hash: str, tag: str) -> _Row:
         return {
             "observation_id": "obs-alpha", "source": "trends", "table": table,
             "term": term, "geo": geo, "list_kind": kind, "period": period,
@@ -1083,20 +1128,24 @@ def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path):
         _pq.write_rows("google_observations", [rev], root=tmp_path / "parquet")
     at_cutoff = signals.query_signals(data_root=tmp_path, as_of="2026-09-03")
     assert len(at_cutoff) == 1
-    assert at_cutoff[0]["metrics"]["refresh_date"] == "2026-09-02"
-    assert at_cutoff[0]["metrics"]["marker"] == "new"
+    cutoff_metrics = at_cutoff[0]["metrics"]
+    assert isinstance(cutoff_metrics, dict)
+    assert cutoff_metrics["refresh_date"] == "2026-09-02"
+    assert cutoff_metrics["marker"] == "new"
     uncut = signals.query_signals(data_root=tmp_path)
     assert len(uncut) == 1
-    assert uncut[0]["metrics"]["refresh_date"] == "2026-09-02"
+    uncut_metrics = uncut[0]["metrics"]
+    assert isinstance(uncut_metrics, dict)
+    assert uncut_metrics["refresh_date"] == "2026-09-02"
     assert signals.query_signals(data_root=tmp_path, as_of="2026-09-01") == []
 
 
-def test_query_signals_tie_breaks_on_refresh_date(tmp_path):
+def test_query_signals_tie_breaks_on_refresh_date(tmp_path: Path) -> None:
     from app.storage import parquet as _pq
     table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
     known_at = "2026-09-02T00:00:00+00:00"
 
-    def _rev(refresh, marker, content_hash, tag):
+    def _rev(refresh: str, marker: str, content_hash: str, tag: str) -> _Row:
         return {
             "observation_id": "obs-alpha", "source": "trends", "table": table,
             "term": term, "geo": geo, "list_kind": kind, "period": period,
@@ -1117,8 +1166,10 @@ def test_query_signals_tie_breaks_on_refresh_date(tmp_path):
     for name in ("a", "b"):
         found = signals.query_signals(data_root=tmp_path / name)
         assert len(found) == 1
-        assert found[0]["metrics"]["refresh_date"] == "2026-09-02"
-        assert found[0]["metrics"]["marker"] == "new"
+        found_metrics = found[0]["metrics"]
+        assert isinstance(found_metrics, dict)
+        assert found_metrics["refresh_date"] == "2026-09-02"
+        assert found_metrics["marker"] == "new"
 
 # Entity + macro ------------------------------------------------------------
 # Migration note: Knowledge Graph entity resolution was removed from the
@@ -1127,7 +1178,7 @@ def test_query_signals_tie_breaks_on_refresh_date(tmp_path):
 # behavior is pinned here.
 
 
-def _dc_payload():
+def _dc_payload() -> _Row:
     return {"byVariable": {"Count_Person": {"byEntity": {"geoId/06": {"orderedFacets": [
         {"facetId": "f1", "observations": [{"date": "2020", "value": 1.0}]},
         {"facetId": "f2", "observations": [{"date": "2020", "value": 2.0}]},
@@ -1136,12 +1187,12 @@ def _dc_payload():
                    "f2": {"unit": "USD", "importName": "BEA"}}}
 
 
-def test_datacommons_two_facets_stay_distinct(monkeypatch):
+def test_datacommons_two_facets_stay_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_DATA_ENABLED", "true")
     monkeypatch.setenv("DATACOMMONS_API_KEY", "dc-test")
-    seen = {}
+    seen: dict[str, Any] = {}
 
-    def _post(url, **kwargs):
+    def _post(url: str, **kwargs: Any) -> _Resp:
         seen.update(kwargs)
         seen["url"] = url
         return _Resp(_dc_payload())
@@ -1149,8 +1200,10 @@ def test_datacommons_two_facets_stay_distinct(monkeypatch):
     monkeypatch.setattr(requests, "post", _post)
     result = datacommons.get_macro_context(["geoId/06"], ["Count_Person"])
     assert result["status"] == "ok"
-    assert len(result["series"]) == 2
-    by_facet = {s["facet"]: s for s in result["series"]}
+    series = result["series"]
+    assert isinstance(series, list)
+    assert len(series) == 2
+    by_facet = {s["facet"]: s for s in series}
     assert by_facet["f1"]["unit"] == "people"
     assert by_facet["f2"]["unit"] == "USD"
     assert by_facet["f1"]["provider"] == "US Census"
@@ -1160,11 +1213,14 @@ def test_datacommons_two_facets_stay_distinct(monkeypatch):
     assert "params" not in seen
 
 
-def test_datacommons_missing_key_makes_no_call(monkeypatch):
+def test_datacommons_missing_key_makes_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_DATA_ENABLED", "true")
-    calls = []
-    monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: (calls.append(a), _Resp({}))[1])
+    calls: list[tuple[Any, ...]] = []
+    def _fail_post(*a: Any, **k: Any) -> _Resp:
+        calls.append(a)
+        return _Resp({})
+
+    monkeypatch.setattr(requests, "post", _fail_post)
     result = datacommons.get_macro_context(["geoId/06"], ["Count_Person"])
     assert result["status"] == "unavailable"
     assert result["error"] == "DATACOMMONS_AUTH_REQUIRED"
@@ -1174,12 +1230,12 @@ def test_datacommons_missing_key_makes_no_call(monkeypatch):
 
 # YouTube analytics (memory-only, thesis-bound) ---------------------------------
 
-def _yt_enable(monkeypatch):
+def _yt_enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_DATA_ENABLED", "true")
     monkeypatch.setenv("GOOGLE_CLOUD_API_KEY", "test-key")
 
 
-def _yt_thesis(tmp_path):
+def _yt_thesis(tmp_path: Path) -> Thesis:
     from app.thesis.repository import ThesisRepository
     repo = ThesisRepository(tmp_path / "thesis")
     return repo.create_thesis("NVDA demand stays strong", scope="NVDA", claims=["demand holds"])
@@ -1188,44 +1244,45 @@ def _yt_thesis(tmp_path):
 class _YtPipe:
     """Streaming HTTP fake: status_code + iter_content + close."""
 
-    def __init__(self, payload=None, status=200, raw=None):
+    def __init__(self, payload: Optional[dict[str, Any]] = None, status: int = 200, raw: Optional[bytes] = None) -> None:
         self.status_code = status
         self._raw = raw if raw is not None else json.dumps(
             payload if payload is not None else {}).encode()
         self.closed = False
 
-    def iter_content(self, chunk_size=65536):
+    def iter_content(self, chunk_size: int = 65536) -> Iterator[bytes]:
         for i in range(0, len(self._raw), chunk_size):
             yield self._raw[i:i + chunk_size]
 
-    def close(self):
+    def close(self) -> None:
         self.closed = True
 
 
-def _yt_search_item(video_id, title, channel, live="none"):
+def _yt_search_item(video_id: str, title: str, channel: str, live: str = "none") -> _Row:
     return {"id": {"videoId": video_id},
             "snippet": {"title": title, "channelId": "chan-" + video_id,
                         "channelTitle": channel, "publishedAt": "2026-01-01T00:00:00Z",
                         "liveBroadcastContent": live}}
 
 
-def _yt_chart_item(video_id, title, channel, live="none"):
+def _yt_chart_item(video_id: str, title: str, channel: str, live: str = "none") -> _Row:
     snip = _yt_search_item(video_id, title, channel, live)["snippet"]
     return {"id": video_id, "snippet": snip}
 
 
-def test_youtube_disabled_before_network_or_files(monkeypatch, tmp_path):
-    calls = []
+def test_youtube_disabled_before_network_or_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         calls.append(url)
         return _YtPipe()
 
     monkeypatch.setattr(requests, "get", _get)
     thesis = _yt_thesis(tmp_path)
     before = {p for p in tmp_path.rglob("*")}
-    for kwargs in ({"mode": "topic", "query": "nvda"},
-                   {"mode": "popular"}):
+    yt_cases: list[dict[str, Any]] = [{"mode": "topic", "query": "nvda"},
+                                        {"mode": "popular"}]
+    for kwargs in yt_cases:
         result = youtube.get_youtube_analytics(
             thesis_id=thesis.thesis_id, data_root=tmp_path, **kwargs)
         assert result == {"status": "disabled", "source": "youtube",
@@ -1239,7 +1296,7 @@ def test_youtube_disabled_before_network_or_files(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_youtube_topic_ok_preserves_order_and_counts(monkeypatch, tmp_path):
+def test_youtube_topic_ok_preserves_order_and_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from datetime import datetime, timedelta
     _yt_enable(monkeypatch)
     thesis = _yt_thesis(tmp_path)
@@ -1253,9 +1310,9 @@ def test_youtube_topic_ok_preserves_order_and_counts(monkeypatch, tmp_path):
         {"id": "vidA", "statistics": {"viewCount": "12", "likeCount": "3",
                                       "commentCount": "1"}},
     ]}
-    seen = {}
+    seen: dict[str, Any] = {}
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         params = kwargs.get("params", {})
         if "search" in url:
             seen["search"] = params
@@ -1272,23 +1329,29 @@ def test_youtube_topic_ok_preserves_order_and_counts(monkeypatch, tmp_path):
     assert result["order"] == "viewCount" and result["query"] == "nvda gpus"
     assert result["days"] == 7 and result["region"] == "US" and result["mode"] == "topic"
     assert result["thesis"] == {"thesis_id": thesis.thesis_id, "slug": thesis.slug}
-    assert [v["video_id"] for v in result["videos"]] == ["vidA", "vidB"]
-    assert result["videos"][1]["view_count"] == "9007199254740993"
-    assert result["videos"][1]["like_count"] is None
-    assert result["videos"][1]["live_broadcast_content"] == "live"
+    videos = result["videos"]
+    assert isinstance(videos, list)
+    assert [v["video_id"] for v in videos] == ["vidA", "vidB"]
+    assert videos[1]["view_count"] == "9007199254740993"
+    assert videos[1]["like_count"] is None
+    assert videos[1]["live_broadcast_content"] == "live"
     assert result["warnings"] == ["live_ordering"]
     assert seen["search"]["publishedAfter"] < seen["search"]["publishedBefore"]
-    retrieved = datetime.fromisoformat(result["retrieved_at"])
-    expires = datetime.fromisoformat(result["expires_at"])
+    retrieved_raw = result["retrieved_at"]
+    assert isinstance(retrieved_raw, str)
+    expires_raw = result["expires_at"]
+    assert isinstance(expires_raw, str)
+    retrieved = datetime.fromisoformat(retrieved_raw)
+    expires = datetime.fromisoformat(expires_raw)
     assert expires - retrieved == timedelta(minutes=15)
 
 
-def test_youtube_no_content_on_disk_and_expiry(monkeypatch, tmp_path):
+def test_youtube_no_content_on_disk_and_expiry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _yt_enable(monkeypatch)
     thesis = _yt_thesis(tmp_path)
     title, channel = "DISK-MARKER-TITLE-9Z3", "DISK-MARKER-CHANNEL-8Y2"
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         if "search" in url:
             return _YtPipe({"items": [_yt_search_item("v1", title, channel)]})
         return _YtPipe({"items": [{"id": "v1", "statistics": {"viewCount": "5"}}]})
@@ -1303,12 +1366,12 @@ def test_youtube_no_content_on_disk_and_expiry(monkeypatch, tmp_path):
     assert title not in blob and channel not in blob
 
 
-def test_youtube_popular_uses_chart_without_query(monkeypatch, tmp_path):
+def test_youtube_popular_uses_chart_without_query(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _yt_enable(monkeypatch)
     thesis = _yt_thesis(tmp_path)
-    seen = {}
+    seen: dict[str, Any] = {}
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         seen.update(kwargs.get("params", {}))
         return _YtPipe({"items": [_yt_chart_item("p1", "Pop Title", "Pop Chan")]})
 
@@ -1322,15 +1385,15 @@ def test_youtube_popular_uses_chart_without_query(monkeypatch, tmp_path):
     assert "q" not in seen and "publishedAfter" not in seen
 
 
-def test_youtube_legacy_cache_refuses_without_serving(monkeypatch, tmp_path):
+def test_youtube_legacy_cache_refuses_without_serving(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _yt_enable(monkeypatch)
     thesis = _yt_thesis(tmp_path)
     cache = tmp_path / "google_data" / "youtube_cache.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"seeded": "STALE-MARKER"}))
-    calls = []
+    calls: list[str] = []
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         calls.append(url)
         return _YtPipe()
 
@@ -1341,12 +1404,12 @@ def test_youtube_legacy_cache_refuses_without_serving(monkeypatch, tmp_path):
     assert calls == [] and "STALE-MARKER" not in json.dumps(result)
 
 
-def test_youtube_invalid_params_and_private_query_refuse(monkeypatch, tmp_path):
+def test_youtube_invalid_params_and_private_query_refuse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _yt_enable(monkeypatch)
     thesis = _yt_thesis(tmp_path)
-    calls = []
+    calls: list[str] = []
 
-    def _get(url, **kwargs):
+    def _get(url: str, **kwargs: Any) -> _YtPipe:
         calls.append(url)
         return _YtPipe()
 
@@ -1363,7 +1426,7 @@ def test_youtube_invalid_params_and_private_query_refuse(monkeypatch, tmp_path):
         {"query": "x", "days": 91},
     ]
     for extra in cases:
-        kwargs = {"thesis_id": thesis.thesis_id, "query": "x", "data_root": tmp_path}
+        kwargs: dict[str, Any] = {"thesis_id": thesis.thesis_id, "query": "x", "data_root": tmp_path}
         kwargs.update(extra)
         assert youtube.get_youtube_analytics(**kwargs)["error_type"] == "invalid_params"
     unknown = youtube.get_youtube_analytics(
@@ -1377,13 +1440,13 @@ def test_youtube_invalid_params_and_private_query_refuse(monkeypatch, tmp_path):
     assert not (tmp_path / "google_data" / "youtube_quota.json").exists()
 
 
-def test_youtube_quota_exhaustion_and_failed_request_accounting(monkeypatch, tmp_path):
+def test_youtube_quota_exhaustion_and_failed_request_accounting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _yt_enable(monkeypatch)
     monkeypatch.setenv("YOUTUBE_SEARCH_DAILY_LIMIT", "1")
     thesis = _yt_thesis(tmp_path)
-    calls: list = []
+    calls: list[str] = []
 
-    def _fail(url, **kwargs):
+    def _fail(url: str, **kwargs: Any) -> _YtPipe:
         calls.append(url)
         raise requests.ConnectionError("down")
 
@@ -1399,11 +1462,11 @@ def test_youtube_quota_exhaustion_and_failed_request_accounting(monkeypatch, tmp
 
 # BigQuery-backed context -------------------------------------------------------
 
-def test_patents_require_aliases_and_count_publications(monkeypatch):
+def test_patents_require_aliases_and_count_publications(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
-    calls: list = []
+    calls: list[tuple[str, _Params]] = []
 
-    def _run(template, params):
+    def _run(template: str, params: _Params) -> _Row:
         calls.append((template, params))
         return {"status": "ok", "rows": [{
             "publication_id": "US-1", "publication_date": "2024-05-01",
@@ -1416,7 +1479,9 @@ def test_patents_require_aliases_and_count_publications(monkeypatch):
     result = patents.search_company_patents(
         "Acme", assignees=["Acme Corp"], limit=5, executor=_run)
     assert result["status"] == "ok"
-    assert [p["publication_id"] for p in result["publications"]] == ["US-1"]
+    pubs = result["publications"]
+    assert isinstance(pubs, list)
+    assert [p["publication_id"] for p in pubs] == ["US-1"]
     assert "invention" not in json.dumps(result).lower()
     assert "start_yyyymmdd" in calls[0][1] and "end_yyyymmdd" in calls[0][1]
     assert calls[0][1]["end_yyyymmdd"] >= calls[0][1]["start_yyyymmdd"]
@@ -1427,7 +1492,7 @@ def test_patents_require_aliases_and_count_publications(monkeypatch):
     assert len(calls) == n_calls
 
 
-def test_geo_mismatch_is_explicit(monkeypatch):
+def test_geo_mismatch_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     empty = geo_context.get_geo_context(
         ["__not_a_geo__"], executor=lambda t, p: {"status": "ok", "rows": []})
@@ -1439,7 +1504,7 @@ def test_geo_mismatch_is_explicit(monkeypatch):
     assert bad_rows["error_type"] == "unsupported_join"
 
 
-def test_stackoverflow_stale_coverage(monkeypatch):
+def test_stackoverflow_stale_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     rows = [{"tag": "python", "period": "2020-01", "activity_count": 5},
             {"tag": "python", "period": "2021-01", "activity_count": 7}]
@@ -1451,50 +1516,69 @@ def test_stackoverflow_stale_coverage(monkeypatch):
 
 # Integration boundary ----------------------------------------------------------
 
-def test_tool_schemas_bounded():
+def test_tool_schemas_bounded() -> None:
     from app import tools as tools_mod
     from app.security.action_policy import TOOL_DOMAINS
     from app.security.context_gateway import TOOL_ENVELOPES
 
-    schemas = {t["function"]["name"]: t["function"] for t in tools_mod.TOOLS}
+    schemas: dict[str, dict[str, Any]] = {}
+    for tool in tools_mod.TOOLS:
+        function = tool.get("function")
+        assert isinstance(function, dict)
+        tool_name = function.get("name")
+        assert isinstance(tool_name, str)
+        schemas[tool_name] = function
+
+    def _required(key: str) -> Any:
+        params = schemas[key]["parameters"]
+        assert isinstance(params, dict)
+        return params["required"]
+
     expected_caps = {"find_alternative_signals": 100, "get_trend_evidence": 1000,
                      "investigate_social_arbitrage_candidate": 25,
                      "get_macro_context": 100, "search_company_patents": 20}
     for name, cap in expected_caps.items():
         params = schemas[name]["parameters"]
-        assert params["properties"]["limit"]["maximum"] == cap
+        assert isinstance(params, dict)
+        properties = params["properties"]
+        assert isinstance(properties, dict)
+        limit_spec = properties["limit"]
+        assert isinstance(limit_spec, dict)
+        assert limit_spec["maximum"] == cap
         assert tools_mod.TOOL_CAPABILITIES[name].name == "RESEARCH"
         assert TOOL_DOMAINS[name] == "financial_research"
         assert name in TOOL_ENVELOPES
-    assert set(schemas["investigate_social_arbitrage_candidate"]["parameters"]["required"]) == {"term"}
-    assert set(schemas["get_macro_context"]["parameters"]["required"]) == {"geos", "variables"}
-    assert schemas["search_company_patents"]["parameters"]["required"] == ["company_id", "assignees"]
+    assert set(_required("investigate_social_arbitrage_candidate")) == {"term"}
+    assert set(_required("get_macro_context")) == {"geos", "variables"}
+    assert _required("search_company_patents") == ["company_id", "assignees"]
 
 
-def test_handler_disabled_passthrough_makes_no_network_call():
+def test_handler_disabled_passthrough_makes_no_network_call() -> None:
     from app import tools as tools_mod
 
     handler = tools_mod._DIRECT_HANDLERS["get_trend_evidence"]
+    assert isinstance(handler, Callable)
     result = handler({"start_date": "2026-09-01", "end_date": "2026-09-02",
                       "geos": ["US"], "limit": 5}, "test-model")
     assert isinstance(result, dict)
     assert result["status"] == "disabled"
 
 
-def test_trend_evidence_term_passed_to_collect(monkeypatch, tmp_path):
+def test_trend_evidence_term_passed_to_collect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.google_data import trends as trends_mod
 
     payload = {"status": "ok", "observations": [{"term": "Stanley Cup"}],
                "rows": [{"term": "Stanley Cup"}], "count": 1}
-    seen = {}
+    seen: dict[str, Any] = {}
 
-    def _fake_collect(**kwargs):
+    def _fake_collect(**kwargs: Any) -> _Row:
         seen.update(kwargs)
         return payload
 
     monkeypatch.setattr(trends_mod, "collect_trends", _fake_collect)
     handler = tools_mod._DIRECT_HANDLERS["get_trend_evidence"]
+    assert isinstance(handler, Callable)
     result = handler({"start_date": "2026-09-01", "end_date": "2026-09-02",
                       "geos": ["US"], "limit": 10, "term": "Stanley"}, "test-model")
     assert seen.get("term") == "Stanley"
@@ -1502,14 +1586,15 @@ def test_trend_evidence_term_passed_to_collect(monkeypatch, tmp_path):
     assert result == payload
 
 
-def test_investigate_returns_evidence_and_gaps():
+def test_investigate_returns_evidence_and_gaps() -> None:
     from app import tools as tools_mod
 
     handler = tools_mod._DIRECT_HANDLERS["investigate_social_arbitrage_candidate"]
+    assert isinstance(handler, Callable)
     result = handler({"term": "Stanley"}, "test-model")
     assert result["term"] == "Stanley"
     assert "evidence" in result and "gaps" in result
-def test_investigate_never_embeds_youtube(monkeypatch, tmp_path):
+def test_investigate_never_embeds_youtube(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import hashlib
     import sqlite3
 
@@ -1519,14 +1604,15 @@ def test_investigate_never_embeds_youtube(monkeypatch, tmp_path):
     monkeypatch.setenv("GOOGLE_CLOUD_API_KEY", "yt-key")
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     marker = "YT-MARKER-7Q2-never-persist"
-    calls = []
+    calls: list[_Row] = []
 
-    def _fake_fetch(**kwargs):
+    def _fake_fetch(**kwargs: Any) -> _Row:
         calls.append(kwargs)
         return {"status": "ok", "videos": [{"title": marker}]}
 
     monkeypatch.setattr(youtube, "get_youtube_analytics", _fake_fetch)
     handler = tools_mod._DIRECT_HANDLERS["investigate_social_arbitrage_candidate"]
+    assert isinstance(handler, Callable)
     recorder = RunRecorder(
         run_id="r-yt", request_id="q-yt", question="stanley", as_of=None,
         model="t", provider="t", model_parameters={}, agent_version="t",
@@ -1552,7 +1638,7 @@ def test_investigate_never_embeds_youtube(monkeypatch, tmp_path):
     assert rows and all(marker not in (row[0] or "") for row in rows)
 
 
-def test_cli_google_data_parses_and_patents_needs_company(capsys):
+def test_cli_google_data_parses_and_patents_needs_company(capsys: pytest.CaptureFixture[str]) -> None:
     import argparse
 
     import cli
@@ -1572,7 +1658,7 @@ def test_cli_google_data_parses_and_patents_needs_company(capsys):
 
 # Live smoke (explicit markers only; offline suite skips) ----------------------
 
-def test_smoke_bigquery_trends_partition(monkeypatch, tmp_path):
+def test_smoke_bigquery_trends_partition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     if not os.environ.get("RUN_BIGQUERY_SMOKE"):
         pytest.skip("live validation unperformed (no RUN_BIGQUERY_SMOKE)")
     from datetime import date, timedelta
@@ -1587,7 +1673,7 @@ def test_smoke_bigquery_trends_partition(monkeypatch, tmp_path):
     assert result["status"] == "ok"
 
 
-def test_smoke_datacommons_california_population():
+def test_smoke_datacommons_california_population() -> None:
     if not os.environ.get("RUN_DATACOMMONS_SMOKE"):
         pytest.skip("live validation unperformed (no RUN_DATACOMMONS_SMOKE)")
     result = datacommons.get_macro_context(["geoId/06"], ["Count_Person"], limit=5)
@@ -1595,7 +1681,7 @@ def test_smoke_datacommons_california_population():
     assert result["series"], "expected at least one California population series"
 
 
-def test_smoke_youtube_search_and_statistics(monkeypatch, tmp_path):
+def test_smoke_youtube_search_and_statistics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     if not os.environ.get("RUN_YOUTUBE_SMOKE"):
         pytest.skip("live validation unperformed (no RUN_YOUTUBE_SMOKE)")
     monkeypatch.setenv("GOOGLE_DATA_ENABLED", "true")
@@ -1607,7 +1693,7 @@ def test_smoke_youtube_search_and_statistics(monkeypatch, tmp_path):
     assert result["videos"], "expected at least one video with batched statistics"
 
 
-def test_smoke_trends_api_pending():
+def test_smoke_trends_api_pending() -> None:
     if not os.environ.get("RUN_GOOGLE_TRENDS_API_SMOKE"):
         pytest.skip("live validation unperformed (no RUN_GOOGLE_TRENDS_API_SMOKE)")
     from app.google_data import trends_api
@@ -1620,7 +1706,7 @@ def test_smoke_trends_api_pending():
 
 # Executor contract fidelity --------------------------------------------------
 
-def test_render_filters_to_referenced_params_with_sdk_types():
+def test_render_filters_to_referenced_params_with_sdk_types() -> None:
     bq_sdk = pytest.importorskip("google.cloud.bigquery")
     spec = bq.TEMPLATES["trends_us_top"]
     sql, params = bq._render_sql(
@@ -1632,26 +1718,28 @@ def test_render_filters_to_referenced_params_with_sdk_types():
     assert "DATE(@start_date)" in sql and "CURRENT_DATE" not in sql
     assert set(params) == {"start_date", "end_date", "dmas", "all_dmas",
                            "week_start", "week_end"}
-    typed = {p.name: p for p in bq._query_parameters(bq_sdk, params)}
-    assert typed["dmas"].array_type == "STRING"
-    assert typed["start_date"].type_ == "STRING"
-    assert typed["all_dmas"].type_ == "BOOL"
+    typed: dict[str, Any] = {}
+    for p in bq._query_parameters(bq_sdk, params):
+        typed[str(getattr(p, "name"))] = p
+    assert getattr(typed["dmas"], "array_type") == "STRING"
+    assert getattr(typed["start_date"], "type_") == "STRING"
+    assert getattr(typed["all_dmas"], "type_") == "BOOL"
 
 
-def test_youtube_default_search_ceiling_is_80(monkeypatch):
+def test_youtube_default_search_ceiling_is_80(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import config as _config
     assert _config.get_youtube_search_daily_limit() == 80
     assert _config.get_bq_daily_bytes_limit() == 10737418240
     assert _config.get_bq_monthly_bytes_limit() == 536870912000
 
 
-def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
+def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     from app.storage import parquet as _pq
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
     weeks = [w1, w2, w3, w4]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         refresh = params["start_date"]
@@ -1660,7 +1748,7 @@ def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
                          rank=r, score=s)
                 for w, r, s in zip(weeks, [4, 3, 2, 1], scores)]
 
-    def _collect(refresh):
+    def _collect(refresh: str) -> _Row:
         return trends.collect_trends(
             start_date=refresh, end_date=refresh, geos=["New York"],
             limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
@@ -1688,8 +1776,8 @@ def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
                for r in feat_rows}
     assert len({json.dumps(v, sort_keys=True) for v in by_hash.values()}) == 2
 
-    def _by_period(as_of):
-        return {s["period"]: s for s in signals.query_signals(
+    def _by_period(as_of: Optional[str]) -> dict[str, _Row]:
+        return {str(s["period"]): s for s in signals.query_signals(
             data_root=tmp_path, as_of=as_of)
             if s.get("term") == "alpha" and s.get("geo") == "New York"}
     old, new = _by_period(kuts[0]), _by_period(kuts[1])
@@ -1717,12 +1805,12 @@ def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
     assert latest[w4]["feature_calculated_at"] is None
 
 
-def test_inputs_hash_includes_shared_period_coverage(monkeypatch, tmp_path):
+def test_inputs_hash_includes_shared_period_coverage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     from app.storage import parquet as _pq
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         refresh = params["start_date"]
@@ -1740,7 +1828,7 @@ def test_inputs_hash_includes_shared_period_coverage(monkeypatch, tmp_path):
                    for w, r, s in zip([w1, w2, w3, w4], [4, 3, 2, 1], [10, 20, 30, 50]))
         return out
 
-    def _collect(refresh):
+    def _collect(refresh: str) -> _Row:
         return trends.collect_trends(
             start_date=refresh, end_date=refresh, geos=["New York"],
             limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
@@ -1774,7 +1862,7 @@ def test_inputs_hash_includes_shared_period_coverage(monkeypatch, tmp_path):
     assert narrow[0]["persistence"] == 1 / 3
     assert expanded[0]["persistence"] == 1 / 4
 
-    def _alpha(as_of):
+    def _alpha(as_of: Optional[str]) -> _Row:
         rows = [s for s in signals.query_signals(data_root=tmp_path, as_of=as_of)
                 if s.get("term") == "alpha" and s.get("geo") == "New York" and s.get("period") == w4]
         assert len(rows) == 1
@@ -1785,16 +1873,16 @@ def test_inputs_hash_includes_shared_period_coverage(monkeypatch, tmp_path):
     assert _alpha(None)["features"] == expanded[0]
 
 
-def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
+def test_unscoped_reads_are_order_independent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
     weeks = [w1, w2, w3, w4]
 
-    def _rows(template, params):
+    def _rows(template: str, params: _Params) -> list[_Row]:
         if template != "trends_us_top":
             return []
         refresh = params["start_date"]
-        out = []
+        out: list[_Row] = []
         for dma, scores in (("New York", [10, 20, 30, 50]),
                             ("Los Angeles", [15, 25, 35, 55])):
             out.extend(_dma_row(dma, term="alpha", week=w, refresh=refresh,
@@ -1802,7 +1890,7 @@ def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
                        for w, r, s in zip(weeks, [4, 3, 2, 1], scores))
         return out
 
-    def _collect(root, geos):
+    def _collect(root: Path, geos: list[str]) -> None:
         result = trends.collect_trends(
             start_date="2026-09-02", end_date="2026-09-02", geos=geos,
             limit=20, data_root=root, week_start="2026-08-01", week_end="2026-08-31",
@@ -1810,18 +1898,22 @@ def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
                 refreshes=["2026-09-02"], rows_for=_rows, seen=[]))
         assert result["status"] == "ok"
 
-    def _scrubbed(root):
-        rows = []
+    def _scrubbed(root: Path) -> list[_Row]:
+        rows: list[_Row] = []
         for record in signals.query_signals(data_root=root):
             record = dict(record)
             for key in ("known_at", "retrieved_at", "feature_calculated_at"):
                 if key in record:
                     record[key] = ""
+            raw_scopes = record.get("available_feature_scopes")
+            assert isinstance(raw_scopes, list)
             record["available_feature_scopes"] = [
                 {**entry, "feature_calculated_at": ""}
-                for entry in (record.get("available_feature_scopes") or [])]
+                for entry in raw_scopes]
             rows.append(record)
-        rows.sort(key=lambda r: str(r.get("signal_id")))
+        def _sort_key(r: _Row) -> str:
+            return str(r.get("signal_id"))
+        rows.sort(key=_sort_key)
         return rows
 
     _collect(tmp_path / "a", ["New York"])
@@ -1847,6 +1939,8 @@ def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
         assert ny_filtered["features"] is None
         assert ny_unfiltered["features"] is None
         assert ny_filtered["available_feature_scopes"] == ny_unfiltered["available_feature_scopes"]
-        assert len(ny_filtered["available_feature_scopes"]) == 2
-        assert {tuple(sorted(e["feature_scope"]["geos"])) for e in ny_filtered["available_feature_scopes"]} == {
+        ny_scopes = ny_filtered["available_feature_scopes"]
+        assert isinstance(ny_scopes, list)
+        assert len(ny_scopes) == 2
+        assert {tuple(sorted(e["feature_scope"]["geos"])) for e in ny_scopes} == {
             ("New York",), ("Los Angeles", "New York")}

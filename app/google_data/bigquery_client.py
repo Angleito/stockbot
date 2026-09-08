@@ -8,6 +8,7 @@ ledger. No agent SQL, writes, exports, or Storage Read API.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import contextlib
 import hashlib
 try:
@@ -20,7 +21,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict, cast
 
 import requests  # already a direct dependency (requests==2.34.2)
 
@@ -233,6 +234,30 @@ class LedgerCorrupt(Exception):
     """Local BigQuery accounting state is unreadable; refusing to query."""
 
 
+class _JobEntry(TypedDict, total=False):
+    """One ledger job record: reservation ints stay ints, outcomes stay explicit."""
+    template: str
+    month: str
+    day: str
+    max_bytes: int
+    status: str
+    actual_bytes: int | None
+    source: str
+    dataset: str
+    table: str
+    executed_at: str
+    bytes_processed: int | None
+    cache_hit: bool
+    success: bool
+
+
+class _Ledger(TypedDict):
+    """Local accounting state: idempotent job records plus 3-bucket counters."""
+    jobs: dict[str, _JobEntry]
+    months: dict[str, int]
+    days: dict[str, int]
+
+
 def bq_enabled() -> bool:
     """True when the BigQuery source is configured (project + positive caps)."""
     return google_source_enabled("bigquery")
@@ -260,7 +285,7 @@ def _ledger_path(data_root: Any = None) -> Path:
     return base / "google_data" / "bq_ledger.json"
 
 
-def _load_ledger(path: Path) -> dict:
+def _load_ledger(path: Path) -> _Ledger:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -276,10 +301,11 @@ def _load_ledger(path: Path) -> dict:
     ):
         raise LedgerCorrupt(f"malformed ledger {path}: expected {{jobs, months}}")
     if "days" not in data:
-        data["days"] = {}
+        empty_days: dict[str, int] = {}
+        data["days"] = empty_days
     if not isinstance(data["days"], dict):
         raise LedgerCorrupt(f"malformed ledger {path}: expected days dict")
-    return data
+    return cast(_Ledger, data)
 
 
 class _LedgerBusy(Exception):
@@ -307,7 +333,7 @@ def _ledger_locked(data_root: Any = None):
         fh.close()
 
 
-def _prune_buckets(ledger: dict) -> None:
+def _prune_buckets(ledger: _Ledger) -> None:
     """Keep only the 3 most recent month/day counters; job records are retained."""
     for key in ("months", "days"):
         buckets = ledger.get(key)
@@ -316,7 +342,7 @@ def _prune_buckets(ledger: dict) -> None:
                 del buckets[old]
 
 
-def _save_ledger(path: Path, ledger: dict) -> None:
+def _save_ledger(path: Path, ledger: _Ledger) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".bq_ledger", suffix=".tmp")
     try:
@@ -331,13 +357,13 @@ def _save_ledger(path: Path, ledger: dict) -> None:
         raise
 
 
-def _job_id(template: str, params: dict) -> str:
+def _job_id(template: str, params: dict[str, object]) -> str:
     canonical = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(f"{template}:{canonical}".encode("utf-8")).hexdigest()
 
 
-def _err(message: str, error_type: str, **extra: Any) -> dict:
-    out = {"error": message, "error_type": error_type, "source": SOURCE}
+def _err(message: str, error_type: str, **extra: Any) -> dict[str, object]:
+    out: dict[str, object] = {"error": message, "error_type": error_type, "source": SOURCE}
     out.update(extra)
     return out
 
@@ -398,9 +424,10 @@ _QUERY_PARAM_RE = re.compile(r"@(\w+)")
 _IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
-def _resolve_table(spec: dict, params: dict) -> str:
+def _resolve_table(spec: dict[str, object], params: dict[str, object]) -> str:
     """Effective table: census suffix interpolation, per-shard table, or checked-in table."""
-    sql = spec.get("sql", "")
+    sql_obj = spec.get("sql", "")
+    sql = sql_obj if isinstance(sql_obj, str) else ""
     if "{table_suffix}" in sql:
         suffix = params.get("table_suffix", "county_2020_5yr")
         if suffix not in _ACS_SUFFIXES:
@@ -409,33 +436,41 @@ def _resolve_table(spec: dict, params: dict) -> str:
         return f"bigquery-public-data.census_bureau_acs.{suffix}"
     if spec.get("table_from_params"):
         table = params.get("table", "")
-        if not _table_allowed(table):
+        if not isinstance(table, str) or not _table_allowed(table):
             raise ValueError(f"unknown table: {table!r}")
         return table
-    return spec.get("table") or ""
+    table_obj = spec.get("table")
+    return table_obj if isinstance(table_obj, str) else ""
 
 
-def _render_sql(spec: dict, params: dict, table: str) -> tuple[str, dict]:
+def _render_sql(spec: dict[str, object], params: dict[str, object], table: str) -> tuple[str, dict[str, object]]:
     """Fill {limit}/{table}/{table_suffix}/{columns}; pass only @-referenced params."""
-    sql_template = spec.get("sql", "")
+    sql_obj = spec.get("sql", "")
+    sql_template = sql_obj if isinstance(sql_obj, str) else ""
     fmt: dict[str, Any] = {"limit": params["limit"], "table": table}
     if "{table_suffix}" in sql_template:
         fmt["table_suffix"] = table.rsplit(".", 1)[-1]
     if "{columns}" in sql_template:
-        cols = params.get("columns", ["total_pop"])
-        cols = [cols] if isinstance(cols, str) else list(cols)
+        cols_raw = params.get("columns", ["total_pop"])
+        if isinstance(cols_raw, str):
+            cols = [cols_raw]
+        elif isinstance(cols_raw, (list, tuple)):
+            cols = list(cols_raw)
+        else:
+            raise ValueError(
+                f"unknown census columns: {cols_raw!r} (available: {sorted(_ACS_COLUMNS)})")
         bad = [c for c in cols if not _IDENT_RE.match(str(c)) or c not in _ACS_COLUMNS]
         if not cols or bad:
             raise ValueError(
                 f"unknown census columns: {(bad or cols)!r} (available: {sorted(_ACS_COLUMNS)})")
-        fmt["columns"] = ", ".join(cols)
+        fmt["columns"] = ", ".join(str(c) for c in cols)
     sql = sql_template.format(**fmt)
     names = set(_QUERY_PARAM_RE.findall(sql))
     return sql, {k: v for k, v in params.items() if k in names}
 
 
-def _query_parameters(bq: Any, params: dict) -> list:
-    out = []
+def _query_parameters(bq: Any, params: dict[str, object]) -> list[object]:
+    out: list[object] = []
     for key, value in params.items():
         if isinstance(value, bool):
             out.append(bq.ScalarQueryParameter(key, "BOOL", value))
@@ -450,7 +485,7 @@ def _query_parameters(bq: Any, params: dict) -> list:
     return out
 
 
-def _real_dry_run(client: Any, sql: str, params: dict, cap: int) -> int:
+def _real_dry_run(client: Any, sql: str, params: dict[str, object], cap: int) -> int:
     from google.cloud import bigquery as _bq
 
     job_config = _bq.QueryJobConfig(
@@ -463,8 +498,8 @@ def _real_dry_run(client: Any, sql: str, params: dict, cap: int) -> int:
 
 
 def _real_submit(
-    client: Any, sql: str, params: dict, cap: int, job_id: str, max_rows: int
-) -> dict:
+    client: Any, sql: str, params: dict[str, object], cap: int, job_id: str, max_rows: int
+) -> dict[str, object]:
     from google.cloud import bigquery as _bq
 
     job_config = _bq.QueryJobConfig(
@@ -485,8 +520,9 @@ def _real_submit(
 
 
 def submit_template(
-    template: str, params: dict, client_factory=None, data_root=None
-) -> dict:
+    template: str, params: dict[str, object], client_factory: Callable[[], Any] | None = None,
+    data_root: Path | None = None,
+) -> dict[str, object]:
     """Run one checked-in template; bounded, ledger-backed, billing-gated.
 
     Fake seam (no network): client_factory() -> object with
@@ -521,7 +557,12 @@ def submit_template(
     if per_query_cap <= 0 or monthly_limit <= 0 or daily_limit <= 0:
         return _err("non-positive BigQuery byte limit", "cost_limit_exceeded")
     try:
-        limit = int(params.get("limit", spec["max_rows"]))
+        raw_limit = params.get("limit", spec["max_rows"])
+        limit = (
+            int(raw_limit)
+            if isinstance(raw_limit, (int, str, float))
+            else spec["max_rows"]
+        )
     except (TypeError, ValueError):
         limit = spec["max_rows"]
     params["limit"] = max(1, min(limit, spec["max_rows"]))
@@ -591,7 +632,10 @@ def submit_template(
                 "cost_limit_exceeded",
             )
         pending_resume = isinstance(existing, dict) and existing.get("status") == "pending"
-        reserve = max(estimate, int(existing.get("max_bytes", estimate))) if pending_resume else estimate
+        if pending_resume and isinstance(existing, dict):
+            reserve = max(estimate, int(existing.get("max_bytes", estimate)))
+        else:
+            reserve = estimate
         if not pending_resume:
             if months.get(month, 0) + reserve > monthly_limit:
                 return _err(
@@ -641,7 +685,10 @@ def submit_template(
         day_key = entry.get("day", day)
         if state == "DONE":
             try:
-                actual = int(result.get("total_bytes_billed", entry["max_bytes"]))
+                billed_raw = result.get("total_bytes_billed", entry["max_bytes"])
+                if not isinstance(billed_raw, (int, str, float)):
+                    raise ValueError(f"non-numeric bytes billed: {billed_raw!r}")
+                actual = int(billed_raw)
             except (TypeError, ValueError):
                 actual = entry["max_bytes"]
             entry["status"] = "done"

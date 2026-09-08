@@ -16,6 +16,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from typing import cast
 
 import requests
 
@@ -26,6 +27,7 @@ from ..config import (
     google_data_enabled,
 )
 from ..security.action_policy import private_pattern_hit
+from ..thesis.models import Thesis
 from ..thesis.repository import ThesisRepository
 
 try:
@@ -65,11 +67,11 @@ class _QuotaRefused(Exception):
         self.code = code
 
 
-def _disabled(reason: str) -> dict:
+def _disabled(reason: str) -> dict[str, object]:
     return {"status": "disabled", "source": SOURCE, "reason": reason}
 
 
-def _unavailable(code: str) -> dict:
+def _unavailable(code: str) -> dict[str, object]:
     return {"status": "unavailable", "source": SOURCE, "error_type": code, "error": code}
 
 
@@ -106,7 +108,7 @@ def _pacific_today() -> str:
     return datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
 
 
-def _store_ledger(path: Path, days: dict) -> None:
+def _store_ledger(path: Path, days: dict[str, object]) -> None:
     payload = {"version": 2, "days": days}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +124,7 @@ def _store_ledger(path: Path, days: dict) -> None:
         raise _QuotaRefused("quota_state_invalid")
 
 
-def _validate_days(days: dict) -> dict:
+def _validate_days(days: dict[str, object]) -> dict[str, object]:
     for day, bucket in days.items():
         if not isinstance(day, str):
             raise _QuotaRefused("quota_state_invalid")
@@ -134,7 +136,7 @@ def _validate_days(days: dict) -> dict:
             raise _QuotaRefused("quota_state_invalid")
         for key in ("search", "videos"):
             used = bucket.get(key)
-            if not _is_int(used) or used < 0:
+            if not isinstance(used, int) or isinstance(used, bool) or used < 0:
                 raise _QuotaRefused("quota_state_invalid")
     return days
 
@@ -168,7 +170,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
             except (ValueError, OSError):
                 raise _QuotaRefused("quota_state_invalid") from None
             if raw is None:
-                days: dict = {}
+                days: dict[str, object] = {}
             elif isinstance(raw, dict) and raw.get("version") == 2:
                 daymap = raw.get("days")
                 if not isinstance(daymap, dict):
@@ -192,7 +194,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
             for old in sorted(days)[:-3]:
                 del days[old]
             bucket = days.get(today)
-            if bucket is None:
+            if not isinstance(bucket, dict):
                 bucket = {"search": 0, "videos": 0}
                 days[today] = bucket
             if bucket[kind] >= ceiling:
@@ -204,7 +206,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def _http_get(url: str, params: dict) -> tuple[dict | None, str | None]:
+def _http_get(url: str, params: dict[str, str | int]) -> tuple[dict[str, object] | None, str | None]:
     """Bounded GET returning (body, error_code); never raises, never logs."""
     try:
         resp = requests.get(url, params=params, timeout=_TIMEOUT,
@@ -238,7 +240,7 @@ def _http_get(url: str, params: dict) -> tuple[dict | None, str | None]:
             resp.close()
 
 
-def _snippet_row(video_id: str, snip: dict) -> dict:
+def _snippet_row(video_id: str, snip: dict[str, object]) -> dict[str, object]:
     title = snip.get("title")
     channel_id = snip.get("channelId")
     channel_title = snip.get("channelTitle")
@@ -261,7 +263,7 @@ def _snippet_row(video_id: str, snip: dict) -> dict:
     }
 
 
-def _parse_search_item(item: dict) -> dict:
+def _parse_search_item(item: dict[str, object]) -> dict[str, object]:
     if not isinstance(item, dict):
         raise _Malformed("item")
     ident = item.get("id")
@@ -272,7 +274,7 @@ def _parse_search_item(item: dict) -> dict:
     return _snippet_row(video_id, snip)
 
 
-def _parse_chart_item(entry: dict) -> dict:
+def _parse_chart_item(entry: dict[str, object]) -> dict[str, object]:
     if not isinstance(entry, dict):
         raise _Malformed("item")
     video_id = entry.get("id")
@@ -291,7 +293,7 @@ def _parse_chart_item(entry: dict) -> dict:
     return row
 
 
-def _apply_details(rows: list, body: dict) -> str | None:
+def _apply_details(rows: list[dict[str, object]], body: dict[str, object]) -> str | None:
     """Merge videos.list into search rows; returns a warning code or None."""
     items = body.get("items")
     if not isinstance(items, list):
@@ -300,7 +302,7 @@ def _apply_details(rows: list, body: dict) -> str | None:
              if isinstance(e, dict) and isinstance(e.get("id"), str)}
     missing = False
     for row in rows:
-        entry = by_id.get(row["video_id"])
+        entry = by_id.get(cast(str, row["video_id"]))
         if entry is None:
             missing = True
             continue
@@ -320,8 +322,9 @@ def _apply_details(rows: list, body: dict) -> str | None:
     return "details_missing" if missing else None
 
 
-def _success(thesis, mode: str, query, region: str, days, order: str,
-             videos: list, warnings: set) -> dict:
+def _success(thesis: Thesis, mode: str, query: str | None, region: str, days: int | None,
+             order: str, videos: list[dict[str, object]],
+             warnings: set[str]) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     return {
         "status": "partial" if warnings - {"live_ordering"} else "ok",
@@ -336,11 +339,11 @@ def _success(thesis, mode: str, query, region: str, days, order: str,
     }
 
 
-def _topic(root: Path, thesis, query: str, region: str, days: int,
-           limit: int, key: str, search_ceiling: int) -> dict:
+def _topic(root: Path, thesis: Thesis, query: str, region: str, days: int,
+           limit: int, key: str, search_ceiling: int) -> dict[str, object]:
     _reserve(root, "search", search_ceiling)
     now = datetime.now(timezone.utc)
-    params = {
+    params: dict[str, str | int] = {
         "part": "snippet", "type": "video", "q": query, "order": "viewCount",
         "regionCode": region,
         "publishedAfter": (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -352,6 +355,8 @@ def _topic(root: Path, thesis, query: str, region: str, days: int,
     body, err = _http_get(_SEARCH_URL, params)
     if err:
         return _unavailable(err)
+    if body is None:
+        return _unavailable("source_unavailable")
     items = body.get("items")
     if not isinstance(items, list):
         return _unavailable("malformed_response")
@@ -361,12 +366,12 @@ def _topic(root: Path, thesis, query: str, region: str, days: int,
         rows = [_parse_search_item(item) for item in items]
     except _Malformed:
         return _unavailable("malformed_response")
-    warnings: set = set()
+    warnings: set[str] = set()
     if rows:
         _reserve(root, "videos", _VIDEOS_BUCKET)
         dbody, derr = _http_get(_VIDEOS_URL, {
             "part": "snippet,statistics",
-            "id": ",".join(r["video_id"] for r in rows),
+            "id": ",".join(str(r["video_id"]) for r in rows),
             "key": key,
             "fields": ("items(id,snippet(title,channelId,channelTitle,"
                        "publishedAt,liveBroadcastContent),"
@@ -383,7 +388,7 @@ def _topic(root: Path, thesis, query: str, region: str, days: int,
     return _success(thesis, "topic", query, region, days, "viewCount", rows, warnings)
 
 
-def _popular(root: Path, thesis, region: str, limit: int, key: str) -> dict:
+def _popular(root: Path, thesis: Thesis, region: str, limit: int, key: str) -> dict[str, object]:
     _reserve(root, "videos", _VIDEOS_BUCKET)
     body, err = _http_get(_VIDEOS_URL, {
         "part": "snippet,statistics", "chart": "mostPopular",
@@ -394,6 +399,8 @@ def _popular(root: Path, thesis, region: str, limit: int, key: str) -> dict:
     })
     if err:
         return _unavailable(err)
+    if body is None:
+        return _unavailable("source_unavailable")
     items = body.get("items")
     if not isinstance(items, list):
         return _unavailable("malformed_response")
@@ -401,16 +408,16 @@ def _popular(root: Path, thesis, region: str, limit: int, key: str) -> dict:
         rows = [_parse_chart_item(entry) for entry in items]
     except _Malformed:
         return _unavailable("malformed_response")
-    warnings: set = set()
+    warnings: set[str] = set()
     if any(r["live_broadcast_content"] in ("live", "upcoming") for r in rows):
         warnings.add("live_ordering")
     return _success(thesis, "popular", None, region, None, "mostPopular", rows, warnings)
 
 
-def get_youtube_analytics(*, thesis_id: str, mode: str = "topic",
-                          query: str | None = None, region: str = "US",
-                          days: int = 30, limit: int = 10,
-                          data_root=None) -> dict:
+def get_youtube_analytics(*, thesis_id: str, mode: str | None = "topic",
+                          query: str | None = None, region: str | None = "US",
+                          days: int | None = 30, limit: int | None = 10,
+                          data_root: Path | str | None = None) -> dict[str, object]:
     """Thesis-labelled attention metrics; memory-only, fixed-shape errors."""
     if mode is None:
         mode = "topic"
@@ -448,7 +455,8 @@ def get_youtube_analytics(*, thesis_id: str, mode: str = "topic",
         query, days = None, None
     if not google_data_enabled():
         return _disabled("google_disabled")
-    if not get_google_cloud_api_key():
+    key = get_google_cloud_api_key()
+    if not key:
         return _disabled("missing_key")
     try:
         configured = get_youtube_search_daily_limit()
@@ -461,8 +469,11 @@ def get_youtube_analytics(*, thesis_id: str, mode: str = "topic",
         thesis = ThesisRepository(root / "thesis").load_thesis(thesis_id)
     except Exception:
         return _unavailable("invalid_thesis")
-    if mode == "topic" and private_pattern_hit(query):
-        return _unavailable("private_args_denied")
+    if mode == "topic":
+        if query is None or days is None:
+            return _unavailable("invalid_params")
+        if private_pattern_hit(query):
+            return _unavailable("private_args_denied")
     gdir = root / _DIRNAME
     for name in (_CACHE_NAME, _CACHE_NAME + ".tmp"):
         probe = gdir / name
@@ -470,14 +481,16 @@ def get_youtube_analytics(*, thesis_id: str, mode: str = "topic",
             return _unavailable("legacy_cache_present")
     try:
         if mode == "topic":
+            if query is None or days is None:
+                return _unavailable("invalid_params")
             return _topic(root, thesis, query, region, days, limit,
-                          get_google_cloud_api_key(), min(configured, _SEARCH_BUCKET))
-        return _popular(root, thesis, region, limit, get_google_cloud_api_key())
+                          key, min(configured, _SEARCH_BUCKET))
+        return _popular(root, thesis, region, limit, key)
     except _QuotaRefused as refused:
         return _unavailable(refused.code)
 
 
-def _emit(response: dict) -> None:
+def _emit(response: dict[str, object]) -> None:
     try:
         out = json.dumps(response).encode("utf-8")
     except (TypeError, ValueError):
@@ -488,7 +501,7 @@ def _emit(response: dict) -> None:
     sys.stdout.buffer.flush()
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Private one-shot worker: one bounded JSON on stdin, one on stdout."""
     try:
         raw = sys.stdin.buffer.read(_STDIN_MAX + 1)

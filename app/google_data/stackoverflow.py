@@ -11,6 +11,10 @@ safeguard.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol, cast
+
 import os
 from datetime import date, datetime, timezone
 
@@ -28,6 +32,13 @@ _MAX_LIMIT = 100
 _STALE_LAG_DAYS = 90
 _EPOCH_START = "2008-01-01"
 
+class _Submitter(Protocol):
+    """Anything submit_template-compatible: the real client or a test double."""
+    def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
+
+
+_Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
+
 
 def _data_enabled() -> bool:
     fn = getattr(_config, "google_data_enabled", None)
@@ -39,7 +50,7 @@ def _data_enabled() -> bool:
     return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 
-def _setting(fn_name: str, env_name: str, default=None):
+def _setting(fn_name: str, env_name: str, default: object = None) -> object:
     fn = getattr(_config, fn_name, None)
     if callable(fn):
         try:
@@ -52,7 +63,8 @@ def _setting(fn_name: str, env_name: str, default=None):
     return value or default
 
 
-def _submit(template: str, params: dict, executor, data_root) -> dict:
+def _submit(template: str, params: dict[str, object], executor: _Executor | None,
+            data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
             try:
@@ -85,8 +97,10 @@ _UNAVAILABLE = frozenset({"billing_enabled", "billing_unknown", "cost_limit_exce
                           "source_unavailable", "ledger_corrupt"})
 
 
-def get_tag_activity(tags, *, start_date=None, end_date=None, limit=100,
-                     executor=None, data_root=None) -> dict:
+def get_tag_activity(tags: list[str] | str | None, *, start_date: str | None = None,
+                     end_date: str | None = None, limit: int = 100,
+                     executor: _Executor | None = None,
+                     data_root: Path | None = None) -> dict[str, object]:
     """Observed tag activity per tag/period with last-covered date."""
     if isinstance(tags, str):
         tags = [tags]
@@ -112,13 +126,15 @@ def get_tag_activity(tags, *, start_date=None, end_date=None, limit=100,
     if not isinstance(result, dict) or "error" in result:
         if isinstance(result, dict) and "status" in result:
             return result
-        out = dict(result) if isinstance(result, dict) else {"error": "bad executor result"}
+        out: dict[str, object] = (dict(result) if isinstance(result, dict)
+                                  else {"error": "bad executor result"})
         out["status"] = "unavailable" if out.get("error_type") in _UNAVAILABLE else "error"
         out["engine"] = out.get("source", "bigquery")
         out["source"] = SOURCE
         return out
-    activity = []
-    for row in (result.get("rows", []) or [])[:limit]:
+    activity: list[dict[str, object]] = []
+    rows = cast(list[object], result.get("rows", []) or [])
+    for row in rows[:limit]:
         if not isinstance(row, dict):
             continue
         questions = row.get("question_count", row.get("count"))
@@ -133,7 +149,7 @@ def get_tag_activity(tags, *, start_date=None, end_date=None, limit=100,
         })
     periods = sorted({str(a["period"]) for a in activity if a.get("period")})
     last_covered = periods[-1] if periods else result.get("last_covered")
-    warnings = []
+    warnings: list[str] = []
     if last_covered:
         try:
             lag = (date.fromisoformat(str(end_date)[:10])

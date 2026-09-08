@@ -1778,7 +1778,7 @@ def suggest_public_search_queries(
     return plan_public_search_queries(primary_name, primary_ticker, related)
 
 
-def _google_soft(result: dict) -> dict:
+def _google_soft(result: dict[str, object]) -> dict[str, object]:
     """Collector passthrough: error dicts get soft:true like _search_web."""
     if isinstance(result, dict) and "error" in result and "soft" not in result:
         result = dict(result)
@@ -1786,75 +1786,105 @@ def _google_soft(result: dict) -> dict:
     return result
 
 
-def _google_import_error(source: str, exc: Exception) -> dict:
+def _google_import_error(source: str, exc: Exception) -> dict[str, object]:
     return {"status": "unavailable", "source": source, "soft": True,
             "error": f"Google data unavailable: {exc}", "error_type": "source_unavailable"}
 
 
-def _find_alternative_signals(args: dict, model: str) -> dict:
+def _arg_str(args: dict[str, object], key: str) -> str | None:
+    """JSON-boundary narrow: schema strings only, None otherwise."""
+    raw = args.get(key)
+    return raw if isinstance(raw, str) else None
+
+
+def _arg_str_list(args: dict[str, object], key: str) -> list[str]:
+    raw = args.get(key)
+    if isinstance(raw, list):
+        return [v for v in raw if isinstance(v, str)]
+    return []
+
+
+def _arg_int(args: dict[str, object], key: str, default: int) -> int:
+    raw = args.get(key, default)
+    return int(raw) if isinstance(raw, (int, str)) else default
+
+
+def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, object]:
     """Local collected candidates only; disabled without credentials, never raises."""
     try:
         from .google_data import signals as _signals
     except Exception as exc:
         return _google_import_error("google", exc)
     try:
-        limit = args.get("limit", 20)
+        limit = _arg_int(args, "limit", 20)
         rows = _signals.query_signals(
-            query=args.get("query"), geo=args.get("geo"), as_of=args.get("as_of"),
+            query=_arg_str(args, "query"), geo=_arg_str(args, "geo"), as_of=_arg_str(args, "as_of"),
             limit=limit, data_root=get_data_root(),
         )
         try:
-            capped = len(rows) >= max(1, int(limit))
+            capped = len(rows) >= max(1, limit)
         except (TypeError, ValueError):
             capped = False
         return {"status": "ok", "source": "google", "signals": rows,
                 "count": len(rows),
-                "coverage": {"query": args.get("query"), "geo": args.get("geo"),
-                             "as_of": args.get("as_of")},
+                "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"),
+                             "as_of": _arg_str(args, "as_of")},
                 "warnings": [], "continuation": capped}
     except Exception as exc:
         logger.exception("find_alternative_signals failed")
         return {"error": f"Tool 'find_alternative_signals' failed: {exc}", "soft": True, "source": "google"}
 
 
-def _get_trend_evidence(args: dict, model: str) -> dict:
+def _get_trend_evidence(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import trends as _trends
     except Exception as exc:
         return _google_import_error("trends", exc)
     try:
-        geos = args.get("geos") or ([args["geo"]] if args.get("geo") else ["US"])
-        start_date, end_date = args.get("start_date"), args.get("end_date")
+        geo = _arg_str(args, "geo")
+        raw_geos = args.get("geos")
+        str_geos: list[str] = [g for g in raw_geos if isinstance(g, str)] if isinstance(raw_geos, list) else []
+        geos = str_geos or ([geo] if geo else ["US"])
+        start_date = _arg_str(args, "start_date")
+        end_date = _arg_str(args, "end_date")
         if start_date is None and end_date is None:
             _today = datetime.now(timezone.utc).date()
             end_date = _today.isoformat()
             start_date = (_today - timedelta(days=6)).isoformat()
         result = _google_soft(_trends.collect_trends(
             start_date=start_date, end_date=end_date,
-            geos=list(geos), limit=args.get("limit", 100),
+            geos=list(geos), limit=_arg_int(args, "limit", 100),
             data_root=get_data_root(),
-            week_start=args.get("week_start"), week_end=args.get("week_end"),
-            term=args.get("term"),
+            week_start=_arg_str(args, "week_start"), week_end=_arg_str(args, "week_end"),
+            term=_arg_str(args, "term"),
         ))
         return result
+
+
     except Exception as exc:
         logger.exception("get_trend_evidence failed")
         return {"error": f"Tool 'get_trend_evidence' failed: {exc}", "soft": True, "source": "trends"}
 
 
-def _investigate_social_arbitrage_candidate(args: dict, model: str) -> dict:
+def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str) -> dict[str, object]:
     """Evidence + gaps for one term; corroboration capped, causality never claimed."""
-    term = args.get("term", "")
-    geo = args.get("geo") or "US"
-    per_source = min(max(int(args.get("limit", 5)), 1), 25)
-    result: dict = {"term": term, "geo": geo, "source": "google",
-                     "status": "ok", "evidence": {}, "entities": {"confirmed": [], "unresolved": []}, "gaps": []}
+    term_raw = args.get("term", "")
+    term = term_raw if isinstance(term_raw, str) else str(term_raw or "")
+    geo = _arg_str(args, "geo") or "US"
+    per_source = min(max(_arg_int(args, "limit", 5), 1), 25)
+    evidence: dict[str, object] = {}
+    confirmed: list[object] = []
+    unresolved: list[object] = []
+    gaps: list[str] = []
+    result: dict[str, object] = {"term": term, "geo": geo, "source": "google",
+                     "status": "ok", "evidence": evidence,
+                     "entities": {"confirmed": confirmed, "unresolved": unresolved}, "gaps": gaps}
     try:
         from .google_data import signals as _signals
-        result["evidence"]["signals"] = _signals.query_signals(
+        evidence["signals"] = _signals.query_signals(
             query=term, geo=geo, limit=per_source, data_root=get_data_root())
     except Exception as exc:
-        result["gaps"].append(f"signals unavailable: {exc}")
+        gaps.append(f"signals unavailable: {exc}")
     try:
         from datetime import datetime, timezone
         from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
@@ -1867,53 +1897,58 @@ def _investigate_social_arbitrage_candidate(args: dict, model: str) -> dict:
                      "cik": cik,
                      "verification_status": getattr(ent, "verification_status", None)}
             if getattr(ent, "verification_status", None) == "verified" and cik:
-                result["entities"]["confirmed"].append(entry)
+                confirmed.append(entry)
             else:
-                result["entities"]["unresolved"].append(entry)
+                unresolved.append(entry)
         as_of = datetime.now(timezone.utc)
-        resolution = _resolve_alias(str(term).upper(),
-                                    _alias_cands(str(term).upper(), as_of, get_data_root()),
+        resolution = _resolve_alias(term.upper(),
+                                    _alias_cands(term.upper(), as_of, get_data_root()),
                                     as_of=as_of)
         if resolution.resolved:
-            result["entities"]["confirmed"].append(
-                {"ticker": str(term).upper(), "entity_id": resolution.entity_id,
+            confirmed.append(
+                {"ticker": term.upper(), "entity_id": resolution.entity_id,
                  "security_id": resolution.security_id, "via": "ticker_alias"})
-        elif not result["entities"]["confirmed"] and not result["entities"]["unresolved"]:
-            result["entities"]["unresolved"].append({"ticker": str(term).upper(), "reason": "unresolved"})
+        elif not confirmed and not unresolved:
+            unresolved.append({"ticker": term.upper(), "reason": "unresolved"})
     except Exception as exc:
-        result["gaps"].append(f"entity resolution unavailable: {exc}")
+        gaps.append(f"entity resolution unavailable: {exc}")
     # ponytail: no YouTube imports/calls/data here — evidence table has no expiry, so API content must not enter tool results
-    result["gaps"].append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
-    if len(result["gaps"]) >= 3 and not result["evidence"]:
-        result.update({"status": "unavailable", "soft": True, "error": "; ".join(result["gaps"])})
+    gaps.append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
+    if len(gaps) >= 3 and not evidence:
+        result.update({"status": "unavailable", "soft": True, "error": "; ".join(gaps)})
     return result
 
 
-def _get_macro_context(args: dict, model: str) -> dict:
+def _get_macro_context(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import datacommons as _dc
     except Exception as exc:
         return _google_import_error("datacommons", exc)
     try:
         return _google_soft(_dc.get_macro_context(
-            args.get("geos", []), args.get("variables", []),
-            start_date=args.get("start_date"), end_date=args.get("end_date"),
-            limit=args.get("limit", 100),
+            _arg_str_list(args, "geos"), _arg_str_list(args, "variables"),
+            start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
+            limit=_arg_int(args, "limit", 100),
         ))
     except Exception as exc:
         logger.exception("get_macro_context failed")
         return {"error": f"Tool 'get_macro_context' failed: {exc}", "soft": True, "source": "datacommons"}
 
 
-def _search_company_patents(args: dict, model: str) -> dict:
+def _search_company_patents(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import patents as _patents
     except Exception as exc:
         return _google_import_error("patents", exc)
     try:
+        company_id = args["company_id"]
+        if not isinstance(company_id, str) or not company_id:
+            raise TypeError(f"company_id must be a non-empty string, got {type(company_id).__name__}")
+        assignees_raw = args.get("assignees")
+        assignees = [a for a in assignees_raw if isinstance(a, str)] if isinstance(assignees_raw, list) else None
         return _google_soft(_patents.search_company_patents(
-            args["company_id"], start_date=args.get("start_date"), end_date=args.get("end_date"),
-            limit=args.get("limit", 20), assignees=args.get("assignees"),
+            company_id, start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
+            limit=_arg_int(args, "limit", 20), assignees=assignees,
         ))
     except Exception as exc:
         logger.exception("search_company_patents failed")

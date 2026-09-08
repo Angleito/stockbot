@@ -58,14 +58,14 @@ def _dc_key() -> str | None:
     return (os.getenv("DATACOMMONS_API_KEY") or "").strip() or None
 
 
-def _key_headers() -> dict | None:
+def _key_headers() -> dict[str, str] | None:
     key = _dc_key()
     if not key:
         return None
     return {"X-API-Key": key}
 
 
-def _map_http_error(exc: Exception) -> dict:
+def _map_http_error(exc: Exception) -> dict[str, object]:
     if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
         return {"status": "unavailable", "source": SOURCE,
                 "error": f"data commons unreachable: {exc}",
@@ -74,7 +74,7 @@ def _map_http_error(exc: Exception) -> dict:
             "error": f"data commons request failed: {exc}", "error_type": "request_failed"}
 
 
-def _map_status(response) -> dict | None:
+def _map_status(response: requests.Response) -> dict[str, object] | None:
     code = response.status_code
     if code in (401, 403):
         return {"status": "unavailable", "source": SOURCE,
@@ -91,7 +91,14 @@ def _map_status(response) -> dict | None:
     return None
 
 
-def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=100) -> dict:
+def _obs_date(point: dict[str, object]) -> str:
+    """Sort key for observation points: ISO date string, never missing here."""
+    return str(point["date"])
+
+
+def get_macro_context(geos: list[str] | str | None, variables: list[str] | str | None, *,
+                      start_date: str | None = None, end_date: str | None = None,
+                      limit: int = 100) -> dict[str, object]:
     """Bounded statistical observations for geos x variables, faceted series."""
     if isinstance(geos, str):
         geos = [geos]
@@ -131,7 +138,7 @@ def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=
                 "error": "data commons returned non-JSON", "error_type": "malformed_response"}
     retrieved_at = datetime.now(timezone.utc).isoformat()
     facets = body.get("facets", {}) or {}
-    series = []
+    series: list[dict[str, object]] = []
     remaining = limit
     continuation = False
     by_variable = body.get("byVariable", {}) or {}
@@ -143,7 +150,7 @@ def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=
             for facet in (by_ent or {}).get("orderedFacets", []) or []:
                 facet_id = facet.get("facetId")
                 meta = facets.get(facet_id, {}) if isinstance(facets, dict) else {}
-                points = []
+                points: list[dict[str, object]] = []
                 for obs in facet.get("observations", []) or []:
                     when, value = obs.get("date"), obs.get("value")
                     if when is None or value is None:
@@ -155,7 +162,7 @@ def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=
                     points.append({"date": when, "value": value})
                 if not points:
                     continue
-                points.sort(key=lambda p: str(p["date"]))
+                points.sort(key=_obs_date)
                 if remaining <= 0:
                     continuation = True
                     continue
@@ -178,7 +185,7 @@ def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=
                 remaining -= len(points[:remaining])
                 if remaining <= 0:
                     continuation = True
-    out: dict = {"status": "ok", "source": SOURCE, "series": series, "count": len(series),
+    out: dict[str, object] = {"status": "ok", "source": SOURCE, "series": series, "count": len(series),
                  "coverage": {"geos": geos, "variables": variables},
                  "continuation": continuation or bool(body.get("nextToken")),
                  "retrieved_at": retrieved_at, "known_at": retrieved_at}
@@ -187,7 +194,8 @@ def get_macro_context(geos, variables, *, start_date=None, end_date=None, limit=
     return out
 
 
-def resolve_entities(nodes, *, resolver=None, property=None) -> dict:
+def resolve_entities(nodes: list[str] | str | None, *, resolver: str | None = None,
+                     property: str | None = None) -> dict[str, object]:
     """Resolve up to 50 nodes to DCIDs via the V2 resolve API (key header)."""
     nodes = [nodes] if isinstance(nodes, str) else list(nodes or [])
     if not nodes:
@@ -204,7 +212,7 @@ def resolve_entities(nodes, *, resolver=None, property=None) -> dict:
     if headers is None:
         return {"status": "unavailable", "source": SOURCE,
                 "error": "DATACOMMONS_AUTH_REQUIRED", "error_type": "auth_required"}
-    payload = {"nodes": nodes}
+    payload: dict[str, object] = {"nodes": nodes}
     if resolver:
         payload["resolver"] = resolver
     if property:
@@ -225,7 +233,7 @@ def resolve_entities(nodes, *, resolver=None, property=None) -> dict:
             "retrieved_at": datetime.now(timezone.utc).isoformat()}
 
 
-def get_place_hierarchy(dcid: str) -> dict:
+def get_place_hierarchy(dcid: str) -> dict[str, object]:
     """Containing states for one place DCID via documented containedInPlace lookup."""
     if not dcid or not str(dcid).strip():
         return {"status": "error", "source": SOURCE,

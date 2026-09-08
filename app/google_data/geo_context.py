@@ -11,6 +11,8 @@ unavailable until a Marketplace table is confirmed.
 """
 
 from __future__ import annotations
+from collections.abc import Callable
+from typing import Protocol, cast
 
 import hashlib
 import json
@@ -41,6 +43,14 @@ _ACS_UNITS = {"total_pop": "people", "median_age": "years",
 # ACS reserve codes: not reported, uninhabited, or withheld.
 _ACS_SENTINELS = frozenset({-666666666, -999999999, -888888888})
 
+class _Submitter(Protocol):
+    """Anything submit_template-compatible: the real client or a test double."""
+    def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
+
+
+_Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
+
+
 # GSOD long-form metric columns with verbatim units (F/inches/knots/millibars/miles).
 _NOAA_UNITS = {"temp": "Fahrenheit", "dewp": "Fahrenheit",
                "max": "Fahrenheit", "min": "Fahrenheit",
@@ -62,7 +72,7 @@ def _data_enabled() -> bool:
     return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 
-def _setting(fn_name: str, env_name: str, default=None):
+def _setting(fn_name: str, env_name: str, default: object = None) -> object:
     fn = getattr(_config, fn_name, None)
     if callable(fn):
         try:
@@ -75,7 +85,7 @@ def _setting(fn_name: str, env_name: str, default=None):
     return value or default
 
 
-def _resolve_root(data_root=None) -> Path:
+def _resolve_root(data_root: Path | None = None) -> Path:
     if data_root:
         return Path(data_root)
     try:
@@ -85,7 +95,8 @@ def _resolve_root(data_root=None) -> Path:
         return Path(os.getenv("STOCKBOT_DATA_DIR", "data"))
 
 
-def _submit(template: str, params: dict, executor, data_root) -> dict:
+def _submit(template: str, params: dict[str, object], executor: _Executor | None,
+            data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
             try:
@@ -113,11 +124,12 @@ def _submit(template: str, params: dict, executor, data_root) -> dict:
                 "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
 
 
-def _looks_noaa(variables: list) -> bool:
+def _looks_noaa(variables: list[str]) -> bool:
     return any(any(hint in str(v).upper() for hint in _NOAA_HINTS) for v in variables)
 
 
-def _vintage_key(template: str, geo_ids: list, variables: list, extra: dict) -> str:
+def _vintage_key(template: str, geo_ids: list[str], variables: list[str],
+                 extra: dict[str, str]) -> str:
     blob = json.dumps({"t": template, "g": sorted(map(str, geo_ids)),
                        "v": sorted(map(str, variables)),
                        "x": {k: str(v) for k, v in sorted(extra.items())}},
@@ -125,7 +137,7 @@ def _vintage_key(template: str, geo_ids: list, variables: list, extra: dict) -> 
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def _clean_float(value):
+def _clean_float(value: object) -> object:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -133,9 +145,11 @@ def _clean_float(value):
     return value
 
 
-def get_geo_context(geo_ids, *, variables=None, start_date=None, end_date=None,
-                    table_suffix="county_2020_5yr", columns=None,
-                    limit=100, executor=None, data_root=None) -> dict:
+def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | str | None = None,
+                    start_date: str | None = None, end_date: str | None = None,
+                    table_suffix: str = "county_2020_5yr", columns: list[str] | None = None,
+                    limit: int = 100, executor: _Executor | None = None,
+                    data_root: Path | None = None) -> dict[str, object]:
     """Census/NOAA context for explicit geo/time keys; gaps stay explicit."""
     if isinstance(geo_ids, str):
         geo_ids = [geo_ids]
@@ -152,6 +166,7 @@ def get_geo_context(geo_ids, *, variables=None, start_date=None, end_date=None,
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
+    wanted: list[str] = []
     template = _NOAA_TEMPLATE if _looks_noaa(variables) else _CENSUS_TEMPLATE
 
     if template == _CENSUS_TEMPLATE:
@@ -167,9 +182,9 @@ def get_geo_context(geo_ids, *, variables=None, start_date=None, end_date=None,
                     "error": f"unknown census columns: {bad!r}",
                     "error_type": "source_unavailable",
                     "available": list(_ACS_COLUMNS)}
-        params = {"geo_ids": geo_ids, "table_suffix": table_suffix,
-                  "columns": wanted, "limit": limit,
-                  "collector_version": "1", "sql_version": "1"}
+        params: dict[str, object] = {"geo_ids": geo_ids, "table_suffix": table_suffix,
+                                     "columns": wanted, "limit": limit,
+                                     "collector_version": "1", "sql_version": "1"}
         extra = {"suffix": table_suffix, "columns": ",".join(wanted)}
         vintage = table_suffix.split("_")[1] if "_" in table_suffix else table_suffix
     else:
@@ -185,7 +200,7 @@ def get_geo_context(geo_ids, *, variables=None, start_date=None, end_date=None,
     cache_path = _resolve_root(data_root) / "google_data" / "geo_vintage.json"
     cache_key = _vintage_key(template, geo_ids, variables, extra)
     try:
-        cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+        cache: dict[str, object] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     except ValueError:
         cache = {}
     hit = cache.get(cache_key) if isinstance(cache, dict) else None
@@ -204,19 +219,19 @@ def get_geo_context(geo_ids, *, variables=None, start_date=None, end_date=None,
     if not isinstance(result, dict) or "error" in result:
         if isinstance(result, dict) and "status" in result:
             return result
-        out = dict(result) if isinstance(result, dict) else {"error": "bad executor result"}
+        out: dict[str, object] = dict(result) if isinstance(result, dict) else {"error": "bad executor result"}
         out.setdefault("status", "unavailable")
         out["engine"] = out.get("source", "bigquery")
         out["source"] = SOURCE
         out.setdefault("reason", "missing-coverage")
         return out
-    rows = result.get("rows", []) or []
+    rows = cast(list[object], result.get("rows", []) or [])
     if not rows:
         return {"status": "unavailable", "source": SOURCE,
                 "reason": "missing-coverage",
                 "error": "no supported geo/time coverage", "error_type": "missing_coverage"}
-    context = []
-    warnings: list = []
+    context: list[dict[str, object]] = []
+    warnings: list[str] = []
     if template == _CENSUS_TEMPLATE:
         for row in rows:
             if not isinstance(row, dict) or not row.get("geo_id"):

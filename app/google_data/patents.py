@@ -9,6 +9,9 @@ publications and families explicitly, never unique inventions or signals.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Protocol, cast
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +31,13 @@ _MAX_STATS = 100
 _DEFAULT_COUNTRIES = ("US",)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+class _Submitter(Protocol):
+    """Anything submit_template-compatible: the real client or a test double."""
+    def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
+
+
+_Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
+
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
@@ -43,7 +53,7 @@ def _data_enabled() -> bool:
     return _env_flag("GOOGLE_DATA_ENABLED")
 
 
-def _setting(fn_name: str, env_name: str, default=None):
+def _setting(fn_name: str, env_name: str, default: object = None) -> object:
     fn = getattr(_config, fn_name, None)
     if callable(fn):
         try:
@@ -56,7 +66,8 @@ def _setting(fn_name: str, env_name: str, default=None):
     return value or default
 
 
-def _submit(template: str, params: dict, executor, data_root) -> dict:
+def _submit(template: str, params: dict[str, object], executor: _Executor | None,
+            data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
             try:
@@ -89,7 +100,7 @@ _UNAVAILABLE = frozenset({"billing_enabled", "billing_unknown", "cost_limit_exce
                           "source_unavailable", "ledger_corrupt"})
 
 
-def _wrap_error(result: dict) -> dict:
+def _wrap_error(result: dict[str, object]) -> dict[str, object]:
     if "status" in result:
         return result
     out = dict(result)
@@ -99,7 +110,9 @@ def _wrap_error(result: dict) -> dict:
     return out
 
 
-def _check_dates(start_date, end_date):
+def _check_dates(
+    start_date: str | None, end_date: str | None
+) -> tuple[dict[str, object] | None, str | None, str | None]:
     """Validated (start, end) or (error, None, None); absent dates stay unbounded."""
     if start_date is None and end_date is None:
         return None, None, None
@@ -121,16 +134,19 @@ def _check_dates(start_date, end_date):
     return None, start_date, end_date
 
 
-def _clean_list(values) -> list:
+def _clean_list(values: list[str] | str | None) -> list[str]:
     if isinstance(values, str):
         values = [values]
     return [str(v).strip() for v in (values or []) if v and str(v).strip()]
 
 
-def search_company_patents(company_id: str, *, start_date=None, end_date=None,
-                           limit: int = 20, assignees: list | None = None,
-                           aliases: list | None = None, country_codes: list | None = None,
-                           executor=None, data_root=None) -> dict:
+def search_company_patents(company_id: str, *, start_date: str | None = None,
+                           end_date: str | None = None, limit: int = 20,
+                           assignees: list[str] | None = None,
+                           aliases: list[str] | None = None,
+                           country_codes: list[str] | None = None,
+                           executor: _Executor | None = None,
+                           data_root: Path | None = None) -> dict[str, object]:
     """Publications for documented assignee aliases; empty aliases refuse."""
     if not company_id or not str(company_id).strip():
         return {"status": "error", "source": SOURCE,
@@ -157,8 +173,8 @@ def search_company_patents(company_id: str, *, start_date=None, end_date=None,
         end_date = _today.isoformat()
         start_date = (_today - timedelta(days=1825)).isoformat()
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
-    params: dict = {"assignees": assignees, "country_codes": countries,
-                    "limit": limit, "collector_version": "1", "sql_version": "1"}
+    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
+                                 "limit": limit, "collector_version": "1", "sql_version": "1"}
     if start_date is not None:
         params["start_yyyymmdd"] = int(start_date.replace("-", ""))
     if end_date is not None:
@@ -166,8 +182,9 @@ def search_company_patents(company_id: str, *, start_date=None, end_date=None,
     result = _submit(_TEMPLATE, params, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
-    publications = []
-    for row in (result.get("rows", []) or [])[:limit]:
+    publications: list[dict[str, object]] = []
+    rows = cast(list[object], result.get("rows", []) or [])
+    for row in rows[:limit]:
         if not isinstance(row, dict):
             continue
         publications.append({
@@ -187,10 +204,13 @@ def search_company_patents(company_id: str, *, start_date=None, end_date=None,
             "publications": publications, "count": len(publications)}
 
 
-def get_assignee_stats(company_id: str, *, start_date=None, end_date=None,
-                       assignees: list | None = None, aliases: list | None = None,
-                       country_codes: list | None = None,
-                       executor=None, data_root=None) -> dict:
+def get_assignee_stats(company_id: str, *, start_date: str | None = None,
+                       end_date: str | None = None,
+                       assignees: list[str] | None = None,
+                       aliases: list[str] | None = None,
+                       country_codes: list[str] | None = None,
+                       executor: _Executor | None = None,
+                       data_root: Path | None = None) -> dict[str, object]:
     """Yearly publication/family/citation aggregates plus top inventive CPC.
 
     Null publication dates become gaps (excluded, counted); null citations
@@ -216,8 +236,8 @@ def get_assignee_stats(company_id: str, *, start_date=None, end_date=None,
         end_date = _today.isoformat()
         start_date = (_today - timedelta(days=1825)).isoformat()
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
-    params: dict = {"assignees": assignees, "country_codes": countries,
-                    "limit": _MAX_STATS, "collector_version": "1", "sql_version": "1"}
+    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
+                                 "limit": _MAX_STATS, "collector_version": "1", "sql_version": "1"}
     if start_date is not None:
         params["start_yyyymmdd"] = int(start_date.replace("-", ""))
     if end_date is not None:
@@ -225,9 +245,10 @@ def get_assignee_stats(company_id: str, *, start_date=None, end_date=None,
     result = _submit(_STATS_TEMPLATE, params, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
-    by_year: dict = {}
+    by_year: dict[int, dict[str, object]] = {}
     gaps = 0
-    for row in result.get("rows", []) or []:
+    rows = cast(list[object], result.get("rows", []) or [])
+    for row in rows:
         if not isinstance(row, dict):
             continue
         year = row.get("pub_year")
@@ -244,15 +265,18 @@ def get_assignee_stats(company_id: str, *, start_date=None, end_date=None,
         for key, field in (("pub_count", "pub_count"), ("family_count", "family_count"),
                            ("total_citations", "total_citations")):
             try:
-                bucket[field] += int(row.get(key) or 0)
+                bucket[field] = cast(int, bucket.get(field, 0)) + int(row.get(key) or 0)
             except (TypeError, ValueError):
                 pass
+        cpc_counts = cast(dict[str, int], bucket["cpc_counts"])
         for code in row.get("cpc_bag") or []:
-            bucket["cpc_counts"][str(code)] = bucket["cpc_counts"].get(str(code), 0) + 1
-    years = []
+            code_key = str(code)
+            cpc_counts[code_key] = cpc_counts.get(code_key, 0) + 1
+    years: list[dict[str, object]] = []
     for year in sorted(by_year):
         bucket = by_year[year]
-        ranked = sorted(((n, c) for c, n in bucket["cpc_counts"].items() if c != "__NONE__"),
+        cpc_counts = cast(dict[str, int], bucket["cpc_counts"])
+        ranked = sorted(((n, c) for c, n in cpc_counts.items() if c != "__NONE__"),
                         reverse=True)
         years.append({"pub_year": year, "pub_count": bucket["pub_count"],
                       "family_count": bucket["family_count"],

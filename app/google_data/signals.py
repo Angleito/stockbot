@@ -11,8 +11,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from datetime import datetime, timezone
+from operator import itemgetter
 from pathlib import Path
+from typing import Optional, cast
 
 try:
     from ..storage import parquet as _parquet
@@ -25,6 +28,19 @@ except ImportError:  # pragma: no cover
 STORE_NAME = "signals.jsonl"
 _MIGRATED_MARKER = ".signals_jsonl_migrated"
 
+
+def _known_at_str(row: dict[str, object]) -> str:
+    return str(row.get("known_at", ""))
+
+
+def _features_json_str(row: dict[str, object]) -> str:
+    return str(row.get("features_json") or "")
+
+
+def _signal_sort_key(row: dict[str, object]) -> tuple[str, str]:
+    return (str(row.get("known_at", "")), str(row.get("signal_id")))
+
+
 _PERIOD_KEYS = ("source_period", "period", "week", "observed_at", "date")
 _GEO_KEYS = ("geo", "geography")
 _RANK_KEYS = ("rank", "position")
@@ -34,7 +50,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_root(data_root=None) -> Path:
+def _resolve_root(data_root: Optional[Path | str] = None) -> Path:
     if data_root:
         return Path(data_root)
     try:
@@ -48,7 +64,7 @@ def _resolve_root(data_root=None) -> Path:
             return Path(os.getenv("STOCKBOT_DATA_DIR", "data"))
 
 
-def _pick(item: dict, keys, default=None):
+def _pick(item: dict[str, object], keys: Sequence[str], default: object = None) -> object:
     for key in keys:
         value = item.get(key)
         if value is not None:
@@ -56,7 +72,7 @@ def _pick(item: dict, keys, default=None):
     return default
 
 
-def _is_present(item: dict) -> bool:
+def _is_present(item: dict[str, object]) -> bool:
     if not item.get("present", True):
         return False
     if item.get("absent", False) or item.get("missing", False):
@@ -67,15 +83,15 @@ def _is_present(item: dict) -> bool:
     return True
 
 
-def _rank_improvement(present: list) -> int | None:
-    groups: dict = {}
+def _rank_improvement(present: list[dict[str, object]]) -> Optional[int]:
+    groups: dict[tuple[object, object, object], list[tuple[str, int]]] = {}
     for item in present:
         rank = _pick(item, _RANK_KEYS)
         period = _pick(item, _PERIOD_KEYS)
         if rank is None or period is None:
             continue
         try:
-            rank = int(rank)
+            rank = int(cast("str | int", rank))
         except (TypeError, ValueError):
             continue
         key = (item.get("table") or item.get("source_table"),
@@ -84,7 +100,7 @@ def _rank_improvement(present: list) -> int | None:
         groups.setdefault(key, []).append((str(period), rank))
     best = None
     for rows in groups.values():
-        rows.sort(key=lambda pair: pair[0])
+        rows.sort(key=itemgetter(0))
         if len(rows) >= 2 and (best is None or len(rows) > len(best)):
             best = rows
     if not best:
@@ -98,22 +114,23 @@ CALC_VERSION = "2"
 RULES = {"velocity_min": None, "persistence_min": 0.5, "diffusion_min": 0.25}
 
 
-def _score_of(item: dict):
-    for key in ("score", "metrics"):
-        if key == "metrics" and isinstance(item.get("metrics"), dict):
-            value = item["metrics"].get("score")
-        elif key == "score":
-            value = item.get("score")
-        else:
-            continue
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return float(value)
+def _score_of(item: dict[str, object]) -> Optional[float]:
+    score = item.get("score")
+    if isinstance(score, (int, float)) and not isinstance(score, bool):
+        return float(score)
+    metrics = item.get("metrics")
+    if isinstance(metrics, dict):
+        mscore = metrics.get("score")
+        if isinstance(mscore, (int, float)) and not isinstance(mscore, bool):
+            return float(mscore)
     return None
 
 
-def compute_candidate_features(observations, periods_covered=None, geos_covered=None) -> dict:
+def compute_candidate_features(
+    observations: Optional[dict[str, object] | Sequence[dict[str, object]]],
+    periods_covered: Optional[Sequence[str]] = None,
+    geos_covered: Optional[Sequence[str]] = None,
+) -> dict[str, object]:
     """persistence = distinct hit periods / covered periods; diffusion likewise.
 
     Coverage may be passed explicitly, ride inside the batch
@@ -126,15 +143,19 @@ def compute_candidate_features(observations, periods_covered=None, geos_covered=
     """
     if isinstance(observations, dict):
         blob = observations
-        periods_covered = periods_covered or blob.get("periods_covered") or blob.get("covered_periods")
-        geos_covered = geos_covered or blob.get("geos_covered") or blob.get("covered_geos")
-        observations = blob.get("observations", [])
+        if periods_covered is None:
+            periods_covered = cast("Optional[Sequence[str]]",
+                                   blob.get("periods_covered") or blob.get("covered_periods"))
+        if geos_covered is None:
+            geos_covered = cast("Optional[Sequence[str]]",
+                                blob.get("geos_covered") or blob.get("covered_geos"))
+        observations = cast("Optional[list[dict[str, object]]]", blob.get("observations", []))
     rows = [o for o in (observations or []) if isinstance(o, dict)]
     for row in rows:
         if periods_covered is None and isinstance(row.get("periods_covered"), list):
-            periods_covered = row["periods_covered"]
+            periods_covered = cast("Sequence[str]", row["periods_covered"])
         if geos_covered is None and isinstance(row.get("geos_covered"), list):
-            geos_covered = row["geos_covered"]
+            geos_covered = cast("Sequence[str]", row["geos_covered"])
     covered_periods = (list(periods_covered) if periods_covered
                        else sorted({str(_pick(o, _PERIOD_KEYS)) for o in rows if _pick(o, _PERIOD_KEYS) is not None}))
     covered_geos = (list(geos_covered) if geos_covered
@@ -142,11 +163,14 @@ def compute_candidate_features(observations, periods_covered=None, geos_covered=
     present = [o for o in rows if _is_present(o)]
     hit_periods = {str(_pick(o, _PERIOD_KEYS)) for o in present if _pick(o, _PERIOD_KEYS) is not None}
     hit_geos = {str(_pick(o, _GEO_KEYS)) for o in present if _pick(o, _GEO_KEYS) is not None}
-    missing: dict = {}
-    scored = sorted(
-        {(str(_pick(o, _PERIOD_KEYS)), _score_of(o)) for o in present
-         if _pick(o, _PERIOD_KEYS) is not None and _score_of(o) is not None},
-        key=lambda pair: pair[0])
+    missing: dict[str, str] = {}
+    scored_pairs: set[tuple[str, float]] = set()
+    for o in present:
+        _period = _pick(o, _PERIOD_KEYS)
+        _score = _score_of(o)
+        if _period is not None and _score is not None:
+            scored_pairs.add((str(_period), _score))
+    scored = sorted(scored_pairs, key=itemgetter(0))
     n_periods = len(covered_periods)
     if not covered_periods:
         missing["velocity"] = "no coverage"
@@ -179,7 +203,7 @@ def compute_candidate_features(observations, periods_covered=None, geos_covered=
     latest = max(covered_periods) if covered_periods else None
     first_seen = min(hit_periods) if hit_periods else None
     new_entry = bool(hit_periods) and first_seen == latest
-    values = {
+    values: dict[str, object] = {
         "persistence": (len(hit_periods) / len(covered_periods)) if covered_periods else 0.0,
         "diffusion": (len(hit_geos) / len(covered_geos)) if covered_geos else 0.0,
         "rank_improvement": _rank_improvement(present),
@@ -196,13 +220,16 @@ def compute_candidate_features(observations, periods_covered=None, geos_covered=
     return values
 
 
-def normalize_candidate(record=None, *, table=None, period=None, geo=None,
-                        term=None, list_kind=None, rank=None,
-                        signal_type="trend", source="trends",
-                        source_record_id=None, observed_at=None,
-                        retrieved_at=None, known_at=None, entities=None,
-                        metrics=None, evidence=None, features=None, data_root=None,
-                        persist=True) -> dict:
+def normalize_candidate(record: Optional[dict[str, object]] = None, *, table: object = None,
+                        period: object = None, geo: object = None,
+                        term: object = None, list_kind: object = None, rank: object = None,
+                        signal_type: object = "trend", source: object = "trends",
+                        source_record_id: object = None, observed_at: object = None,
+                        retrieved_at: object = None, known_at: object = None,
+                        entities: object = None,
+                        metrics: object = None, evidence: object = None,
+                        features: object = None, data_root: Optional[Path | str] = None,
+                        persist: bool = True) -> dict[str, object]:
     """Build (and by default store) one candidate; identity is stable.
 
     Accepts either a record dict (keys table/period/geo/term/list_kind/rank)
@@ -224,7 +251,8 @@ def normalize_candidate(record=None, *, table=None, period=None, geo=None,
     signal_id = hashlib.sha256(
         f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
     now = _now_iso()
-    merged_metrics = dict(record.get("metrics", None) or metrics or {})
+    merged_metrics: dict[str, object] = dict(cast("dict[str, object]",
+                                                  record.get("metrics", None) or metrics or {}))
     if rank is not None and "rank" not in merged_metrics:
         merged_metrics["rank"] = rank
     candidate = {
@@ -238,8 +266,8 @@ def normalize_candidate(record=None, *, table=None, period=None, geo=None,
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
         "metrics": merged_metrics,
-        "entities": record.get("entities", None) if record.get("entities") is not None else (entities or []),
-        "evidence": record.get("evidence", None) if record.get("evidence") is not None else (evidence or []),
+        "entities": record.get("entities", None) if record.get("entities") is not None else cast("list[object]", entities or []),
+        "evidence": record.get("evidence", None) if record.get("evidence") is not None else cast("list[object]", evidence or []),
         "features": record.get("features", None) if record.get("features") is not None else features,
     }
     if persist:
@@ -247,17 +275,18 @@ def normalize_candidate(record=None, *, table=None, period=None, geo=None,
     return candidate
 
 
-def _same_content(old: dict, new: dict) -> bool:
+def _same_content(old: dict[str, object], new: dict[str, object]) -> bool:
     skip = {"known_at", "retrieved_at"}
     keys = (set(old) | set(new)) - skip
     return all(old.get(k) == new.get(k) for k in keys)
 
 
-def _append_version(candidate: dict, data_root=None) -> dict:
+def _append_version(candidate: dict[str, object],
+                    data_root: Optional[Path | str] = None) -> dict[str, object]:
     root = _resolve_root(data_root) / "google_data"
     root.mkdir(parents=True, exist_ok=True)
     path = root / STORE_NAME
-    prior = []
+    prior: list[dict[str, object]] = []
     if path.exists():
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -265,7 +294,7 @@ def _append_version(candidate: dict, data_root=None) -> dict:
                 prior.append(json.loads(line))
     same = [d for d in prior if d.get("signal_id") == candidate["signal_id"]]
     if same:
-        latest = max(same, key=lambda d: str(d.get("known_at", "")))
+        latest = max(same, key=_known_at_str)
         if _same_content(latest, candidate):
             candidate["known_at"] = latest.get("known_at", candidate["known_at"])
             return candidate  # idempotent recollect: no duplicate line
@@ -274,7 +303,7 @@ def _append_version(candidate: dict, data_root=None) -> dict:
     return candidate
 
 
-def _as_key(value) -> str | None:
+def _as_key(value: object) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -284,12 +313,13 @@ def _as_key(value) -> str | None:
     return str(value)
 
 
-def _signal_id_for(table, period, geo, term, list_kind) -> str:
+def _signal_id_for(table: object, period: object, geo: object, term: object,
+                   list_kind: object) -> str:
     return hashlib.sha256(
         f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
 
 
-def _warehouse_records(data_root=None) -> list:
+def _warehouse_records(data_root: Optional[Path | str] = None) -> list[dict[str, object]]:
     if _parquet is None:
         return []
     root = _resolve_root(data_root) / "parquet"
@@ -299,7 +329,7 @@ def _warehouse_records(data_root=None) -> list:
         return []
 
 
-def migrate_jsonl_once(data_root=None) -> int:
+def migrate_jsonl_once(data_root: Optional[Path | str] = None) -> int:
     """Import legacy signals.jsonl rows into the warehouse, preserving known_at.
 
     Runs once per data root (marker file); warehouse dedup makes reruns free.
@@ -322,8 +352,8 @@ def migrate_jsonl_once(data_root=None) -> int:
             except Exception:
                 pass
         return 0
-    rows = []
-    feature_rows = []
+    rows: list[dict[str, object]] = []
+    feature_rows: list[dict[str, object]] = []
     for line in store.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -334,8 +364,8 @@ def migrate_jsonl_once(data_root=None) -> int:
             continue
         if not isinstance(record, dict):
             continue
-        metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
-        evidence = record.get("evidence") if isinstance(record.get("evidence"), list) else []
+        metrics: dict[str, object] = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+        evidence: list[object] = record.get("evidence") if isinstance(record.get("evidence"), list) else []
         raw_features = record.get("features")
         features = dict(raw_features) if isinstance(raw_features, dict) else None
         table = record.get("table") or "trends"
@@ -410,17 +440,17 @@ def migrate_jsonl_once(data_root=None) -> int:
     return written
 
 
-def _record_to_signal(row: dict) -> dict:
+def _record_to_signal(row: dict[str, object]) -> dict[str, object]:
     table = row.get("table") or "trends"
     period = row.get("period") or ""
     geo, term = row.get("geo") or "", row.get("term") or ""
     list_kind = row.get("list_kind") or "top"
     try:
-        metrics = json.loads(row.get("metrics_json") or "{}")
+        metrics: dict[str, object] = json.loads(cast("str", row.get("metrics_json") or "{}"))
     except ValueError:
         metrics = {}
     try:
-        evidence = json.loads(row.get("evidence_json") or "[]")
+        evidence: list[object] = json.loads(cast("str", row.get("evidence_json") or "[]"))
     except ValueError:
         evidence = []
     collector_version = str(row.get("collector_version") or "1")
@@ -442,14 +472,16 @@ def _record_to_signal(row: dict) -> dict:
         "retrieved_at": row.get("retrieved_at") or "",
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
-        "metrics": metrics, "entities": [],
+        "metrics": metrics, "entities": cast("list[object]", []),
         "evidence": evidence, "features": None,
         "collector_version": collector_version, "_source_hash": source_hash,
     }
 
 
-def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
-                  feature_scope_hash=None) -> list:
+def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
+                  as_of: Optional[str] = None, limit: Optional[int] = None,
+                  data_root: Optional[Path | str] = None,
+                  feature_scope_hash: Optional[str] = None) -> list[dict[str, object]]:
     """Latest known version per signal_id, excluding anything known after as_of.
 
     Reads the ``google_observations`` warehouse (migrating legacy JSONL once);
@@ -463,8 +495,8 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
     """
     migrate_jsonl_once(data_root)
     cutoff = _as_key(as_of)
-    latest: dict = {}
-    keys: dict = {}
+    latest: dict[str, dict[str, object]] = {}
+    keys: dict[str, tuple[str, str, str, str]] = {}
     for row in _warehouse_records(data_root):
         if not isinstance(row, dict):
             continue
@@ -472,14 +504,15 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
         known = str(record.get("known_at", ""))
         if cutoff is not None and known > cutoff:
             continue
-        metrics = record.get("metrics") or {}
-        key = (str(metrics.get("refresh_date") or ""), known,
+        _mraw: object = record.get("metrics") or {}
+        _mdict: dict[str, object] = _mraw if isinstance(_mraw, dict) else {}
+        key = (str(_mdict.get("refresh_date") or ""), known,
                str(record.get("_source_hash") or ""), str(row.get("source_record_id") or ""))
-        sid = record.get("signal_id")
+        sid = str(record.get("signal_id") or "")
         if sid not in latest or key > keys[sid]:
             latest[sid] = record
             keys[sid] = key
-    feature_rows: list = []
+    feature_rows: list[dict[str, object]] = []
     if _parquet is not None:
         try:
             feature_rows = _parquet.read_table(
@@ -494,7 +527,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
             from app.google_data import trends as _trends  # type: ignore
         except ImportError:
             _trends = None  # type: ignore
-    shaped: dict = {}
+    shaped: dict[str, dict[str, object]] = {}
     for _sid, _rec in latest.items():
         _metrics = _rec.get("metrics")
         shaped[_sid] = {
@@ -508,13 +541,13 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
             "metrics": _metrics if isinstance(_metrics, dict) else {},
         }
     candidates = list(shaped.values())
-    def _pick(_rows: list) -> dict:
+    def _pick(_rows: list[dict[str, object]]) -> dict[str, object]:
         _peak = max(str(_r.get("calculated_at") or "") for _r in _rows)
         return min((_r for _r in _rows if str(_r.get("calculated_at") or "") == _peak),
-                   key=lambda _r: str(_r.get("features_json") or ""))
+                   key=_features_json_str)
     for _sid, record in latest.items():
         oid = str(record.get("observation_id") or "")
-        by_scope: dict = {}
+        by_scope: dict[str, list[dict[str, object]]] = {}
         if _trends is not None:
             basis = _trends._series_basis(shaped[_sid])
             for frow in feature_rows:
@@ -530,7 +563,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
                 if cutoff is not None and str(frow.get("calculated_at") or "") > cutoff:
                     continue
                 try:
-                    scope = json.loads(frow.get("feature_scope_json") or "")
+                    scope = json.loads(cast("str", frow.get("feature_scope_json") or ""))
                 except ValueError:
                     continue
                 if not isinstance(scope, dict):
@@ -543,15 +576,14 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
                     continue
                 by_scope.setdefault(str(frow.get("feature_scope_hash") or ""), []).append(frow)
         flat = [r for rows in by_scope.values() for r in rows]
+        best: Optional[dict[str, object]] = None
         if flat and (feature_scope_hash is not None or len(by_scope) == 1):
             best = _pick(flat)
-        else:
-            best = None
-        available = []
+        available: list[dict[str, object]] = []
         for _hash in sorted(by_scope):
             rep = _pick(by_scope[_hash])
             try:
-                _scope = json.loads(rep.get("feature_scope_json") or "")
+                _scope = json.loads(cast("str", rep.get("feature_scope_json") or ""))
             except ValueError:
                 continue
             if not isinstance(_scope, dict):
@@ -565,12 +597,12 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
             })
         if best is not None:
             try:
-                decoded = json.loads(best.get("features_json") or "")
+                decoded = json.loads(cast("str", best.get("features_json") or ""))
             except ValueError:
                 decoded = None
             record["features"] = decoded if isinstance(decoded, dict) else None
             try:
-                scope_decoded = json.loads(best.get("feature_scope_json") or "")
+                scope_decoded = json.loads(cast("str", best.get("feature_scope_json") or ""))
             except ValueError:
                 scope_decoded = None
             record["feature_scope"] = scope_decoded
@@ -582,8 +614,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
             record["feature_scope_hash"] = None
             record["feature_calculated_at"] = None
         record["available_feature_scopes"] = available
-    rows = sorted(latest.values(),
-                  key=lambda d: (str(d.get("known_at", "")), str(d.get("signal_id"))))
+    rows = sorted(latest.values(), key=_signal_sort_key)
     if query is not None:
         rows = [r for r in rows if str(query).lower() in str(r.get("term", "")).lower()]
     if geo is not None:
