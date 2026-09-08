@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 try:
@@ -60,9 +60,13 @@ except ImportError:  # pragma: no cover
 SOURCE = "trends"
 _US_TEMPLATES = ("trends_us_top", "trends_us_rising")
 _INTL_TEMPLATES = ("trends_intl_top", "trends_intl_rising")
+_US_NATIONAL_TEMPLATES = ("trends_us_top_national", "trends_us_rising_national")
+_INTL_NATIONAL_TEMPLATES = ("trends_intl_top_national", "trends_intl_rising_national")
 _TEMPLATE_LIST_KIND = {
     "trends_us_top": "top", "trends_us_rising": "rising",
     "trends_intl_top": "top", "trends_intl_rising": "rising",
+    "trends_us_top_national": "top", "trends_us_rising_national": "rising",
+    "trends_intl_top_national": "top", "trends_intl_rising_national": "rising",
     "trends_top": "top", "trends_rising": "rising",
 }
 _FALLBACK_TABLES = {
@@ -70,6 +74,10 @@ _FALLBACK_TABLES = {
     "trends_us_rising": "bigquery-public-data.google_trends.top_rising_terms",
     "trends_intl_top": "bigquery-public-data.google_trends.international_top_terms",
     "trends_intl_rising": "bigquery-public-data.google_trends.international_top_rising_terms",
+    "trends_us_top_national": "bigquery-public-data.google_trends.top_terms",
+    "trends_us_rising_national": "bigquery-public-data.google_trends.top_rising_terms",
+    "trends_intl_top_national": "bigquery-public-data.google_trends.international_top_terms",
+    "trends_intl_rising_national": "bigquery-public-data.google_trends.international_top_rising_terms",
 }
 _COLLECTOR_VERSION = "1"
 _SQL_VERSION = "1"
@@ -78,8 +86,6 @@ _MAX_LIMIT = 1000
 _FETCH_LIMIT = _MAX_LIMIT + 1
 _MAX_GEOS = 50
 _MAX_SPAN_DAYS = 31
-_WIDE_WEEK_START = "1900-01-01"
-_WIDE_WEEK_END = "2100-01-01"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -296,6 +302,10 @@ def _cache_in_scope(cached: dict, params: dict) -> bool:
     if week < str(params.get("week_start") or "") or week > str(params.get("week_end") or ""):
         return False
     geo = str(cached.get("geo") or "")
+    if params.get("national"):
+        if "country_code" not in params:
+            return geo == str(params["national"])
+        return geo == str(params.get("country_code"))
     if "all_dmas" in params:
         if params.get("all_dmas"):
             return geo == "US"
@@ -417,41 +427,6 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, d
     return refreshes
 
 
-def _rollup_national(rows: list) -> list:
-    """Aggregate DMA rows per refresh into geo=US observations."""
-    if not rows:
-        return rows
-    grouped: dict = {}
-    for row in rows:
-        key = (str(row.get("_refresh")), str(row.get("_week")),
-               str(row.get("term")), str(row.get("_kind")))
-        bucket = grouped.setdefault(key, [])
-        bucket.append(row)
-    rolled = []
-    for (refresh, week, term, kind), bucket in grouped.items():
-        ranks = [b.get("rank") for b in bucket if isinstance(b.get("rank"), int)]
-        scores = [b.get("score") for b in bucket if isinstance(b.get("score"), int)]
-        gains = [b.get("percent_gain") for b in bucket if isinstance(b.get("percent_gain"), int)]
-        table = bucket[0].get("_table")
-        first = bucket[0]
-        rolled.append({
-            "_table": table, "_week": week, "_refresh": refresh,
-            "_geo": "US", "_kind": kind, "_template": first.get("_template"),
-            "table": table, "week": week, "refresh_date": refresh,
-            "geo": "US", "term": term, "list_kind": kind,
-            "rank": min(ranks) if ranks else None,
-            "score": max(scores) if scores else None,
-            "percent_gain": max(gains) if gains else None,
-            "dma_id": None, "country_name": None, "region_name": None,
-            "source_record_id": f"{table}|{refresh}|US|{term}|{kind}",
-            "job_id": first.get("job_id"),
-            "dma_count": len(bucket),
-        })
-    rolled.sort(key=lambda r: (str(r.get("refresh_date")), str(r.get("week")),
-                               str(r.get("term")), str(r.get("list_kind"))))
-    return rolled
-
-
 def collect_trends(*, start_date, end_date, geos, limit=100,
                    data_root=None, executor=None, week_start=None,
                    week_end=None, interval="daily") -> dict:
@@ -508,12 +483,20 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
     limit = max(1, min(limit, _MAX_LIMIT))
-    week_start = week_start or _WIDE_WEEK_START
-    week_end = week_end or _WIDE_WEEK_END
+    if week_start is None and week_end is None:
+        week_end = end_date
+        week_start = (date.fromisoformat(end_date) - timedelta(days=13)).isoformat()
+    elif week_start is None:
+        week_start = (date.fromisoformat(week_end) - timedelta(days=13)).isoformat()
+    elif week_end is None:
+        week_end = (date.fromisoformat(week_start) + timedelta(days=13)).isoformat()
 
+    def _pair_for(group: dict) -> tuple:
+        if group["kind"] == "us":
+            return _US_NATIONAL_TEMPLATES if group.get("national") else _US_TEMPLATES
+        return _INTL_NATIONAL_TEMPLATES
     groups = _plan_groups(geos)
-    templates = [t for g in groups
-                 for t in (_US_TEMPLATES if g["kind"] == "us" else _INTL_TEMPLATES)]
+    templates = [t for g in groups for t in _pair_for(g)]
     completed = _completed_refreshes(data_root, templates) if data_root is not None else set()
 
     merged: dict = {}
@@ -521,7 +504,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     refresh_seen: set = set()
     fetched: list = []
     for group in groups:
-        pair = _US_TEMPLATES if group["kind"] == "us" else _INTL_TEMPLATES
+        pair = _pair_for(group)
         for template in pair:
             table = _template_table(template)
             refreshes = _enumerate_refreshes(table, start_date, end_date, executor, data_root)
@@ -533,19 +516,24 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 refreshes = [end_date]
             for refresh in refreshes:
                 refresh_seen.add(refresh)
-                if group["kind"] == "us":
+                if group["kind"] == "us" and group.get("national"):
                     params = {"start_date": refresh, "end_date": refresh,
-                              "dmas": [] if group["national"] else sorted(group["dmas"]),
-                              "all_dmas": bool(group["national"]),
+                              "week_start": week_start, "week_end": week_end,
+                              "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
+                              "sql_version": _SQL_VERSION, "national": "US"}
+                elif group["kind"] == "us":
+                    params = {"start_date": refresh, "end_date": refresh,
+                              "dmas": sorted(group["dmas"]),
+                              "all_dmas": False,
                               "week_start": week_start, "week_end": week_end,
                               "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
                               "sql_version": _SQL_VERSION}
                 else:
                     params = {"start_date": refresh, "end_date": refresh,
-                              "country_code": group["country"], "region_codes": [],
+                              "country_code": group["country"],
                               "week_start": week_start, "week_end": week_end,
                               "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
-                              "sql_version": _SQL_VERSION}
+                              "sql_version": _SQL_VERSION, "national": group["country"]}
                 checkpoint_key = _checkpoint_key(template, refresh, params)
                 if checkpoint_key in completed:
                     cached_rows = [c for c in _warehouse_rows(data_root, table, refresh)
@@ -614,7 +602,12 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                        or row.get("source_period") or refresh)
                     row["_kind"] = (row.get("list_kind") or row.get("list")
                                     or _TEMPLATE_LIST_KIND.get(template, "top"))
-                    if group["kind"] == "us":
+                    if template in _US_NATIONAL_TEMPLATES:
+                        row["_geo"] = "US"
+                    elif template in _INTL_NATIONAL_TEMPLATES:
+                        row["_geo"] = (row.get("country_code") or group["country"]
+                                       or row.get("geo"))
+                    elif group["kind"] == "us":
                         row["_geo"] = row.get("dma_name") or row.get("geo")
                     else:
                         region = row.get("region_code") or ""
@@ -653,7 +646,8 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     national = any(g.get("kind") == "us" and g.get("national") for g in groups)
     dma_set = {d for g in groups if g.get("kind") == "us" and not g.get("national")
                for d in (g.get("dmas") or [])}
-    national_input, dma_rows, intl_rows = [], [], []
+    national_templates = _US_NATIONAL_TEMPLATES + _INTL_NATIONAL_TEMPLATES
+    national_rows, dma_rows, intl_rows = [], [], []
     for key, row in merged.items():
         table = row.get("_table") or row.get("table")
         staged_row = _as_staged(row)
@@ -661,16 +655,18 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             return {"status": "error", "source": SOURCE,
                     "error": f"malformed trends row for key {key!r}",
                     "error_type": "malformed_row"}
-        if table in us_tables:
-            if national:
-                national_input.append(staged_row)
+        if row.get("_template") in national_templates:
+            national_rows.append(staged_row)
+        elif table in us_tables:
+            if national and str(staged_row["_geo"]) == "US":
+                national_rows.append(staged_row)
             elif str(staged_row["_geo"]) in dma_set:
                 dma_rows.append(staged_row)
         elif table in intl_tables:
             intl_rows.append(staged_row)
 
-    staged_all = national_input + dma_rows + intl_rows
-    final_geos = ({"US"} if national else set()) | {str(r["_geo"]) for r in dma_rows + intl_rows}
+    staged_all = national_rows + dma_rows + intl_rows
+    final_geos = {str(r["_geo"]) for r in staged_all}
     periods_all = sorted({str(r["_week"]) for r in staged_all}) or [end_date]
     winners: dict = {}
     for staged_row in staged_all:
@@ -692,10 +688,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
 
     observations = []
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    for row in _rollup_national(national_input):
-        observations.append(_normalize_row(row, retrieved_at, data_root,
-                                           features=term_features.get(row.get("term"))))
-    for row in dma_rows + intl_rows:
+    for row in national_rows + dma_rows + intl_rows:
         observations.append(_normalize_row(row, retrieved_at, data_root,
                                            features=term_features.get(row.get("term"))))
 
@@ -758,6 +751,8 @@ def _normalize_row(row: dict, retrieved_at: str, data_root, features=None) -> di
                    "region_code": row.get("region_code")}
         if row.get("dma_count") is not None:
             metrics["dma_count"] = row["dma_count"]
+        if row.get("region_count") is not None:
+            metrics["region_count"] = row["region_count"]
         evidence = [{"table": table, "row": {k: v for k, v in row.items() if not k.startswith("_")},
                      "job_id": row.get("job_id"), "template": row.get("_template")}]
     return _signals.normalize_candidate(

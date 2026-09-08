@@ -52,7 +52,11 @@ Observations land in the `google_observations` warehouse
 `known_at`; revised content is invisible before its new `known_at`. Only the
 last ~30 Trends `refresh_date` partitions are queryable (TTL); each carries
 rolling 5-year `week` backfill. Scores/ranks compare only within one
-refresh/week/geo/granularity. YouTube titles/counts are never persisted
+refresh/week/geo/granularity. Omitted `week_start`/`week_end` default to the
+trailing 14-day week window ending at `end_date`; deeper history needs
+explicit `week_start`/`week_end`. `US`/country rows are grouped
+cross-subregion `AVG(score)` with `dma_count`/`region_count` and carry no
+Google national rank. YouTube titles/counts are never persisted
 (RAM-only panel); only quota counters touch disk.
 
 ## Error codes

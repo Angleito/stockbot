@@ -112,6 +112,44 @@ TEMPLATES: dict[str, dict[str, Any]] = {
         "AND week BETWEEN DATE(@week_start) AND DATE(@week_end) "
         "ORDER BY refresh_date DESC, week DESC, rank ASC LIMIT {limit}",
     },
+    "trends_us_top_national": {
+        "table": "bigquery-public-data.google_trends.top_terms",
+        "max_rows": 1001,
+        "sql": "SELECT term, week, refresh_date, COUNT(DISTINCT dma_id) AS dma_count, AVG(score) AS score "
+        "FROM `bigquery-public-data.google_trends.top_terms` "
+        "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
+        "AND week BETWEEN DATE(@week_start) AND DATE(@week_end) "
+        "GROUP BY refresh_date, week, term ORDER BY refresh_date DESC, week DESC, score DESC LIMIT {limit}",
+    },
+    "trends_us_rising_national": {
+        "table": "bigquery-public-data.google_trends.top_rising_terms",
+        "max_rows": 1001,
+        "sql": "SELECT term, week, refresh_date, COUNT(DISTINCT dma_id) AS dma_count, AVG(score) AS score, AVG(percent_gain) AS percent_gain "
+        "FROM `bigquery-public-data.google_trends.top_rising_terms` "
+        "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
+        "AND week BETWEEN DATE(@week_start) AND DATE(@week_end) "
+        "GROUP BY refresh_date, week, term ORDER BY refresh_date DESC, week DESC, score DESC LIMIT {limit}",
+    },
+    "trends_intl_top_national": {
+        "table": "bigquery-public-data.google_trends.international_top_terms",
+        "max_rows": 1001,
+        "sql": "SELECT term, week, refresh_date, country_code, COUNT(DISTINCT region_code) AS region_count, AVG(score) AS score "
+        "FROM `bigquery-public-data.google_trends.international_top_terms` "
+        "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
+        "AND country_code = @country_code "
+        "AND week BETWEEN DATE(@week_start) AND DATE(@week_end) "
+        "GROUP BY refresh_date, week, term, country_code ORDER BY refresh_date DESC, week DESC, score DESC LIMIT {limit}",
+    },
+    "trends_intl_rising_national": {
+        "table": "bigquery-public-data.google_trends.international_top_rising_terms",
+        "max_rows": 1001,
+        "sql": "SELECT term, week, refresh_date, country_code, COUNT(DISTINCT region_code) AS region_count, AVG(score) AS score, AVG(percent_gain) AS percent_gain "
+        "FROM `bigquery-public-data.google_trends.international_top_rising_terms` "
+        "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
+        "AND country_code = @country_code "
+        "AND week BETWEEN DATE(@week_start) AND DATE(@week_end) "
+        "GROUP BY refresh_date, week, term, country_code ORDER BY refresh_date DESC, week DESC, score DESC LIMIT {limit}",
+    },
     "trends_refreshes": {
         "table": None,
         "table_from_params": True,

@@ -333,39 +333,174 @@ def _three_dma_rows():
                 [("Chicago", "alpha"), ("Los Angeles", "beta"), ("New York", "gamma")])]
 
 
+def _national_row(term="alpha", week="2026-08-24", refresh="2026-09-02",
+                 dma_count=2, score=85.0, kind="top"):
+    return {"term": term, "week": week, "refresh_date": refresh,
+            "dma_count": dma_count, "score": score, "list_kind": kind}
+
+
+def _intl_national_row(term="alpha", week="2026-08-24", refresh="2026-09-02",
+                      country="GB", region_count=5, score=80.0, kind="top"):
+    return {"term": term, "week": week, "refresh_date": refresh,
+            "country_code": country, "region_count": region_count,
+            "score": score, "list_kind": kind}
+
+
+
 def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
     _enable(monkeypatch)
     refreshes = ["2026-09-01", "2026-09-02"]
     seen = []
 
     def _rows(template, params):
-        if template != "trends_us_top":
+        if template != "trends_us_top_national":
             return []
         refresh = params["start_date"]
         assert refresh in refreshes
-        return [_dma_row("New York", refresh=refresh, rank=1, score=90),
-                _dma_row("Los Angeles", refresh=refresh, rank=2, score=80)]
+        assert "dmas" not in params and "all_dmas" not in params
+        return [_national_row("alpha", refresh=refresh, dma_count=2, score=85.0),
+                _national_row("beta", refresh=refresh, dma_count=3, score=70.0)]
 
     result = trends.collect_trends(
         start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
         limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] == "ok"
+    assert {t for t, _ in seen if t != "trends_refreshes"} <= {
+        "trends_us_top_national", "trends_us_rising_national"}
     by_refresh = {}
     for obs in result["observations"]:
         assert obs["geo"] == "US"
+        assert obs.get("rank") is None
+        assert (obs.get("metrics") or {}).get("rank") is None
         by_refresh.setdefault(obs["metrics"]["refresh_date"], []).append(obs)
     assert sorted(by_refresh) == refreshes
     for refresh, obs_list in by_refresh.items():
-        assert len(obs_list) == 1
-        assert obs_list[0]["metrics"]["dma_count"] == 2
-        assert refresh in obs_list[0]["source_record_id"]
-    table = trends._template_table("trends_us_top")
+        by_term = {o["term"]: o for o in obs_list}
+        assert by_term["alpha"]["metrics"]["dma_count"] == 2
+        assert by_term["alpha"]["metrics"]["score"] == pytest.approx(85.0)
+        assert by_term["beta"]["metrics"]["dma_count"] == 3
+        assert by_term["beta"]["metrics"]["score"] == pytest.approx(70.0)
+        assert all(refresh in o["source_record_id"] for o in obs_list)
+    table = trends._template_table("trends_us_top_national")
     for refresh in refreshes:
         durable = trends._warehouse_rows(tmp_path, table, refresh)
         assert durable, f"expected durable rows for {refresh}"
         assert {str((r.get("metrics") or {}).get("refresh_date")) for r in durable} == {refresh}
-        assert all((r.get("metrics") or {}).get("dma_count") == 2 for r in durable)
+        assert {(r.get("metrics") or {}).get("dma_count") for r in durable} == {2, 3}
+
+
+def test_national_default_scope_is_bounded(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    result = trends.collect_trends(
+        start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
+        limit=10, data_root=tmp_path,
+        executor=_scoped_trend_executor(
+            refreshes=refreshes, rows_for=lambda template, params: [], seen=seen))
+    assert result["status"] == "ok"
+    data_calls = [(t, p) for t, p in seen if t != "trends_refreshes"]
+    assert data_calls
+    assert {t for t, _ in data_calls} <= {
+        "trends_us_top_national", "trends_us_rising_national"}
+    for _, params in data_calls:
+        assert params["limit"] == 1001
+        assert "dmas" not in params and "all_dmas" not in params
+        assert params["week_end"] == "2026-09-02"
+        assert params["week_start"] == "2026-08-20"
+
+
+def test_national_sentinel_fires_post_aggregation(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    big_us = [_national_row(term=f"term-{i}", refresh="2026-09-02",
+                            dma_count=210, score=50.0) for i in range(1001)]
+    big_gb = [_intl_national_row(term=f"term-{i}", refresh="2026-09-02",
+                                 country="GB", region_count=12, score=50.0)
+              for i in range(1001)]
+
+    def _collect(geos, big, template):
+        seen: list = []
+
+        def _rows(t, params):
+            if t == template:
+                return [dict(r) for r in big]
+            return []
+
+        return trends.collect_trends(
+            start_date="2026-09-02", end_date="2026-09-02", geos=geos,
+            limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_scoped_trend_executor(
+                refreshes=refreshes, rows_for=_rows, seen=seen)), seen
+
+    for geos, big, template in ((["US"], big_us, "trends_us_top_national"),
+                                (["GB"], big_gb, "trends_intl_top_national")):
+        result, seen = _collect(geos, big, template)
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "query_scope_too_large"
+        assert result["error_type"] == "missing_coverage"
+        assert template in {t for t, _ in seen}
+    try:
+        observations = trends._parquet.read_table(
+            "google_observations", tmp_path / "parquet").to_pylist()
+    except Exception:
+        observations = []
+    assert observations == []
+    try:
+        stored = trends._parquet.read_table(
+            "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
+    except Exception:
+        stored = []
+    assert [r for r in stored if r.get("status") == "complete"] == []
+
+
+def test_national_ok_below_sentinel_preserves_counts(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template == "trends_us_top_national":
+            return [_national_row(term=f"term-{i}", refresh="2026-09-02",
+                                  dma_count=210, score=50.0) for i in range(1000)]
+        return []
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["US"],
+        limit=1000, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    assert result["count"] == 1000
+    assert all((o.get("metrics") or {}).get("dma_count") == 210
+               for o in result["observations"])
+
+
+def test_explicit_dma_keeps_row_level_sql(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return [_dma_row("New York", refresh=params["start_date"], rank=1)]
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    data_calls = [(t, p) for t, p in seen if t != "trends_refreshes"]
+    assert data_calls
+    assert {t for t, _ in data_calls} <= {"trends_us_top", "trends_us_rising"}
+    top_calls = [p for t, p in data_calls if t == "trends_us_top"]
+    assert top_calls and all(p["all_dmas"] is False for p in top_calls)
+    assert all(p["week_start"] == "2026-08-01" and p["week_end"] == "2026-08-31"
+               for p in top_calls)
+    assert {o["geo"] for o in result["observations"]} == {"New York"}
+
 
 
 def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):

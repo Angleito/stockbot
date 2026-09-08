@@ -1106,6 +1106,8 @@ TOOLS = [
                     "geo": {"type": "string", "description": "Single geography shorthand for geos."},
                     "term": {"type": "string", "description": "Optional substring filter over collected terms."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Max rows (default 100)."},
+                    "week_start": {"type": "string", "description": "Interest-week start YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
+                    "week_end": {"type": "string", "description": "Interest-week end YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
                 },
                 "required": [],
             },
@@ -1780,6 +1782,7 @@ def _get_trend_evidence(args: dict, model: str) -> dict:
             start_date=start_date, end_date=end_date,
             geos=list(geos), limit=args.get("limit", 100),
             data_root=get_data_root(),
+            week_start=args.get("week_start"), week_end=args.get("week_end"),
         ))
         term = args.get("term")
         if term and isinstance(result, dict) and result.get("status") == "ok":
