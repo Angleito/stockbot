@@ -75,6 +75,7 @@ _COLLECTOR_VERSION = "1"
 _SQL_VERSION = "1"
 _CHECKPOINT_PIPELINE = "google_trends"
 _MAX_LIMIT = 1000
+_FETCH_LIMIT = _MAX_LIMIT + 1
 _MAX_GEOS = 50
 _MAX_SPAN_DAYS = 31
 _WIDE_WEEK_START = "1900-01-01"
@@ -366,6 +367,29 @@ def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict
         pass
 
 
+def _archived_rows(data_root, template: str, job_id: str, params: dict) -> list | None:
+    if data_root is None or _raw_archive is None:
+        return None
+    best: list | None = None
+    try:
+        records = _raw_archive.iter_archive(
+            "google", template, job_id, root=Path(data_root) / "raw")
+        for record in records:
+            try:
+                if (record.metadata or {}).get("params") != params:
+                    continue
+                payload = json.loads(record.payload_path.read_bytes())
+            except Exception:
+                continue
+            if not isinstance(payload, list):
+                continue
+            if best is None or len(payload) > len(best):
+                best = payload
+    except Exception:
+        return best
+    return best
+
+
 def _mark_complete(data_root, checkpoint_key: str, refresh: str, payload_hash: str, count: int) -> None:
     proot = _parquet_root(data_root)
     if proot is None:
@@ -514,18 +538,23 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                               "dmas": [] if group["national"] else sorted(group["dmas"]),
                               "all_dmas": bool(group["national"]),
                               "week_start": week_start, "week_end": week_end,
-                              "limit": _MAX_LIMIT, "collector_version": _COLLECTOR_VERSION,
+                              "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
                               "sql_version": _SQL_VERSION}
                 else:
                     params = {"start_date": refresh, "end_date": refresh,
                               "country_code": group["country"], "region_codes": [],
                               "week_start": week_start, "week_end": week_end,
-                              "limit": _MAX_LIMIT, "collector_version": _COLLECTOR_VERSION,
+                              "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
                               "sql_version": _SQL_VERSION}
                 checkpoint_key = _checkpoint_key(template, refresh, params)
                 if checkpoint_key in completed:
                     cached_rows = [c for c in _warehouse_rows(data_root, table, refresh)
                                    if _cache_in_scope(c, params)]
+                    if len(cached_rows) > _MAX_LIMIT:
+                        return {"status": "unavailable", "source": SOURCE,
+                                "reason": "query_scope_too_large",
+                                "error": f"{template} query scope exceeds 1000 rows for {refresh}",
+                                "error_type": "missing_coverage"}
                     cached_rows.sort(key=lambda c: str(c.get("source_record_id") or ""))
                     cached_rows.sort(key=lambda c: (c.get("rank") if isinstance(
                         c.get("rank"), (int, float)) else float("inf")))
@@ -552,12 +581,25 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 result = _submit(template, params, executor, data_root)
                 if not isinstance(result, dict) or "error" in result:
                     return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
+                cached = bool(result.get("cached"))
                 rows = result.get("rows", []) or []
                 job_id = result.get("job_id")
-                if data_root is not None:
+                if cached and not rows:
+                    recovered = _archived_rows(data_root, template, job_id or template, params)
+                    if recovered is None:
+                        return _wrap_error({"error": f"cached Trends result unavailable for {template}|{refresh}; refusing to checkpoint",
+                                            "error_type": "source_unavailable", "source": "bigquery"})
+                    rows = recovered
+                if data_root is not None and not cached:
                     _archive_raw(data_root, template, job_id or template, table, params, rows)
+                if data_root is not None:
                     payload_hash = hashlib.sha256(json.dumps(
                         rows, sort_keys=True, default=str).encode()).hexdigest()
+                if len(rows) > _MAX_LIMIT:
+                    return {"status": "unavailable", "source": SOURCE,
+                            "reason": "query_scope_too_large",
+                            "error": f"{template} query scope exceeds 1000 rows for {refresh}",
+                            "error_type": "missing_coverage"}
                 if template not in used_templates:
                     used_templates.append(template)
                 tables_seen = set()
@@ -630,8 +672,15 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     staged_all = national_input + dma_rows + intl_rows
     final_geos = ({"US"} if national else set()) | {str(r["_geo"]) for r in dma_rows + intl_rows}
     periods_all = sorted({str(r["_week"]) for r in staged_all}) or [end_date]
-    by_term: dict = {}
+    winners: dict = {}
     for staged_row in staged_all:
+        wkey = (staged_row.get("_table"), staged_row.get("_kind"),
+                staged_row.get("_geo"), staged_row.get("term"), staged_row.get("_week"))
+        prev = winners.get(wkey)
+        if prev is None or str(staged_row.get("_refresh") or "") > str(prev.get("_refresh") or ""):
+            winners[wkey] = staged_row
+    by_term: dict = {}
+    for staged_row in winners.values():
         by_term.setdefault(staged_row.get("term"), []).append({
             "table": staged_row.get("_table"), "period": staged_row.get("_week"),
             "geo": staged_row.get("_geo"), "term": staged_row.get("term"),

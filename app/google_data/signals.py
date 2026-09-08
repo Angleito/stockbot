@@ -412,7 +412,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None) 
         if geo is not None and str(record.get("geo")) != str(geo):
             continue
         metrics = record.get("metrics") or {}
-        key = (known, str(metrics.get("refresh_date") or ""),
+        key = (str(metrics.get("refresh_date") or ""), known,
                str(row.get("content_hash") or ""), str(row.get("source_record_id") or ""))
         sid = record.get("signal_id")
         if sid not in latest or key > keys[sid]:

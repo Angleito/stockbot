@@ -72,7 +72,7 @@ def _table_allowed(table: str) -> bool:
 TEMPLATES: dict[str, dict[str, Any]] = {
     "trends_us_top": {
         "table": "bigquery-public-data.google_trends.top_terms",
-        "max_rows": 1000,
+        "max_rows": 1001,
         "sql": "SELECT term, rank, score, week, refresh_date, dma_name, dma_id "
         "FROM `bigquery-public-data.google_trends.top_terms` "
         "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
@@ -82,7 +82,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
     },
     "trends_us_rising": {
         "table": "bigquery-public-data.google_trends.top_rising_terms",
-        "max_rows": 1000,
+        "max_rows": 1001,
         "sql": "SELECT term, rank, score, percent_gain, week, refresh_date, dma_name, dma_id "
         "FROM `bigquery-public-data.google_trends.top_rising_terms` "
         "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
@@ -92,7 +92,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
     },
     "trends_intl_top": {
         "table": "bigquery-public-data.google_trends.international_top_terms",
-        "max_rows": 1000,
+        "max_rows": 1001,
         "sql": "SELECT term, rank, score, week, refresh_date, country_name, country_code, region_name, region_code "
         "FROM `bigquery-public-data.google_trends.international_top_terms` "
         "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "
@@ -103,7 +103,7 @@ TEMPLATES: dict[str, dict[str, Any]] = {
     },
     "trends_intl_rising": {
         "table": "bigquery-public-data.google_trends.international_top_rising_terms",
-        "max_rows": 1000,
+        "max_rows": 1001,
         "sql": "SELECT term, rank, score, percent_gain, week, refresh_date, country_name, country_code, region_name, region_code "
         "FROM `bigquery-public-data.google_trends.international_top_rising_terms` "
         "WHERE refresh_date BETWEEN DATE(@start_date) AND DATE(@end_date) "

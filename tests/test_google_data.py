@@ -385,7 +385,7 @@ def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] == "ok"
     data_calls = [params for template, params in seen if template != "trends_refreshes"]
-    assert data_calls and all(params["limit"] == 1000 for params in data_calls)
+    assert data_calls and all(params["limit"] == 1001 for params in data_calls)
     assert result["count"] == 1 and len(result["observations"]) == 1
     assert result["continuation"] is True and "truncated" in result["warnings"]
     retained = signals.query_signals(data_root=tmp_path)
@@ -460,6 +460,180 @@ def test_checkpoint_scope_distinguishes_dmas(monkeypatch, tmp_path):
                             for t, p in calls if t != "trends_refreshes"}
     ny_keys, la_keys = scoped(seen[:first_seen]), scoped(seen[first_seen:])
     assert ny_keys and la_keys and not (ny_keys & la_keys)
+
+
+def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen: list = []
+    calls: dict = {}
+
+    def _run(template, params):
+        seen.append((template, dict(params)))
+        if template == "trends_refreshes":
+            return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
+                    "source": "bigquery"}
+        key = (template, json.dumps(params, sort_keys=True, default=str))
+        n = calls.get(key, 0)
+        calls[key] = n + 1
+        job_id = f"job-{template}-{params['start_date']}"
+        if n == 0:
+            rows = _three_dma_rows() if template == "trends_us_top" else []
+            return {"status": "ok", "rows": [dict(r) for r in rows],
+                    "source": "bigquery", "job_id": job_id}
+        return {"status": "ok", "cached": True, "job_id": job_id, "rows": [],
+                "source": "bigquery"}
+
+    orig_write = trends._parquet.write_rows
+
+    def _drop_one(name, rows, root=None, **kwargs):
+        if name == "google_observations" and len(rows) > 1:
+            rows = list(rows)[:-1]
+        return orig_write(name, rows, root=root, **kwargs)
+
+    monkeypatch.setattr(trends._parquet, "write_rows", _drop_one)
+
+    def _collect():
+        return trends.collect_trends(
+            start_date="2026-09-02", end_date="2026-09-02",
+            geos=["Chicago", "Los Angeles", "New York"],
+            limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_run)
+
+    first, second = _collect(), _collect()
+    for result in (first, second):
+        assert result["status"] in ("unavailable", "error")
+        assert "warehouse verify failed" in result.get("error", "")
+    try:
+        stored = trends._parquet.read_table(
+            "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
+    except Exception:
+        stored = []
+    complete = {row.get("key") for row in stored if row.get("status") == "complete"}
+    scoped = {trends._checkpoint_key(template, params["start_date"], params)
+              for template, params in seen if template != "trends_refreshes"}
+    assert scoped
+    assert not (scoped & complete)
+
+
+def test_query_scope_over_1000_never_checkpoints(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen: list = []
+    calls: dict = {}
+    big = [_dma_row("New York", term=f"term-{i}", week="2026-08-24",
+                    refresh="2026-09-02", rank=i + 1, score=90)
+           for i in range(1001)]
+
+    def _run(template, params):
+        seen.append((template, dict(params)))
+        if template == "trends_refreshes":
+            return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
+                    "source": "bigquery"}
+        key = (template, json.dumps(params, sort_keys=True, default=str))
+        n = calls.get(key, 0)
+        calls[key] = n + 1
+        job_id = f"job-{template}-{params['start_date']}"
+        if n == 0:
+            rows = big if template == "trends_us_top" else []
+            return {"status": "ok", "rows": [dict(r) for r in rows],
+                    "source": "bigquery", "job_id": job_id}
+        return {"status": "ok", "cached": True, "job_id": job_id, "rows": [],
+                "source": "bigquery"}
+
+    def _collect():
+        return trends.collect_trends(
+            start_date="2026-09-02", end_date="2026-09-02", geos=["New York"],
+            limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_run)
+
+    first, second = _collect(), _collect()
+    for result in (first, second):
+        assert result["status"] == "unavailable"
+        assert result["error_type"] == "missing_coverage"
+        assert result["reason"] == "query_scope_too_large"
+    try:
+        observations = trends._parquet.read_table(
+            "google_observations", tmp_path / "parquet").to_pylist()
+    except Exception:
+        observations = []
+    assert observations == []
+    try:
+        stored = trends._parquet.read_table(
+            "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
+    except Exception:
+        stored = []
+    assert [r for r in stored if r.get("status") == "complete"] == []
+
+
+def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-01", "2026-09-02"]
+    seen: list = []
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        refresh = params["start_date"]
+        if refresh == "2026-09-01":
+            return [_dma_row("New York", term="alpha", week=w, refresh=refresh,
+                             rank=r, score=s)
+                    for w, r, s in [(w1, 4, 10), (w2, 3, 20), (w3, 2, 30), (w4, 1, 100)]]
+        if refresh == "2026-09-02":
+            return [_dma_row("New York", term="alpha", week=w4, refresh=refresh,
+                             rank=5, score=40)]
+        return []
+
+    result = trends.collect_trends(
+        start_date="2026-09-01", end_date="2026-09-02", geos=["New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    alpha = [o for o in result["observations"] if o.get("term") == "alpha"]
+    assert alpha
+    features = alpha[0].get("features") or {}
+    assert features["velocity"] == pytest.approx(7.5)
+    assert features["acceleration"] == pytest.approx(0.0)
+    assert features["rank_improvement"] == -3
+    assert features["percentile"] == pytest.approx(1.0)
+    table = trends._template_table("trends_us_top")
+    old = trends._warehouse_rows(tmp_path, table, "2026-09-01")
+    new = trends._warehouse_rows(tmp_path, table, "2026-09-02")
+    assert {r.get("week") for r in old} >= {w4}
+    assert {r.get("week") for r in new} == {w4}
+    assert {(r.get("metrics") or {}).get("score") for r in old if r.get("week") == w4} == {100}
+    assert {(r.get("metrics") or {}).get("score") for r in new if r.get("week") == w4} == {40}
+
+
+def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path):
+    from app.storage import parquet as _pq
+    table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
+
+    def _rev(refresh, known, marker, content_hash, tag):
+        return {
+            "observation_id": "obs-alpha", "source": "trends", "table": table,
+            "term": term, "geo": geo, "list_kind": kind, "period": period,
+            "observed_at": period, "known_at": known, "retrieved_at": known,
+            "source_record_id": f"{table}|{refresh}|{geo}|{term}|{kind}#{tag}",
+            "content_hash": content_hash, "collector_version": "1", "calc_version": "1",
+            "metrics_json": json.dumps(
+                {"rank": 1, "refresh_date": refresh, "marker": marker}, sort_keys=True),
+            "evidence_json": "[]", "source_url": f"bq://{table}",
+        }
+
+    newer = _rev("2026-09-02", "2026-09-02", "new", "hash-new", "new")
+    backfill = _rev("2026-09-01", "2026-09-03", "backfill", "hash-old", "old")
+    for rev in (newer, backfill):
+        _pq.write_rows("google_observations", [rev], root=tmp_path / "parquet")
+    at_cutoff = signals.query_signals(data_root=tmp_path, as_of="2026-09-03")
+    assert len(at_cutoff) == 1
+    assert at_cutoff[0]["metrics"]["refresh_date"] == "2026-09-02"
+    assert at_cutoff[0]["metrics"]["marker"] == "new"
+    uncut = signals.query_signals(data_root=tmp_path)
+    assert len(uncut) == 1
+    assert uncut[0]["metrics"]["refresh_date"] == "2026-09-02"
+    assert signals.query_signals(data_root=tmp_path, as_of="2026-09-01") == []
 
 
 def test_query_signals_tie_breaks_on_refresh_date(tmp_path):
