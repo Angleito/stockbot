@@ -1079,7 +1079,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "find_alternative_signals",
-            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with deterministic persistence/diffusion features. Candidates only, never materiality or investment claims.",
+            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
             "parameters": {
                 "type": "object",
                 "properties": {

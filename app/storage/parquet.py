@@ -517,7 +517,7 @@ DATASETS["google_signal_features"] = Dataset(
         ("calc_version", TEXT), ("calculated_at", TEXT),
         ("inputs_hash", TEXT),
     )),
-    unique_keys=("observation_id", "feature_scope_hash", "calc_version"),
+    unique_keys=("observation_id", "feature_scope_hash", "calc_version", "inputs_hash"),
     partition_field="calculated_at",
 )
 

@@ -1555,3 +1555,129 @@ def test_youtube_default_search_ceiling_is_80(monkeypatch):
     assert _config.get_youtube_search_daily_limit() == 80
     assert _config.get_bq_daily_bytes_limit() == 10737418240
     assert _config.get_bq_monthly_bytes_limit() == 536870912000
+
+
+def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    from app.storage import parquet as _pq
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+    weeks = [w1, w2, w3, w4]
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        refresh = params["start_date"]
+        scores = [10, 20, 30, 50] if refresh == "2026-09-02" else [11, 21, 31, 99]
+        return [_dma_row("New York", term="alpha", week=w, refresh=refresh,
+                         rank=r, score=s)
+                for w, r, s in zip(weeks, [4, 3, 2, 1], scores)]
+
+    def _collect(refresh):
+        return trends.collect_trends(
+            start_date=refresh, end_date=refresh, geos=["New York"],
+            limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_scoped_trend_executor(refreshes=[refresh], rows_for=_rows, seen=[]))
+
+    assert _collect("2026-09-02")["status"] == "ok"
+    assert _collect("2026-09-03")["status"] == "ok"
+    table = trends._template_table("trends_us_top")
+    stored = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
+    obs_rows = [r for r in stored
+                if r.get("table") == table and r.get("geo") == "New York"
+                and r.get("term") == "alpha" and r.get("period") == w4]
+    assert len(obs_rows) == 2
+    target_oid = obs_rows[0]["observation_id"]
+    assert {r["observation_id"] for r in obs_rows} == {target_oid}
+    kuts = sorted({r.get("known_at") for r in stored})
+    assert len(kuts) == 2 and kuts[0] < kuts[1]
+    feat_rows = [r for r in _pq.read_table(
+        "google_signal_features", tmp_path / "parquet").to_pylist()
+        if str(r.get("observation_id") or "") == str(target_oid)]
+    assert len(feat_rows) == 2
+    assert len({r.get("feature_scope_hash") for r in feat_rows}) == 1
+    assert len({r.get("inputs_hash") for r in feat_rows}) == 2
+    by_hash = {r.get("inputs_hash"): json.loads(r.get("features_json") or "{}")
+               for r in feat_rows}
+    assert len({json.dumps(v, sort_keys=True) for v in by_hash.values()}) == 2
+
+    def _by_period(as_of):
+        return {s["period"]: s for s in signals.query_signals(
+            data_root=tmp_path, as_of=as_of)
+            if s.get("term") == "alpha" and s.get("geo") == "New York"}
+    old, new = _by_period(kuts[0]), _by_period(kuts[1])
+    assert old[w4]["features"] == by_hash[old[w4]["available_feature_scopes"][0]["inputs_hash"]]
+    assert new[w4]["features"] == by_hash[new[w4]["available_feature_scopes"][0]["inputs_hash"]]
+    assert old[w4]["features"] != new[w4]["features"]
+
+    v2 = [r for r in obs_rows if r.get("known_at") == kuts[1]][0]
+    metrics = json.loads(v2["metrics_json"])
+    metrics["score"] = 123.0
+    evidence = json.loads(v2["evidence_json"])
+    _, new_hash = trends._observation_identity(
+        v2["table"], v2["period"], v2["geo"], v2["term"], v2["list_kind"],
+        metrics, evidence)
+    rev = dict(v2)
+    rev["metrics_json"] = json.dumps(metrics, sort_keys=True, default=str)
+    rev["content_hash"] = new_hash
+    rev["known_at"] = "2099-01-01T00:00:00+00:00"
+    rev["retrieved_at"] = "2099-01-01T00:00:00+00:00"
+    _pq.write_rows("google_observations", [rev], root=tmp_path / "parquet")
+    latest = _by_period(None)
+    assert latest[w4]["features"] is None
+    assert latest[w4]["feature_scope"] is None
+    assert latest[w4]["feature_scope_hash"] is None
+    assert latest[w4]["feature_calculated_at"] is None
+
+
+def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+    weeks = [w1, w2, w3, w4]
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        refresh = params["start_date"]
+        out = []
+        for dma, scores in (("New York", [10, 20, 30, 50]),
+                            ("Los Angeles", [15, 25, 35, 55])):
+            out.extend(_dma_row(dma, term="alpha", week=w, refresh=refresh,
+                                rank=r, score=s)
+                       for w, r, s in zip(weeks, [4, 3, 2, 1], scores))
+        return out
+
+    def _collect(root, geos):
+        result = trends.collect_trends(
+            start_date="2026-09-02", end_date="2026-09-02", geos=geos,
+            limit=20, data_root=root, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_scoped_trend_executor(
+                refreshes=["2026-09-02"], rows_for=_rows, seen=[]))
+        assert result["status"] == "ok"
+
+    def _scrubbed(root):
+        rows = []
+        for record in signals.query_signals(data_root=root):
+            record = dict(record)
+            for key in ("known_at", "retrieved_at", "feature_calculated_at"):
+                if key in record:
+                    record[key] = ""
+            record["available_feature_scopes"] = [
+                {**entry, "feature_calculated_at": ""}
+                for entry in (record.get("available_feature_scopes") or [])]
+            rows.append(record)
+        rows.sort(key=lambda r: str(r.get("signal_id")))
+        return rows
+
+    _collect(tmp_path / "a", ["New York"])
+    _collect(tmp_path / "a", ["New York", "Los Angeles"])
+    _collect(tmp_path / "b", ["New York", "Los Angeles"])
+    _collect(tmp_path / "b", ["New York"])
+    a, b = _scrubbed(tmp_path / "a"), _scrubbed(tmp_path / "b")
+    assert json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+    by_key = {(s["term"], s["geo"], s["period"]): s for s in a}
+    multi = by_key[("alpha", "New York", w4)]
+    assert multi["features"] is None
+    assert len(multi["available_feature_scopes"]) == 2
+    assert [e["feature_scope_hash"] for e in multi["available_feature_scopes"]] == sorted(
+        e["feature_scope_hash"] for e in multi["available_feature_scopes"])
+    assert by_key[("alpha", "Los Angeles", w4)]["features"] is not None

@@ -455,8 +455,11 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
     Reads the ``google_observations`` warehouse (migrating legacy JSONL once);
     optional substring match on term (``query``), exact match on ``geo``,
     and a row ``limit`` cap.
-    Features are scope-transparent derived data: default latest-derived-revision
-    at current CALC_VERSION within PIT, with winning scope returned transparently.
+    Features are scope-transparent derived data: only PIT-valid v2 rows at
+    current CALC_VERSION attach (stored inputs_hash must equal the hash
+    recomputed over the selected observations); unscoped reads attach
+    features only when exactly one valid scope matches, otherwise null
+    with ``available_feature_scopes`` listed.
     """
     migrate_jsonl_once(data_root)
     cutoff = _as_key(as_of)
@@ -488,27 +491,82 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
                 _resolve_root(data_root) / "parquet").to_pylist()
         except Exception:
             feature_rows = []
-    for record in latest.values():
+    try:
+        from . import trends as _trends
+    except ImportError:
+        try:
+            from app.google_data import trends as _trends  # type: ignore
+        except ImportError:
+            _trends = None  # type: ignore
+    shaped: dict = {}
+    for _sid, _rec in latest.items():
+        _metrics = _rec.get("metrics")
+        shaped[_sid] = {
+            "observation_id": str(_rec.get("observation_id") or ""),
+            "content_hash": str(_rec.get("_source_hash") or ""),
+            "table": str(_rec.get("table") or ""),
+            "period": str(_rec.get("period") or ""),
+            "geo": str(_rec.get("geo") or ""),
+            "term": str(_rec.get("term") or ""),
+            "list_kind": str(_rec.get("list_kind") or ""),
+            "metrics": _metrics if isinstance(_metrics, dict) else {},
+        }
+    candidates = list(shaped.values())
+    def _pick(_rows: list) -> dict:
+        _peak = max(str(_r.get("calculated_at") or "") for _r in _rows)
+        return min((_r for _r in _rows if str(_r.get("calculated_at") or "") == _peak),
+                   key=lambda _r: str(_r.get("features_json") or ""))
+    for _sid, record in latest.items():
         oid = str(record.get("observation_id") or "")
-        best = None
-        best_at = ""
-        best_scope = None
-        for frow in feature_rows:
-            if not isinstance(frow, dict):
-                continue
-            if str(frow.get("observation_id") or "") != oid:
-                continue
-            if str(frow.get("calc_version") or "") != str(CALC_VERSION):
-                continue
-            if feature_scope_hash is not None:
-                if str(frow.get("feature_scope_hash") or "") != str(feature_scope_hash):
+        by_scope: dict = {}
+        if _trends is not None:
+            basis = _trends._series_basis(shaped[_sid])
+            for frow in feature_rows:
+                if not isinstance(frow, dict):
                     continue
-            cat = str(frow.get("calculated_at") or "")
-            if cutoff is not None and cat > cutoff:
+                if str(frow.get("observation_id") or "") != oid:
+                    continue
+                if str(frow.get("calc_version") or "") != str(CALC_VERSION):
+                    continue
+                if feature_scope_hash is not None:
+                    if str(frow.get("feature_scope_hash") or "") != str(feature_scope_hash):
+                        continue
+                if cutoff is not None and str(frow.get("calculated_at") or "") > cutoff:
+                    continue
+                try:
+                    scope = json.loads(frow.get("feature_scope_json") or "")
+                except ValueError:
+                    continue
+                if not isinstance(scope, dict):
+                    continue
+                expected = _trends.expected_inputs_hash(
+                    scope, str(record.get("term") or ""),
+                    str(record.get("table") or ""),
+                    str(record.get("list_kind") or ""), basis, candidates)
+                if str(frow.get("inputs_hash") or "") != str(expected):
+                    continue
+                by_scope.setdefault(str(frow.get("feature_scope_hash") or ""), []).append(frow)
+        flat = [r for rows in by_scope.values() for r in rows]
+        if flat and (feature_scope_hash is not None or len(by_scope) == 1):
+            best = _pick(flat)
+        else:
+            best = None
+        available = []
+        for _hash in sorted(by_scope):
+            rep = _pick(by_scope[_hash])
+            try:
+                _scope = json.loads(rep.get("feature_scope_json") or "")
+            except ValueError:
                 continue
-            if best is None or cat > best_at:
-                best = frow
-                best_at = cat
+            if not isinstance(_scope, dict):
+                continue
+            available.append({
+                "feature_scope": _scope,
+                "feature_scope_hash": str(rep.get("feature_scope_hash") or ""),
+                "feature_calculated_at": str(rep.get("calculated_at") or ""),
+                "calc_version": str(rep.get("calc_version") or ""),
+                "inputs_hash": str(rep.get("inputs_hash") or ""),
+            })
         if best is not None:
             try:
                 decoded = json.loads(best.get("features_json") or "")
@@ -527,6 +585,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
             record["feature_scope"] = None
             record["feature_scope_hash"] = None
             record["feature_calculated_at"] = None
+        record["available_feature_scopes"] = available
     rows = sorted(latest.values(),
                   key=lambda d: (str(d.get("known_at", "")), str(d.get("signal_id"))))
     if limit is not None:
