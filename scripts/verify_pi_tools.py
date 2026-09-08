@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -39,6 +40,30 @@ def ensure_thesis_fixture(store: Path) -> str:
     if not isinstance(out, dict) or not out.get("thesis_id"):
         raise RuntimeError(f"thesis fixture setup failed: {str(out)[:300]}")
     return str(out["thesis_id"])
+
+
+FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
+
+
+def seed_finra_fixture(store: Path, durable: Path) -> None:
+    """Copy leaderboard inputs from the durable store into the batch store.
+
+    Verify batches run in an isolated store that starts empty, so the
+    FINRA short-interest snapshot plus its SEC join inputs would otherwise
+    be missing and get_short_interest_leaderboard fails deterministically.
+    Plain file copy (never symlink): batch runs must not append to the
+    operator's durable datasets. Warns and continues when the durable
+    store has nothing to copy; the tool then fails in-attempt with the
+    refresh-data hint instead of breaking unrelated tools here.
+    """
+    if store.resolve() == durable.resolve():
+        return
+    for name in FINRA_SEED_DATASETS:
+        src = durable / "parquet" / name
+        if not src.is_dir():
+            print(f"verify seed: durable dataset missing, skipping: {src}", file=sys.stderr)
+            continue
+        shutil.copytree(src, store / "parquet" / name, dirs_exist_ok=True)
 
 
 class _VerifyCase(TypedDict):
@@ -137,6 +162,10 @@ def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) ->
         case = VERIFY_CASES.get(tool)
         natural = case["natural_question"] if case is not None else ""
         if natural:
+            if THESIS_ID_PLACEHOLDER in natural and "id" in args:
+                thesis_id = str(args["id"])
+                natural = natural.replace(THESIS_ID_PLACEHOLDER, thesis_id)
+                natural += f" Use thesis ID `{thesis_id}` exactly for the `id` argument."
             return natural
         return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
     return build_explicit_prompt(tool, args)
@@ -373,7 +402,9 @@ def main() -> int:
     # Contain live side effects (e.g. thesis_create) in the batch dir; never
     # the operator's durable store. run_pi children inherit this env.
     store = root / "store"
+    durable = Path(os.environ.get("STOCKBOT_DATA_DIR", "data"))
     os.environ.setdefault("STOCKBOT_DATA_DIR", str(store.resolve()))
+    seed_finra_fixture(store, durable)
     if any(t in THESIS_ID_TOOLS for t in tool_names):
         try:
             fixture_id = ensure_thesis_fixture(store.resolve())
