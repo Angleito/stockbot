@@ -307,6 +307,190 @@ def test_asof_excludes_future_evidence_and_recollect_idempotent(monkeypatch, tmp
     assert len(first_ids) == len(set(first_ids))
 
 
+# Trends durability regressions -------------------------------------------------
+
+def _scoped_trend_executor(*, refreshes, rows_for, seen):
+    """Params-aware executor: partitions for trends_refreshes, per-refresh rows otherwise."""
+    def _run(template, params):
+        seen.append((template, dict(params)))
+        if template == "trends_refreshes":
+            return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes],
+                    "source": "bigquery"}
+        return {"status": "ok", "rows": [dict(r) for r in rows_for(template, dict(params))],
+                "source": "bigquery"}
+    return _run
+
+
+def _dma_row(dma, term="alpha", week="2026-08-24", refresh="2026-09-02",
+             rank=1, score=90, kind="top"):
+    return {"term": term, "week": week, "refresh_date": refresh,
+            "dma_name": dma, "rank": rank, "score": score, "list_kind": kind}
+
+
+def _three_dma_rows():
+    return [_dma_row(dma, term, refresh="2026-09-02", rank=i + 1, score=90 - 10 * i)
+            for i, (dma, term) in enumerate(
+                [("Chicago", "alpha"), ("Los Angeles", "beta"), ("New York", "gamma")])]
+
+
+def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-01", "2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        refresh = params["start_date"]
+        assert refresh in refreshes
+        return [_dma_row("New York", refresh=refresh, rank=1, score=90),
+                _dma_row("Los Angeles", refresh=refresh, rank=2, score=80)]
+
+    result = trends.collect_trends(
+        start_date="2026-09-01", end_date="2026-09-02", geos=["US"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    by_refresh = {}
+    for obs in result["observations"]:
+        assert obs["geo"] == "US"
+        by_refresh.setdefault(obs["metrics"]["refresh_date"], []).append(obs)
+    assert sorted(by_refresh) == refreshes
+    for refresh, obs_list in by_refresh.items():
+        assert len(obs_list) == 1
+        assert obs_list[0]["metrics"]["dma_count"] == 2
+        assert refresh in obs_list[0]["source_record_id"]
+    table = trends._template_table("trends_us_top")
+    for refresh in refreshes:
+        durable = trends._warehouse_rows(tmp_path, table, refresh)
+        assert durable, f"expected durable rows for {refresh}"
+        assert {str((r.get("metrics") or {}).get("refresh_date")) for r in durable} == {refresh}
+        assert all((r.get("metrics") or {}).get("dma_count") == 2 for r in durable)
+
+
+def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return _three_dma_rows()
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02",
+        geos=["Chicago", "Los Angeles", "New York"],
+        limit=1, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    data_calls = [params for template, params in seen if template != "trends_refreshes"]
+    assert data_calls and all(params["limit"] == 1000 for params in data_calls)
+    assert result["count"] == 1 and len(result["observations"]) == 1
+    assert result["continuation"] is True and "truncated" in result["warnings"]
+    retained = signals.query_signals(data_root=tmp_path)
+    assert sorted(s["term"] for s in retained) == ["alpha", "beta", "gamma"]
+
+
+def test_partial_write_does_not_checkpoint(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return _three_dma_rows()
+
+    orig_write = trends._parquet.write_rows
+
+    def _drop_one(name, rows, root=None, **kwargs):
+        if name == "google_observations" and len(rows) > 1:
+            rows = list(rows)[:-1]
+        return orig_write(name, rows, root=root, **kwargs)
+
+    monkeypatch.setattr(trends._parquet, "write_rows", _drop_one)
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02",
+        geos=["Chicago", "Los Angeles", "New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] in ("unavailable", "error")
+    assert "warehouse verify failed" in result.get("error", "")
+    try:
+        stored = trends._parquet.read_table(
+            "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
+    except Exception:
+        stored = []
+    complete = {row.get("key") for row in stored if row.get("status") == "complete"}
+    scoped = {trends._checkpoint_key(template, params["start_date"], params)
+              for template, params in seen if template != "trends_refreshes"}
+    assert scoped
+    assert not (scoped & complete)
+
+
+def test_checkpoint_scope_distinguishes_dmas(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return [_dma_row(dma, refresh=params["start_date"], rank=1)
+                for dma in params.get("dmas", [])]
+
+    def _collect(geos):
+        return trends.collect_trends(
+            start_date="2026-09-01", end_date="2026-09-02", geos=geos,
+            limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_scoped_trend_executor(
+                refreshes=refreshes, rows_for=_rows, seen=seen))
+
+    first = _collect(["New York"])
+    assert first["status"] == "ok"
+    assert {obs["geo"] for obs in first["observations"]} == {"New York"}
+    first_seen = len(seen)
+    second = _collect(["Los Angeles"])
+    assert second["status"] == "ok"
+    assert {obs["geo"] for obs in second["observations"]} == {"Los Angeles"}
+    assert [t for t, _ in seen[first_seen:] if t != "trends_refreshes"], \
+        "scoped miss must re-execute data templates"
+    scoped = lambda calls: {trends._checkpoint_key(t, p["start_date"], p)
+                            for t, p in calls if t != "trends_refreshes"}
+    ny_keys, la_keys = scoped(seen[:first_seen]), scoped(seen[first_seen:])
+    assert ny_keys and la_keys and not (ny_keys & la_keys)
+
+
+def test_query_signals_tie_breaks_on_refresh_date(tmp_path):
+    from app.storage import parquet as _pq
+    table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
+    known_at = "2026-09-02T00:00:00+00:00"
+
+    def _rev(refresh, marker, content_hash, tag):
+        return {
+            "observation_id": "obs-alpha", "source": "trends", "table": table,
+            "term": term, "geo": geo, "list_kind": kind, "period": period,
+            "observed_at": period, "known_at": known_at,
+            "retrieved_at": f"2026-09-02T00:00:0{'1' if tag == 'old' else '2'}+00:00",
+            "source_record_id": f"{table}|{refresh}|{geo}|{term}|{kind}#{tag}",
+            "content_hash": content_hash, "collector_version": "1", "calc_version": "1",
+            "metrics_json": json.dumps(
+                {"rank": 1, "refresh_date": refresh, "marker": marker}, sort_keys=True),
+            "evidence_json": "[]", "source_url": f"bq://{table}",
+        }
+
+    old = _rev("2026-09-01", "old", "zzz-old-hash", "old")
+    new = _rev("2026-09-02", "new", "aaa-new-hash", "new")
+    for name, order in (("a", (old, new)), ("b", (new, old))):
+        for rev in order:
+            _pq.write_rows("google_observations", [rev], root=tmp_path / name / "parquet")
+    for name in ("a", "b"):
+        found = signals.query_signals(data_root=tmp_path / name)
+        assert len(found) == 1
+        assert found[0]["metrics"]["refresh_date"] == "2026-09-02"
+        assert found[0]["metrics"]["marker"] == "new"
+
 # Entity + macro ------------------------------------------------------------
 # Migration note: Knowledge Graph entity resolution was removed from the
 # research path (no GOOGLE_KG_API_KEY; investigation uses SEC-confirmed

@@ -208,8 +208,26 @@ def _parquet_root(data_root) -> Path | None:
     return Path(data_root) / "parquet"
 
 
+def _checkpoint_key(template: str, refresh: str, params: dict) -> str:
+    """Scoped completion key for the exact canonical query submitted."""
+    scope_hash = hashlib.sha256(
+        json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return f"{template}|{refresh}|{scope_hash}"
+
+
+def _observation_identity(table: str, period: str, geo: str, term: str,
+                          list_kind: str, metrics: dict, evidence: list) -> tuple:
+    """Durable (observation_id, content_hash) identity shared by store and verify."""
+    content_hash = hashlib.sha256(
+        json.dumps({"metrics": metrics, "evidence": evidence},
+                   sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    observation_id = hashlib.sha256(
+        f"{SOURCE}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+    return observation_id, content_hash
+
+
 def _completed_refreshes(data_root, templates: list) -> set:
-    """Checkpointed (template, refresh_date) pairs; missing warehouse reads as none."""
+    """Completed scoped checkpoint keys; missing warehouse reads as none."""
     done = set()
     proot = _parquet_root(data_root)
     if proot is None:
@@ -231,9 +249,9 @@ def _completed_refreshes(data_root, templates: list) -> set:
         if row.get("status") != "complete":
             continue
         key = str(row.get("key") or "")
-        template, _, refresh = key.partition("|")
-        if template in wanted and refresh:
-            done.add((template, refresh))
+        template, _, _rest = key.partition("|")
+        if template in wanted and key:
+            done.add(key)
     return done
 
 
@@ -271,11 +289,27 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
     return out
 
 
-def _store_observations(data_root, observations: list, retrieved_at: str) -> None:
-    """Write normalized observations to the warehouse, preserving first known_at."""
+def _cache_in_scope(cached: dict, params: dict) -> bool:
+    """Keep only cached rows matching the current canonical query scope."""
+    week = str(cached.get("week") or cached.get("period") or "")
+    if week < str(params.get("week_start") or "") or week > str(params.get("week_end") or ""):
+        return False
+    geo = str(cached.get("geo") or "")
+    if "all_dmas" in params:
+        if params.get("all_dmas"):
+            return geo == "US"
+        return geo in set(params.get("dmas") or [])
+    if "country_code" in params:
+        country = str(params.get("country_code") or "")
+        return geo == country or geo.startswith(country + ":")
+    return True
+
+
+def _store_observations(data_root, observations: list, retrieved_at: str) -> dict:
+    """Write normalized observations; return expected identities per (table, refresh)."""
     proot = _parquet_root(data_root)
     if proot is None:
-        return
+        return {}
     try:
         stored = _parquet.read_table("google_observations", proot).to_pylist()
     except Exception:
@@ -289,15 +323,20 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> Non
         if key not in first_known or known < first_known[key]:
             first_known[key] = known
     warehouse_rows = []
+    expected: dict = {}
     for obs in observations:
         metrics = dict(obs.get("metrics") or {})
         evidence = list(obs.get("evidence") or [])
-        content_hash = hashlib.sha256(
-            json.dumps({"metrics": metrics, "evidence": evidence},
-                       sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
-        observation_id = hashlib.sha256(
-            f"{SOURCE}|{obs['table']}|{obs['period']}|{obs['geo']}|{obs['term']}|{obs['list_kind']}".encode()
-        ).hexdigest()
+        observation_id, content_hash = _observation_identity(
+            obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"],
+            metrics, evidence)
+        refresh_date = str(metrics.get("refresh_date") or "")
+        if not refresh_date:
+            parts = str(obs.get("source_record_id") or "").split("|")
+            if len(parts) >= 2 and parts[0] == obs.get("table"):
+                refresh_date = parts[1]
+        expected.setdefault((obs["table"], refresh_date), set()).add(
+            (observation_id, content_hash))
         known_at = first_known.get((observation_id, content_hash), retrieved_at)
         warehouse_rows.append({
             "observation_id": observation_id, "source": SOURCE, "table": obs["table"],
@@ -312,6 +351,7 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> Non
             "source_url": f"bq://{obs['table']}",
         })
     _parquet.write_rows("google_observations", warehouse_rows, root=proot)
+    return expected
 
 
 def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict, rows: list) -> None:
@@ -326,14 +366,14 @@ def _archive_raw(data_root, template: str, job_id: str, table: str, params: dict
         pass
 
 
-def _mark_complete(data_root, template: str, refresh: str, payload_hash: str, count: int) -> None:
+def _mark_complete(data_root, checkpoint_key: str, refresh: str, payload_hash: str, count: int) -> None:
     proot = _parquet_root(data_root)
     if proot is None:
         return
     now = datetime.now(timezone.utc).isoformat()
     _parquet.write_rows("ingestion_checkpoints", [{
         "pipeline": _CHECKPOINT_PIPELINE, "source": "bigquery",
-        "key": f"{template}|{refresh}", "payload_hash": payload_hash,
+        "key": checkpoint_key, "payload_hash": payload_hash,
         "status": "complete", "record_count": count,
         "started_at": now, "finished_at": now, "parser_version": _COLLECTOR_VERSION,
         "last_key": refresh, "error": None, "totals_json": "{}",
@@ -354,36 +394,37 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, d
 
 
 def _rollup_national(rows: list) -> list:
-    """Aggregate DMA rows at the latest refresh into geo=US observations."""
+    """Aggregate DMA rows per refresh into geo=US observations."""
     if not rows:
         return rows
-    latest = max(str(r.get("_refresh", "")) for r in rows)
-    fresh = [r for r in rows if str(r.get("_refresh", "")) == latest]
     grouped: dict = {}
-    for row in fresh:
-        key = (str(row.get("_week")), str(row.get("term")), str(row.get("_kind")))
+    for row in rows:
+        key = (str(row.get("_refresh")), str(row.get("_week")),
+               str(row.get("term")), str(row.get("_kind")))
         bucket = grouped.setdefault(key, [])
         bucket.append(row)
     rolled = []
-    for (week, term, kind), bucket in grouped.items():
+    for (refresh, week, term, kind), bucket in grouped.items():
         ranks = [b.get("rank") for b in bucket if isinstance(b.get("rank"), int)]
         scores = [b.get("score") for b in bucket if isinstance(b.get("score"), int)]
         gains = [b.get("percent_gain") for b in bucket if isinstance(b.get("percent_gain"), int)]
         table = bucket[0].get("_table")
         first = bucket[0]
         rolled.append({
-            "_table": table, "_week": week, "_refresh": latest,
+            "_table": table, "_week": week, "_refresh": refresh,
             "_geo": "US", "_kind": kind, "_template": first.get("_template"),
-            "table": table, "week": week, "refresh_date": latest,
+            "table": table, "week": week, "refresh_date": refresh,
             "geo": "US", "term": term, "list_kind": kind,
             "rank": min(ranks) if ranks else None,
             "score": max(scores) if scores else None,
             "percent_gain": max(gains) if gains else None,
             "dma_id": None, "country_name": None, "region_name": None,
-            "source_record_id": f"{table}|{latest}|US|{term}|{kind}",
+            "source_record_id": f"{table}|{refresh}|US|{term}|{kind}",
             "job_id": first.get("job_id"),
             "dma_count": len(bucket),
         })
+    rolled.sort(key=lambda r: (str(r.get("refresh_date")), str(r.get("week")),
+                               str(r.get("term")), str(r.get("list_kind"))))
     return rolled
 
 
@@ -468,8 +509,29 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 refreshes = [end_date]
             for refresh in refreshes:
                 refresh_seen.add(refresh)
-                if (template, refresh) in completed:
-                    cached_rows = _warehouse_rows(data_root, table, refresh)
+                if group["kind"] == "us":
+                    params = {"start_date": refresh, "end_date": refresh,
+                              "dmas": [] if group["national"] else sorted(group["dmas"]),
+                              "all_dmas": bool(group["national"]),
+                              "week_start": week_start, "week_end": week_end,
+                              "limit": _MAX_LIMIT, "collector_version": _COLLECTOR_VERSION,
+                              "sql_version": _SQL_VERSION}
+                else:
+                    params = {"start_date": refresh, "end_date": refresh,
+                              "country_code": group["country"], "region_codes": [],
+                              "week_start": week_start, "week_end": week_end,
+                              "limit": _MAX_LIMIT, "collector_version": _COLLECTOR_VERSION,
+                              "sql_version": _SQL_VERSION}
+                checkpoint_key = _checkpoint_key(template, refresh, params)
+                if checkpoint_key in completed:
+                    cached_rows = [c for c in _warehouse_rows(data_root, table, refresh)
+                                   if _cache_in_scope(c, params)]
+                    cached_rows.sort(key=lambda c: str(c.get("source_record_id") or ""))
+                    cached_rows.sort(key=lambda c: (c.get("rank") if isinstance(
+                        c.get("rank"), (int, float)) else float("inf")))
+                    cached_rows.sort(key=lambda c: str(c.get("week") or c.get("period") or ""),
+                                     reverse=True)
+                    cached_rows = cached_rows[:_MAX_LIMIT]
                     if cached_rows:
                         for cached in cached_rows:
                             crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
@@ -486,20 +548,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         if template not in used_templates:
                             used_templates.append(template)
                         continue
-                    # Checkpointed but warehouse empty: fall through to a fresh fetch.
-                if group["kind"] == "us":
-                    params = {"start_date": refresh, "end_date": refresh,
-                              "dmas": [] if group["national"] else group["dmas"],
-                              "all_dmas": bool(group["national"]),
-                              "week_start": week_start, "week_end": week_end,
-                              "limit": limit, "collector_version": _COLLECTOR_VERSION,
-                              "sql_version": _SQL_VERSION}
-                else:
-                    params = {"start_date": refresh, "end_date": refresh,
-                              "country_code": group["country"], "region_codes": [],
-                              "week_start": week_start, "week_end": week_end,
-                              "limit": limit, "collector_version": _COLLECTOR_VERSION,
-                              "sql_version": _SQL_VERSION}
+                    # Checkpointed but warehouse empty/out of scope: fall through to a fresh fetch.
                 result = _submit(template, params, executor, data_root)
                 if not isinstance(result, dict) or "error" in result:
                     return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
@@ -538,7 +587,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                     merged.setdefault(key, row)
                     tables_seen.add(row["_table"])
                 if data_root is not None:
-                    fetched.append((template, refresh, payload_hash, len(rows),
+                    fetched.append((checkpoint_key, template, refresh, payload_hash, len(rows),
                                     sorted(tables_seen)))
 
     # Cached warehouse rows carry plain dicts (no _-markers); normalize keys.
@@ -602,24 +651,32 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                            features=term_features.get(row.get("term"))))
 
     continuation = len(observations) > limit
-    if continuation:
-        observations = observations[:limit]
-    if data_root is not None and observations:
+    if data_root is not None and (observations or fetched):
         try:
-            _store_observations(data_root, observations, retrieved_at)
-            for _template, _refresh, _hash, _count, _tables in fetched:
+            expected = _store_observations(data_root, observations, retrieved_at)
+            for _key, _template, _refresh, _hash, _count, _tables in fetched:
                 for _table in _tables:
-                    if not _warehouse_rows(data_root, _table, _refresh):
+                    actual = set()
+                    for _cached in _warehouse_rows(data_root, _table, _refresh):
+                        _metrics = _cached.get("metrics") or {}
+                        _evidence = _cached.get("evidence") or []
+                        actual.add(_observation_identity(
+                            _cached.get("table") or _table,
+                            str(_cached.get("period") or _cached.get("week") or ""),
+                            str(_cached.get("geo") or ""), str(_cached.get("term") or ""),
+                            str(_cached.get("list_kind") or ""), _metrics, _evidence))
+                    if not expected.get((_table, _refresh), set()) <= actual:
                         raise RuntimeError(f"warehouse verify failed for {_table}|{_refresh}")
-            for _template, _refresh, _hash, _count, _tables in fetched:
-                _mark_complete(data_root, _template, _refresh, _hash, _count)
+            for _key, _template, _refresh, _hash, _count, _tables in fetched:
+                _mark_complete(data_root, _key, _refresh, _hash, _count)
         except Exception as exc:
             return _wrap_error({"error": f"{SOURCE} store failed: {exc}",
                                 "error_type": "source_unavailable"})
     weeks = sorted({str(o["period"]) for o in observations})
     geos_covered = sorted({str(o["geo"]) for o in observations})
-    return {"status": "ok", "source": SOURCE, "observations": observations,
-            "rows": observations, "count": len(observations),
+    returned_observations = observations[:limit] if continuation else observations
+    return {"status": "ok", "source": SOURCE, "observations": returned_observations,
+            "rows": returned_observations, "count": len(returned_observations),
             "coverage": {"periods_covered": weeks, "geos_covered": geos_covered,
                          "templates": used_templates,
                          "refresh_dates": sorted(refresh_seen)},

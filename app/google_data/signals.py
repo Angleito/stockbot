@@ -399,6 +399,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None) 
     migrate_jsonl_once(data_root)
     cutoff = _as_key(as_of)
     latest: dict = {}
+    keys: dict = {}
     for row in _warehouse_records(data_root):
         if not isinstance(row, dict):
             continue
@@ -410,9 +411,13 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None) 
             continue
         if geo is not None and str(record.get("geo")) != str(geo):
             continue
-        current = latest.get(record.get("signal_id"))
-        if current is None or known > str(current.get("known_at", "")):
-            latest[record.get("signal_id")] = record
+        metrics = record.get("metrics") or {}
+        key = (known, str(metrics.get("refresh_date") or ""),
+               str(row.get("content_hash") or ""), str(row.get("source_record_id") or ""))
+        sid = record.get("signal_id")
+        if sid not in latest or key > keys[sid]:
+            latest[sid] = record
+            keys[sid] = key
     rows = sorted(latest.values(),
                   key=lambda d: (str(d.get("known_at", "")), str(d.get("signal_id"))))
     if limit is not None:
