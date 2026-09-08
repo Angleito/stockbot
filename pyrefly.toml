@@ -4,3 +4,6 @@ search-path = ["."]
 python-platform = "linux"
 python-version = "3.14"
 preset = "strict"
+[errors]
+explicit-any = true
+no-any-return = true

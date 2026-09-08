@@ -61,7 +61,14 @@ def _set_expression_status(r: ThesisRepository, tid: str, eid: str, status: str,
 
 
 def _claim_status(snap: ThesisStateSnapshot, cid: str) -> str:
-    return next(c["status"] for c in snap.thesis["claims"] if c["claim_id"] == cid)
+    claims = snap.thesis.get("claims", [])
+    assert isinstance(claims, list)
+    for c in claims:
+        if isinstance(c, dict) and c["claim_id"] == cid:
+            status = c["status"]
+            assert isinstance(status, str)
+            return status
+    raise AssertionError(f"claim {cid!r} missing")
 
 
 def test_create_writes_v1(tmp_path: Path) -> None:
@@ -98,8 +105,14 @@ def test_assessment_and_expression_history(tmp_path: Path) -> None:
     _set_expression_status(r, tid, "expr:e1", "flagged", T3)
 
     def _expr(snap: ThesisStateSnapshot) -> str:
-        return next(e["status"] for e in snap.thesis["expressions"]
-                    if e["expression_id"] == "expr:e1")
+        exprs = snap.thesis.get("expressions", [])
+        assert isinstance(exprs, list)
+        for e in exprs:
+            if isinstance(e, dict) and e["expression_id"] == "expr:e1":
+                status = e["status"]
+                assert isinstance(status, str)
+                return status
+        raise AssertionError("expr:e1 missing")
 
     s0 = r.load_state_as_of(tid, T0)
     assert s0.state["assessment"] == "unresolved" and _expr(s0) == "undecided"
@@ -127,9 +140,13 @@ def test_questions_watch_history(tmp_path: Path) -> None:
         "watch_add": [_filing_rule("rule:filing")],
     }, "run:t1", effective_at=T1)
     s1 = r.load_state_as_of(tid, T1)
-    assert {q["question_id"]: q["status"] for q in s1.questions["questions"]} == \
+    _qs = s1.questions.get("questions", [])
+    assert isinstance(_qs, list)
+    assert {q["question_id"]: q["status"] for q in _qs if isinstance(q, dict)} == \
         {"q:one": "open", "q:two": "open"}
-    assert [x["rule_id"] for x in s1.watch["rules"]] == ["rule:filing"]
+    _wr = s1.watch.get("rules", [])
+    assert isinstance(_wr, list)
+    assert [x["rule_id"] for x in _wr if isinstance(x, dict)] == ["rule:filing"]
 
     r.answer_questions(tid, [{"question_id": "q:one", "answer": "Yes, steady."}],
                        effective_at=T3)
@@ -140,13 +157,18 @@ def test_questions_watch_history(tmp_path: Path) -> None:
         "watch_add": [short],
     }, "run:t3", effective_at=T3)
     s3 = r.load_state_as_of(tid, T3)
-    got = {q["question_id"]: q for q in s3.questions["questions"]}
+    _qs3 = s3.questions.get("questions", [])
+    assert isinstance(_qs3, list)
+    got = {q["question_id"]: q for q in _qs3 if isinstance(q, dict)}
     assert got["q:one"]["status"] == "answered" and got["q:one"]["answer"] == "Yes, steady."
     assert got["q:two"]["status"] == "answered" and got["q:two"]["answer"] == "No, narrow."
-    assert [x["rule_id"] for x in s3.watch["rules"]] == ["rule:filing", "rule:short"]
+    _wr3 = s3.watch.get("rules", [])
+    assert isinstance(_wr3, list)
+    assert [x["rule_id"] for x in _wr3 if isinstance(x, dict)] == ["rule:filing", "rule:short"]
     # T1 snapshot is untouched by the T3 answers.
-    assert all(q["status"] == "open" for q in
-               r.load_state_as_of(tid, T1).questions["questions"])
+    _qs1 = r.load_state_as_of(tid, T1).questions.get("questions", [])
+    assert isinstance(_qs1, list)
+    assert all(q["status"] == "open" for q in _qs1 if isinstance(q, dict))
 
 
 def test_same_effective_at_higher_version_wins(tmp_path: Path) -> None:
@@ -190,8 +212,15 @@ def test_build_context_pit_regression(tmp_path: Path) -> None:
     trig = r.create_trigger(tid, canonical_refs=["ev:A"], summary="filing")
 
     ctx = build_context(r, tid, trig, known_at=T1)
-    assert ctx.thesis_packet["state"]["assessment"] == "unresolved"
-    assert ctx.thesis_packet["thesis"]["claims"][0]["status"] == "unvalidated"
+    state = ctx.thesis_packet["state"]
+    assert isinstance(state, dict)
+    assert state["assessment"] == "unresolved"
+    thesis = ctx.thesis_packet["thesis"]
+    assert isinstance(thesis, dict)
+    claims = _as_seq(thesis["claims"])
+    first = claims[0]
+    assert isinstance(first, dict)
+    assert first["status"] == "unvalidated"
     assert {e["canonical_ref"] for e in ctx.evidence_refs} == {"ev:A"}
 
     with pytest.raises(HistoricalStateUnavailable):
@@ -279,7 +308,9 @@ def test_historical_memory_stamps_effective_at(tmp_path: Path) -> None:
     tid = _make(tmp_path).thesis_id
     r.apply_research_result(tid, {"memories_add": [{"memory_id": "m1", "text": "Desk note"}]},
                             "run:mem", effective_at=T1)
-    mems = r.load_state_as_of(tid, T1).memory["memories"]
+    _mems = r.load_state_as_of(tid, T1).memory.get("memories", [])
+    assert isinstance(_mems, list)
+    mems = [m for m in _mems if isinstance(m, dict)]
     assert next(m for m in mems if m["memory_id"] == "m1")["created_at"] == T1
     trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
     assert "m1" in build_context(r, tid, trig, known_at=T1).included_ids
@@ -343,9 +374,12 @@ def test_historical_thesis_refine_appends_without_touching_live(tmp_path: Path) 
                                  "test-model", context=ctx)
     assert "error" not in got and got.get("applied") is True
     snap = repo.load_state_as_of(tid, T1)
-    assert "NVDA networking demand also strong" in [c["statement"] for c in snap.thesis["claims"]]
+    _tclaims = snap.thesis.get("claims", [])
+    assert isinstance(_tclaims, list)
+    tclaims = [c for c in _tclaims if isinstance(c, dict)]
+    assert "NVDA networking demand also strong" in [c["statement"] for c in tclaims]
     assert _claim_status(snap, "claim:c1") == "unvalidated"
-    t1_ids = {c["claim_id"] for c in snap.thesis["claims"]}
+    t1_ids = {c["claim_id"] for c in tclaims}
     assert got.get("rules_added") and all(
         set(r.get("claim_ids", ())) <= t1_ids for r in _as_seq(got["rules_added"]))
     live = repo.load_thesis(tid)

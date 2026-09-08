@@ -105,7 +105,7 @@ def _str_or_none(value: object) -> str | None:
 def _sweep(obj: object, names: tuple[str, ...]) -> object:
     for name in names:
         try:
-            value = getattr(obj, name)
+            value: object = getattr(obj, name)
         except Exception:
             continue
         if value is not None:

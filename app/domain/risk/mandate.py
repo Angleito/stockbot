@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Mapping
 
 SUPPORTED_METRICS = ("single_position_weight", "minimum_cash", "sector_exposure")
 SUPPORTED_OPERATORS = ("<=", ">=")
@@ -42,7 +42,7 @@ def _decimal_threshold(value: object, *, index: int) -> Decimal:
     return threshold
 
 
-def parse_mandate(data: Mapping[str, Any]) -> Mandate:
+def parse_mandate(data: Mapping[str, object]) -> Mandate:
     """Validate and build a mandate from a parsed JSON payload.
 
     Raises ``ValueError`` with a clear message on any malformed or

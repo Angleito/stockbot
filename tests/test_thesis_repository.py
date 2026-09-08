@@ -228,7 +228,9 @@ def test_normalize_watch_heals_and_load_watch_rules(tmp_path: Path) -> None:
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
     watch = tmp_path / "theses" / t.slug / "watch.yaml"
     raw = load_raw_yaml(watch)
-    raw["rules"].append({"rule_id": "rule:odd", "rule_type": "price_moon",
+    rules = raw["rules"]
+    assert isinstance(rules, list)
+    rules.append({"rule_id": "rule:odd", "rule_type": "price_moon",
                          "enabled": True, "support_status": "supported",
                          "support_reason": "", "claim_ids": [cid], "expression_ids": []})
     atomic_write_yaml(watch, raw, tmp_path / "theses")

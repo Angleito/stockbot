@@ -19,7 +19,7 @@ from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Optional
+from typing import Optional
 
 from ..config import get_data_root
 from ..redact import redact_json, redact_text
@@ -94,6 +94,15 @@ def _duration_ms(started_at: str, completed_at: str) -> float:
     return (end - start).total_seconds() * 1000.0
 
 
+def _usage_int(value: object) -> int:
+    """Narrow a provider usage counter to int; raises on malformed."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (str, float)):
+        return int(value)
+    raise TypeError(f"malformed usage counter: {value!r}")
+
+
 def get_runs_db_path(data_root: Path) -> Path:
     """Resolve the runs DB path: $RUNS_DB_PATH wins, else data_root/runs.sqlite."""
     env = os.environ.get("RUNS_DB_PATH")
@@ -114,7 +123,7 @@ class RunRecorder:
         as_of: Optional[str],
         model: str,
         provider: str,
-        model_parameters: dict[str, Any],
+        model_parameters: dict[str, object],
         agent_version: str,
         prompt_version: str,
         tool_registry_version: str,
@@ -252,12 +261,12 @@ class RunRecorder:
         round: Optional[int] = None,
         model: Optional[str] = None,
         tool_name: Optional[str] = None,
-        arguments: Optional[Any] = None,
+        arguments: object | None = None,
         result_summary: Optional[str] = None,
         success: Optional[bool] = None,
         error_type: Optional[str] = None,
         evidence_ids: Optional[list[str]] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, object]] = None,
         started_at: Optional[str] = None,
         completed_at: Optional[str] = None,
         duration_ms: Optional[float] = None,
@@ -465,7 +474,7 @@ class RunRecorder:
         model: str,
         started_at: str,
         completed_at: str,
-        usage: Optional[dict[str, Any]] = None,
+        usage: Optional[dict[str, object]] = None,
         finish_reason: Optional[str] = None,
         tool_call_count: int = 0,
         provider_request_id: Optional[str] = None,
@@ -482,16 +491,16 @@ class RunRecorder:
                 self.model_calls += 1
                 assert self._conn is not None
                 usage = usage or {}
-                input_tokens = int(usage.get("prompt_tokens", 0))
-                output_tokens = int(usage.get("completion_tokens", 0))
-                reasoning_tokens = int(usage.get("reasoning_tokens", 0))
-                cached_tokens = int(
-                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-                )
+                input_tokens = _usage_int(usage.get("prompt_tokens", 0))
+                output_tokens = _usage_int(usage.get("completion_tokens", 0))
+                reasoning_tokens = _usage_int(usage.get("reasoning_tokens", 0))
+                details_raw = usage.get("prompt_tokens_details")
+                details: dict[str, object] = details_raw if isinstance(details_raw, dict) else {}
+                cached_tokens = _usage_int(details.get("cached_tokens", 0))
                 cost = self._estimate_cost(model, input_tokens, output_tokens, usage)
                 self._input_tokens += input_tokens
                 self._output_tokens += output_tokens
-                self._total_tokens += int(usage.get("total_tokens", 0))
+                self._total_tokens += _usage_int(usage.get("total_tokens", 0))
                 self._estimated_model_cost += cost
                 self._conn.execute(
                     "INSERT INTO model_calls (model_call_id, run_id, round, provider,"
@@ -568,7 +577,7 @@ class RunRecorder:
 
     @staticmethod
     def _estimate_cost(
-        model: str, input_tokens: int, output_tokens: int, usage: dict[str, Any]
+        model: str, input_tokens: int, output_tokens: int, usage: dict[str, object]
     ) -> float:
         """Provider-reported usage.cost wins; else the static list-price table."""
         cost = usage.get("cost")
@@ -684,7 +693,7 @@ def _query_conn() -> Optional[sqlite3.Connection]:
     return conn
 
 
-def list_runs(limit: int = 20) -> list[dict[str, Any]]:
+def list_runs(limit: int = 20) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -700,7 +709,7 @@ def list_runs(limit: int = 20) -> list[dict[str, Any]]:
         return []
 
 
-def get_run(run_id: str) -> Optional[dict[str, Any]]:
+def get_run(run_id: str) -> Optional[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -716,7 +725,7 @@ def get_run(run_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def get_events(run_id: str) -> list[dict[str, Any]]:
+def get_events(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -732,7 +741,7 @@ def get_events(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
-def get_tool_calls(run_id: str) -> list[dict[str, Any]]:
+def get_tool_calls(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -748,7 +757,7 @@ def get_tool_calls(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
-def get_model_calls(run_id: str) -> list[dict[str, Any]]:
+def get_model_calls(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -764,7 +773,7 @@ def get_model_calls(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
-def get_security_events(run_id: str) -> list[dict[str, Any]]:
+def get_security_events(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -792,12 +801,13 @@ def get_security_summary(run_id: str) -> dict[str, int]:
         "response_stripped": 0,
     }
     for event in get_security_events(run_id):
-        decision = event.get("decision") or "unknown"
+        decision_value = event.get("decision")
+        decision = decision_value if isinstance(decision_value, str) and decision_value else "unknown"
         counts[decision] = counts.get(decision, 0) + 1
     return counts
 
 
-def get_evidence(run_id: str) -> list[dict[str, Any]]:
+def get_evidence(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:

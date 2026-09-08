@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Sequence
+from typing import Sequence
 
 
 class InstructionAuthority(StrEnum):
@@ -117,4 +117,4 @@ class RunSecurityContext:
     # gates the portfolio-data usage notice (approval alone is not enough).
     private_ingress: bool = False
     quarantined_items: int = 0
-    security_events: list[dict[str, Any]] = field(default_factory=list)
+    security_events: list[dict[str, object]] = field(default_factory=list)

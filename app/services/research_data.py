@@ -14,7 +14,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 import requests
 
@@ -83,7 +83,7 @@ def _sec_get(url: str) -> bytes:
     return resp.content
 
 
-def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict[str, Any]:
+def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_TICKERS_URL
@@ -139,7 +139,7 @@ def _normalize_and_write_company_facts(
     )
 
 
-def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict[str, Any]:
+def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_FACTS_URL.format(cik=cik)
@@ -161,7 +161,7 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
     }
 
 
-def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[str, Any]:
+def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[str, object]:
     """Replay archived SEC companyfacts payloads through normalize -> Parquet.
 
     Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
@@ -173,7 +173,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[s
     raw_root = data_root / "raw"
     archived_payloads = 0
     written_rows = 0
-    failed: list[dict[str, Any]] = []
+    failed: list[dict[str, str]] = []
     sec_dir = raw_root / "sec"
     if sec_dir.is_dir():
         for cik_dir in sorted(p for p in sec_dir.iterdir() if p.is_dir()):
@@ -203,7 +203,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[s
     }
 
 
-def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict[str, Any]:
+def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
     url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
@@ -211,12 +211,12 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
         "symbolCode", "issueName", "settlementDate", "currentShortPositionQuantity",
         "previousShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity",
     )
-    all_rows: list[dict[str, Any]] = []
+    all_rows: list[dict[str, object]] = []
     total: Optional[int] = None
     offset = 0
     while True:
         time.sleep(0.2)  # politeness pacing, same interval as the pre-cut pipeline
-        payload: dict[str, Any] = {
+        payload: dict[str, object] = {
             "limit": finra_client.MAX_LIMIT,
             "offset": offset,
             "fields": list(fields),
@@ -278,7 +278,7 @@ def prepare_short_interest_data(
     tickers: Sequence[str] = (),
     ciks: Sequence[int] = (),
     data_root: Optional[Path] = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Refresh the SEC ticker universe and the full FINRA snapshot, and
     enrich SEC company facts only for the explicitly requested tickers/CIKs.
 
@@ -291,15 +291,20 @@ def prepare_short_interest_data(
     """
     requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
     sec_tickers = refresh_sec_tickers(data_root=data_root)
-    ticker_ciks = sec_tickers["ticker_ciks"]
+    ticker_ciks_raw = sec_tickers["ticker_ciks"]
+    ticker_ciks: dict[str, int] = {}
+    if isinstance(ticker_ciks_raw, dict):
+        for k, v in ticker_ciks_raw.items():
+            if isinstance(k, str) and isinstance(v, int):
+                ticker_ciks[k] = v
     unresolved = [t for t in requested if t not in ticker_ciks]
     enrich_ciks = list(dict.fromkeys(
         [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
     ))
     finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
     cik_to_ticker = {cik: ticker for ticker, cik in ticker_ciks.items()}
-    sec_facts: list[dict[str, Any]] = []
-    failed_enrichments: list[dict[str, Any]] = []
+    sec_facts: list[dict[str, object]] = []
+    failed_enrichments: list[dict[str, object]] = []
     for cik in enrich_ciks:
         try:
             sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))

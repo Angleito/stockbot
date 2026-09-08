@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import yaml
 
@@ -18,6 +19,7 @@ from app.thesis.models import (
     EvidenceRef,
     ExpressionRequirement,
     HistoricalStateUnavailable,
+    JSONValue,
     QuestionStatus,
     Thesis,
     ThesisClaim,
@@ -83,7 +85,7 @@ def _best_effort_thesis_id(thesis_file: Path) -> str | None:
     return None
 
 
-def _journal_front_matter(entry_id: str, thesis_id: str, created: str, d: dict[str, Any]) -> str:
+def _journal_front_matter(entry_id: str, thesis_id: str, created: str, d: Mapping[str, object]) -> str:
     """Journal front matter; ``known_at`` persists when the entry carries it (PIT gate)."""
     known = f"known_at: {d.get('known_at')}\n" if d.get("known_at") else ""
     return (
@@ -92,7 +94,7 @@ def _journal_front_matter(entry_id: str, thesis_id: str, created: str, d: dict[s
     )
 
 
-def _coerce_claim(item: Any, _path: str = "<create>") -> ThesisClaim:
+def _coerce_claim(item: ThesisClaim | str | Mapping[str, object], _path: str = "<create>") -> ThesisClaim:
     if isinstance(item, ThesisClaim):
         return item
     if isinstance(item, str):
@@ -105,7 +107,7 @@ def _coerce_claim(item: Any, _path: str = "<create>") -> ThesisClaim:
     raise ValueError(f"{_path}: claim must be str, mapping, or ThesisClaim, got {type(item).__name__}")
 
 
-def _coerce_expression(item: Any, _path: str = "<create>") -> TradeExpression:
+def _coerce_expression(item: TradeExpression | Mapping[str, object], _path: str = "<create>") -> TradeExpression:
     if isinstance(item, TradeExpression):
         return item
     if isinstance(item, dict):
@@ -225,8 +227,17 @@ class ThesisRepository:
     def load_questions(self, id_or_slug: str) -> list[ThesisQuestion]:
         d = self._dir_for(self._resolve_id(id_or_slug))
         raw = load_raw_yaml(d / "questions.yaml")
-        self._check_file_owner(raw, str(d / "questions.yaml"), self._resolve_id(id_or_slug))
-        return [ThesisQuestion.from_dict(q, str(d / "questions.yaml")) for q in raw.get("questions", [])]
+        _qid = self._resolve_id(id_or_slug)
+        self._check_file_owner(raw, str(d / "questions.yaml"), _qid)
+        _ql = raw.get("questions", [])
+        if not isinstance(_ql, list):
+            raise ValueError(f"{d / 'questions.yaml'}: 'questions' must be a list")
+        out: list[ThesisQuestion] = []
+        for _q in _ql:
+            if not isinstance(_q, dict):
+                raise ValueError(f"{d / 'questions.yaml'}: question must be a mapping")
+            out.append(ThesisQuestion.from_dict(_q, str(d / "questions.yaml")))
+        return out
 
     def load_triggers(self, id_or_slug: str, *, include_processed: bool = True) -> list[Trigger]:
         thesis_id = self._resolve_id(id_or_slug)
@@ -254,7 +265,7 @@ class ThesisRepository:
         self._unknown_thesis(id_or_slug, bad_dirs, bad_ids)
 
     @staticmethod
-    def _check_file_owner(raw: dict[str, Any], path: str, thesis_id: str) -> None:
+    def _check_file_owner(raw: Mapping[str, object], path: str, thesis_id: str) -> None:
         if raw.get("thesis_id") != thesis_id:
             raise ValueError(f"{path}: thesis_id mismatch: file has {raw.get('thesis_id')!r}, expected {thesis_id!r}")
 
@@ -287,7 +298,7 @@ class ThesisRepository:
     def _write_snapshot_from_dicts_locked(
         self, thesis_dir: Path, thesis_id: str, *, effective_at: str, reason: str,
         run_id: str = "", trigger_id: str = "",
-        thesis: dict[str, Any], state: dict[str, Any], questions: dict[str, Any], watch: dict[str, Any], memory: dict[str, Any],
+        thesis: dict[str, JSONValue], state: dict[str, JSONValue], questions: dict[str, JSONValue], watch: dict[str, JSONValue], memory: dict[str, JSONValue],
     ) -> ThesisStateSnapshot:
         """Write one versioned snapshot from caller-supplied dicts; caller must hold thesis_lock."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -371,7 +382,9 @@ class ThesisRepository:
             earliest = min(s.effective_at for s in snaps)
             raise HistoricalStateUnavailable(
                 f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})")
-        eligible.sort(key=lambda s: (_as_dt(s.effective_at), s.version))  # type: ignore[return-value]
+        def _snapshot_order(snap: ThesisStateSnapshot) -> tuple[str, int]:
+            return (snap.effective_at, snap.version)
+        eligible.sort(key=_snapshot_order)
         return eligible[-1]
 
     def list_state_versions(self, thesis_id: str) -> list[int]:
@@ -389,7 +402,7 @@ class ThesisRepository:
         return sorted(out)
 
 
-    def answer_questions(self, thesis_id: str, answered: list[dict[str, Any]], *, effective_at: str | None = None) -> None:
+    def answer_questions(self, thesis_id: str, answered: list[dict[str, JSONValue]], *, effective_at: str | None = None) -> None:
         """Mark questions answered (validate-then-replace questions.yaml, lock-held)."""
         if not answered:
             return
@@ -407,31 +420,47 @@ class ThesisRepository:
             latest = self._latest_effective_locked(thesis_dir)
             if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
-                raw = {"schema_version": base.questions.get("schema_version", SCHEMA_VERSION),
-                       "thesis_id": thesis_id,
-                       "questions": [dict(q) for q in base.questions.get("questions", [])]}
-                by_id = {q.get("question_id"): q for q in raw.get("questions", [])}
+                _bq = base.questions.get("questions", [])
+                if not isinstance(_bq, list):
+                    raise ValueError(f"{path}: 'questions' must be a list")
+                raw = dict(base.questions)
+                raw["questions"] = list[JSONValue](dict(q) if isinstance(q, dict) else q for q in _bq)
+                _rq = raw.get("questions", [])
+                if not isinstance(_rq, list):
+                    raise ValueError(f"{path}: 'questions' must be a list")
+                by_id: dict[object, dict[str, JSONValue]] = {q.get("question_id"): q for q in _rq if isinstance(q, dict)}
                 for a in answered:
-                    target = by_id.get(a["question_id"])
+                    _aq = a.get("question_id")
+                    target = by_id.get(_aq)
                     if target is None:
-                        raise ValueError(f"{path}: question {a['question_id']!r} vanished mid-run")
+                        raise ValueError(f"{path}: question {a.get('question_id')!r} vanished mid-run")
                     target["status"] = QuestionStatus.ANSWERED.value
-                    target["answer"] = a["answer"]
-                for q in raw.get("questions", []):
+                    _ans = a.get("answer")
+                    target["answer"] = _ans if isinstance(_ans, str) else _ans
+                for q in _rq:
+                    if not isinstance(q, dict):
+                        raise ValueError(f"{path}: question must be a mapping")
                     ThesisQuestion.from_dict(q, path)
                 self._write_snapshot_from_dicts_locked(
                     thesis_dir, thesis_id, effective_at=eff, reason="questions_answered",
                     thesis=dict(base.thesis), state=dict(base.state),
                     questions=raw, watch=dict(base.watch), memory=dict(base.memory))
                 return
-            by_id = {q.get("question_id"): q for q in raw.get("questions", [])}
+            _live_q = raw.get("questions", [])
+            if not isinstance(_live_q, list):
+                raise ValueError(f"{path}: 'questions' must be a list")
+            by_id = {q.get("question_id"): q for q in _live_q if isinstance(q, dict)}
             for a in answered:
-                target = by_id.get(a["question_id"])
+                _aq2 = a.get("question_id")
+                target = by_id.get(_aq2)
                 if target is None:
-                    raise ValueError(f"{path}: question {a['question_id']!r} vanished mid-run")
+                    raise ValueError(f"{path}: question {a.get('question_id')!r} vanished mid-run")
                 target["status"] = QuestionStatus.ANSWERED.value
-                target["answer"] = a["answer"]
-            for q in raw.get("questions", []):
+                _ans2 = a.get("answer")
+                target["answer"] = _ans2 if isinstance(_ans2, str) else _ans2
+            for q in _live_q:
+                if not isinstance(q, dict):
+                    raise ValueError(f"{path}: question must be a mapping")
                 ThesisQuestion.from_dict(q, path)
             atomic_write_yaml(thesis_dir / "questions.yaml", raw, self.root)
             self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="questions_answered")
@@ -453,11 +482,18 @@ class ThesisRepository:
             latest = self._latest_effective_locked(thesis_dir)
             if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
-                raw = {"schema_version": base.watch.get("schema_version", SCHEMA_VERSION),
-                       "thesis_id": thesis_id,
-                       "rules": [dict(r) for r in base.watch.get("rules", [])]}
+                _br = base.watch.get("rules", [])
+                if not isinstance(_br, list):
+                    raise ValueError(f"{path}: 'rules' must be a list")
+                raw = dict(base.watch)
+                raw["rules"] = list[JSONValue](dict(r) if isinstance(r, dict) else r for r in _br)
                 changed = False
-                for r in raw.get("rules", []):
+                _rl = raw.get("rules", [])
+                if not isinstance(_rl, list):
+                    raise ValueError(f"{path}: 'rules' must be a list")
+                for r in _rl:
+                    if not isinstance(r, dict):
+                        raise ValueError(f"{path}: watch rule must be a mapping")
                     if r.get("rule_type") in SUPPORTED_HANDLERS:
                         continue
                     if not r.get("enabled") and r.get("support_status") == "unsupported":
@@ -479,7 +515,12 @@ class ThesisRepository:
                         questions=dict(base.questions), watch=raw, memory=dict(base.memory))
                 return
             changed = False
-            for r in raw.get("rules", []):
+            _live_rules = raw.get("rules", [])
+            if not isinstance(_live_rules, list):
+                raise ValueError(f"{path}: 'rules' must be a list")
+            for r in _live_rules:
+                if not isinstance(r, dict):
+                    raise ValueError(f"{path}: watch rule must be a mapping")
                 if r.get("rule_type") in SUPPORTED_HANDLERS:
                     continue
                 if not r.get("enabled") and r.get("support_status") == "unsupported":
@@ -505,7 +546,15 @@ class ThesisRepository:
         path = str(thesis_dir / "watch.yaml")
         raw = load_raw_yaml(thesis_dir / "watch.yaml")
         self._check_file_owner(raw, path, thesis.thesis_id)
-        return [WatchRule.from_dict(r, path) for r in raw.get("rules", [])]
+        _rl = raw.get("rules", [])
+        if not isinstance(_rl, list):
+            raise ValueError(f"{path}: 'rules' must be a list")
+        rules: list[WatchRule] = []
+        for _r in _rl:
+            if not isinstance(_r, dict):
+                raise ValueError(f"{path}: watch rule must be a mapping")
+            rules.append(WatchRule.from_dict(_r, path))
+        return rules
 
     # -- creation ---------------------------------------------------------
 
@@ -513,13 +562,13 @@ class ThesisRepository:
         self,
         user_thesis: str,
         scope: str = "unknown",
-        claims: Sequence[str | dict[str, Any] | ThesisClaim] = (),
+        claims: Sequence[str | Mapping[str, object] | ThesisClaim] = (),
         assumptions: Sequence[str] = (),
         invalidators: Sequence[str] = (),
         unknowns: Sequence[str] = (),
-        expressions: Sequence[dict[str, Any] | TradeExpression] = (),
-        requirements: Sequence[dict[str, Any] | ExpressionRequirement] = (),
-        watch_rules: Sequence[dict[str, Any]] = (),
+        expressions: Sequence[Mapping[str, object] | TradeExpression] = (),
+        requirements: Sequence[Mapping[str, object] | ExpressionRequirement] = (),
+        watch_rules: Sequence[Mapping[str, object]] = (),
         *,
         effective_at: str | None = None,
     ) -> Thesis:
@@ -548,14 +597,16 @@ class ThesisRepository:
             requirements=tuple(),
         )
         # Coerce requirement dicts now that expression IDs exist.
-        req_objs = []
+        req_objs: list[ExpressionRequirement] = []
         for r in requirements or []:
             if isinstance(r, dict):
                 d = dict(r)
                 d.setdefault("requirement_id", new_requirement_id())
                 req_objs.append(models.ExpressionRequirement.from_dict(d, "<create>"))
-            else:
+            elif isinstance(r, ExpressionRequirement):
                 req_objs.append(r)
+            else:
+                raise ValueError(f"<create>: requirement must be a mapping or ExpressionRequirement, got {type(r).__name__}")
         thesis = Thesis(
             thesis_id=thesis.thesis_id, slug="tmp", status=thesis.status, created_at=thesis.created_at,
             updated_at=thesis.updated_at, user_thesis=thesis.user_thesis, scope=thesis.scope,
@@ -628,7 +679,7 @@ class ThesisRepository:
 
     # -- mutations (all hold the thesis lock + validate candidate first) ---
 
-    def update_thesis(self, id_or_slug: str, *, effective_at: str | None = None, **patch: Any) -> Thesis:
+    def update_thesis(self, id_or_slug: str, *, effective_at: str | None = None, **patch: object) -> Thesis:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
@@ -645,7 +696,8 @@ class ThesisRepository:
             if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 if isinstance(patch.get("claims"), list):
-                    base_claim_ids = {c.get("claim_id") for c in base.thesis.get("claims", []) if isinstance(c, dict)} - {None}
+                    _tclaims = base.thesis.get("claims", [])
+                    base_claim_ids = {c.get("claim_id") for c in (_tclaims if isinstance(_tclaims, list) else []) if isinstance(c, dict)} - {None}
                     patch_claim_ids = {c.get("claim_id") for c in patch["claims"] if isinstance(c, dict)}
                     missing = base_claim_ids - patch_claim_ids
                     if missing:
@@ -653,14 +705,15 @@ class ThesisRepository:
                         raise ValueError(
                             f"{thesis_dir}/thesis.yaml: claim {cid!r} does not belong to thesis {thesis_id!r}")
                 if isinstance(patch.get("expressions"), list):
-                    base_expr_ids = {e.get("expression_id") for e in base.thesis.get("expressions", []) if isinstance(e, dict)} - {None}
+                    _texprs = base.thesis.get("expressions", [])
+                    base_expr_ids = {e.get("expression_id") for e in (_texprs if isinstance(_texprs, list) else []) if isinstance(e, dict)} - {None}
                     patch_expr_ids = {e.get("expression_id") for e in patch["expressions"] if isinstance(e, dict)}
                     missing = base_expr_ids - patch_expr_ids
                     if missing:
                         eid = sorted(missing, key=str)[0]
                         raise ValueError(
                             f"{thesis_dir}/thesis.yaml: expression {eid!r} does not belong to thesis {thesis_id!r}")
-                data = dict(base.thesis)
+                data: dict[str, object] = dict(base.thesis)
                 data.update(patch)
                 data["thesis_id"] = thesis_id
                 data["updated_at"] = eff
@@ -670,11 +723,11 @@ class ThesisRepository:
                     thesis=candidate.to_dict(), state=dict(base.state),
                     questions=dict(base.questions), watch=dict(base.watch), memory=dict(base.memory))
                 return candidate
-            data = thesis.to_dict()
-            data.update(patch)
-            data["thesis_id"] = thesis_id
-            data["updated_at"] = _utcnow()
-            candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
+            live_data: dict[str, object] = dict(thesis.to_dict())
+            live_data.update(patch)
+            live_data["thesis_id"] = thesis_id
+            live_data["updated_at"] = _utcnow()
+            candidate = Thesis.from_dict(live_data, str(thesis_dir / "thesis.yaml"))
             atomic_write_yaml(thesis_dir / "thesis.yaml", candidate.to_dict(), self.root)
             self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="thesis_updated")
             return candidate
@@ -751,13 +804,14 @@ class ThesisRepository:
             self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="status_changed")
             return candidate
 
-    def append_journal_entry(self, thesis_id: str, entry: dict[str, Any]) -> Path:
+    def append_journal_entry(self, thesis_id: str, entry: Mapping[str, object]) -> Path:
         """Idempotent by entry/journal id: retrying with the same id is a no-op."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
             d = dict(entry)
-            entry_id = d.get("entry_id") or d.get("journal_id") or new_journal_id()
+            _eid_raw = d.get("entry_id") or d.get("journal_id")
+            entry_id = _eid_raw if isinstance(_eid_raw, str) and _eid_raw else new_journal_id()
             for existing in (thesis_dir / "journal").glob("*.md"):
                 try:
                     head = existing.read_text(encoding="utf-8").split("---")
@@ -765,9 +819,12 @@ class ThesisRepository:
                         return existing  # idempotent retry
                 except OSError:
                     continue
-            created = d.get("created_at") or _utcnow()
-            title = d.get("title", f"Journal {entry_id}")
-            body = d.get("body", d.get("summary", ""))
+            _created_raw = d.get("created_at") or _utcnow()
+            created = _created_raw if isinstance(_created_raw, str) else str(_created_raw)
+            _title_raw = d.get("title", f"Journal {entry_id}")
+            title = _title_raw if isinstance(_title_raw, str) else str(_title_raw)
+            _body_raw = d.get("body", d.get("summary", ""))
+            body = _body_raw if isinstance(_body_raw, str) else ("" if _body_raw is None else str(_body_raw))
             dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
             atomic_write_text(
                 dest,
@@ -816,7 +873,7 @@ class ThesisRepository:
         expression_ids: Sequence[str] = (),
         canonical_refs: Sequence[str] = (),
         summary: str = "",
-        metadata: dict[str, Any] | None = None,
+        metadata: dict[str, JSONValue] | None = None,
     ) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -850,7 +907,7 @@ class ThesisRepository:
             atomic_write_yaml(dest, {"schema_version": SCHEMA_VERSION, **trigger.to_dict()}, self.root)
             return trigger
 
-    def mark_trigger_processed(self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict[str, Any] | None = None) -> Trigger:
+    def mark_trigger_processed(self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict[str, JSONValue] | None = None) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
@@ -879,7 +936,7 @@ class ThesisRepository:
             atomic_write_yaml(target, {"schema_version": SCHEMA_VERSION, **updated.to_dict()}, self.root)
             return updated
 
-    def _load_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, Any]]:
+    def _load_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, JSONValue]]:
         """Locate one trigger's raw mapping (direct name, else inbox scan)."""
         direct = thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.yaml"
         if direct.is_file():
@@ -917,7 +974,7 @@ class ThesisRepository:
     def _pending_path(self, thesis_dir: Path, trigger_id: str) -> Path:
         return thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.pending.json"
 
-    def read_pending_result(self, thesis_id: str, trigger_id: str) -> dict[str, Any] | None:
+    def read_pending_result(self, thesis_id: str, trigger_id: str) -> dict[str, JSONValue] | None:
         """Durable research-result intent for crash replay (None when absent)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -938,14 +995,14 @@ class ThesisRepository:
                 or not raw["run_id"]
             ):
                 raise ValueError(f"{p}: foreign or corrupt pending result intent; operator review required")
-            return raw
+            return dict(raw)
 
-    def write_pending_result(self, thesis_id: str, trigger_id: str, intent: dict[str, Any]) -> Path:
+    def write_pending_result(self, thesis_id: str, trigger_id: str, intent: Mapping[str, JSONValue]) -> Path:
         """Persist the validated result before mutating (replay skips the model call)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
-            body = dict(intent)
+            body: dict[str, JSONValue] = dict(intent)
             body["thesis_id"] = thesis_id
             body["trigger_id"] = trigger_id
             return atomic_write_json(self._pending_path(thesis_dir, trigger_id), body, self.root)
@@ -969,7 +1026,7 @@ class ThesisRepository:
             self._check_file_owner(raw, str(thesis_dir / "checkpoint.yaml"), thesis_id)
             return Checkpoint.from_dict(raw, str(thesis_dir / "checkpoint.yaml"))
 
-    def save_checkpoint(self, thesis_id: str, checkpoint: Checkpoint | dict[str, Any]) -> Checkpoint:
+    def save_checkpoint(self, thesis_id: str, checkpoint: Checkpoint | Mapping[str, object]) -> Checkpoint:
         """Validate-then-replace checkpoint.yaml (lock-held, atomic)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -982,9 +1039,9 @@ class ThesisRepository:
 
 
     def apply_research_result(
-        self, thesis_id: str, result: dict[str, Any], run_id: str = "", *, allowed_refs: set[str] | None = None,
+        self, thesis_id: str, result: Mapping[str, object], run_id: str = "", *, allowed_refs: set[str] | None = None,
         effective_at: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, JSONValue]:
         """Single replayable research commit; de-dup additions by ID (crash-retry safe).
 
         One lock, fixed order: claim/expression status -> evidence refs -> state
@@ -1006,57 +1063,123 @@ class ThesisRepository:
         if eff_dt is None:
             raise ValueError(f"<apply>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
-        outcome: dict[str, Any] = {}
+        outcome: dict[str, JSONValue] = {}
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
+            _claim_tmp = result.get("claim_updates")
+            if _claim_tmp is None:
+                _claim_updates_raw: list[object] = []
+            elif not isinstance(_claim_tmp, list):
+                raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim updates {_claim_tmp!r}")
+            else:
+                _claim_updates_raw = _claim_tmp
+            _expr_tmp = result.get("expression_updates")
+            if _expr_tmp is None:
+                _expression_updates_raw: list[object] = []
+            elif not isinstance(_expr_tmp, list):
+                raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression updates {_expr_tmp!r}")
+            else:
+                _expression_updates_raw = _expr_tmp
+            _trigger_id_raw = result.get("trigger_id")
+            if _trigger_id_raw is not None and _trigger_id_raw != "" and not isinstance(_trigger_id_raw, str):
+                raise ValueError(f"{thesis_dir}: bad trigger_id {_trigger_id_raw!r}")
+            _trigger_id = _trigger_id_raw if isinstance(_trigger_id_raw, str) else ""
+            _ev_tmp = result.get("evidence_refs")
+            if _ev_tmp is None:
+                _evidence_refs_raw: list[object] = []
+            elif not isinstance(_ev_tmp, list):
+                raise ValueError(f"{thesis_dir}/evidence: bad evidence refs {_ev_tmp!r}")
+            else:
+                _evidence_refs_raw = _ev_tmp
+            _state_raw = result.get("state")
+            _qa_tmp = result.get("questions_add")
+            if _qa_tmp is None:
+                _questions_add_raw: list[object] = []
+            elif not isinstance(_qa_tmp, list):
+                raise ValueError(f"{thesis_dir}: bad questions_add {_qa_tmp!r}")
+            else:
+                _questions_add_raw = _qa_tmp
+            _ma_tmp = result.get("memories_add")
+            if _ma_tmp is None:
+                _memories_add_raw: list[object] = []
+            elif not isinstance(_ma_tmp, list):
+                raise ValueError(f"{thesis_dir}: bad memories_add {_ma_tmp!r}")
+            else:
+                _memories_add_raw = _ma_tmp
+            _wa_tmp = result.get("watch_add")
+            if _wa_tmp is None:
+                _watch_add_raw: list[object] = []
+            elif not isinstance(_wa_tmp, list):
+                raise ValueError(f"{thesis_dir}: bad watch_add {_wa_tmp!r}")
+            else:
+                _watch_add_raw = _wa_tmp
+            _qans_tmp = result.get("questions_answered")
+            if _qans_tmp is None:
+                _questions_answered_raw: list[object] = []
+            elif not isinstance(_qans_tmp, list):
+                raise ValueError(f"{thesis_dir}: bad questions_answered {_qans_tmp!r}")
+            else:
+                _questions_answered_raw = _qans_tmp
+            _journal_raw = result.get("journal_entry")
+            if _journal_raw is not None and not isinstance(_journal_raw, dict):
+                raise ValueError(f"{thesis_dir}: bad journal_entry {_journal_raw!r}")
             if latest is not None and eff_dt < latest[0]:
                 # Backdated commit: patch copies of the as-of snapshot, never live files.
                 base = self.load_state_as_of(thesis_id, eff)
                 if base.thesis.get("status") == models.ThesisStatus.CLOSED.value:
                     raise ValueError(
                         f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
-                base_claim_ids = {c.get("claim_id") for c in base.thesis.get("claims", [])
+                _bclaims = base.thesis.get("claims", [])
+                base_claim_ids = {c.get("claim_id") for c in (_bclaims if isinstance(_bclaims, list) else [])
                                   if isinstance(c, dict)}
-                base_expr_ids = {e.get("expression_id") for e in base.thesis.get("expressions", [])
+                _bexprs = base.thesis.get("expressions", [])
+                base_expr_ids = {e.get("expression_id") for e in (_bexprs if isinstance(_bexprs, list) else [])
                                  if isinstance(e, dict)}
                 # 0a. claim/expression updates: IDs must belong to the as-of state.
-                claim_patch = {}
-                for c in result.get("claim_updates", []) or []:
+                claim_patch: dict[str, dict[str, object]] = {}
+                for c in _claim_updates_raw:
                     if not isinstance(c, dict) or not c.get("claim_id"):
                         raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
-                    if c["claim_id"] not in base_claim_ids:
+                    _cid = c.get("claim_id")
+                    if not isinstance(_cid, str):
+                        raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
+                    if _cid not in base_claim_ids:
                         raise ValueError(
-                            f"{thesis_dir}/thesis.yaml: claim {c['claim_id']!r} does not belong to thesis {thesis_id!r}")
-                    if c.get("status") is not None and c["status"] not in {e.value for e in models.ClaimStatus}:
+                            f"{thesis_dir}/thesis.yaml: claim {_cid!r} does not belong to thesis {thesis_id!r}")
+                    if c.get("status") is not None and c.get("status") not in {e.value for e in models.ClaimStatus}:
                         raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim status {c.get('status')!r}")
-                    claim_patch[c["claim_id"]] = c
-                expr_patch = {}
-                for e in result.get("expression_updates", []) or []:
+                    claim_patch[_cid] = c
+                expr_patch: dict[str, dict[str, object]] = {}
+                for e in _expression_updates_raw:
                     if not isinstance(e, dict) or not e.get("expression_id"):
                         raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
-                    if e["expression_id"] not in base_expr_ids:
+                    _eid = e.get("expression_id")
+                    if not isinstance(_eid, str):
+                        raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
+                    if _eid not in base_expr_ids:
                         raise ValueError(
-                            f"{thesis_dir}/thesis.yaml: expression {e['expression_id']!r}"
+                            f"{thesis_dir}/thesis.yaml: expression {_eid!r}"
                             f" does not belong to thesis {thesis_id!r}")
-                    if e.get("status") is not None and e["status"] not in {e2.value for e2 in models.ExpressionStatus}:
+                    if e.get("status") is not None and e.get("status") not in {e2.value for e2 in models.ExpressionStatus}:
                         raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression status {e.get('status')!r}")
-                    expr_patch[e["expression_id"]] = e
+                    expr_patch[_eid] = e
                 # 0b. evidence provenance before any write (same gate as the live path).
-                tpath = None
-                raw_trigger = None
-                if result.get("trigger_id"):
-                    tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
+                tpath: Path | None = None
+                raw_trigger: dict[str, JSONValue] | None = None
+                if _trigger_id:
+                    tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, _trigger_id)
                     if allowed_refs is not None:
-                        allowed = set(allowed_refs)
+                        allowed: set[str] | None = set(allowed_refs)
                     else:
                         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-                        journal = result.get("journal_entry")
-                        payload_known = journal.get("known_at") if isinstance(journal, dict) else None
+                        _j = _journal_raw
+                        payload_known = _j.get("known_at") if isinstance(_j, dict) else None
                         if not payload_known:
                             payload_known = raw_trigger.get("created_at")
-                        dt_cut = _as_dt(payload_known) if payload_known else None
-                        pit_refs = set()
+                        _pk_str = payload_known if isinstance(payload_known, str) else (str(payload_known) if payload_known is not None else None)
+                        dt_cut = _as_dt(_pk_str) if _pk_str else None
+                        pit_refs: set[str] = set()
                         if dt_cut is not None:
                             evdir = thesis_dir / "evidence"
                             if evdir.is_dir():
@@ -1070,13 +1193,16 @@ class ThesisRepository:
                                     ref, known = raw.get("canonical_ref"), raw.get("known_at")
                                     if not isinstance(ref, str) or not ref:
                                         continue
-                                    dt_known = _as_dt(known) if known else None
+                                    _known_str = known if isinstance(known, str) else (str(known) if known is not None else "")
+                                    dt_known = _as_dt(_known_str) if _known_str else None
                                     if dt_known is not None and dt_known <= dt_cut:
                                         pit_refs.add(ref)
-                        allowed = set(raw_trigger.get("canonical_refs", [])) | pit_refs
+                        _cr = raw_trigger.get("canonical_refs", [])
+                        _cr_set = {c for c in _cr if isinstance(c, str)} if isinstance(_cr, list) else set[str]()
+                        allowed = _cr_set | pit_refs
                 else:
                     allowed = None
-                for ref in result.get("evidence_refs", []) or []:
+                for ref in _evidence_refs_raw:
                     if not isinstance(ref, dict):
                         raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
                     smuggled = [k for k in _FORBIDDEN_EVIDENCE_KEYS if ref.get(k)]
@@ -1086,41 +1212,48 @@ class ThesisRepository:
                     if allowed is not None and ref.get("canonical_ref") not in allowed:
                         raise ValueError(
                             f"{thesis_dir}/evidence: foreign canonical_ref {ref.get('canonical_ref')!r}"
-                            f" (trigger {result['trigger_id']!r}); refusing writeback")
+                            f" (trigger {_trigger_id!r}); refusing writeback")
                 # Working copies of the as-of state; only the snapshot persists them.
                 thesis_d = dict(base.thesis)
                 state_d = dict(base.state)
-                questions_raw = {"schema_version": base.questions.get("schema_version", SCHEMA_VERSION),
+                _squestions = base.questions.get("questions", [])
+                _smemories = base.memory.get("memories", [])
+                _srules = base.watch.get("rules", [])
+                questions_raw: dict[str, JSONValue] = {"schema_version": base.questions.get("schema_version", SCHEMA_VERSION),
                                  "thesis_id": thesis_id,
-                                 "questions": [dict(q) for q in base.questions.get("questions", [])]}
-                memory_raw = {"schema_version": base.memory.get("schema_version", SCHEMA_VERSION),
+                                 "questions": list[JSONValue](dict(q) if isinstance(q, dict) else q for q in (_squestions if isinstance(_squestions, list) else []))}
+                memory_raw: dict[str, JSONValue] = {"schema_version": base.memory.get("schema_version", SCHEMA_VERSION),
                               "thesis_id": thesis_id,
-                              "memories": [dict(m) for m in base.memory.get("memories", [])]}
-                watch_raw = {"schema_version": base.watch.get("schema_version", SCHEMA_VERSION),
+                              "memories": list[JSONValue](dict(m) if isinstance(m, dict) else m for m in (_smemories if isinstance(_smemories, list) else []))}
+                watch_raw: dict[str, JSONValue] = {"schema_version": base.watch.get("schema_version", SCHEMA_VERSION),
                              "thesis_id": thesis_id,
-                             "rules": [dict(r) for r in base.watch.get("rules", [])]}
+                             "rules": list[JSONValue](dict(r) if isinstance(r, dict) else r for r in (_srules if isinstance(_srules, list) else []))}
                 claim_or_expr = bool(claim_patch or expr_patch)
-                state_changed = result.get("state") is not None
+                state_changed = _state_raw is not None
                 questions_added = False
                 memories_added = False
                 watch_added = False
                 questions_answered_updated = False
                 # 0c. fold the old standalone thesis status mutation into this commit.
                 if claim_patch or expr_patch:
-                    patched = dict(base.thesis)
+                    patched: dict[str, object] = dict[str, object](base.thesis)
+                    _pclaims = patched.get("claims", [])
                     patched["claims"] = [
-                        {**c, **claim_patch[c["claim_id"]]} if isinstance(c, dict) and c.get("claim_id") in claim_patch else c
-                        for c in patched.get("claims", [])
+                        {**c, **claim_patch[cid]} if isinstance(c, dict) and isinstance(cid := c.get("claim_id"), str) and cid in claim_patch else c
+                        for c in (_pclaims if isinstance(_pclaims, list) else [])
                     ]
+                    _pexprs = patched.get("expressions", [])
                     patched["expressions"] = [
-                        {**e, **expr_patch[e["expression_id"]]} if isinstance(e, dict) and e.get("expression_id") in expr_patch else e
-                        for e in patched.get("expressions", [])
+                        {**e, **expr_patch[eid]} if isinstance(e, dict) and isinstance(eid := e.get("expression_id"), str) and eid in expr_patch else e
+                        for e in (_pexprs if isinstance(_pexprs, list) else [])
                     ]
                     patched["thesis_id"] = thesis_id
                     patched["updated_at"] = eff
                     thesis_d = Thesis.from_dict(patched, str(thesis_dir / "thesis.yaml")).to_dict()
                 # 1. evidence refs (live side effect: one file per ref, skip existing IDs)
-                for ref in result.get("evidence_refs", []) or []:
+                for ref in _evidence_refs_raw:
+                    if not isinstance(ref, dict):
+                        raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
                     d = dict(ref)
                     d.setdefault("evidence_id", new_evidence_id())
                     d["thesis_id"] = thesis_id
@@ -1129,44 +1262,63 @@ class ThesisRepository:
                     if dest.is_file():
                         continue
                     atomic_write_yaml(dest, {"schema_version": SCHEMA_VERSION, **ev.to_dict()}, self.root)
-                outcome["evidence"] = len(result.get("evidence_refs", []) or [])
+                outcome["evidence"] = len(_evidence_refs_raw)
                 # 2. state candidate, validated (as-of copy only, never live state.yaml)
-                if result.get("state") is not None:
-                    sdata = result["state"] if isinstance(result["state"], dict) else result["state"].to_dict()
-                    sdata = dict(sdata)
+                if _state_raw is not None:
+                    if isinstance(_state_raw, dict):
+                        sdata: dict[str, object] = dict(_state_raw)
+                    elif isinstance(_state_raw, ThesisState):
+                        sdata = dict(_state_raw.to_dict())
+                    else:
+                        raise ValueError(f"{thesis_dir}/state.yaml: bad state {_state_raw!r}")
                     sdata["thesis_id"] = thesis_id
                     state_d = ThesisState.from_dict(sdata, str(thesis_dir / "state.yaml")).to_dict()
                 # 3. questions (append by ID, skip known)
-                if result.get("questions_add"):
-                    known = {q.get("question_id") for q in questions_raw.get("questions", [])}
-                    for q in result["questions_add"]:
+                if _questions_add_raw:
+                    _ql = questions_raw.get("questions", [])
+                    known = {q.get("question_id") for q in (_ql if isinstance(_ql, list) else []) if isinstance(q, dict)}
+                    for q in _questions_add_raw:
+                        if not isinstance(q, dict):
+                            raise ValueError(f"{thesis_dir}/questions.yaml: bad question {q!r}")
                         d = dict(q)
                         d.setdefault("question_id", new_question_id())
                         qobj = ThesisQuestion.from_dict(d, str(thesis_dir / "questions.yaml"))
                         if qobj.question_id in known:
                             continue
-                        questions_raw.setdefault("questions", []).append(qobj.to_dict())
+                        _qadd = questions_raw.setdefault("questions", [])
+                        if isinstance(_qadd, list):
+                            _qadd.append(qobj.to_dict())
                         known.add(qobj.question_id)
                         questions_added = True
                 # 4. memory (append by ID, skip known)
-                if result.get("memories_add"):
-                    known = {m.get("memory_id") for m in memory_raw.get("memories", [])}
-                    for m in result["memories_add"]:
+                if _memories_add_raw:
+                    _ml = memory_raw.get("memories", [])
+                    known = {m.get("memory_id") for m in (_ml if isinstance(_ml, list) else []) if isinstance(m, dict)}
+                    for m in _memories_add_raw:
+                        if not isinstance(m, dict):
+                            raise ValueError(f"{thesis_dir}/memory.yaml: bad memory {m!r}")
                         d = dict(m)
                         d.setdefault("memory_id", new_memory_id())
                         d.setdefault("created_at", eff)
                         mobj = ThesisMemory.from_dict(d, str(thesis_dir / "memory.yaml"))
                         if mobj.memory_id in known:
                             continue
-                        memory_raw.setdefault("memories", []).append(mobj.to_dict())
+                        _madd = memory_raw.setdefault("memories", [])
+                        if isinstance(_madd, list):
+                            _madd.append(mobj.to_dict())
                         known.add(mobj.memory_id)
                         memories_added = True
                 # 5. watch (append rules by ID with cross-ref checks against as-of state)
-                if result.get("watch_add"):
-                    known = {r.get("rule_id") for r in watch_raw.get("rules", [])}
-                    claim_ids = {c.get("claim_id") for c in thesis_d.get("claims", []) if isinstance(c, dict)}
-                    expr_ids = {e.get("expression_id") for e in thesis_d.get("expressions", []) if isinstance(e, dict)}
-                    for r in result["watch_add"]:
+                if _watch_add_raw:
+                    _rl = watch_raw.get("rules", [])
+                    known = {r.get("rule_id") for r in (_rl if isinstance(_rl, list) else []) if isinstance(r, dict)}
+                    _tclaims = thesis_d.get("claims", [])
+                    claim_ids = {c.get("claim_id") for c in (_tclaims if isinstance(_tclaims, list) else []) if isinstance(c, dict)}
+                    _texprs = thesis_d.get("expressions", [])
+                    expr_ids = {e.get("expression_id") for e in (_texprs if isinstance(_texprs, list) else []) if isinstance(e, dict)}
+                    for r in _watch_add_raw:
+                        if not isinstance(r, dict):
+                            raise ValueError(f"{thesis_dir}/watch.yaml: bad rule {r!r}")
                         d = dict(r)
                         d.setdefault("rule_id", f"rule:{__import__('uuid').uuid4()}")
                         robj = WatchRule.from_dict(d, str(thesis_dir / "watch.yaml"))
@@ -1179,31 +1331,44 @@ class ThesisRepository:
                         require_watch_targets(robj, str(thesis_dir / "watch.yaml"))
                         if robj.rule_id in known:
                             continue
-                        watch_raw.setdefault("rules", []).append(robj.to_dict())
+                        _radd = watch_raw.setdefault("rules", [])
+                        if isinstance(_radd, list):
+                            _radd.append(robj.to_dict())
                         known.add(robj.rule_id)
                         watch_added = True
                 # 5b. questions answered (as-of copy only, validated inline)
-                if result.get("questions_answered"):
+                if _questions_answered_raw:
                     qpath = thesis_dir / "questions.yaml"
-                    by_id = {q.get("question_id"): q for q in questions_raw.get("questions", [])}
-                    for a in result["questions_answered"]:
+                    _qa = questions_raw.get("questions", [])
+                    if not isinstance(_qa, list):
+                        raise ValueError(f"{qpath}: 'questions' must be a list")
+                    by_id: dict[object, dict[str, JSONValue]] = {q.get("question_id"): q for q in _qa if isinstance(q, dict)}
+                    for a in _questions_answered_raw:
                         if (not isinstance(a, dict) or not isinstance(a.get("question_id"), str)
-                                or a["question_id"] not in by_id):
+                                or a.get("question_id") not in by_id):
                             raise ValueError(f"{qpath}: answer names absent question {a!r}")
-                        if not isinstance(a.get("answer"), str) or not a["answer"]:
-                            raise ValueError(f"{qpath}: answer for {a['question_id']!r} must be a non-empty string")
-                        by_id[a["question_id"]]["status"] = QuestionStatus.ANSWERED.value
-                        by_id[a["question_id"]]["answer"] = a["answer"]
-                    for q in questions_raw.get("questions", []):
+                        _aqid = a.get("question_id")
+                        _aans = a.get("answer")
+                        if not isinstance(_aans, str) or not _aans:
+                            raise ValueError(f"{qpath}: answer for {a.get('question_id')!r} must be a non-empty string")
+                        _tgt = by_id.get(_aqid)
+                        if _tgt is None:
+                            raise ValueError(f"{qpath}: answer names absent question {a!r}")
+                        _tgt["status"] = QuestionStatus.ANSWERED.value
+                        _tgt["answer"] = _aans
+                    for q in _qa:
+                        if not isinstance(q, dict):
+                            raise ValueError(f"{qpath}: question must be a mapping")
                         ThesisQuestion.from_dict(q, str(qpath))
                     questions_answered_updated = True
                 # 6. journal (live side effect, idempotent by entry id)
-                if result.get("journal_entry") is not None:
-                    jd = dict(result["journal_entry"])
+                if _journal_raw is not None:
+                    jd = dict(_journal_raw)
                     jd.setdefault("run_id", run_id)
-                    if result.get("trigger_id"):
-                        jd.setdefault("trigger_id", result["trigger_id"])
-                    entry_id = jd.get("entry_id") or jd.get("journal_id") or new_journal_id()
+                    if _trigger_id:
+                        jd.setdefault("trigger_id", _trigger_id)
+                    _jeid_raw = jd.get("entry_id") or jd.get("journal_id")
+                    entry_id = _jeid_raw if isinstance(_jeid_raw, str) and _jeid_raw else new_journal_id()
                     existing = None
                     for f in (thesis_dir / "journal").glob("*.md"):
                         try:
@@ -1214,19 +1379,23 @@ class ThesisRepository:
                             continue
                     if existing is None:
                         dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
+                        _jtitle = jd.get('title', 'Research run')
+                        _jtitle_s = _jtitle if isinstance(_jtitle, str) else str(_jtitle)
+                        _jbody = jd.get('body', jd.get('summary', ''))
+                        _jbody_s = _jbody if isinstance(_jbody, str) else ("" if _jbody is None else str(_jbody))
                         atomic_write_text(
                             dest,
                             _journal_front_matter(entry_id, thesis_id, _utcnow(), jd)
-                            + f"# {jd.get('title', 'Research run')}\n\n{jd.get('body', jd.get('summary', ''))}\n",
+                            + f"# {_jtitle_s}\n\n{_jbody_s}\n",
                             self.root,
                         )
                         outcome["journal"] = str(dest)
                     else:
                         outcome["journal"] = str(existing)
                 # 7. trigger processed metadata (live side effect, never delete)
-                if result.get("trigger_id"):
+                if _trigger_id:
                     if raw_trigger is None or tpath is None:
-                        tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
+                        tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, _trigger_id)
                     if tpath.is_file():
                         raw_trigger = load_raw_yaml(tpath)
                         self._check_file_owner(raw_trigger, str(tpath), thesis_id)
@@ -1242,7 +1411,7 @@ class ThesisRepository:
                 if mutable_changed:
                     self._write_snapshot_from_dicts_locked(
                         thesis_dir, thesis_id, effective_at=eff, reason="research_result",
-                        run_id=run_id, trigger_id=result.get("trigger_id") or "",
+                        run_id=run_id, trigger_id=_trigger_id,
                         thesis=thesis_d, state=state_d, questions=questions_raw,
                         watch=watch_raw, memory=memory_raw)
                 return outcome
@@ -1250,43 +1419,50 @@ class ThesisRepository:
                 raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
 
             # 0a. claim/expression updates: IDs must belong here, statuses known.
-            claim_patch: dict[str, dict[str, Any]] = {}
-            for c in result.get("claim_updates", []) or []:
+            claim_patch = {}
+            for c in _claim_updates_raw:
                 if not isinstance(c, dict) or not c.get("claim_id"):
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
-                if c["claim_id"] not in {x.claim_id for x in thesis.claims}:
+                _cid2 = c.get("claim_id")
+                if not isinstance(_cid2, str):
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
+                if _cid2 not in {x.claim_id for x in thesis.claims}:
                     raise ValueError(
-                        f"{thesis_dir}/thesis.yaml: claim {c['claim_id']!r} does not belong to thesis {thesis_id!r}")
-                if c.get("status") is not None and c["status"] not in {e.value for e in models.ClaimStatus}:
+                        f"{thesis_dir}/thesis.yaml: claim {_cid2!r} does not belong to thesis {thesis_id!r}")
+                if c.get("status") is not None and c.get("status") not in {e.value for e in models.ClaimStatus}:
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim status {c.get('status')!r}")
-                claim_patch[c["claim_id"]] = c
-            expr_patch: dict[str, dict[str, Any]] = {}
-            for e in result.get("expression_updates", []) or []:
+                claim_patch[_cid2] = c
+            expr_patch = {}
+            for e in _expression_updates_raw:
                 if not isinstance(e, dict) or not e.get("expression_id"):
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
-                if e["expression_id"] not in {x.expression_id for x in thesis.expressions}:
+                _eid2 = e.get("expression_id")
+                if not isinstance(_eid2, str):
+                    raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
+                if _eid2 not in {x.expression_id for x in thesis.expressions}:
                     raise ValueError(
-                        f"{thesis_dir}/thesis.yaml: expression {e['expression_id']!r}"
+                        f"{thesis_dir}/thesis.yaml: expression {_eid2!r}"
                         f" does not belong to thesis {thesis_id!r}")
-                if e.get("status") is not None and e["status"] not in {e2.value for e2 in models.ExpressionStatus}:
+                if e.get("status") is not None and e.get("status") not in {e2.value for e2 in models.ExpressionStatus}:
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression status {e.get('status')!r}")
-                expr_patch[e["expression_id"]] = e
+                expr_patch[_eid2] = e
 
             # 0b. evidence provenance before any write (foreign/invalid changes nothing).
-            tpath: Path | None = None
-            raw_trigger: dict[str, Any] | None = None
-            if result.get("trigger_id"):
-                tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
+            tpath = None
+            raw_trigger = None
+            if _trigger_id:
+                tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, _trigger_id)
                 if allowed_refs is not None:
                     allowed = set(allowed_refs)
                 else:
                     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
-                    journal = result.get("journal_entry")
-                    payload_known = journal.get("known_at") if isinstance(journal, dict) else None
+                    _j2 = _journal_raw
+                    payload_known = _j2.get("known_at") if isinstance(_j2, dict) else None
                     if not payload_known:
                         payload_known = raw_trigger.get("created_at")
-                    dt_cut = _as_dt(payload_known) if payload_known else None
+                    _pk2 = payload_known if isinstance(payload_known, str) else (str(payload_known) if payload_known is not None else None)
+                    dt_cut = _as_dt(_pk2) if _pk2 else None
                     pit_refs: set[str] = set()
                     if dt_cut is not None:
                         evdir = thesis_dir / "evidence"
@@ -1301,13 +1477,16 @@ class ThesisRepository:
                                 ref, known = raw.get("canonical_ref"), raw.get("known_at")
                                 if not isinstance(ref, str) or not ref:
                                     continue
-                                dt_known = _as_dt(known) if known else None
+                                _known2 = known if isinstance(known, str) else (str(known) if known is not None else "")
+                                dt_known = _as_dt(_known2) if _known2 else None
                                 if dt_known is not None and dt_known <= dt_cut:
                                     pit_refs.add(ref)
-                    allowed = set(raw_trigger.get("canonical_refs", [])) | pit_refs
+                    _cr2 = raw_trigger.get("canonical_refs", [])
+                    _cr_set2 = {c for c in _cr2 if isinstance(c, str)} if isinstance(_cr2, list) else set[str]()
+                    allowed = _cr_set2 | pit_refs
             else:
                 allowed = None  # seed path without a trigger: membership unchecked
-            for ref in result.get("evidence_refs", []) or []:
+            for ref in _evidence_refs_raw:
                 if not isinstance(ref, dict):
                     raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
                 smuggled = [k for k in _FORBIDDEN_EVIDENCE_KEYS if ref.get(k)]
@@ -1317,23 +1496,25 @@ class ThesisRepository:
                 if allowed is not None and ref.get("canonical_ref") not in allowed:
                     raise ValueError(
                         f"{thesis_dir}/evidence: foreign canonical_ref {ref.get('canonical_ref')!r}"
-                        f" (trigger {result['trigger_id']!r}); refusing writeback")
+                        f" (trigger {_trigger_id!r}); refusing writeback")
             claim_or_expr = bool(claim_patch or expr_patch)
-            state_changed = result.get("state") is not None
+            state_changed = _state_raw is not None
             questions_added = False
             memories_added = False
             watch_added = False
             questions_answered_updated = False
             # 0c. fold the old standalone thesis status mutation into this commit.
             if claim_patch or expr_patch:
-                patched = thesis.to_dict()
+                patched = dict[str, object](thesis.to_dict())
+                _lclaims = patched.get("claims", [])
                 patched["claims"] = [
-                    {**c, **claim_patch[c["claim_id"]]} if c["claim_id"] in claim_patch else c
-                    for c in patched["claims"]
+                    {**c, **claim_patch[cid]} if isinstance(c, dict) and isinstance(cid := c.get("claim_id"), str) and cid in claim_patch else c
+                    for c in (_lclaims if isinstance(_lclaims, list) else [])
                 ]
+                _lexprs = patched.get("expressions", [])
                 patched["expressions"] = [
-                    {**e, **expr_patch[e["expression_id"]]} if e["expression_id"] in expr_patch else e
-                    for e in patched["expressions"]
+                    {**e, **expr_patch[eid]} if isinstance(e, dict) and isinstance(eid := e.get("expression_id"), str) and eid in expr_patch else e
+                    for e in (_lexprs if isinstance(_lexprs, list) else [])
                 ]
                 patched["thesis_id"] = thesis_id
                 patched["updated_at"] = _utcnow()
@@ -1341,7 +1522,9 @@ class ThesisRepository:
                 atomic_write_yaml(thesis_dir / "thesis.yaml", thesis.to_dict(), self.root)
 
             # 1. evidence refs (one file per ref, skip existing IDs)
-            for ref in result.get("evidence_refs", []) or []:
+            for ref in _evidence_refs_raw:
+                if not isinstance(ref, dict):
+                    raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
                 d = dict(ref)
                 d.setdefault("evidence_id", new_evidence_id())
                 d["thesis_id"] = thesis_id
@@ -1350,57 +1533,80 @@ class ThesisRepository:
                 if dest.is_file():
                     continue
                 atomic_write_yaml(dest, {"schema_version": SCHEMA_VERSION, **ev.to_dict()}, self.root)
-            outcome["evidence"] = len(result.get("evidence_refs", []) or [])
+            outcome["evidence"] = len(_evidence_refs_raw)
 
             # 2. state.yaml (full-replace candidate, validated)
-            if result.get("state") is not None:
-                sdata = result["state"] if isinstance(result["state"], dict) else result["state"].to_dict()
-                sdata = dict(sdata)
-                sdata["thesis_id"] = thesis_id
-                candidate = ThesisState.from_dict(sdata, str(thesis_dir / "state.yaml"))
+            if _state_raw is not None:
+                if isinstance(_state_raw, dict):
+                    sdata2: dict[str, object] = dict(_state_raw)
+                elif isinstance(_state_raw, ThesisState):
+                    sdata2 = dict(_state_raw.to_dict())
+                else:
+                    raise ValueError(f"{thesis_dir}/state.yaml: bad state {_state_raw!r}")
+                sdata2["thesis_id"] = thesis_id
+                candidate = ThesisState.from_dict(sdata2, str(thesis_dir / "state.yaml"))
                 atomic_write_yaml(thesis_dir / "state.yaml", candidate.to_dict(), self.root)
 
             # 3. questions (append by ID, skip known)
-            if result.get("questions_add"):
+            if _questions_add_raw:
                 raw = load_raw_yaml(thesis_dir / "questions.yaml")
                 self._check_file_owner(raw, str(thesis_dir / "questions.yaml"), thesis_id)
-                known = {q.get("question_id") for q in raw.get("questions", [])}
-                for q in result["questions_add"]:
+                _qll = raw.get("questions", [])
+                if not isinstance(_qll, list):
+                    raise ValueError(f"{thesis_dir}/questions.yaml: 'questions' must be a list")
+                known = {q.get("question_id") for q in _qll if isinstance(q, dict)}
+                for q in _questions_add_raw:
+                    if not isinstance(q, dict):
+                        raise ValueError(f"{thesis_dir}/questions.yaml: bad question {q!r}")
                     d = dict(q)
                     d.setdefault("question_id", new_question_id())
                     qobj = ThesisQuestion.from_dict(d, str(thesis_dir / "questions.yaml"))
                     if qobj.question_id in known:
                         continue
-                    raw.setdefault("questions", []).append(qobj.to_dict())
+                    _qadd2 = raw.setdefault("questions", [])
+                    if isinstance(_qadd2, list):
+                        _qadd2.append(qobj.to_dict())
                     known.add(qobj.question_id)
                     questions_added = True
                 atomic_write_yaml(thesis_dir / "questions.yaml", raw, self.root)
 
             # 4. memory (append by ID, skip known)
-            if result.get("memories_add"):
+            if _memories_add_raw:
                 raw = load_raw_yaml(thesis_dir / "memory.yaml")
                 self._check_file_owner(raw, str(thesis_dir / "memory.yaml"), thesis_id)
-                known = {m.get("memory_id") for m in raw.get("memories", [])}
-                for m in result["memories_add"]:
+                _mll = raw.get("memories", [])
+                if not isinstance(_mll, list):
+                    raise ValueError(f"{thesis_dir}/memory.yaml: 'memories' must be a list")
+                known = {m.get("memory_id") for m in _mll if isinstance(m, dict)}
+                for m in _memories_add_raw:
+                    if not isinstance(m, dict):
+                        raise ValueError(f"{thesis_dir}/memory.yaml: bad memory {m!r}")
                     d = dict(m)
                     d.setdefault("memory_id", new_memory_id())
                     d.setdefault("created_at", eff)
                     mobj = ThesisMemory.from_dict(d, str(thesis_dir / "memory.yaml"))
                     if mobj.memory_id in known:
                         continue
-                    raw.setdefault("memories", []).append(mobj.to_dict())
+                    _madd2 = raw.setdefault("memories", [])
+                    if isinstance(_madd2, list):
+                        _madd2.append(mobj.to_dict())
                     known.add(mobj.memory_id)
                     memories_added = True
                 atomic_write_yaml(thesis_dir / "memory.yaml", raw, self.root)
 
             # 5. watch (append rules by ID with cross-ref checks)
-            if result.get("watch_add"):
+            if _watch_add_raw:
                 raw = load_raw_yaml(thesis_dir / "watch.yaml")
                 self._check_file_owner(raw, str(thesis_dir / "watch.yaml"), thesis_id)
-                known = {r.get("rule_id") for r in raw.get("rules", [])}
+                _wll = raw.get("rules", [])
+                if not isinstance(_wll, list):
+                    raise ValueError(f"{thesis_dir}/watch.yaml: 'rules' must be a list")
+                known = {r.get("rule_id") for r in _wll if isinstance(r, dict)}
                 claim_ids = {c.claim_id for c in thesis.claims}
                 expr_ids = {e.expression_id for e in thesis.expressions}
-                for r in result["watch_add"]:
+                for r in _watch_add_raw:
+                    if not isinstance(r, dict):
+                        raise ValueError(f"{thesis_dir}/watch.yaml: bad rule {r!r}")
                     d = dict(r)
                     d.setdefault("rule_id", f"rule:{__import__('uuid').uuid4()}")
                     robj = WatchRule.from_dict(d, str(thesis_dir / "watch.yaml"))
@@ -1413,41 +1619,53 @@ class ThesisRepository:
                     require_watch_targets(robj, str(thesis_dir / "watch.yaml"))
                     if robj.rule_id in known:
                         continue
-                    raw.setdefault("rules", []).append(robj.to_dict())
+                    _radd2 = raw.setdefault("rules", [])
+                    if isinstance(_radd2, list):
+                        _radd2.append(robj.to_dict())
                     known.add(robj.rule_id)
                     watch_added = True
                 atomic_write_yaml(thesis_dir / "watch.yaml", raw, self.root)
 
             # 5b. questions answered (folded; same lock, validated inline).
-            if result.get("questions_answered"):
+            if _questions_answered_raw:
                 qpath = thesis_dir / "questions.yaml"
                 qraw = load_raw_yaml(qpath)
                 self._check_file_owner(qraw, str(qpath), thesis_id)
-                by_id = {q.get("question_id"): q for q in qraw.get("questions", [])}
-                for a in result["questions_answered"]:
+                _qraw_ll = qraw.get("questions", [])
+                if not isinstance(_qraw_ll, list):
+                    raise ValueError(f"{qpath}: 'questions' must be a list")
+                by_id2: dict[object, dict[str, JSONValue]] = {q.get("question_id"): q for q in _qraw_ll if isinstance(q, dict)}
+                for a in _questions_answered_raw:
                     if (
                         not isinstance(a, dict)
                         or not isinstance(a.get("question_id"), str)
-                        or a["question_id"] not in by_id
+                        or a.get("question_id") not in by_id2
                     ):
                         raise ValueError(f"{qpath}: answer names absent question {a!r}")
-                    if not isinstance(a.get("answer"), str) or not a["answer"]:
-                        raise ValueError(f"{qpath}: answer for {a['question_id']!r} must be a non-empty string")
-                    by_id[a["question_id"]]["status"] = QuestionStatus.ANSWERED.value
-                    by_id[a["question_id"]]["answer"] = a["answer"]
-                for q in qraw.get("questions", []):
+                    _ans_q = a.get("answer")
+                    if not isinstance(_ans_q, str) or not _ans_q:
+                        raise ValueError(f"{qpath}: answer for {a.get('question_id')!r} must be a non-empty string")
+                    _tgt2 = by_id2.get(a.get("question_id"))
+                    if _tgt2 is None:
+                        raise ValueError(f"{qpath}: answer names absent question {a!r}")
+                    _tgt2["status"] = QuestionStatus.ANSWERED.value
+                    _tgt2["answer"] = _ans_q
+                for q in _qraw_ll:
+                    if not isinstance(q, dict):
+                        raise ValueError(f"{qpath}: question must be a mapping")
                     ThesisQuestion.from_dict(q, str(qpath))
                 atomic_write_yaml(qpath, qraw, self.root)
                 questions_answered_updated = True
 
             # 6. journal (idempotent by entry id; atomic replace keeps Markdown intact)
-            if result.get("journal_entry") is not None:
-                jd = dict(result["journal_entry"])
+            if _journal_raw is not None:
+                jd = dict(_journal_raw)
                 jd.setdefault("run_id", run_id)
-                if result.get("trigger_id"):
-                    jd.setdefault("trigger_id", result["trigger_id"])
+                if _trigger_id:
+                    jd.setdefault("trigger_id", _trigger_id)
                 # Inline (already holding the lock): reuse file-level logic without re-locking.
-                entry_id = jd.get("entry_id") or jd.get("journal_id") or new_journal_id()
+                _je_raw2 = jd.get("entry_id") or jd.get("journal_id")
+                entry_id = _je_raw2 if isinstance(_je_raw2, str) and _je_raw2 else new_journal_id()
                 existing = None
                 for f in (thesis_dir / "journal").glob("*.md"):
                     try:
@@ -1458,10 +1676,14 @@ class ThesisRepository:
                         continue
                 if existing is None:
                     dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
+                    _jt2 = jd.get('title', 'Research run')
+                    _jt2s = _jt2 if isinstance(_jt2, str) else str(_jt2)
+                    _jb2 = jd.get('body', jd.get('summary', ''))
+                    _jb2s = _jb2 if isinstance(_jb2, str) else ("" if _jb2 is None else str(_jb2))
                     atomic_write_text(
                         dest,
                         _journal_front_matter(entry_id, thesis_id, _utcnow(), jd)
-                        + f"# {jd.get('title', 'Research run')}\n\n{jd.get('body', jd.get('summary', ''))}\n",
+                        + f"# {_jt2s}\n\n{_jb2s}\n",
                         self.root,
                     )
                     outcome["journal"] = str(dest)
@@ -1469,9 +1691,9 @@ class ThesisRepository:
                     outcome["journal"] = str(existing)
 
             # 7. trigger processed metadata (never delete; last write of the commit)
-            if result.get("trigger_id"):
+            if _trigger_id:
                 if raw_trigger is None or tpath is None:  # trigger_id validated in 0b; reload only if unset
-                    tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
+                    tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, _trigger_id)
                 if tpath.is_file():
                     raw_trigger = load_raw_yaml(tpath)
                     self._check_file_owner(raw_trigger, str(tpath), thesis_id)
@@ -1487,5 +1709,5 @@ class ThesisRepository:
             if mutable_changed:
                 self._snapshot_state_locked(
                     thesis_dir, thesis_id, effective_at=eff, reason="research_result",
-                    run_id=run_id, trigger_id=result.get("trigger_id") or "")
+                    run_id=run_id, trigger_id=_trigger_id)
         return outcome

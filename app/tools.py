@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from . import analytics
 from . import analyst_client
@@ -27,6 +27,7 @@ from .robinhood.client import RobinhoodAuthRequired
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services import risk as risk_service
+from .domain.market.entities import EntityRelationship
 from .domain.portfolio.models import Position
 from .services.portfolio_research import PortfolioResearchPosition, SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
@@ -1116,14 +1117,16 @@ def _provider_payload(value: object) -> object:
     if isinstance(value, dict):
         structured = value.get("structured_content") or value.get("structuredContent")
         if structured is not None:
-            return structured
+            payload: object = structured
+            return payload
         content = value.get("content")
         if isinstance(content, list):
             for block in content:
                 text = block.get("text") if isinstance(block, dict) else None
                 if text:
                     try:
-                        return json.loads(text)
+                        parsed: object = json.loads(text)
+                        return parsed
                     except (TypeError, ValueError):
                         return {"text": text}
         return value
@@ -1156,7 +1159,8 @@ def _first(value: object, *keys: str) -> object:
         return None
     for key in keys:
         if value.get(key) is not None:
-            return value[key]
+            found: object = value[key]
+            return found
     return None
 
 
@@ -1300,7 +1304,7 @@ def _position_research_row(position: Position, research_item: PortfolioResearchP
         sec: dict[str, object] = {}
         for concept in SEC_CONCEPTS:
             fact = research_item.latest_sec_metrics.get(concept)
-            if fact:
+            if isinstance(fact, dict) and fact:
                 sec[concept] = {
                     "value": _str_or_none(fact.get("value")),
                     "period_end": fact.get("period_end") or None,
@@ -1400,7 +1404,7 @@ _SCAN_RESULTS_ROWS = 20
 _SCAN_WRITE_PREVIEW_ROWS = 10
 
 
-def _scan_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _scan_rows(data: dict[str, object]) -> list[dict[str, object]]:
     """Instrument rows from a scan payload under any of the common keys."""
     rows = _rows(data, "results", "instruments", "rows", "items")
     return rows if rows is not None else []
@@ -1632,7 +1636,7 @@ def _search_web(args: dict[str, object], model: str) -> dict[str, object]:
 def plan_public_search_queries(
     primary_name: str | None = None,
     primary_ticker: str | None = None,
-    related_names: Any = (),
+    related_names: Sequence[object] = (),
 ) -> list[dict[str, object]]:
     """PUBLIC search targets → search_web args (planning only, no numbers).
 
@@ -1668,14 +1672,14 @@ def suggest_public_search_queries(
     primary_entity_id: str | None,
     primary_name: str | None,
     primary_ticker: str | None,
-    relationships: Any = (),
-    names_by_entity: Any = None,
+    relationships: Sequence[EntityRelationship] = (),
+    names_by_entity: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Warehouse-aware wrapper: single-hop EntityRelationships."""
     related: list[str] = []
     if primary_entity_id:
         for rel in relationships or ():
-            other = None
+            other: str | None = None
             try:
                 if rel.from_entity_id == primary_entity_id:
                     other = rel.to_entity_id
@@ -2226,7 +2230,7 @@ def tool_is_permitted(name: str, context: RequestContext) -> bool:
     return capability is not None and capability in context.capabilities
 
 
-def _validate_tool_arguments(name: str, arguments: Any) -> str | None:
+def _validate_tool_arguments(name: str, arguments: object) -> str | None:
     """Schema-level argument check: object-ness plus required keys. Returns
     an error message, or None when the arguments are acceptable. Type
     checking is intentionally out of scope; lenient handler coercions
@@ -2283,11 +2287,14 @@ def _pit_day(cutoff: str) -> str | None:
     return dt.astimezone(timezone.utc).date().isoformat()
 
 
-def _apply_pit_cutoff(name: str, arguments: Any, context: RequestContext) -> tuple[dict[str, object], dict[str, object] | None]:
+def _apply_pit_cutoff(name: str, arguments: object, context: RequestContext) -> tuple[dict[str, object], dict[str, object] | None]:
     """Default `as_of` to the run cutoff; reject a model value beyond it."""
     cutoff = _effective_at(context)
-    if not cutoff or not isinstance(arguments, dict):
-        return arguments, None
+    if not isinstance(arguments, dict):
+        return {}, {"error": f"Tool arguments must be a JSON object for tool '{name}'", "error_type": "invalid_tool_arguments"}
+    args: dict[str, object] = arguments
+    if not cutoff:
+        return args, None
     tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
     fn = _tool_function(tool) if tool is not None else {}
     raw_parameters = fn.get("parameters")
@@ -2295,23 +2302,23 @@ def _apply_pit_cutoff(name: str, arguments: Any, context: RequestContext) -> tup
     raw_props = parameters.get("properties")
     props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
     if "as_of" not in props:
-        return arguments, None
-    supplied = arguments.get("as_of")
+        return args, None
+    supplied = args.get("as_of")
     if supplied is None or (isinstance(supplied, str) and not supplied):
         if name in _PIT_INSTANT_TOOLS:
-            return {**arguments, "as_of": cutoff}, None
+            return {**args, "as_of": cutoff}, None
         day = _pit_day(cutoff)
         if day is None:
-            return arguments, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
-        return {**arguments, "as_of": day}, None
+            return args, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+        return {**args, "as_of": day}, None
     if not isinstance(supplied, str):
-        return arguments, None  # handler validation owns the message
+        return args, None  # handler validation owns the message
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
     supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
     if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
-        return arguments, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
-    return arguments, None
+        return args, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+    return args, None
 
 
 def _thesis_proposal(arguments: dict[str, object], user_thesis: str, path: str) -> IntakeProposal:
@@ -2351,20 +2358,22 @@ def _thesis_show(arguments: dict[str, object], context: RequestContext) -> dict[
     if isinstance(as_of, str) and as_of:
         snap = repo.load_state_as_of(tid, as_of)
         t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
-        rules = list(watch.get("rules", []))
+        _rules = watch.get("rules", [])
+        rules = [r for r in (_rules if isinstance(_rules, list) else ()) if isinstance(r, dict)]
         live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+        _qq = questions.get("questions", [])
         return {
             "thesis_id": tid,
             "slug": t.get("slug"),
             "status": t.get("status"),
             "user_thesis": t.get("user_thesis"),
             "scope": t.get("scope"),
-            "claims": list(t.get("claims", [])),
-            "expressions": list(t.get("expressions", [])),
+            "claims": list(_claims) if isinstance((_claims := t.get("claims", [])), list) else [],
+            "expressions": list(_exprs) if isinstance((_exprs := t.get("expressions", [])), list) else [],
             "assessment": state.get("assessment"),
             "rules": rules,
             "setup_needed": not live,
-            "open_questions": [q for q in questions.get("questions", []) if q.get("status") == "open"],
+            "open_questions": [q for q in (_qq if isinstance(_qq, list) else ()) if isinstance(q, dict) and q.get("status") == "open"],
         }
     rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
     live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
@@ -2397,8 +2406,10 @@ def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dic
     proposal = _thesis_proposal(
         arguments, f"{thesis.user_thesis}\n{clarification.strip()}", "<thesis_refine>")
     plan = thesis_intake.plan_refinement(thesis, proposal)
+    merged = plan["merged"]
+    merged_thesis = merged.get("user_thesis") if isinstance(merged, dict) else None
     if (not plan["added_claims"] and not plan["added_expressions"]
-            and plan["merged"]["user_thesis"] == thesis.user_thesis):
+            and merged_thesis == thesis.user_thesis):
         return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
     out = thesis_intake.apply_refinement(
         repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
@@ -2416,7 +2427,8 @@ def _thesis_watch(arguments: dict[str, object], context: RequestContext) -> dict
         cutoff = _effective_at(context)
         if cutoff:
             snap = repo.load_state_as_of(tid, cutoff)
-            rules = list(snap.watch.get("rules", []))
+            _wrules = snap.watch.get("rules", [])
+            rules = [r for r in (_wrules if isinstance(_wrules, list) else ()) if isinstance(r, dict)]
             live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
             return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
         rules = [r.to_dict() for r in repo.load_watch_rules(tid)]

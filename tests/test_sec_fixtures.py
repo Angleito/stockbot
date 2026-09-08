@@ -17,7 +17,11 @@ _ACC_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 
 def _load() -> list[dict[str, object]]:
     # Fixture file is untyped JSON; callers validate the fields they consume.
-    return json.loads(_FIX.read_text())
+    raw: object = json.loads(_FIX.read_text())
+    assert isinstance(raw, list)
+    for entry in raw:
+        assert isinstance(entry, dict)
+    return raw
 
 
 def _by_form(entries: list[dict[str, object]], form: str) -> dict[str, object]:

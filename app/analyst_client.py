@@ -19,7 +19,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 
@@ -119,24 +119,37 @@ def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
         )
         resp = _session_get(_ensure_session(), url, headers={"Accept": "application/json"})
     resp.raise_for_status()
-    payload = resp.json()
-    result = (payload.get("quoteSummary") or {}).get("result") or []
-    if not result:
-        error = (payload.get("quoteSummary") or {}).get("error") or {}
+    decoded: object = resp.json()
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    summary: object = decoded.get("quoteSummary") or {}
+    if not isinstance(summary, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    result_obj: object = summary.get("result") or []
+    if not isinstance(result_obj, list) or not result_obj:
+        err: object = summary.get("error") or {}
+        detail: object = err.get("description") if isinstance(err, dict) else None
         raise ValueError(
-            error.get("description", f"Yahoo returned no data for {ticker}")
+            detail if isinstance(detail, str) else f"Yahoo returned no data for {ticker}"
         )
-    return result[0]
+    first: object = result_obj[0]
+    if not isinstance(first, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    return first
 
 
-def _raw(value: Any) -> Optional[float]:
+def _raw(value: object) -> Optional[float]:
     if not isinstance(value, dict):
         return None
-    raw = value.get("raw")
-    return float(raw) if raw is not None else None
+    raw: object = value.get("raw")
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float, str)):
+        return float(raw)
+    return None
 
 
-def _int(value: Any) -> Optional[int]:
+def _int(value: object) -> Optional[int]:
     raw = _raw(value)
     return int(raw) if raw is not None else None
 
@@ -208,7 +221,7 @@ def get_analyst_estimates(ticker: str) -> dict[str, object]:
         return _no_data("", "empty ticker")
     key = f"analyst_estimates:{ticker}"
     hit = cache.get(key, ttl=ESTIMATES_CACHE_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, dict):
         return hit
     try:
         data = _quote_summary(
@@ -282,7 +295,7 @@ def get_sp500_weight(ticker: str) -> dict[str, object]:
         return _no_data("", "empty ticker")
     key = f"sp500_weight:{ticker}"
     hit = cache.get(key, ttl=WEIGHT_CACHE_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, dict):
         return hit
     try:
         resp = _session_get(_ensure_session(), SLICKCHARTS_SP500_URL)

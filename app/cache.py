@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from .config import get_data_root
 
@@ -39,7 +39,7 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
+def get(key: str, ttl: Optional[float] = None) -> object | None:
     """Return the cached JSON value for key, or None. If ttl (seconds) is given,
     entries older than ttl are treated as misses."""
     row = _conn().execute("SELECT value, created_at FROM cache WHERE key = ?", (key,)).fetchone()
@@ -48,10 +48,11 @@ def get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
     value, created_at = row
     if ttl is not None and (time.time() - created_at) > ttl:
         return None
-    return json.loads(value)
+    decoded: object = json.loads(value)
+    return decoded
 
 
-def set(key: str, value: Any) -> None:
+def set(key: str, value: object) -> None:
     """Store value (JSON-serialized) under key."""
     _conn().execute(
         "INSERT OR REPLACE INTO cache (key, value, created_at) VALUES (?, ?, ?)",

@@ -76,7 +76,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, prompt: str, mode: str = "ok", timeout
     out = run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1", prompt=prompt,
                         data_root="/tmp/root", timeout_s=timeout_s)
     assert out is None
-    return fake.captured
+    return _as_dict(fake.captured)
 
 
 def test_builds_canonical_command_without_tool_restrictions(monkeypatch: pytest.MonkeyPatch) -> None:

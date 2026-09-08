@@ -67,7 +67,7 @@ def _first(obj: object, *names: str) -> object:
     `_safe_float`, `str`)."""
     for name in names:
         try:
-            value = getattr(obj, name)
+            value: object = getattr(obj, name)
         except Exception:
             continue
         if value is not None:

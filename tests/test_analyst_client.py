@@ -242,7 +242,7 @@ def test_execute_tool_dispatch(monkeypatch: pytest.MonkeyPatch, fake_cache: Fake
     yahoo_session = _fake_session(_response(payload=payload))
     slick_session = _fake_session(_response(text=html))
 
-    def session_for(url: str, **kwargs: object) -> MagicMock:
+    def session_for(url: str, **kwargs: object):
         if "yahoo" in url:
             return yahoo_session.get(url, **kwargs)
         return slick_session.get(url, **kwargs)

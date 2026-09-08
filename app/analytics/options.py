@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Iterable
 
 from ..robinhood.options import OptionQuote
 ZERO = Decimal("0")
@@ -35,7 +35,7 @@ def analyze_option(
     *,
     as_of: date | datetime | None = None,
     target_price: Decimal | int | str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Return observable quote fields plus deterministic derived metrics."""
     today = _as_of(as_of)
     dte = (quote.expiration - today).days
@@ -54,7 +54,7 @@ def analyze_option(
     if mid is not None:
         breakeven = quote.strike - mid if quote.option_type == "put" else quote.strike + mid
     premium_per_contract = mid * CONTRACT_MULTIPLIER if mid is not None else None
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "contract_id": quote.contract_id,
         "ticker": quote.ticker,
         "expiration": quote.expiration.isoformat(),
@@ -98,12 +98,14 @@ def analyze_option(
     return result
 
 
-def _target_pnl_key(row: dict[str, Any]) -> Decimal:
-    return Decimal(row["target_pnl"]) if row.get("target_pnl") is not None else Decimal("-Infinity")
+def _target_pnl_key(row: dict[str, object]) -> Decimal:
+    value = row.get("target_pnl")
+    return Decimal(str(value)) if value is not None else Decimal("-Infinity")
 
 
-def _spread_pct_key(row: dict[str, Any]) -> Decimal:
-    return Decimal(row["spread_pct"]) if row.get("spread_pct") is not None else Decimal("Infinity")
+def _spread_pct_key(row: dict[str, object]) -> Decimal:
+    value = row.get("spread_pct")
+    return Decimal(str(value)) if value is not None else Decimal("Infinity")
 
 
 def compare_options(
@@ -112,7 +114,7 @@ def compare_options(
     target_price: Decimal | int | str | None = None,
     as_of: date | datetime | None = None,
     limit: int = 20,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Analyze and deterministically rank contracts by target P/L or liquidity."""
     rows = [analyze_option(q, as_of=as_of, target_price=target_price) for q in quotes]
     if target_price is not None:

@@ -1088,7 +1088,7 @@ def _enqueue_or_requeue(store: ModuleType, source: str, form: str, qs: str, qe: 
                         batch_size: int,
                         root: Path | str | None = None) -> str:
     """Enqueue a quarterly job; reset finished-but-uncovered ones for resume."""
-    job_id = store.enqueue_backfill_job(
+    job_id: str = store.enqueue_backfill_job(
         source, form, qs, qe, PARSER_VERSION, batch_size=batch_size, root=root)
     try:
         job = store.get_job(job_id, root=root)
@@ -3201,14 +3201,17 @@ def evaluate_and_persist_type(
         "windows": windows, "horizons": list(kwargs.get("horizons", _eval.HORIZONS)),
     })
     prev_state, prev_row = _store.latest_type_state(label, root=data_root)
-    decision = outcome["decision"]
+    decision_raw = outcome["decision"]
+    decision = decision_raw if isinstance(decision_raw, str) else ""
     new_state = {"activate": "active", "demote": "demoted"}.get(decision, prev_state)
     note = reason or outcome["reason"]
     if (prev_row is not None and prev_row.get("actor") == "human"
             and new_state != prev_state and decision in ("activate", "demote")):
         note = f"supersedes human {prev_row.get('evaluation_id')}: {note}"
     written = 0
-    for window in outcome["windows"]:
+    windows_raw = outcome["windows"]
+    eval_windows = windows_raw if isinstance(windows_raw, list) else []
+    for window in eval_windows:
         written += _store.store_relationship_type_evaluation({
             "evaluation_id": _evaluation_id(label, window, inputs_hash),
             "relationship_type": label,

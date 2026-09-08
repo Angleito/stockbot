@@ -352,7 +352,7 @@ def test_as_of_timestamp_granularity(data_root: Path):
 
 def test_events_evidence_registry_roundtrip(data_root: Path):
     """CorporateEvent/Evidence datasets dedup on rerun."""
-    event_row = {
+    event_row: dict[str, object] = {
         "event_id": "sec:event:NVDA:0123456789abcdef",
         "entity_id": "sec:cik:0001045810",
         "security_id": None,
@@ -373,7 +373,7 @@ def test_events_evidence_registry_roundtrip(data_root: Path):
         "content_hash": "h1",
         "parser_version": "obligations-v2",
     }
-    evidence_row = {
+    evidence_row: dict[str, object] = {
         "evidence_id": "sec:evidence:abcdef0123456789",
         "event_id": event_row["event_id"],
         "source_type": "filing_text",

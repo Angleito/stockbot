@@ -11,7 +11,7 @@ rendering — it never slices serialized JSON or rendered text blindly.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Optional
 
 from app.domain.risk.evaluation import EvaluationIssue
 from app.services.portfolio_research import SEC_CONCEPTS
@@ -34,7 +34,7 @@ def _as_list(value: object) -> list[object]:
 
 
 def render_tool_result(
-    result: Any, max_bytes: int = MAX_TOOL_MESSAGE_BYTES
+    result: object, max_bytes: int = MAX_TOOL_MESSAGE_BYTES
 ) -> str:
     """Render a tool result as compact text within the byte budget.
 

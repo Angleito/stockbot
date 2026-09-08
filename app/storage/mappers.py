@@ -11,13 +11,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
 from ..domain.market.securities import TickerAlias
 from ..domain.portfolio import Position
 
 
-def ticker_alias_from_row(row: Mapping[str, Any]) -> TickerAlias:
+def ticker_alias_from_row(row: Mapping[str, object]) -> TickerAlias:
     """Rebuild a ticker alias from a persisted entity_aliases row.
 
     Field mapping only, no identity policy: identity derivation is the
@@ -27,12 +26,12 @@ def ticker_alias_from_row(row: Mapping[str, Any]) -> TickerAlias:
         alias_type=str(row["alias_type"]),
         alias_value=str(row["alias_value"]),
         entity_id=str(row["entity_id"]),
-        security_id=row.get("security_id"),
+        security_id=str(row["security_id"]) if row.get("security_id") else None,
         source=str(row["source"]),
-        valid_from=row.get("valid_from"),
-        valid_to=row.get("valid_to"),
-        known_at=row.get("known_at"),
-        retrieved_at=row.get("retrieved_at"),
+        valid_from=str(row["valid_from"]) if row.get("valid_from") else None,
+        valid_to=str(row["valid_to"]) if row.get("valid_to") else None,
+        known_at=str(row["known_at"]) if row.get("known_at") else None,
+        retrieved_at=str(row["retrieved_at"]) if row.get("retrieved_at") else None,
     )
 
 
@@ -54,7 +53,7 @@ def _required_quantity(value: Decimal | None) -> Decimal:
     return value
 
 
-def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Position:
+def position_from_row(row: Mapping[str, object], retrieved_at: datetime) -> Position:
     """Rebuild a position from a persisted row.
 
     ``retrieved_at`` is not persisted in the position schema; it is
@@ -76,7 +75,8 @@ def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Positio
         )
     }
     quote_retrieved_at = row.get("quote_retrieved_at")
-    asset_type = row.get("asset_type") or "equity"
+    asset_type_value = row.get("asset_type")
+    asset_type = asset_type_value if isinstance(asset_type_value, str) and asset_type_value else "equity"
     return Position(
         position_id=str(row["position_id"]),
         account_id=str(row["account_id"]),
@@ -95,7 +95,7 @@ def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Positio
         price_type=str(row["price_type"]) if row.get("price_type") else None,
         quote_retrieved_at=(
             datetime.fromisoformat(quote_retrieved_at.replace("Z", "+00:00"))
-            if quote_retrieved_at else None
+            if isinstance(quote_retrieved_at, str) and quote_retrieved_at else None
         ),
         asset_type=asset_type,
     )

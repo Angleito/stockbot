@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from operator import itemgetter
-from typing import Any, Optional, TypeGuard
+from typing import Optional, TypeGuard
 
 import requests
 
@@ -88,7 +88,7 @@ _DATE_PARTITION_MAPPINGS: dict[tuple[str, str], str] = {
 
 # Corrections applied on top of live catalog/metadata before exposure.
 # Keys are lowercase (group, name).
-_METADATA_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
+_METADATA_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
     ("fixedincomemarket", "treasurydailyaggregates"): {
         "market_aggregate": True,
         "symbol_field": None,
@@ -204,7 +204,7 @@ class DatasetSpec:
     group: str
     name: str
     description: str
-    fields: tuple[dict[str, Any], ...] = ()
+    fields: tuple[dict[str, object], ...] = ()
     partition_fields: tuple[str, ...] = ()
     methods: tuple[str, ...] = ()
     symbol_field: Optional[str] = None
@@ -219,7 +219,12 @@ class DatasetSpec:
 
     @property
     def field_names(self) -> frozenset[str]:
-        return frozenset(f["name"] for f in self.fields if f.get("name"))
+        names: list[str] = []
+        for f in self.fields:
+            candidate: object = f.get("name")
+            if isinstance(candidate, str) and candidate:
+                names.append(candidate)
+        return frozenset(names)
 
 
 _token_lock = threading.Lock()
@@ -605,7 +610,8 @@ def query_dataset(
         pagination=pagination,
     )
     stale = _stale_warning(as_of, freshness)
-    warnings = list(analysis["warnings"])
+    raw_warnings: object = analysis.get("warnings")
+    warnings: list[object] = list(raw_warnings) if isinstance(raw_warnings, list) else []
     if stale:
         warnings.append(stale)
     return {

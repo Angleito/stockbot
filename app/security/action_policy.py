@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from ..redact import _ACCOUNT_ID_RE, _BEARER_RE, _JWT_RE, _SK_OR_V1_RE
 from .context import RunSecurityContext
@@ -109,7 +108,7 @@ class EgressDecision:
 
 
 def authorize_tool_call(
-    name: str, arguments: dict[str, Any], run_security: RunSecurityContext
+    name: str, arguments: dict[str, object], run_security: RunSecurityContext
 ) -> tuple[bool, str]:
     """Gate one tool call against intent plus the explicit session grant."""
     domain = TOOL_DOMAINS.get(name)

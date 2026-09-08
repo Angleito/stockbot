@@ -37,7 +37,7 @@ def test_period_lineage_restatement():
 
 
 def test_xbrl_lineage_as_of_excludes_restatement(tmp_path: Path) -> None:
-    rows = [
+    rows: list[dict[str, object]] = [
         {"fact_id": "f1", "entity_id": "E1", "concept": "Revenues",
          "value": 1.0, "period_end": "2024-12-31",
          "filed_at": "2025-02-01", "known_at": "2025-02-01",

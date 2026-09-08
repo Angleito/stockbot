@@ -48,7 +48,7 @@ def _unr(ticker: str | None = None, name: str | None = None, as_of: datetime | N
     return SecurityResolution(None, None, ticker or name or "UNKNOWN", False, "unresolved")
 
 
-def _item(ticker: str = "ABC") -> dict[str, str]:
+def _item(ticker: str = "ABC") -> dict[str, object]:
     return {
         "subject_ticker": ticker,
         "subject_name": "Abc",

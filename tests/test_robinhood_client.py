@@ -21,7 +21,9 @@ def test_oauth_state_is_private_and_round_trips(tmp_path: Path) -> None:
     save_tokens({"tokens": {"access_token": "redacted"}}, path)
     loaded = load_tokens(path)
     assert loaded is not None
-    assert loaded["tokens"]["access_token"] == "redacted"
+    tokens = loaded["tokens"]
+    assert isinstance(tokens, dict)
+    assert tokens["access_token"] == "redacted"
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
@@ -83,8 +85,15 @@ def test_mcp_v2_transport_adapter_lists_and_calls_tools() -> None:
     )
     assert client.list_tools()[0]["name"] == "get_equity_quotes"
     result = client.call_tool("get_equity_quotes", {"symbol": "WING"})
-    assert result["content"][0]["text"]
-    assert '"last": "10.00"' in result["content"][0]["text"]
+    assert isinstance(result, dict)
+    content = result["content"]
+    assert isinstance(content, list)
+    item = content[0]
+    assert isinstance(item, dict)
+    text = item["text"]
+    assert isinstance(text, str)
+    assert text
+    assert '"last": "10.00"' in text
 
 
 def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:

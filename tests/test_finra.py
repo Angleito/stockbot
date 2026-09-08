@@ -57,7 +57,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "finra"
 
 
 def _load_catalog() -> dict[str, object]:
-    return json.loads((FIXTURES / "catalog.json").read_text())
+    raw: object = json.loads((FIXTURES / "catalog.json").read_text())
+    assert isinstance(raw, dict)
+    return raw
 
 
 def _load_metadata(group: str, name: str):

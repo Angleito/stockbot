@@ -94,14 +94,16 @@ def test_structured_create_persists_thesis_slug_rules(tmp_path: Path) -> None:
     repo = ThesisRepository(tmp_path / "theses")
     proposal = IntakeProposal.from_dict(_structured(), "<thesis_create>")
     out = create_thesis_from_proposal(repo, proposal)
-    assert out["thesis_id"] and out["slug"] and not out["setup_needed"]
-    assert [r["rule_type"] for r in out["rules"]] == ["new_filing"]
-    thesis = repo.load_thesis(out["thesis_id"])
+    thesis_id, slug, rules = out["thesis_id"], out["slug"], out["rules"]
+    assert isinstance(thesis_id, str) and isinstance(slug, str) and isinstance(rules, list)
+    assert thesis_id and slug and not out["setup_needed"]
+    assert [r["rule_type"] for r in rules] == ["new_filing"]
+    thesis = repo.load_thesis(thesis_id)
     assert thesis.user_thesis == "NVDA demand stays strong"
     assert all(c.status == "unvalidated" for c in thesis.claims)
-    assert {(q.status, q.text) for q in repo.load_questions(out["thesis_id"])} == {
+    assert {(q.status, q.text) for q in repo.load_questions(thesis_id)} == {
         ("open", "What horizon?")}
-    assert (tmp_path / "theses" / out["slug"] / "watch.yaml").is_file()
+    assert (tmp_path / "theses" / slug / "watch.yaml").is_file()
 
 
 def test_structured_create_missing_user_thesis_errors_without_write(tmp_path: Path) -> None:
@@ -127,7 +129,9 @@ def test_structured_refine_persists_and_refuses_paused_closed(tmp_path: Path) ->
     repo = ThesisRepository(tmp_path / "theses")
     first = IntakeProposal.from_dict(_structured(), "<thesis_create>")
     created = create_thesis_from_proposal(repo, first)
-    thesis = repo.load_thesis(created["thesis_id"])
+    created_id, created_slug = created["thesis_id"], created["slug"]
+    assert isinstance(created_id, str) and isinstance(created_slug, str)
+    thesis = repo.load_thesis(created_id)
     proposal = IntakeProposal.from_dict(_structured(
         user_thesis=f"{thesis.user_thesis}\nAlso adding puts",
         claims=[{"statement": "demand holds"}, {"statement": "puts hedge drawdown"}]),
@@ -135,10 +139,10 @@ def test_structured_refine_persists_and_refuses_paused_closed(tmp_path: Path) ->
     out = apply_refinement(repo, thesis.thesis_id, plan_refinement(thesis, proposal), proposal)
     assert out["added_claims"] == 1 and out["slug"] == created["slug"]
     assert "puts hedge drawdown" in {c.statement for c in repo.load_thesis(thesis.thesis_id).claims}
-    before = (tmp_path / "theses" / created["slug"] / "thesis.yaml").read_bytes()
+    before = (tmp_path / "theses" / created_slug / "thesis.yaml").read_bytes()
     with pytest.raises(ValueError):
         IntakeProposal.from_dict({"user_thesis": "  "}, "<thesis_refine>")
-    assert (tmp_path / "theses" / created["slug"] / "thesis.yaml").read_bytes() == before
+    assert (tmp_path / "theses" / created_slug / "thesis.yaml").read_bytes() == before
     repo.pause_thesis(thesis.thesis_id)
     with pytest.raises(ValueError):
         apply_refinement(repo, thesis.thesis_id, plan_refinement(repo.load_thesis(thesis.thesis_id),

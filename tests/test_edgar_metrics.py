@@ -7,7 +7,7 @@ that returns the same value with an explicit note.
 
 import pandas as pd
 import pytest
-from typing import Any, override
+from typing import override
 
 from app import edgar_client
 from app.sec.events8k import KNOWN_8K_ITEMS, parse_8k_events
@@ -35,12 +35,12 @@ class _FakeCompany:
 
 class _FakeCache:
     def __init__(self) -> None:
-        self.store: dict[str, Any] = {}
+        self.store: dict[str, object] = {}
 
-    def get(self, key: str, ttl: float | None = None) -> Any | None:
+    def get(self, key: str, ttl: float | None = None) -> object | None:
         return self.store.get(key)
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: object) -> None:
         self.store[key] = value
 
 

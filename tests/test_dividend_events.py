@@ -131,17 +131,23 @@ def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) ->
                pay="2026-09-15", accn="0000000002"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
+    next_declared = result["next_declared_dividend"]
+    assert isinstance(next_declared, dict)
+    past = result["past_events"]
+    assert isinstance(past, list)
+    annual = result["annual_history"]
+    assert isinstance(annual, list)
     assert result["last_dividend"] == {
         "amount_per_share": 0.51, "payment_date": "2026-07-01", "type": "regular"}
     assert result["next_declared_dividend"] == {
         "amount_per_share": 0.54, "declaration_date": "2026-08-01",
         "record_date": "2026-08-29", "payment_date": "2026-09-15",
         "status": "upcoming",
-        "source_url": result["next_declared_dividend"]["source_url"],
+        "source_url": next_declared["source_url"],
         "accession": "0000000002"}
-    assert [e["payment_date"] for e in result["past_events"]] == ["2026-07-01"]
+    assert [e["payment_date"] for e in past] == ["2026-07-01"]
     assert result["events_coverage"] == "structured_only"
-    assert result["row_count"] == len(result["annual_history"])
+    assert result["row_count"] == len(annual)
 
 
 def test_future_declaration_invisible_at_earlier_as_of(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,7 +176,9 @@ def test_duplicate_accessions_dedup_to_one(store: Path, monkeypatch: pytest.Monk
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["past_events"] == []
-    assert result["next_declared_dividend"]["amount_per_share"] == 0.54
+    next_declared = result["next_declared_dividend"]
+    assert isinstance(next_declared, dict)
+    assert next_declared["amount_per_share"] == 0.54
 
 
 def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,8 +194,10 @@ def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch:
                pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000007"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["next_declared_dividend"]["amount_per_share"] == 0.54
-    assert result["next_declared_dividend"]["accession"] == "0000000007"
+    next_declared = result["next_declared_dividend"]
+    assert isinstance(next_declared, dict)
+    assert next_declared["amount_per_share"] == 0.54
+    assert next_declared["accession"] == "0000000007"
 
 
 def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,10 +210,14 @@ def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pyte
                pay=None, accn="0000000009"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["next_declared_dividend"]["payment_date"] == "2026-09-15"
+    next_declared = result["next_declared_dividend"]
+    assert isinstance(next_declared, dict)
+    assert next_declared["payment_date"] == "2026-09-15"
     assert result["last_dividend"] is None
     assert result["past_events"] == []
-    assert all(e["accession"] != "0000000009" for e in result["past_events"])
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert all(e["accession"] != "0000000009" for e in past)
 
 
 def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,7 +238,9 @@ def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypat
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["ttm_dividend_per_share"] == 2.07
     assert result["dividend_status"] == "paying"
-    assert result["next_declared_dividend"]["amount_per_share"] == 0.53
+    next_declared = result["next_declared_dividend"]
+    assert isinstance(next_declared, dict)
+    assert next_declared["amount_per_share"] == 0.53
     assert result["last_dividend"] is None
 
 def test_upcoming_excluded_from_past(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,8 +253,10 @@ def test_upcoming_excluded_from_past(store: Path, monkeypatch: pytest.MonkeyPatc
                pay="2026-09-15", accn="0000000012"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert len(result["past_events"]) == 1
-    assert result["past_events"][0]["payment_date"] == "2026-07-01"
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert len(past) == 1
+    assert past[0]["payment_date"] == "2026-07-01"
 
 
 def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,9 +271,13 @@ def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.Monk
                pay="2026-07-01", known="2026-08-05T00:00:00Z", accn="0000000014"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["last_dividend"]["amount_per_share"] == 0.54
-    assert len(result["past_events"]) == 1
-    assert result["past_events"][0]["amount_per_share"] == 0.54
+    last = result["last_dividend"]
+    assert isinstance(last, dict)
+    assert last["amount_per_share"] == 0.54
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert len(past) == 1
+    assert past[0]["amount_per_share"] == 0.54
 
 
 def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,7 +291,9 @@ def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.
     assert result["data_source"] == "store"
     assert result["dividend_status"] == "unknown"
     assert result["ttm_dividend_per_share"] is None
-    assert result["last_dividend"]["amount_per_share"] == 0.51
+    last = result["last_dividend"]
+    assert isinstance(last, dict)
+    assert last["amount_per_share"] == 0.51
     assert result["row_count"] == 0
 
 
@@ -313,8 +337,10 @@ def test_cross_source_duplicate_merges_to_one_payment(store: Path, monkeypatch: 
                dtype="regular"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
-    assert len(result["past_events"]) == 1
-    assert result["past_events"][0]["amount_per_share"] == 0.54
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert len(past) == 1
+    assert past[0]["amount_per_share"] == 0.54
     assert result["total_paid_per_share"] == 0.54
     assert result["regular_paid_per_share"] == 0.54
     assert result["events_coverage"] == "structured_and_text"
@@ -334,7 +360,9 @@ def test_unknown_matches_special_by_amount_not_first_bucket(store: Path, monkeyp
                dtype="unknown"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
-    assert len(result["past_events"]) == 2
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert len(past) == 2
     assert result["regular_paid_per_share"] == 0.50
     assert result["special_paid_per_share"] == 2.00
     assert result["total_paid_per_share"] == 2.50
@@ -355,7 +383,9 @@ def test_unknown_amount_match_ignores_row_order(store: Path, monkeypatch: pytest
                source_type="filing_text", dtype="regular"),
     ])
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
-    assert len(result["past_events"]) == 2
+    past = result["past_events"]
+    assert isinstance(past, list)
+    assert len(past) == 2
     assert result["regular_paid_per_share"] == 0.50
     assert result["special_paid_per_share"] == 2.00
     assert result["total_paid_per_share"] == 2.50
@@ -495,7 +525,9 @@ def test_lifecycle_regular_basis_growth_needs_five_consecutive_years() -> None:
     full = _lifecycle.analyze_dividends(paid_events=five_years, as_of="2026-02-01")
     assert full["growth_basis"] == "total_aggregates"
     assert full["regular_basis_growth"] is not None
-    assert full["regular_basis_growth"]["growth_1y"] == 0.0
+    growth = full["regular_basis_growth"]
+    assert isinstance(growth, dict)
+    assert growth["growth_1y"] == 0.0
     four_years = [p for year in range(2022, 2026)
                   for p in _series([0.50] * 4, f"{year}-01-15", 91)]
     short = _lifecycle.analyze_dividends(paid_events=four_years, as_of="2026-02-01")
