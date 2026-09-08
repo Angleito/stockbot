@@ -1,6 +1,7 @@
 """Offline tests for 8-K events, exhibits, and filing diffs (no network)."""
 
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -9,7 +10,7 @@ from app.sec import diffs, documents, events8k
 ACC = "0000000000-26-000001"
 
 
-def test_parse_multi_item():
+def test_parse_multi_item() -> None:
     items = {
         "Item 1.03": "bankruptcy filing text",
         "1.02": "",  # empty -> skipped
@@ -28,28 +29,31 @@ def test_parse_multi_item():
     assert events[0].to_dict()["item_number"] == "1.03"
 
 
-def test_extract_wrapper_skips_falsy():
+def test_extract_wrapper_skips_falsy() -> None:
     texts = {"Item 1.03": "bankruptcy text", "Item 2.02": ""}
 
     class R:
         items = ["Item 1.03", "Item 2.02"]
 
-        def __getitem__(self, k):
-            return texts[k]
+        def __getitem__(self, name: str) -> object:
+            return texts[name]
 
     events = events8k.extract_8k_events(R(), ACC)
     assert [e.item_number for e in events] == ["1.03"]
 
 
-def test_exhibits(monkeypatch):
+def test_exhibits(monkeypatch: pytest.MonkeyPatch) -> None:
     atts = [
         SimpleNamespace(document_type="EX-99.1", description="Press release",
                         document="ex991.htm", url="https://x/ex991.htm"),
         SimpleNamespace(document_type="EX-10.1", description="Agreement",
                         document="ex101.htm", url="https://x/ex101.htm"),
     ]
-    monkeypatch.setattr(documents, "get_by_accession_number",
-                        lambda a: SimpleNamespace(exhibits=atts))
+
+    def _fake_get(accession_no: str) -> SimpleNamespace:
+        return SimpleNamespace(exhibits=atts)
+
+    monkeypatch.setattr(documents, "get_by_accession_number", _fake_get)
     rows = documents.get_filing_exhibits(ACC)
     assert rows[0] == {"accession_no": ACC, "exhibit": "EX-99.1",
                        "description": "Press release", "document": "ex991.htm",
@@ -59,32 +63,43 @@ def test_exhibits(monkeypatch):
         documents.get_filing_exhibit(ACC, "EX-99.9")
 
 
-def test_diff_specialization_and_counts(monkeypatch):
+def test_diff_specialization_and_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import filings
 
-    monkeypatch.setattr(documents, "get_sec_filing_text",
-                        lambda a, d=None: "a\nb\nc\n" if a == "old" else "a\nB\nc\nd\n")
-    monkeypatch.setattr(filings, "get_sec_filing",
-                        lambda a: SimpleNamespace(form="10-K"))
+    def _fake_text(accession_no: str, document: object = None) -> str:
+        return "a\nb\nc\n" if accession_no == "old" else "a\nB\nc\nd\n"
+
+    def _fake_filing(accession_no: str) -> SimpleNamespace:
+        return SimpleNamespace(form="10-K")
+
+    monkeypatch.setattr(documents, "get_sec_filing_text", _fake_text)
+    monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
     out = diffs.diff_filings("new", "old")
     assert out["specialization"] == "10-K/10-Q"
     assert out["added"] == 2 and out["removed"] == 1
     assert out["truncated"] is False
 
 
-def test_diff_truncated_and_error(monkeypatch):
+def test_diff_truncated_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import filings
     texts = {"n": "\n".join(str(i) for i in range(1000, 2000)),
              "o": "\n".join(str(i) for i in range(1000))}
-    monkeypatch.setattr(documents, "get_sec_filing_text",
-                        lambda a, d=None: texts[a])
 
-    monkeypatch.setattr(filings, "get_sec_filing",
-                        lambda a: SimpleNamespace(form="8-K"))
+    def _fake_text(accession_no: str, document: object = None) -> str:
+        return texts[accession_no]
+
+    def _fake_filing(accession_no: str) -> SimpleNamespace:
+        return SimpleNamespace(form="8-K")
+
+    monkeypatch.setattr(documents, "get_sec_filing_text", _fake_text)
+
+    monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
     out = diffs.diff_filings("n", "o")
-    assert out["truncated"] is True and len(out["diff_lines"]) == 500
+    diff_lines = out["diff_lines"]
+    assert isinstance(diff_lines, list)
+    assert out["truncated"] is True and len(diff_lines) == 500
 
-    def boom(a, d=None):
+    def boom(accession_no: str, document: object = None) -> NoReturn:
         raise ValueError("bad accession")
 
     monkeypatch.setattr(documents, "get_sec_filing_text", boom)

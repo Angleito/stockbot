@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import warnings
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +62,7 @@ def archive_sec_document(
     *,
     url: str,
     retrieved_at: Optional[str] = None,
-    metadata: Optional[dict] = None,
+    metadata: Optional[dict[str, object]] = None,
     root: Optional[Path] = None,
 ) -> raw_archive.ArchiveRecord:
     """Archive one exact filing document under key ``(accession, document)``.
@@ -73,7 +74,7 @@ def archive_sec_document(
     digest = raw_archive.content_hash(payload)
     existed = raw_archive.has_payload(
         "sec", DOCUMENT_KIND, key, sha256=digest, root=root)
-    meta = {"accession_no": accession_no, "document_name": document_name}
+    meta: dict[str, object] = {"accession_no": accession_no, "document_name": document_name}
     meta.update(metadata or {})
     record = raw_archive.archive(
         source="sec",
@@ -115,7 +116,7 @@ def iter_archived_documents(
     document_name: str,
     *,
     root: Optional[Path] = None,
-):
+) -> Iterator[raw_archive.ArchiveRecord]:
     """All byte revisions for one accession/document, oldest first."""
     yield from raw_archive.iter_archive(
         "sec", DOCUMENT_KIND, _document_key(accession_no, document_name),

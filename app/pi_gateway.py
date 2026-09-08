@@ -61,9 +61,20 @@ PI_MODEL = "pi"
 
 # Single source of truth stays in app/tools.py; this is just the RESEARCH
 # projection of the canonical registry.
+def _schema_name(tool: dict[str, object]) -> str | None:
+    """OpenAI schema function name (TOOLS entries are untyped app-side JSON)."""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
 RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
-    tool["function"]["name"]
+    name
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH}))
+    for name in [_schema_name(tool)]
+    if name is not None
 )
 
 _UNAVAILABLE_HEADER = (
@@ -86,12 +97,12 @@ _BUDGET_EXHAUSTED_RESPONSE = (
 _NON_DATA_LIST_KEYS = frozenset({"source_records", "warnings", "metrics", "trends"})
 
 
-def _is_failed_result(result) -> bool:
+def _is_failed_result(result: object) -> bool:
     """A tool result is a failure when it carries an explicit error."""
     return isinstance(result, dict) and bool(result.get("error"))
 
 
-def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
+def _unavailable_data_response(failed: list[tuple[str, dict[str, object]]]) -> str:
     """Deterministic user-facing response when any tool call failed.
 
     Built from the rendered error context of each failed tool (name,
@@ -109,7 +120,7 @@ def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
     return "\n".join(lines)
 
 
-def _tool_result_meta(result) -> ToolResultMeta:
+def _tool_result_meta(result: object) -> ToolResultMeta:
     """Best-effort telemetry envelope for a tool result: row counts,
     truncation, source name, and freshness."""
     if not isinstance(result, dict):
@@ -200,39 +211,45 @@ def _record_security(
         )
 
 
-def _args_json(arguments: dict) -> str:
+def _args_json(arguments: dict[str, object]) -> str:
     return json.dumps(arguments, sort_keys=True)
 
 
-def _override_context(data_root: str | Path | None = None):
+def _override_context(data_root: str | Path | None = None, as_of: str | None = None):
     """LOCAL_CONTEXT with data_root overridden; invalid roots fall back."""
+    def _with_root(root: Path) -> RequestContext:
+        return RequestContext(
+            principal_id=LOCAL_CONTEXT.principal_id,
+            capabilities=LOCAL_CONTEXT.capabilities,
+            tool_policy=LOCAL_CONTEXT.tool_policy,
+            data_root=root,
+            run_limits=LOCAL_CONTEXT.run_limits,
+            as_of=as_of,
+        )
     if data_root is None or not str(data_root):
-        return LOCAL_CONTEXT
+        if as_of is None:
+            return LOCAL_CONTEXT
+        return _with_root(LOCAL_CONTEXT.data_root)
     try:
         root = Path(str(data_root))
     except Exception:
-        return LOCAL_CONTEXT
+        return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
     if not root.is_absolute():
-        return LOCAL_CONTEXT
-    return RequestContext(
-        principal_id=LOCAL_CONTEXT.principal_id,
-        capabilities=LOCAL_CONTEXT.capabilities,
-        tool_policy=LOCAL_CONTEXT.tool_policy,
-        data_root=root,
-        run_limits=LOCAL_CONTEXT.run_limits,
-    )
+        return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
+    return _with_root(root)
 
 
 def execute_pi_tool(
     name: str,
-    arguments: dict,
+    arguments: dict[str, object],
     session: PiSessionContext,
     *,
     tool_call_id: str | None = None,
     protocol_id: str | None = None,
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
-) -> dict:
+    as_of: str | None = None,
+) -> dict[str, object]:
     """Run one Pi-requested tool through all gates. Never raises."""
     try:
         return _execute_pi_tool(
@@ -243,6 +260,7 @@ def execute_pi_tool(
             protocol_id=protocol_id,
             bridge_queue_ms=bridge_queue_ms,
             data_root=data_root,
+            as_of=as_of,
         )
     except Exception as exc:  # never break the bridge loop
         logger.exception("Pi tool gateway failed for '%s'", name)
@@ -251,14 +269,15 @@ def execute_pi_tool(
 
 def _execute_pi_tool(
     name: str,
-    arguments: dict,
+    arguments: dict[str, object],
     session: PiSessionContext,
     *,
     tool_call_id: str | None = None,
     protocol_id: str | None = None,
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
-) -> dict:
+    as_of: str | None = None,
+) -> dict[str, object]:
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
     args_for_hash = (
@@ -346,7 +365,7 @@ def _execute_pi_tool(
     # context carries the validated data_root override.
     t0_iso = datetime.now(timezone.utc).isoformat()
     handler_t0 = time.perf_counter()
-    result = execute_tool(name, arguments, PI_MODEL, context=_override_context(data_root))
+    result = execute_tool(name, arguments, PI_MODEL, context=_override_context(data_root, as_of))
     handler_ms = (time.perf_counter() - handler_t0) * 1000.0
 
     # Top-level cache metadata only, for the recorder; protocol IDs and
@@ -360,12 +379,13 @@ def _execute_pi_tool(
     soft = failed and result.get("soft") is True
     denied = failed and "not permitted" in str(result.get("error", ""))
     status = "completed" if not failed else ("denied" if denied else "failed")
-    error_type = None
-    error_message = None
+    error_type: str | None = None
+    error_message: str | None = None
     if failed:
-        error_type = result.get("error_type") or (
+        raw_error_type = result.get("error_type") or (
             "permission_denied" if denied else "tool_error"
         )
+        error_type = raw_error_type if isinstance(raw_error_type, str) else None
         error_message = redact_text(str(result.get("error")))[:2000]
     meta = _tool_result_meta(result)
     if tool_call_id is not None:

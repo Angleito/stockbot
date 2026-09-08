@@ -2,8 +2,8 @@
 
 A tick queries canonical Stockbot sources from persisted checkpoints, normalizes
 hits to stable canonical events, persists one pending trigger per new meaningful
-event, then runs each pending trigger oldest-first through Pi. The gateway is
-only ever called via ``run_trigger``; ticks with nothing new make zero Pi calls.
+event, then runs each pending trigger oldest-first via ``run_trigger`` (one
+normal-Pi launch each). Ticks with nothing new make zero Pi calls.
 
 No broker, price, Greeks, or options monitoring exists here on purpose: rules
 without a reliable canonical backing stay ``enabled: false``/``unsupported``
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.thesis.models import Checkpoint, WatchRule
-from app.thesis.runner import run_trigger
+from app.thesis.runner import RunOutcome, run_trigger
 from app.thesis.yaml import load_raw_yaml, thesis_lock
 
 _MAX_DUP_MARKERS = 1_000
@@ -45,7 +45,7 @@ class CanonicalEvent:
     cycle: str | None = None
     cursor: str | None = None
     file_id: str | None = None
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SourceService(Protocol):
@@ -53,18 +53,18 @@ class SourceService(Protocol):
 
     name: str
 
-    def query_since(self, checkpoint: dict, *, known_at: str) -> list[CanonicalEvent]:
+    def query_since(self, checkpoint: dict[str, Any], *, known_at: str) -> list[CanonicalEvent]:
         ...
 
 
 @dataclass
 class TickResult:
     thesis_id: str
-    triggers_created: list = field(default_factory=list)  # trigger_id strings
-    runs: list = field(default_factory=list)  # RunOutcome objects
+    triggers_created: list[str] = field(default_factory=list)  # trigger_id strings
+    runs: list[RunOutcome] = field(default_factory=list)  # RunOutcome objects
     no_op: bool = False
     no_op_reason: str = ""
-    checkpoint: dict = field(default_factory=dict)
+    checkpoint: dict[str, Any] = field(default_factory=dict)
 
 
 def _utcnow() -> str:
@@ -138,6 +138,10 @@ def _importance(rule_type: str) -> str:
     return {"explicit_thesis_invalidator": "high", "scheduled_deep_review": "low"}.get(rule_type, "medium")
 
 
+def _rule_order(rule: WatchRule) -> tuple[str, str]:
+    return (rule.rule_type, rule.rule_id)
+
+
 # -- production source services (thin, PIT-gated, empty-safe) -----------------
 
 
@@ -150,7 +154,7 @@ class SecFilingsService:
         self.targets = tuple(targets)
         self.since_default = since_default
 
-    def query_since(self, checkpoint: dict, *, known_at: str) -> list[CanonicalEvent]:
+    def query_since(self, checkpoint: dict[str, Any], *, known_at: str) -> list[CanonicalEvent]:
         if not self.targets:
             return []
         from app.sec.filings import list_sec_filings
@@ -183,7 +187,7 @@ class MaterialEventsService:
         self.targets = tuple(targets)
         self.since_default = since_default
 
-    def query_since(self, checkpoint: dict, *, known_at: str) -> list[CanonicalEvent]:
+    def query_since(self, checkpoint: dict[str, Any], *, known_at: str) -> list[CanonicalEvent]:
         if not self.targets:
             return []
         from app.sec.material import get_material_events
@@ -219,7 +223,7 @@ class FinraShortInterestService:
     def __init__(self, targets: tuple[str, ...] = ()) -> None:
         self.targets = tuple(targets)
 
-    def query_since(self, checkpoint: dict, *, known_at: str) -> list[CanonicalEvent]:
+    def query_since(self, checkpoint: dict[str, Any], *, known_at: str) -> list[CanonicalEvent]:
         if not self.targets:
             return []
         from app.finra_client import get_short_interest
@@ -240,7 +244,8 @@ class FinraShortInterestService:
                 continue  # no orderable cycle: never invent one
             if not _le(cycle, _day(known_at)):
                 continue
-            trends = [str(t) for t in (res.get("trends") or [])]
+            trends_raw = res.get("trends")
+            trends: list[str] = [str(t) for t in trends_raw] if isinstance(trends_raw, list) else []
             ref = f"finra-si:{target}:{cycle}"
             summary = f"short-interest settlement {cycle} for {target}" + (
                 f": {'; '.join(trends)}" if trends else "")
@@ -260,34 +265,34 @@ class FinraShortInterestService:
 # Each handler maps already-queried source events (or local checkpoint state)
 # to candidate CanonicalEvents plus its new per-source cursor/detail state.
 
-def _cursor_state(events: list[CanonicalEvent], known_at: str) -> dict:
+def _cursor_state(events: list[CanonicalEvent], known_at: str) -> dict[str, str]:
     days = [_day(e.cursor or e.known_at or "") for e in events]
     days = [d for d in days if d]
     return {"cursor": max(days) if days else _day(known_at)}
 
 
-def _handle_new_filing(*, rule: WatchRule, thesis: Any, source_events: dict,
-                       sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_new_filing(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                       sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     evs = [e for e in source_events.get("sec_filings", [])
            if not (e.metadata or {}).get("amendment")]
     return evs, _cursor_state(source_events.get("sec_filings", []), known_at)
 
 
-def _handle_filing_change(*, rule: WatchRule, thesis: Any, source_events: dict,
-                          sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_filing_change(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                          sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     evs = [e for e in source_events.get("sec_filings", [])
            if (e.metadata or {}).get("amendment")]
     return evs, _cursor_state(source_events.get("sec_filings", []), known_at)
 
 
-def _handle_material_event(*, rule: WatchRule, thesis: Any, source_events: dict,
-                           sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_material_event(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                           sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     evs = list(source_events.get("material_events", []))
     return evs, _cursor_state(evs, known_at)
 
 
-def _finra_state(all_evs: list[CanonicalEvent], prev: dict, known_at: str) -> dict:
-    tickers: dict[str, dict] = {}
+def _finra_state(all_evs: list[CanonicalEvent], prev: dict[str, Any], known_at: str) -> dict[str, Any]:
+    tickers: dict[str, dict[str, Any]] = {}
     for e in all_evs:
         meta = e.metadata or {}
         if meta.get("cycle"):
@@ -299,8 +304,8 @@ def _finra_state(all_evs: list[CanonicalEvent], prev: dict, known_at: str) -> di
     return {"cursor": cursor, "tickers": tickers}
 
 
-def _handle_si_cycle(*, rule: WatchRule, thesis: Any, source_events: dict,
-                     sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_si_cycle(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                     sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     prev = dict(sources.get("finra_short_interest") or {})
     cursor = str(prev.get("cursor") or "")
     evs = [e for e in source_events.get("finra_short_interest", [])
@@ -308,8 +313,8 @@ def _handle_si_cycle(*, rule: WatchRule, thesis: Any, source_events: dict,
     return evs, _finra_state(source_events.get("finra_short_interest", []), prev, known_at)
 
 
-def _handle_si_material(*, rule: WatchRule, thesis: Any, source_events: dict,
-                        sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_si_material(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                        sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     prev = dict(sources.get("finra_short_interest") or {})
     cursor = str(prev.get("cursor") or "")
     seen = prev.get("tickers") or {}
@@ -326,17 +331,17 @@ def _handle_si_material(*, rule: WatchRule, thesis: Any, source_events: dict,
     return out, _finra_state(source_events.get("finra_short_interest", []), prev, known_at)
 
 
-def _handle_external(*, rule: WatchRule, thesis: Any, source_events: dict,
-                     sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_external(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                     sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     # Dead: no production source exists; kept only so old imports don't break.
     # Never referenced from SUPPORTED_HANDLERS/_SOURCE_FOR_RULE/_STATE_KEY.
     evs = list(source_events.get("external_evidence", []))
     return evs, _cursor_state(evs, known_at)
 
 
-def _handle_invalidator(*, rule: WatchRule, thesis: Any, source_events: dict,
-                        sources: dict, known_at: str,
-                        stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_invalidator(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                        sources: dict[str, Any], known_at: str,
+                        stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     # Deterministic semantic match, no source query: invalidator keywords from
     # the thesis against this tick's events plus already-stored canonical refs
     # (evidence files, earlier triggers). Refs stay stable, so a repeat tick
@@ -346,7 +351,8 @@ def _handle_invalidator(*, rule: WatchRule, thesis: Any, source_events: dict,
     if not toks:
         return [], {}
     pool = [e for evs in source_events.values() for e in evs] + list(stored)
-    out, matched = [], set()
+    out: list[CanonicalEvent] = []
+    matched: set[str] = set()
     for e in pool:
         if e.canonical_ref in matched:
             continue
@@ -362,8 +368,8 @@ def _handle_invalidator(*, rule: WatchRule, thesis: Any, source_events: dict,
     return out, {}
 
 
-def _handle_deep_review(*, rule: WatchRule, thesis: Any, source_events: dict,
-                        sources: dict, known_at: str, stored: tuple = ()) -> tuple[list[CanonicalEvent], dict]:
+def _handle_deep_review(*, rule: WatchRule, thesis: Any, source_events: dict[str, list[CanonicalEvent]],
+                        sources: dict[str, Any], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, Any]]:
     last = str((sources.get("scheduled") or {}).get("cursor") or "")
     today = _day(known_at)
     if last:
@@ -414,10 +420,14 @@ _STATE_KEY = {
 }
 
 
-def tick(repository: Any, thesis_id: str, source_services: Any = None,
-         gateway: Any = None, request_context: Any = None, *,
+def tick(repository: Any, thesis_id: str, source_services: Any = None, *,
          known_at: str | None = None) -> TickResult:
-    """Run one deterministic monitor tick; see module docstring for the order."""
+    """Run one live monitor tick with a PIT data cutoff.
+
+    known_at bounds source, event, evidence, and trigger queries only; it never
+    selects historical thesis, watch, claim, expression, checkpoint, or
+    trigger-timestamp state, which are always read live.
+    """
     known_at = known_at or _utcnow()
     services = dict(source_services or {})
 
@@ -434,12 +444,12 @@ def tick(repository: Any, thesis_id: str, source_services: Any = None,
                           checkpoint=cp.to_dict())
     repository.normalize_watch(tid)
 
-    rules = repository.load_watch_rules(tid)
+    rules: list[WatchRule] = repository.load_watch_rules(tid)
     targets = targets_for_thesis(thesis)
     blob = _thesis_blob(thesis)
     active_claims = {c.claim_id for c in thesis.claims if c.status != "invalidated"}
     active_exprs = {e.expression_id for e in thesis.expressions if e.status != "closed"}
-    live = [r for r in sorted(rules, key=lambda r: (r.rule_type, r.rule_id))
+    live = [r for r in sorted(rules, key=_rule_order)
             if r.enabled and r.support_status == "supported"
             and r.rule_type in SUPPORTED_HANDLERS
             and ((set(r.claim_ids) & active_claims) or (set(r.expression_ids) & active_exprs))]
@@ -448,7 +458,7 @@ def tick(repository: Any, thesis_id: str, source_services: Any = None,
     sources = dict(checkpoint.sources or {})
 
     # (2) query each needed source once, from its checkpoint up to known_at.
-    needed = sorted({_SOURCE_FOR_RULE[r.rule_type] for r in live} - {None})
+    needed = sorted({v for v in (_SOURCE_FOR_RULE[r.rule_type] for r in live) if v is not None})
     source_events: dict[str, list[CanonicalEvent]] = {}
     queried_ok: set[str] = set()
     for key in needed:
@@ -471,8 +481,8 @@ def tick(repository: Any, thesis_id: str, source_services: Any = None,
     for t in existing:
         if isinstance(getattr(t, "metadata", None), dict) and t.metadata.get("content_hash"):
             seen_hashes.add(t.metadata["content_hash"])
-    pending_states: dict[str, dict] = {}
-    grouped: dict[str, dict] = {}
+    pending_states: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, dict[str, Any]] = {}
     # Stored canonical refs (evidence files PIT-filtered + earlier triggers)
     # give the invalidator handler a query-free candidate pool.
     stored: list[CanonicalEvent] = []
@@ -554,8 +564,7 @@ def tick(repository: Any, thesis_id: str, source_services: Any = None,
     runs = []
     for t in pending:
         try:
-            runs.append(run_trigger(repository, tid, t.trigger_id, gateway,
-                                    request_context, known_at=known_at))
+            runs.append(run_trigger(repository, tid, t.trigger_id, known_at=known_at))
         except Exception:
             break
 

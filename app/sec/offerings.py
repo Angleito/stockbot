@@ -1,8 +1,12 @@
 """Deterministic offering history (no network, no invented terms)."""
 
+from datetime import date, datetime
 import re
+from pathlib import Path
 
-from .models import Offering
+# `object` marks the edgar SDK dynamic boundary (no stubs): attrs are read
+# via _sweep and validated before building Offering objects.
+from .models import Filing, Offering
 
 OFFERING_FORMS = (
     "S-1", "S-1/A", "S-3", "S-3/A", "S-8", "F-1", "F-1/A", "F-3", "F-3/A",
@@ -31,16 +35,20 @@ _ATM_ATTRS = ("is_atm", "atm", "at_the_market", "at_the_market_program",
               "is_at_the_market")
 _TYPE_ATTRS = ("offering_type", "type", "offering_kind", "security_type",
                "securities_type")
-
-
-def list_sec_filings(*args, **kwargs):
+def list_sec_filings(ticker_or_cik: str | int,
+                     forms: str | list[str] | tuple[str, ...] | None = None,
+                     start_date: str | date | datetime | None = None,
+                     end_date: str | date | datetime | None = None,
+                     as_of: str | date | datetime | None = None,
+                     limit: int | None = 50) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
-def _safe_int(value):
+def _safe_int(value: object) -> int | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -54,7 +62,7 @@ def _safe_int(value):
         return None
 
 
-def _safe_float(value):
+def _safe_float(value: object) -> float | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -66,7 +74,7 @@ def _safe_float(value):
         return None
 
 
-def _safe_bool(value):
+def _safe_bool(value: object) -> bool | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -84,7 +92,7 @@ def _safe_bool(value):
     return True if text else None
 
 
-def _str_or_none(value):
+def _str_or_none(value: object) -> str | None:
     if value is None:
         return None
     try:
@@ -94,7 +102,7 @@ def _str_or_none(value):
     return text or None
 
 
-def _sweep(obj, names):
+def _sweep(obj: object, names: tuple[str, ...]) -> object:
     for name in names:
         try:
             value = getattr(obj, name)
@@ -105,7 +113,7 @@ def _sweep(obj, names):
     return None
 
 
-def _norm_underwriters(value):
+def _norm_underwriters(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
@@ -117,7 +125,7 @@ def _norm_underwriters(value):
     return (text,) if text else ()
 
 
-def _type_says_atm(offering_type) -> bool:
+def _type_says_atm(offering_type: object) -> bool:
     if not offering_type:
         return False
     text = re.sub(r"[-_]", " ", str(offering_type).lower())
@@ -132,7 +140,7 @@ _PRICE_SPAN = re.compile(
     r"\$\s?[\d,]+(?:\.\d+)?\s+per\s+share", re.IGNORECASE)
 
 
-def resolve_offering_status(form, *, text=None) -> str:
+def resolve_offering_status(form: object, *, text: object = None) -> str:
     """EFFECT is effective, RW is a filed withdrawal request, else filed.
 
     Amendments (``/A``) never set status: a shelf amendment is still a
@@ -150,7 +158,7 @@ def resolve_offering_status(form, *, text=None) -> str:
     return "filed"
 
 
-def resolve_amount_basis(form) -> "str | None":
+def resolve_amount_basis(form: object) -> str | None:
     """Registration statements register; prospectuses propose. Never issuance."""
     try:
         upper = str(form or "").strip().upper()
@@ -165,7 +173,7 @@ def resolve_amount_basis(form) -> "str | None":
     return "proposed"
 
 
-def extract_offering_facts(obj=None, *, text=None, form=None) -> dict:
+def extract_offering_facts(obj: object | None = None, *, text: str | None = None, form: object = None) -> dict[str, object]:
     """Structured terms first, then exact document spans; never raises.
 
     Quantities stay proposed/registered via ``amount_basis``: a registration
@@ -173,10 +181,10 @@ def extract_offering_facts(obj=None, *, text=None, form=None) -> dict:
     method for store/service provenance.
     """
     try:
-        facts: dict = {"shares": None, "price_per_share": None,
+        facts: dict[str, object] = {"shares": None, "price_per_share": None,
                        "gross_proceeds": None, "security_title": None,
                        "underwriters": None}
-        spans: list = []
+        spans: list[dict[str, str]] = []
         structured = False
         if obj is not None:
             for key, attrs in (("shares", _SHARE_ATTRS),
@@ -190,7 +198,7 @@ def extract_offering_facts(obj=None, *, text=None, form=None) -> dict:
                     facts[key] = value
                     structured = True
         if text:
-            body = str(text)
+            body = text
             if facts["shares"] is None or facts["security_title"] is None:
                 match = _SHARES_SPAN.search(body)
                 if match:
@@ -218,7 +226,7 @@ def extract_offering_facts(obj=None, *, text=None, form=None) -> dict:
         return {"spans": [], "method": "form-identity", "amount_basis": None}
 
 
-def load_terms(accession_no: str) -> dict:
+def load_terms(accession_no: str) -> dict[str, object]:
     """Live seam: best-effort edgar attr sweep; any failure -> {}."""
     try:
         from .documents import get_by_accession_number
@@ -228,7 +236,7 @@ def load_terms(accession_no: str) -> dict:
             obj = filing.obj()
         except Exception:
             obj = None
-        terms: dict = {}
+        terms: dict[str, object] = {}
         for key, attrs in (("shares", _SHARE_ATTRS),
                            ("price_per_share", _PRICE_ATTRS),
                            ("gross_proceeds", _PROCEEDS_ATTRS),
@@ -247,12 +255,17 @@ def load_terms(accession_no: str) -> dict:
         return {}
 
 
-def normalize_offering(accession_no, form, *, issuer, filed_at,
-                       terms=None, obj=None, text=None, filer_cik=None,
-                       filer_name=None, registrant_cik=None,
-                       registrant_name=None, security_title=None,
-                       document_name=None, known_at=None,
-                       source_url=None) -> Offering:
+def normalize_offering(accession_no: str, form: str, *, issuer: str,
+                       filed_at: str | None, terms: dict[str, object] | None = None,
+                       obj: object | None = None, text: str | None = None,
+                       filer_cik: str | int | None = None,
+                       filer_name: str | None = None,
+                       registrant_cik: str | int | None = None,
+                       registrant_name: str | None = None,
+                       security_title: str | None = None,
+                       document_name: str | None = None,
+                       known_at: str | None = None,
+                       source_url: str | None = None) -> Offering:
     """Pure: missing terms -> None fields, never invented.
 
     Registration stays registration: quantities are proposed/registered via
@@ -291,16 +304,17 @@ def normalize_offering(accession_no, form, *, issuer, filed_at,
         registrant_cik=_str_or_none(registrant_cik),
         registrant_name=(_str_or_none(registrant_name) or issuer),
         security_title=security,
-        amount_basis=facts.get("amount_basis"),
+        amount_basis=_str_or_none(facts.get("amount_basis")),
         document_name=_str_or_none(document_name),
         known_at=_str_or_none(known_at) or filed_at,
         source_url=_str_or_none(source_url),
-        extraction_method=facts.get("method"),
+        extraction_method=_str_or_none(facts.get("method")),
     )
 
 
-def get_offering_history(ticker_or_cik, *, as_of=None, limit=50,
-                         forms=OFFERING_FORMS) -> list:
+def get_offering_history(ticker_or_cik: str | int, *, as_of: str | None = None,
+                         limit: int | None = 50,
+                         forms: tuple[str, ...] | list[str] = OFFERING_FORMS) -> list[Offering]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
     out: list[Offering] = []
@@ -329,15 +343,15 @@ def get_offering_history(ticker_or_cik, *, as_of=None, limit=50,
     from dataclasses import replace
 
     regs = [o for o in out if o.form in REGISTRATION_FORMS]
-    linked = []
+    linked: list[Offering] = []
     for offering in out:
         if offering.form.upper().startswith("424B") and offering.filed_at:
-            best = None
+            best: Offering | None = None
             for reg in regs:
                 if reg is offering or not reg.filed_at:
                     continue
                 if reg.filed_at <= offering.filed_at and (
-                        best is None or reg.filed_at > best.filed_at):
+                        best is None or (best.filed_at or "") < reg.filed_at):
                     best = reg
             if best is not None:
                 offering = replace(offering,
@@ -346,14 +360,17 @@ def get_offering_history(ticker_or_cik, *, as_of=None, limit=50,
     return linked
 
 
-def query_registrant_offerings(registrant, *, registrant_cik=None, as_of=None,
-                               root=None, limit=200):
+def query_registrant_offerings(registrant: str | int | None, *,
+                               registrant_cik: str | int | None = None,
+                               as_of: str | None = None,
+                               root: Path | str | None = None,
+                               limit: int = 200) -> list[dict[str, object]]:
     """Registrant -> offerings over ``sec_offerings`` (PIT)."""
     from . import store as _store
 
-    if registrant_cik is None and isinstance(registrant, int):
-        registrant_cik, registrant = registrant, None
-    elif registrant_cik is None and isinstance(registrant, str) \
+    if isinstance(registrant, int):
+        registrant = str(registrant)
+    if registrant_cik is None and isinstance(registrant, str) \
             and registrant.strip().isdigit():
         registrant_cik, registrant = registrant.strip(), None
     return _store.query_offerings(registrant=registrant,

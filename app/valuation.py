@@ -36,7 +36,7 @@ PRICE_CACHE_TTL_SECONDS = 300  # 5 minutes: numbers must be as-of-now.
 VALUATION_CACHE_TTL_SECONDS = 900
 
 
-def _no_data(ticker: str, what: str) -> dict:
+def _no_data(ticker: str, what: str) -> dict[str, Any]:
     return {"error": f"No valuation data for {ticker}: {what}"}
 
 
@@ -68,7 +68,7 @@ def _annualized(amount_billions: float, years: float) -> float:
     return amount_billions / years
 
 
-def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
+def _obligation_annual_impact(obligations_rows: list[dict[str, Any]], years: int) -> dict[str, Any]:
     """Per-kind annualized $B impact split by EPS treatment.
 
     Three buckets, never conflated:
@@ -95,7 +95,7 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
     contingent_b = 0.0
     default_triggered_b = 0.0
     revenue_matched_b = 0.0
-    per_kind: dict[str, dict] = {}
+    per_kind: dict[str, dict[str, Any]] = {}
     impact_by_fy: dict[str, dict[str, float]] = {}
     flat_annual_by_bucket: dict[str, float] = {
         "contractual": 0.0,
@@ -221,7 +221,7 @@ def _obligation_annual_impact(obligations_rows: list[dict], years: int) -> dict:
 PROJECTION_MULTIPLES = (15, 20, 25, 30, 35)
 
 
-def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: Optional[float]) -> dict:
+def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: Optional[float]) -> dict[str, Any]:
     """Share price per scenario EPS under a set of assumed P/E multiples.
 
     projected_price = scenario EPS x assumed P/E multiple. Each cell also
@@ -229,11 +229,11 @@ def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: Optional[f
     far the stock must fall (or rise) if a scenario's EPS materializes at a
     given multiple.
     """
-    tiers: list[dict] = []
+    tiers: list[dict[str, Any]] = []
     for tier, eps in eps_by_tier.items():
         if eps is None:
             continue
-        cells: dict[str, dict] = {}
+        cells: dict[str, dict[str, Any]] = {}
         for multiple in PROJECTION_MULTIPLES:
             projected = round(eps * multiple, 2)
             pct = round((projected / price - 1) * 100, 1) if price is not None else None
@@ -250,7 +250,7 @@ def _projected_prices(eps_by_tier: dict[str, Optional[float]], price: Optional[f
     }
 
 
-def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
+def _effective_tax_rate(ob_rows: dict[str, Any]) -> Optional[float]:
     """Company's own effective tax rate from its 10-K (income tax expense /
     pre-tax income), falling back to XBRL annual facts, else None. Rates
     outside a sane band (5%-35%) are rejected."""
@@ -282,7 +282,10 @@ def _effective_tax_rate(ob_rows: dict) -> Optional[float]:
         pass
 
     try:
-        df = edgar_client.get_company(ob_rows.get("ticker", "")).get_facts().to_dataframe()
+        facts_obj = edgar_client.get_company(ob_rows.get("ticker", "")).get_facts()
+        if facts_obj is None:
+            raise ValueError("company facts unavailable")
+        df = facts_obj.to_dataframe()
         tax = df[
             df["concept"].str.contains("IncomeTaxExpenseBenefit", case=False)
             & (df["fiscal_period"] == "FY")
@@ -317,7 +320,10 @@ def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
     caveat it.
     """
     try:
-        df = edgar_client.get_company(ticker).get_facts().to_dataframe()
+        facts_obj = edgar_client.get_company(ticker).get_facts()
+        if facts_obj is None:
+            raise ValueError("company facts unavailable")
+        df = facts_obj.to_dataframe()
         gp = df[
             df["concept"].str.fullmatch(r"(us-gaap:)?GrossProfit", case=False)
             & (df["fiscal_period"] == "FY")
@@ -348,8 +354,8 @@ def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
 
 
 def _obligation_eps_scenarios(
-    ob_rows: dict, shares_out: Optional[int], tax_rate: Optional[float]
-) -> dict:
+    ob_rows: dict[str, Any], shares_out: Optional[int], tax_rate: Optional[float]
+) -> dict[str, Any]:
     """Translate disclosed obligations into after-tax EPS-impact scenarios.
 
     Scenario math (Burry-style): each obligation's exposure is converted to
@@ -359,10 +365,10 @@ def _obligation_eps_scenarios(
     No invented inputs: an unknown tax rate yields after_tax None, unknown
     shares yield eps_impact None, each with a reason (never 0.15/1-share).
     """
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     snapshot = ob_rows.get("current_snapshot", ob_rows.get("obligations", [])) or []
 
-    def _hit(name, pretax_billions, one_time, note=""):
+    def _hit(name: str, pretax_billions: float, one_time: bool, note: str = "") -> None:
         if tax_rate is None:
             rows.append(
                 {
@@ -462,7 +468,7 @@ def _obligation_eps_scenarios(
     }
 
 
-def get_valuation_metrics(ticker: str) -> dict:
+def get_valuation_metrics(ticker: str) -> dict[str, Any]:
     """Price-anchored valuation with obligation-aware forward EPS (cached 15m)."""
     ticker = ticker.strip().upper()
     if not ticker:
@@ -484,21 +490,23 @@ def get_valuation_metrics(ticker: str) -> dict:
 
     estimates = analyst_client.get_analyst_estimates(ticker)
     if "error" in estimates:
-        return _no_data(ticker, estimates["error"])
-    estimates_by_period = {
-        r["period"]: r for r in estimates.get("forward_estimates", [])
-    }
+        return _no_data(ticker, str(estimates["error"]))
+    forward_rows = estimates.get("forward_estimates")
+    if not isinstance(forward_rows, list):
+        return _no_data(ticker, "analyst estimates missing forward estimates")
+    estimates_by_period = {r["period"]: r for r in forward_rows}
 
     eps = sec_facts.get_fundamentals(ticker, "eps")
     if "error" in eps:
         return _no_data(ticker, eps["error"])
     ttm_eps_diluted = eps.get("ttm_eps_diluted")  # envelope keeps payload keys
-    shares_out = estimates.get("shares_outstanding")
+    shares_raw = estimates.get("shares_outstanding")
+    shares_out = shares_raw if isinstance(shares_raw, int) else None
 
     ob_rows = obligations.get_obligations(ticker)
     if "error" in ob_rows:
         return _no_data(ticker, ob_rows["error"])
-    impact = _obligation_annual_impact(ob_rows.get("current_snapshot", ob_rows.get("obligations", [])), years=6)
+    impact = _obligation_annual_impact(ob_rows.get("current_snapshot", ob_rows.get("obligations", [])) or [], years=6)
     tax_rate = _effective_tax_rate(ob_rows)
     eps_scenarios = _obligation_eps_scenarios(ob_rows, shares_out, tax_rate)
 
@@ -507,7 +515,7 @@ def get_valuation_metrics(ticker: str) -> dict:
     eps_current = fy_current.get("eps_avg")
     eps_next = fy_next.get("eps_avg")
 
-    def _eps_line(eps_value, contractual, contingent, label, scenario=False):
+    def _eps_line(eps_value: float | None, contractual: float | None, contingent: float | None, label: str, scenario: bool = False) -> dict[str, Any] | None:
         if eps_value is None:
             return None
         line = {
@@ -529,11 +537,11 @@ def get_valuation_metrics(ticker: str) -> dict:
         if contingent:
             line["contingent_drag_per_share"] = round(contingent, 2)
             line["eps_after_all_obligations"] = round(
-                eps_value - contractual - contingent, 2
+                eps_value - (contractual or 0.0) - contingent, 2
             )
             line["pe_after_all_obligations"] = (
-                round(price / max(0.01, eps_value - contractual - contingent), 1)
-                if (price is not None and (eps_value - contractual - contingent) > 0)
+                round(price / max(0.01, eps_value - (contractual or 0.0) - contingent), 1)
+                if (price is not None and (eps_value - (contractual or 0.0) - contingent) > 0)
                 else None
             )
         return line
@@ -570,7 +578,7 @@ def get_valuation_metrics(ticker: str) -> dict:
     impact_by_fy = impact.get("impact_by_fiscal_year") or {}
     flat_map = impact.get("flat_annual_by_bucket") or {}
 
-    def _fy_year(period: dict) -> str | None:
+    def _fy_year(period: dict[str, Any]) -> str | None:
         year = str((period or {}).get("period_end_date") or "")[:4]
         return year or None
 

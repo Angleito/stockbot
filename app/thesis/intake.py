@@ -1,16 +1,15 @@
 """User-idea intake: normalize a natural-language thesis into a validated proposal.
 
-# ponytail: the CLI default is a deterministic local read covering the plan's
-# showcase + intake-table phrases; a Pi-backed JSON completion can plug the same
-# IntakeGateway Protocol later with no migration.
+# ponytail: deterministic local read covering the plan's showcase + intake-table
+# phrases; Pi-facing tools validate through IntakeProposal.from_dict instead.
 """
 
 from __future__ import annotations
 
-import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from app.policy import Capability
 from app.thesis.models import (
@@ -27,14 +26,7 @@ _REQUIREMENT_STATUSES = frozenset({"open", "answered"})
 _MAX_QUESTIONS = 3
 
 
-class IntakeGateway(Protocol):
-    """Injectable structured-completion gateway (Pi plugs in later)."""
-
-    def complete_json(self, prompt: str, *, request_context: Any) -> dict | str:
-        ...
-
-
-def _req_str(d: dict, key: str, where: str) -> str:
+def _req_str(d: dict[str, Any], key: str, where: str) -> str:
     v = d.get(key)
     if not isinstance(v, str) or not v.strip():
         raise ValueError(f"{where}: '{key}' must be a non-empty string")
@@ -49,14 +41,14 @@ def _unknown_str(v: Any, key: str, where: str) -> str:
     raise ValueError(f"{where}: '{key}' must be a string, got {type(v).__name__}")
 
 
-def _str_list(d: dict, key: str, where: str) -> list:
+def _str_list(d: dict[str, Any], key: str, where: str) -> list[str]:
     vals = d.get(key, [])
     if not isinstance(vals, list) or not all(isinstance(i, str) for i in vals):
         raise ValueError(f"{where}: '{key}' must be a list of strings")
     return list(vals)
 
 
-def _as_list(d: dict, key: str, where: str) -> list:
+def _as_list(d: dict[str, Any], key: str, where: str) -> list[Any]:
     vals = d.get(key, [])
     if not isinstance(vals, list):
         raise ValueError(f"{where}: '{key}' must be a list, got {type(vals).__name__}")
@@ -69,7 +61,7 @@ class IntakeQuestion:
     question: str
     question_type: str = UNKNOWN
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "question_id": self.question_id,
             "question": self.question,
@@ -77,7 +69,7 @@ class IntakeQuestion:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, path: str = "<intake>") -> IntakeQuestion:
+    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeQuestion:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: question must be a mapping, got {type(d).__name__}")
         qid = d.get("question_id") or new_question_id()
@@ -88,7 +80,7 @@ class IntakeQuestion:
             question_type=_unknown_str(d.get("question_type", UNKNOWN), "question_type", where),
         )
 
-def _validate_claim(c: Any, path: str) -> dict:
+def _validate_claim(c: Any, path: str) -> dict[str, Any]:
     if not isinstance(c, dict):
         raise ValueError(f"{path}: claim must be a mapping, got {type(c).__name__}")
     cid = c.get("claim_id") or new_claim_id()
@@ -102,14 +94,11 @@ def _validate_claim(c: Any, path: str) -> dict:
     }
 
 
-def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
+def _validate_expression(e: Any, path: str) -> dict[str, Any]:
     if not isinstance(e, dict):
         raise ValueError(f"{path}: expression must be a mapping, got {type(e).__name__}")
-    key = e.get("key")
-    if not isinstance(key, str) or not key.strip():
-        raise ValueError(f"{path}: expression 'key' must be a non-empty string")
     eid = new_expression_id()
-    where = f"{path}: expression {key}"
+    where = f"{path}: expression {eid}"
     instrument = _unknown_str(e.get("instrument", UNKNOWN), "instrument", where)
     if instrument not in _INSTRUMENTS:
         raise ValueError(f"{where}: 'instrument' must be a known primitive or 'unknown', got {instrument!r}")
@@ -122,7 +111,7 @@ def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
     status = _unknown_str(e.get("status", "undecided"), "status", where)
     if status not in _EXPRESSION_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_EXPRESSION_STATUSES)}, got {status!r}")
-    out = {
+    out: dict[str, Any] = {
         "expression_id": eid,
         "intent": _unknown_str(e.get("intent", UNKNOWN), "intent", where),
         "instrument": instrument,
@@ -135,15 +124,15 @@ def _validate_expression(e: Any, path: str) -> tuple[str, dict]:
         "status": status,
     }
     for k in ("leverage", "parameters"):
-        v = e.get(k, {})
+        v: dict[str, Any] = e.get(k, {})
         if v is None:
             v = {}
         if not isinstance(v, dict):
             raise ValueError(f"{where}: '{k}' must be a mapping, got {type(v).__name__}")
         out[k] = dict(v)
-    return key, out
+    return out
 
-def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
+def _validate_requirement(r: Any, path: str, expression_ids: set[str]) -> dict[str, Any]:
     if not isinstance(r, dict):
         raise ValueError(f"{path}: requirement must be a mapping, got {type(r).__name__}")
     rid = r.get("requirement_id") or new_requirement_id()
@@ -153,17 +142,17 @@ def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
     status = _unknown_str(r.get("status", "open"), "status", where)
     if status not in _REQUIREMENT_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_REQUIREMENT_STATUSES)}, got {status!r}")
-    ekey = r.get("expression_key")
-    if not isinstance(ekey, str) or not ekey.strip():
-        raise ValueError(f"{where}: 'expression_key' must be a non-empty string")
-    if ekey not in key_to_id:
+    eid = r.get("expression_id")
+    if not isinstance(eid, str) or not eid.strip():
+        raise ValueError(f"{where}: 'expression_id' must be a non-empty string")
+    if eid not in expression_ids:
         raise ValueError(
             f"{where}: requirement {rid!r} references absent expression "
-            f"{ekey!r}"
+            f"{eid!r}"
         )
     return {
         "requirement_id": rid,
-        "expression_id": key_to_id[ekey],
+        "expression_id": eid,
         "requirement_type": _req_str(r, "requirement_type", where),
         "statement": _req_str(r, "statement", where),
         "status": status,
@@ -174,13 +163,13 @@ def _validate_requirement(r: Any, path: str, key_to_id: dict) -> dict:
 class IntakeProposal:
     user_thesis: str
     scope: str = UNKNOWN
-    claims: tuple = ()
-    assumptions: tuple = ()
-    invalidators: tuple = ()
-    unknowns: tuple = ()
-    expressions: tuple = ()
-    requirements: tuple = ()
-    questions: tuple = ()
+    claims: tuple[dict[str, Any], ...] = ()
+    assumptions: tuple[str, ...] = ()
+    invalidators: tuple[str, ...] = ()
+    unknowns: tuple[str, ...] = ()
+    expressions: tuple[dict[str, Any], ...] = ()
+    requirements: tuple[dict[str, Any], ...] = ()
+    questions: tuple[IntakeQuestion, ...] = ()
 
     def __post_init__(self) -> None:
         self.validate("<intake>")
@@ -215,7 +204,7 @@ class IntakeProposal:
                     f"{r['expression_id']!r}"
                 )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "user_thesis": self.user_thesis,
             "scope": self.scope,
@@ -229,7 +218,7 @@ class IntakeProposal:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, path: str = "<intake>") -> IntakeProposal:
+    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeProposal:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: proposal must be a mapping, got {type(d).__name__}")
         where = f"{path}: proposal"
@@ -238,16 +227,13 @@ class IntakeProposal:
             scope = UNKNOWN
         if not isinstance(scope, str):
             raise ValueError(f"{where}: 'scope' must be a string, got {type(scope).__name__}")
-        key_to_id: dict[str, str] = {}
-        expressions: list[dict] = []
+        expressions: list[dict[str, Any]] = []
         for e in _as_list(d, "expressions", where):
-            key, validated = _validate_expression(e, path)
-            if key in key_to_id:
-                raise ValueError(f"{where}: duplicate expression key {key!r}")
-            key_to_id[key] = validated["expression_id"]
+            validated = _validate_expression(e, path)
             expressions.append(validated)
         requirements = tuple(
-            _validate_requirement(r, path, key_to_id) for r in _as_list(d, "requirements", where)
+            _validate_requirement(r, path, {e["expression_id"] for e in expressions})
+            for r in _as_list(d, "requirements", where)
         )
         return cls(
             user_thesis=_req_str(d, "user_thesis", where),
@@ -275,32 +261,7 @@ def _research_only_context(request_context: Any) -> Any:
     return request_context
 
 
-def _build_prompt(text: str, answers: dict) -> str:
-    lines = [
-        "Normalize the user's investment idea into a single JSON object.",
-        "No tools are needed; use only the idea text below.",
-        "Exact shapes (omit IDs; they are assigned automatically):",
-        "user_thesis: string (the idea, verbatim-ish).",
-        "scope: short string, a ticker like NVDA or the literal unknown; never an object.",
-        "assumptions/invalidators/unknowns: lists of strings (empty when none).",
-        "expressions: [{key: string (local reference like e1), intent: string,",
-        "  instrument: equity|option|future|bond|cash|unknown,",
-        "  direction: long|short|neutral|unknown, structure: string, horizon: string,",
-        "  status: undecided|active|flagged|closed}] (zero or more; never recommend a trade).",
-        "requirements: [{expression_key: key matching an expression above,",
-        "  requirement_type: string, statement: string}] (timing/magnitude conditions only).",
-        "questions: [{question: string, question_type: string}] (at most 3 material",
-        "  questions whose answers would change scope, horizon, or expression research).",
-        "Keep unavailable values the literal unknown; do not strengthen assertions.",
-        f"Idea: {text}",
-    ]
-    if answers:
-        lines.append(f"Answers: {json.dumps(answers)}")
-    lines.append("Return JSON only.")
-    return "\n".join(lines)
-
-
-def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict:
+def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict[str, Any]:
     return {
         "expression_id": new_expression_id(),
         "intent": intent,
@@ -326,7 +287,7 @@ def _expression_choice_question() -> IntakeQuestion:
     )
 
 
-def _strategy_expression(combined: str) -> dict | None:
+def _strategy_expression(combined: str) -> dict[str, Any] | None:
     if re.search(r"\bputs?\b", combined):
         return _expr(intent="bearish", instrument="option", direction="long", structure="long puts")
     if re.search(r"\bcalls?\b", combined):
@@ -338,7 +299,7 @@ def _strategy_expression(combined: str) -> dict | None:
     return None
 
 
-def _local_interpret(text: str, answers: dict) -> IntakeProposal:
+def _local_interpret(text: str, answers: dict[str, Any]) -> IntakeProposal:
     blob = " ".join(str(v) for v in answers.values() if isinstance(v, (str, int, float)))
     blob = blob.lower()
     t = text.lower()
@@ -351,9 +312,7 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
         "assumptions": (),
         "invalidators": (),
         "unknowns": (UNKNOWN,),
-        "expressions": (),
         "requirements": (),
-        "questions": (),
     }
     # Showcase: AI-infra repricing + answers wanting puts and post-selloff accumulation.
     if (
@@ -363,9 +322,8 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
         and ("accumulat" in combined or "selloff" in combined or "sell-off" in combined)
     ):
         return IntakeProposal(
-            **{
-                **base,
-                "expressions": (
+            **base,
+            expressions=(
                     _expr(intent="bearish", instrument="option", direction="long", structure="long puts"),
                     _expr(
                         intent="bullish",
@@ -374,14 +332,12 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
                         structure="post-selloff equity accumulation",
                     ),
                 ),
-            }
         )
     # "own it for ten years" maps to obvious long-equity intent, no options questions.
     if re.search(r"\bten years\b|\b10 years\b|\bten-year\b", combined):
         return IntakeProposal(
-            **{
-                **base,
-                "expressions": (
+            **base,
+            expressions=(
                     _expr(
                         intent="bullish",
                         instrument="equity",
@@ -390,63 +346,45 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
                         horizon="long-term",
                     ),
                 ),
-            }
         )
     # "still deciding" persists zero expressions rather than choosing one.
     if "still deciding" in combined:
         return IntakeProposal(**base)
     strat = _strategy_expression(combined)
     if strat is not None:
-        return IntakeProposal(**{**base, "expressions": (strat,)})
+        return IntakeProposal(**base, expressions=(strat,))
     # No strategy stated: one expression-choice question, never a recommendation.
-    return IntakeProposal(**{**base, "questions": (_expression_choice_question(),)})
+    return IntakeProposal(**base, questions=(_expression_choice_question(),))
 
 
 def interpret_idea(
     text: str,
-    answers: dict | None = None,
-    gateway: IntakeGateway | None = None,
+    answers: dict[str, Any] | None = None,
     request_context: Any = None,
 ) -> IntakeProposal:
     """Normalize ``text`` (+ optional ``answers``) into a validated IntakeProposal."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("<intake>: 'text' must be a non-empty string")
-    ctx = _research_only_context(request_context)
+    _research_only_context(request_context)
     clean = text.strip()
     given = dict(answers or {})
-    if gateway is None:
-        # ponytail: deterministic local default (see module docstring).
-        return _local_interpret(clean, given)
-    # The gateway gets a prompt string plus the RESEARCH-only context only:
-    # no filesystem/repo tools and no financial-research calls happen during intake.
-    raw = gateway.complete_json(_build_prompt(clean, given), request_context=ctx)
-    if isinstance(raw, str):
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"<intake>: gateway returned invalid JSON: {exc}") from exc
-    elif isinstance(raw, dict):
-        data = raw
-    else:
-        raise ValueError(
-            f"<intake>: gateway must return a mapping or JSON string, got {type(raw).__name__}"
-        )
-    return IntakeProposal.from_dict(data, "<intake/gateway>")
+    # ponytail: deterministic local read (see module docstring).
+    return _local_interpret(clean, given)
 
 _SCOPE_RE = re.compile(r"^[A-Za-z]{1,5}$")
 _SETUP_QUESTION_ID = "setup:scope"
 
 
 def build_initial_watch_rules(
-    scope: str, requirements: Any, *, claim_ids: list = (), expression_ids: list = ()
-) -> list[dict]:
+    scope: str, requirements: Any, *, claim_ids: Sequence[str] = (), expression_ids: Sequence[str] = ()
+) -> list[dict[str, Any]]:
     """Supported semantic rules only: explicit ticker scope -> ``new_filing`` plus
     any requirement whose type already names a supported monitor. No thresholds."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the table
 
     cids = [c for c in (claim_ids or []) if isinstance(c, str) and c]
     eids = [e for e in (expression_ids or []) if isinstance(e, str) and e]
-    rules: list[dict] = []
+    rules: list[dict[str, Any]] = []
     if _SCOPE_RE.fullmatch((scope or "").strip()) and "new_filing" in SUPPORTED_HANDLERS and (cids or eids):
         rules.append({
             "rule_id": new_rule_id(),
@@ -476,7 +414,7 @@ def build_initial_watch_rules(
     return rules
 
 
-def setup_needed_question() -> dict:
+def setup_needed_question() -> dict[str, Any]:
     return {
         "question_id": _SETUP_QUESTION_ID,
         "text": "Which ticker should this thesis monitor? Reply with the single ticker symbol (e.g. NVDA).",
@@ -484,7 +422,7 @@ def setup_needed_question() -> dict:
     }
 
 
-def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> dict:
+def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
     """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
 
     Unresolvable scope persists a setup question instead of a fake active
@@ -504,9 +442,10 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> di
         expressions=[dict(e) for e in proposal.expressions],
         requirements=[dict(r) for r in proposal.requirements],
         watch_rules=rules,
+        effective_at=effective_at,
     )
-    missing: list[dict] = []
-    questions_add: list[dict] = []
+    missing: list[dict[str, Any]] = []
+    questions_add: list[dict[str, Any]] = []
     for q in proposal.questions or ():
         if isinstance(q, dict):
             qid, text = q.get("question_id") or new_question_id(), q.get("question") or q.get("text", "")
@@ -518,7 +457,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> di
         missing.append(setup_needed_question())
         questions_add.append(dict(missing[0]))
     if questions_add:
-        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "")
+        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "", effective_at=effective_at)
     return {
         "thesis_id": thesis.thesis_id,
         "slug": thesis.slug,
@@ -529,7 +468,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal) -> di
     }
 
 
-def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
+def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict[str, Any]:
     """Pure merge preview: added claims/expressions/requirements plus merged payload."""
     old_claims = {c.statement for c in thesis.claims}
     claims = [c.to_dict() for c in thesis.claims]
@@ -561,28 +500,47 @@ def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
     }
 
 
-def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal) -> dict:
+def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
 
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
-    if thesis.status != "active":
-        raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
-    updated = repository.update_thesis(tid, **plan["merged"])
-    fresh = repository.load_thesis(tid)
+    if effective_at is None:
+        if thesis.status != "active":
+            raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
+    else:
+        snap_status = repository.load_state_as_of(tid, effective_at).thesis["status"]
+        if snap_status != "active":
+            raise ValueError(f"thesis {tid!r} is {snap_status}; refusing refinement")
+    updated = repository.update_thesis(tid, effective_at=effective_at, **plan["merged"])
     covered_claims: dict[str, set[str]] = {}
     covered_exprs: dict[str, set[str]] = {}
-    for r in repository.load_watch_rules(tid):
-        if not r.enabled or r.support_status != "supported" or r.rule_type not in SUPPORTED_HANDLERS:
-            continue
-        covered_claims.setdefault(r.rule_type, set()).update(r.claim_ids)
-        covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
+    if effective_at is None:
+        fresh = repository.load_thesis(tid)
+        fresh_scope = fresh.scope
+        fresh_claim_ids = [c.claim_id for c in fresh.claims]
+        fresh_expr_ids = [e.expression_id for e in fresh.expressions]
+        for r in repository.load_watch_rules(tid):
+            if not r.enabled or r.support_status != "supported" or r.rule_type not in SUPPORTED_HANDLERS:
+                continue
+            covered_claims.setdefault(r.rule_type, set()).update(r.claim_ids)
+            covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
+    else:
+        snap = repository.load_state_as_of(tid, effective_at)
+        fresh_scope = snap.thesis["scope"]
+        fresh_claim_ids = [c["claim_id"] for c in snap.thesis.get("claims", [])]
+        fresh_expr_ids = [e["expression_id"] for e in snap.thesis.get("expressions", [])]
+        for r in snap.watch["rules"]:
+            if not r.get("enabled") or r.get("support_status") != "supported" or r.get("rule_type") not in SUPPORTED_HANDLERS:
+                continue
+            covered_claims.setdefault(r["rule_type"], set()).update(r.get("claim_ids", ()))
+            covered_exprs.setdefault(r["rule_type"], set()).update(r.get("expression_ids", ()))
     new_rules = []
     for cand in build_initial_watch_rules(
-            fresh.scope, proposal.requirements,
-            claim_ids=[c.claim_id for c in fresh.claims],
-            expression_ids=[e.expression_id for e in fresh.expressions]):
+            fresh_scope, proposal.requirements,
+            claim_ids=fresh_claim_ids,
+            expression_ids=fresh_expr_ids):
         rt = cand["rule_type"]
         known_c = covered_claims.setdefault(rt, set())
         known_e = covered_exprs.setdefault(rt, set())
@@ -595,7 +553,7 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: Inta
         known_c.update(cids)
         known_e.update(eids)
     if new_rules:
-        repository.apply_research_result(tid, {"watch_add": new_rules}, "")
+        repository.apply_research_result(tid, {"watch_add": new_rules}, "", effective_at=effective_at)
     return {
         "thesis_id": tid,
         "slug": updated.slug,

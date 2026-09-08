@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence
 
 from .account import (
     BrokerageAccount,
@@ -23,6 +23,13 @@ from .account import (
 from .options import MarketSnapshot
 
 _QUOTE_LIST_KEYS = ("quotes", "data", "results", "items", "records")
+
+
+class ToolClient(Protocol):
+    """Structural MCP tool surface the provider consumes (real client + test fakes)."""
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        ...
 
 
 def _provider_data(payload: Any) -> Any:
@@ -111,7 +118,7 @@ class RobinhoodPortfolioProvider:
     :class:`RobinhoodToolError` from the client.
     """
 
-    def __init__(self, client) -> None:
+    def __init__(self, client: ToolClient) -> None:
         self._client = client
 
     def get_accounts(self) -> list[BrokerageAccount]:

@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from app import exa_client
+from app import tools
+from app.policy import Capability, RequestContext
 
 EXA_FIXTURES = Path(__file__).parent / "fixtures" / "exa"
 
@@ -22,16 +24,30 @@ ALLOWED_PAYLOAD_KEYS = {
 }
 
 
-def _fixture(name: str) -> dict:
+def _fixture(name: str):
     return json.loads((EXA_FIXTURES / name).read_text())
 
 
-def _enable_exa(monkeypatch):
+def _enable_exa(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXA_ENABLED", "true")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key-123")
 
 
-def _response(payload=None, status: int = 200) -> MagicMock:
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _as_seq(value: object):
+    assert isinstance(value, (list, tuple))
+    return value
+
+def _err(result: dict[str, object]) -> str:
+    err = result.get("error")
+    assert isinstance(err, str)
+    return err
+
+def _response(payload: object = None, status: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.json.return_value = payload
@@ -42,30 +58,35 @@ def _response(payload=None, status: int = 200) -> MagicMock:
 class FakeSession:
     """Session whose post() returns responses in order, last one repeated."""
 
-    def __init__(self, *responses):
+    responses: list[MagicMock]
+    posts: list[tuple[str, dict[str, object]]]
+
+    def __init__(self, *responses: MagicMock) -> None:
         self.responses = list(responses)
         self.posts = []
 
-    def post(self, url, **kwargs):
-        self.posts.append((url, kwargs))
-        return self.responses[-1] if len(self.responses) == 1 else self.responses.pop(0)
+    def post(self, url: str, **kwargs: object) -> MagicMock:
+        self.posts.append((url, dict(kwargs)))
+        if len(self.responses) == 1:
+            return self.responses[-1]
+        return self.responses.pop(0)
 
 
-def _patch_session(monkeypatch, session: FakeSession) -> FakeSession:
+def _patch_session(monkeypatch: pytest.MonkeyPatch, session: FakeSession) -> FakeSession:
     monkeypatch.setattr(exa_client, "_ensure_session", lambda: session)
     return session
 
 
 @pytest.fixture
-def enabled(monkeypatch):
+def enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_exa(monkeypatch)
 
 
-def test_disabled_when_env_off(monkeypatch):
+def test_disabled_when_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXA_ENABLED", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
 
-    def boom(*args, **kwargs):
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call when Exa is disabled")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
@@ -73,11 +94,11 @@ def test_disabled_when_env_off(monkeypatch):
     assert result == {"error": "Exa search unavailable", "source": "exa"}
 
 
-def test_disabled_when_key_unset(monkeypatch):
+def test_disabled_when_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXA_ENABLED", "true")
     monkeypatch.delenv("EXA_API_KEY", raising=False)
 
-    def boom(*args, **kwargs):
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call when the API key is missing")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
@@ -85,15 +106,15 @@ def test_disabled_when_key_unset(monkeypatch):
     assert result == {"error": "Exa search unavailable", "source": "exa"}
 
 
-def test_http_500(enabled, monkeypatch):
+def test_http_500(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(status=500)))
     result = exa_client.search("AMD news")
     assert result["error"] == "Exa search failed: HTTP 500"
     assert result["source"] == "exa"
 
 
-def test_timeout(enabled, monkeypatch):
-    def boom(url, **kwargs):
+def test_timeout(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(url: str, **kwargs: object) -> None:
         raise requests.Timeout("timed out")
 
     session = FakeSession()
@@ -103,8 +124,8 @@ def test_timeout(enabled, monkeypatch):
     assert result["error"] == "Exa search timed out"
 
 
-def test_request_exception(enabled, monkeypatch):
-    def boom(url, **kwargs):
+def test_request_exception(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(url: str, **kwargs: object) -> None:
         raise requests.ConnectionError("down")
 
     session = FakeSession()
@@ -114,7 +135,7 @@ def test_request_exception(enabled, monkeypatch):
     assert result["error"] == "Exa search unavailable"
 
 
-def test_malformed_json(enabled, monkeypatch):
+def test_malformed_json(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     resp = _response(payload={"results": []})
     resp.json.side_effect = ValueError("not json")
     session = _patch_session(monkeypatch, FakeSession(resp))
@@ -123,23 +144,27 @@ def test_malformed_json(enabled, monkeypatch):
     assert session.posts[0][1]["headers"] == {"x-api-key": "test-exa-key-123"}
 
 
-def test_missing_results_key(enabled, monkeypatch):
+def test_missing_results_key(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(payload={"foo": 1})))
     result = exa_client.search("AMD news")
     assert result["error"] == "Exa search returned an invalid response"
 
 
-def test_limit_clamp(enabled, monkeypatch):
+def test_limit_clamp(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     for limit, expected in ((99, 25), (0, 1), (None, 5)):
         session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
-        exa_client.search("AMD news", limit=limit)
+        if limit is None:
+            exa_client.search("AMD news")
+        else:
+            exa_client.search("AMD news", limit=limit)
         payload = session.posts[0][1]["json"]
+        assert isinstance(payload, dict)
         assert payload["numResults"] == expected
         assert payload["query"] == "AMD news"
         assert payload["contents"] == {"highlights": True}
 
 
-def test_normalization_from_fixture(enabled, monkeypatch):
+def test_normalization_from_fixture(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
     result = exa_client.search("AMD news")
     assert result["result_type"] == "web_search"
@@ -150,7 +175,7 @@ def test_normalization_from_fixture(enabled, monkeypatch):
     assert result["omitted_count"] == 1
     assert result["retrieved_at"]
 
-    first, second = result["evidence"]
+    first, second = _as_seq(result["evidence"])
     # Full item with two highlights: title/url/domain preserved, first highlight.
     assert first["title"] == "AMD Unveils MI400 Accelerator With 4x Throughput"
     assert first["url"] == "https://ir.amd.com/news-releases/news-details/2026/amd-mi400"
@@ -163,10 +188,10 @@ def test_normalization_from_fixture(enabled, monkeypatch):
     assert second["published_at"] is None
     assert second["url"].startswith("https://www.reuters.com")
     # Item without url was skipped, never surfaced.
-    assert all("no-url-item" not in str(item) for item in result["evidence"])
+    assert all("no-url-item" not in str(item) for item in _as_seq(result["evidence"]))
 
 
-def test_highlight_truncated_to_max_chars(enabled, monkeypatch):
+def test_highlight_truncated_to_max_chars(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     long_highlight = "x" * 2000
     payload = {"results": [{
         "title": "t", "url": "https://example.com/x",
@@ -175,25 +200,26 @@ def test_highlight_truncated_to_max_chars(enabled, monkeypatch):
     }]}
     session = _patch_session(monkeypatch, FakeSession(_response(payload)))
     result = exa_client.search("AMD news")
-    assert len(result["evidence"][0]["highlight"]) == exa_client.EXA_HIGHLIGHT_MAX_CHARS
+    assert len(_as_seq(result["evidence"])[0]["highlight"]) == exa_client.EXA_HIGHLIGHT_MAX_CHARS
 
 
-def test_company_category_rejects_dates_and_exclude_domains(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_company_category_rejects_dates_and_exclude_domains(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for an unsupported company-category combo")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
-    for kwargs in (
-        {"start_published_date": "2026-01-01"},
-        {"end_published_date": "2026-08-01"},
-        {"exclude_domains": ["reddit.com"]},
-    ):
-        result = exa_client.search("AMD", category="company", **kwargs)
-        assert "does not support" in result["error"], kwargs
-        assert result["source"] == "exa"
+    result = exa_client.search("AMD", category="company", start_published_date="2026-01-01")
+    assert "does not support" in _err(result)
+    assert result["source"] == "exa"
+    result = exa_client.search("AMD", category="company", end_published_date="2026-08-01")
+    assert "does not support" in _err(result)
+    assert result["source"] == "exa"
+    result = exa_client.search("AMD", category="company", exclude_domains=["reddit.com"])
+    assert "does not support" in _err(result)
+    assert result["source"] == "exa"
 
 
-def test_company_category_allows_include_domains(enabled, monkeypatch):
+def test_company_category_allows_include_domains(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
     result = exa_client.search(
         "AMD",
@@ -202,11 +228,12 @@ def test_company_category_allows_include_domains(enabled, monkeypatch):
     )
     assert "error" not in result
     payload = session.posts[0][1]["json"]
+    assert isinstance(payload, dict)
     assert payload["category"] == "company"
     assert payload["includeDomains"] == ["amd.com"]
 
 
-def test_dates_convert_to_iso_ranges(enabled, monkeypatch):
+def test_dates_convert_to_iso_ranges(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
     exa_client.search(
         "AMD news",
@@ -214,40 +241,41 @@ def test_dates_convert_to_iso_ranges(enabled, monkeypatch):
         end_published_date="2026-08-01",
     )
     payload = session.posts[0][1]["json"]
+    assert isinstance(payload, dict)
     assert payload["startPublishedDate"] == "2026-07-01T00:00:00.000Z"
     assert payload["endPublishedDate"] == "2026-08-01T23:59:59.999Z"
 
 
-def test_unsupported_category(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_unsupported_category(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for an unsupported category")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
     result = exa_client.search("AMD news", category="gossip")
-    assert "Unsupported category 'gossip'" in result["error"]
+    assert "Unsupported category 'gossip'" in _err(result)
     assert result["source"] == "exa"
 
 
-def test_unsupported_search_type(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_unsupported_search_type(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for an unsupported search_type")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
     result = exa_client.search("AMD news", search_type="deep")
-    assert "Unsupported search_type 'deep'" in result["error"]
+    assert "Unsupported search_type 'deep'" in _err(result)
 
 
-def test_invalid_date(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_invalid_date(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for an invalid date")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
     result = exa_client.search("AMD news", start_published_date="08/01/2026")
-    assert "Invalid date '08/01/2026'" in result["error"]
+    assert "Invalid date '08/01/2026'" in _err(result)
 
 
-def test_empty_query(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_empty_query(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for an empty query")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
@@ -255,16 +283,20 @@ def test_empty_query(enabled, monkeypatch):
     assert result["error"] == "Exa search query must be a non-empty string"
 
 
-def test_non_integer_limit(enabled, monkeypatch):
-    def boom(*args, **kwargs):
+def test_non_integer_limit(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
         pytest.fail("no HTTP call for a non-integer limit")
 
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
-    result = exa_client.search("AMD news", limit="five")
+    # Non-integer limit arrives as LLM JSON (untyped); dispatch preserves it for runtime validation.
+    context = RequestContext("test", frozenset({Capability.RESEARCH}))
+    result = tools.execute_tool(
+        "search_web", {"query": "AMD news", "limit": "five"}, model="test", context=context
+    )
     assert result["error"] == "limit must be an integer"
 
 
-def test_payload_privacy(enabled, monkeypatch):
+def test_payload_privacy(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
     exa_client.search(
         "AMD competitive position 2026",
@@ -273,6 +305,7 @@ def test_payload_privacy(enabled, monkeypatch):
         start_published_date="2026-07-01",
     )
     payload = session.posts[0][1]["json"]
+    assert isinstance(payload, dict)
     assert set(payload) <= ALLOWED_PAYLOAD_KEYS
     blob = json.dumps(payload).lower()
     for identifier in ("account", "portfolio", "123456789"):

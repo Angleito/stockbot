@@ -16,30 +16,32 @@ from app.robinhood.client import (
 )
 
 
-def test_oauth_state_is_private_and_round_trips(tmp_path):
+def test_oauth_state_is_private_and_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "robinhood" / "oauth.json"
     save_tokens({"tokens": {"access_token": "redacted"}}, path)
-    assert load_tokens(path)["tokens"]["access_token"] == "redacted"
+    loaded = load_tokens(path)
+    assert loaded is not None
+    assert loaded["tokens"]["access_token"] == "redacted"
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
-def test_normalize_result_handles_structured_models():
+def test_normalize_result_handles_structured_models() -> None:
     class Model:
-        def model_dump(self, **kwargs):
+        def model_dump(self, **kwargs: object) -> dict[str, object]:
             return {"structured_content": {"value": 1}, "secret": None}
 
     assert normalize_result(Model()) == {"structured_content": {"value": 1}, "secret": None}
 
 
-def test_parse_callback_url_requires_code_and_preserves_issuer():
+def test_parse_callback_url_requires_code_and_preserves_issuer() -> None:
     result = parse_callback_url(
         "http://127.0.0.1/callback?code=abc&state=xyz&iss=https%3A%2F%2Fissuer"
     )
     assert result == ("abc", "xyz", "https://issuer")
 
 
-def test_loopback_callback_receives_browser_redirect():
+def test_loopback_callback_receives_browser_redirect() -> None:
     callback = LoopbackCallback("http://127.0.0.1:0/callback")
     callback.start()
     url = callback.redirect_uri + "?" + urllib.parse.urlencode(
@@ -50,7 +52,7 @@ def test_loopback_callback_receives_browser_redirect():
     assert asyncio.run(callback.callback_handler()) == ("abc", "xyz", None)
 
 
-def test_mutating_tools_are_rejected_before_network():
+def test_mutating_tools_are_rejected_before_network() -> None:
     client = RobinhoodClient("https://example.test", allowed_tools={"get_option_quotes"})
     with pytest.raises(RobinhoodToolError):
         client.call_tool("place_option_order", {})
@@ -58,22 +60,25 @@ def test_mutating_tools_are_rejected_before_network():
         client.call_tool("get_option_positions", {})
 
 
-def test_deprecated_allowed_tools_alias_restricts_account_reads():
+def test_deprecated_allowed_tools_alias_restricts_account_reads() -> None:
     client = RobinhoodClient("https://example.test", allowed_tools={"get_equity_quotes"})
     with pytest.raises(RobinhoodToolError):
         client.call_tool("get_accounts", {})
 
 
-def test_mcp_v2_transport_adapter_lists_and_calls_tools():
+def test_mcp_v2_transport_adapter_lists_and_calls_tools() -> None:
     server = MCPServer("fixture")
 
     @server.tool()
-    def get_equity_quotes(symbol: str) -> dict:
+    def get_equity_quotes(symbol: str) -> dict[str, object]:
         return {"symbol": symbol, "last": "10.00"}
+
+    def _factory(url: str, auth: object) -> object:
+        return server
 
     client = RobinhoodClient(
         "fixture",
-        transport_factory=lambda url, auth: server,
+        transport_factory=_factory,
         allowed_tools={"get_equity_quotes"},
     )
     assert client.list_tools()[0]["name"] == "get_equity_quotes"
@@ -82,43 +87,46 @@ def test_mcp_v2_transport_adapter_lists_and_calls_tools():
     assert '"last": "10.00"' in result["content"][0]["text"]
 
 
-def test_authenticated_mcp_transport_does_not_follow_redirects():
-    seen = {}
+def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
+    seen: dict[str, object] = {}
 
     class FakeHttpClient:
-        async def __aenter__(self):
+        async def __aenter__(self) -> FakeHttpClient:
             return self
 
-        async def __aexit__(self, *args):
+        async def __aexit__(self, *args: object) -> None:
             return None
 
     class FakeHttpx:
         @staticmethod
-        def AsyncClient(**kwargs):
+        def AsyncClient(**kwargs: object) -> FakeHttpClient:
             seen.update(kwargs)
             return FakeHttpClient()
 
     class FakeTransport:
-        async def __aenter__(self):
+        async def __aenter__(self) -> FakeTransport:
             return self
 
-        async def __aexit__(self, *args):
+        async def __aexit__(self, *args: object) -> None:
             return None
 
     class FakeClient:
-        def __init__(self, transport):
+        def __init__(self, transport: object) -> None:
             self.transport = transport
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> FakeClient:
             return self
 
-        async def __aexit__(self, *args):
+        async def __aexit__(self, *args: object) -> None:
             return None
+
+    def _transport(url: str, **kwargs: object) -> FakeTransport:
+        return FakeTransport()
 
     context = _HttpSessionContext(
         "https://agent.robinhood.com/mcp/trading",
         object(),
-        lambda url, **kwargs: FakeTransport(),
+        _transport,
         FakeClient,
         FakeHttpx,
     )

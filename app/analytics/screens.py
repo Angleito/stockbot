@@ -14,7 +14,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .. import finra_client
 from ..config import get_data_root
@@ -77,7 +77,7 @@ def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path
     return str(latest)
 
 
-def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict], int]:
+def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict[str, Any]], int]:
     """Short-interest rows for one settlement cycle, point-in-time.
 
     Only source versions knowable on/before ``as_of`` are visible, and the
@@ -140,7 +140,7 @@ def _security_type_map(as_of: str, data_root: Path) -> dict[str, str]:
     return {str(row["entity_id"]): str(row["security_type"]) for row in rows}
 
 
-def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
+def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict[str, Any]]]:
     """Shares-outstanding facts per entity, newest filed first.
 
     The as-of clause is mandatory: a fact filed after ``as_of`` is never
@@ -155,7 +155,7 @@ def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
         params=[_SHARES_CONCEPT, param],
         data_root=data_root,
     )
-    by_entity: dict[str, list[dict]] = {}
+    by_entity: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_entity.setdefault(str(row["entity_id"]), []).append(row)
     return by_entity
@@ -211,11 +211,16 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
     ).hexdigest()[:16]
 
 
+def _leaderboard_key(item: dict[str, Any]) -> tuple[Any, Any]:
+    """Short-interest percent descending, ticker ascending."""
+    return (-item["short_interest_percent"], item["ticker"])
+
+
 def materialize_short_interest_screen(
     settlement_date: str,
     as_of: Optional[str] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Build one complete settlement-date leaderboard from normalized data.
 
     ``as_of`` is the knowledge horizon: FINRA rows, ticker aliases, security
@@ -272,7 +277,7 @@ def materialize_short_interest_screen(
         "common_equity_rows": 0,
         "shares_outstanding_rows": 0,
     }
-    candidates: list[dict] = []
+    candidates: list[dict[str, Any]] = []
     for row in rows:
         symbol = str(row["symbol_code"])
         short_shares = row.get("short_position")
@@ -319,7 +324,7 @@ def materialize_short_interest_screen(
             "sec_accession": fact.get("accession"),
             "sec_source_url": fact.get("source_url"),
         })
-    candidates.sort(key=lambda item: (-item["short_interest_percent"], item["ticker"]))
+    candidates.sort(key=_leaderboard_key)
     run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
     parquet.write_rows(
@@ -374,7 +379,7 @@ def read_short_interest_screen(
     as_of: Optional[str] = None,
     limit: Optional[int] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Read a published screen run, bounded to ``limit`` entries."""
     data_root = Path(data_root) if data_root else get_data_root()
     limit = _clamp_limit(limit)
@@ -463,7 +468,7 @@ def get_short_interest_leaderboard(
     settlement_date: Optional[str] = None,
     as_of: Optional[str] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Return a bounded leaderboard, materializing the requested cycle
     (republishing only when its inputs changed) for the requested ``as_of``.
 
@@ -510,9 +515,9 @@ def _cycle_entities(
     as_of: str,
     ticker_aliases: dict[str, list[str]],
     security_types: dict[str, str],
-    facts_by_entity: dict[str, list[dict]],
+    facts_by_entity: dict[str, list[dict[str, Any]]],
     data_root: Path,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, Any]]:
     """Eligible entities for one settlement cycle: symbol -> row + fact.
 
     Same point-in-time rules as the leaderboard: only source versions and
@@ -520,7 +525,7 @@ def _cycle_entities(
     classified as common equity rank.
     """
     rows, _ = _snapshot_rows(settlement_date, as_of, data_root)
-    result: dict[str, dict] = {}
+    result: dict[str, dict[str, Any]] = {}
     for row in rows:
         symbol = str(row["symbol_code"])
         short_shares = row.get("short_position")
@@ -539,7 +544,7 @@ def _cycle_entities(
     return result
 
 
-def _select_fact_for_period(facts: list[dict], settlement_date: str) -> Optional[dict]:
+def _select_fact_for_period(facts: list[dict[str, Any]], settlement_date: str) -> Optional[dict[str, Any]]:
     """Latest fact whose period end is on/before the settlement date; facts
     are pre-sorted newest first and already restricted by known_at <= as_of."""
     for fact in facts:
@@ -553,11 +558,16 @@ def _select_fact_for_period(facts: list[dict], settlement_date: str) -> Optional
     return None
 
 
+def _change_key(e: dict[str, Any]) -> tuple[Any, Any]:
+    """Largest percentage-point change first, ticker ascending."""
+    return (-(e["si_pp_change"] if e["si_pp_change"] is not None else 0.0), e["ticker"])
+
+
 def short_interest_change_screen(
     as_of: str,
     limit: Optional[int] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Dated research slice: short-interest change + shares-outstanding change
     between the two most recent settlement cycles knowable on/before as_of.
 
@@ -575,13 +585,13 @@ def short_interest_change_screen(
     security_types = _security_type_map(as_of, data_root)
     facts_by_entity = _facts_by_entity(as_of, data_root)
     current = _cycle_entities(current_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
-    prior = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
-    entries: list[dict] = []
+    prior: dict[str, dict[str, Any]] = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
+    entries: list[dict[str, Any]] = []
     for symbol, item in sorted(current.items()):
         row, fact = item["row"], item["fact"]
         short_current = float(row["short_position"])
         si_pct_current = 100 * short_current / float(fact["value"])
-        entry: dict = {
+        entry: dict[str, Any] = {
             "ticker": symbol,
             "issue_name": row.get("issue_name"),
             "settlement_current": current_date,
@@ -627,7 +637,7 @@ def short_interest_change_screen(
                 "si_pp_change": si_pct_current - si_pct_prior,
             })
         entries.append(entry)
-    entries.sort(key=lambda e: (-(e["si_pp_change"] if e["si_pp_change"] is not None else 0.0), e["ticker"]))
+    entries.sort(key=_change_key)
     for index, entry in enumerate(entries, 1):
         entry["rank"] = index
     return {

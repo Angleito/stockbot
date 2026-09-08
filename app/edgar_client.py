@@ -1,21 +1,29 @@
 """All SEC EDGAR access lives here. tools.py never imports edgartools directly."""
 
+from __future__ import annotations
+
 import datetime as _dt
 import difflib
 import hashlib
+import itertools
 import json
 import logging
 import os
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Optional
 
 from .config import get_data_root, get_sec_edgar_identity, init_config
 
 os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", str(get_data_root() / "edgar"))
 
-from edgar import Company
+from edgar import Company, Filing
 
 from . import cache
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +41,7 @@ def _ensure_init() -> None:
         _initialized = True
 
 
-def _no_data(ticker: str, what: str) -> dict:
+def _no_data(ticker: str, what: str) -> dict[str, object]:
     return {"error": f"No data found for {ticker}: {what}"}
 
 
@@ -54,6 +62,7 @@ def get_latest_report(ticker: str, form_type: str = "10-K"):
     if not filings:
         return None
     filing = filings[0]
+    assert isinstance(filing, Filing)
     return filing, filing.obj()
 
 
@@ -64,7 +73,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _result_content_hash(payload: dict) -> str:
+def _result_content_hash(payload: dict[str, object]) -> str:
     tmp = {k: v for k, v in payload.items() if k not in ("cache_hit", "cache_type")}
     return hashlib.sha256(json.dumps(tmp, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
@@ -84,7 +93,7 @@ def _filing_dir_url(cik: Any, accession: Any) -> str | None:
         return None
 
 
-def _cached_or_fetch(key: str, fetch):
+def _cached_or_fetch(key: str, fetch: Callable[[], dict[str, object]]) -> dict[str, object]:
     """24h parsed-result cache; retrieved_at preserved, transient flags unstored."""
     hit = cache.get(key, ttl=SEC_RESULT_CACHE_TTL_SECONDS)
     if hit is not None:
@@ -122,7 +131,7 @@ _MISSING_QUARTER_GAP_DAYS = 130
 _DERIVED_Q4_OFFSET_DAYS = 91
 
 
-def _fact_duration_days(frame) -> Any:
+def _fact_duration_days(frame: pd.DataFrame) -> pd.Series:
     """Duration in days between period_start and period_end (XBRL facts)."""
     import pandas as pd
 
@@ -131,7 +140,7 @@ def _fact_duration_days(frame) -> Any:
     return (end - start).dt.days
 
 
-def _dedup_latest(frame) -> Any:
+def _dedup_latest(frame: pd.DataFrame) -> pd.DataFrame:
     """Drop duplicate period_end facts, keeping the most recently filed one.
 
     XBRL company facts can carry restated values for the same period. The
@@ -144,7 +153,7 @@ def _dedup_latest(frame) -> Any:
     )
 
 
-def _quarters_with_derived_q4(quarterly, full_facts, concept) -> Any:
+def _quarters_with_derived_q4(quarterly: pd.DataFrame, full_facts: pd.DataFrame, concept: str) -> pd.DataFrame:
     """Return the last 4 quarterly facts, deriving a missing quarter end.
 
     XBRL company facts hold quarterly (~3-month), YTD (6-9 month), and
@@ -172,7 +181,7 @@ def _quarters_with_derived_q4(quarterly, full_facts, concept) -> Any:
     return quarter.tail(4)
 
 
-def _derive_q4_from_facts(full_facts, concept, fy_end) -> Any:
+def _derive_q4_from_facts(full_facts: pd.DataFrame, concept: str, fy_end: pd.Timestamp) -> pd.DataFrame | None:
     """Derive Q4 EPS = FY_total - YTD_through_Q3 for the fiscal year ending fy_end."""
     import pandas as pd
 
@@ -214,7 +223,7 @@ def _is_recent_dividend_period(period_end: Any, as_of: _dt.date, max_age_days: i
     delta = (as_of - end).days
     return 0 <= delta <= max_age_days
 
-def _null_dividend_payload(ticker: str) -> dict:
+def _null_dividend_payload(ticker: str) -> dict[str, object]:
     """Coverage uncertainty: concept absence is not proof of a nonpayer."""
     return {
         "ticker": ticker,
@@ -249,9 +258,9 @@ def _has_contiguous_quarters(period_ends: list[Any]) -> bool:
     return _has_contiguous_gaps(period_ends, _QUARTER_DAYS, 4)
 
 
-def _dividend_growth(annual: dict) -> dict:
+def _dividend_growth(annual: dict[int, float]) -> dict[str, float | None]:
     """Exact-gap growth/CAGR over annual totals; missing gaps stay null."""
-    out = {"growth_1y": None, "growth_3y_cagr": None, "growth_5y_cagr": None, "growth_10y_cagr": None}
+    out: dict[str, float | None] = {"growth_1y": None, "growth_3y_cagr": None, "growth_5y_cagr": None, "growth_10y_cagr": None}
     if not annual:
         return out
     latest_year = max(annual)
@@ -309,19 +318,24 @@ def _dividend_valuation(ticker: str, ttm: Any, *, include_price: bool) -> dict[s
     return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at"), **_dividend_valuation_stub()}
 
 
-def _dividend_annual_history(rows: list[dict]) -> tuple[list[dict], dict]:
+def _dividend_annual_history(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[list[dict[str, object]], dict[int, float]]:
     """Full-year-duration facts keyed by calendar year of period_end."""
     by_year: dict[int, tuple[str, float]] = {}
     for r in rows:
+        raw_value = r.get("value")
+        if not isinstance(raw_value, (int, float, str, Decimal)):
+            continue
         try:
             end = _dt.date.fromisoformat(str(r.get("period_end"))[:10])
-            val = float(r.get("value"))  # type: ignore[arg-type]
+            val = float(raw_value)
         except (TypeError, ValueError):
             continue
         prev = by_year.get(end.year)
         if prev is None or str(r.get("period_end")) > prev[0]:
             by_year[end.year] = (str(r.get("period_end")), val)
-    history: list[dict] = []
+    history: list[dict[str, object]] = []
     annual: dict[int, float] = {}
     for fy in sorted(by_year, reverse=True):
         total = round(by_year[fy][1], 4)
@@ -330,7 +344,7 @@ def _dividend_annual_history(rows: list[dict]) -> tuple[list[dict], dict]:
     return history, annual
 
 
-def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool = True) -> dict:
+def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool = True) -> dict[str, object]:
     """Return a specific fundamental for ticker.
 
     metric: 'eps' | 'dividends' | 'balance_sheet' | 'shares_outstanding' | 'overview'
@@ -357,13 +371,13 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
     return result
 
 
-def _fetch_fundamentals(ticker: str, metric: str) -> dict:
+def _fetch_fundamentals(ticker: str, metric: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)
         if metric == "overview":
-            out = {
+            out: dict[str, object] = {
                 "ticker": ticker,
                 "name": company.name,
                 "cik": company.cik,
@@ -374,6 +388,8 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             return out
         if metric == "shares_outstanding":
             facts = company.get_facts()
+            if facts is None:
+                return _no_data(ticker, "company facts not available")
             df = facts.to_dataframe()
             shares = df[df["concept"].isin(
                 ["us-gaap:CommonStockSharesOutstanding", "CommonStockSharesOutstanding", "dei:EntityCommonStockSharesOutstanding"]
@@ -381,7 +397,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             if shares.empty:
                 return _no_data(ticker, "shares outstanding not found in company facts")
             latest = shares.sort_values("period_end").iloc[-1]
-            def _col(name, *alts):
+            def _col(name: str, *alts: str) -> str | None:
                 for k in (name, *alts):
                     try:
                         v = latest.get(k)
@@ -390,7 +406,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                     if v is not None and str(v) not in ("", "nan", "NaT"):
                         return str(v)
                 return None
-            out = {
+            out: dict[str, object] = {
                 "ticker": ticker,
                 "shares_outstanding": float(latest["value"]),
                 "as_of": str(latest["period_end"]),
@@ -407,6 +423,8 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             return out
         if metric == "eps":
             facts = company.get_facts()
+            if facts is None:
+                return _no_data(ticker, "company facts not available")
             df = facts.to_dataframe()
             # Fetch diluted EPS
             eps_diluted = df[df["concept"].isin(["us-gaap:EarningsPerShareDiluted", "EarningsPerShareDiluted"])].copy()
@@ -443,9 +461,9 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                     )
             
             # Merge diluted and basic into single quarterly list
-            quarterly_eps = []
+            quarterly_eps: list[dict[str, object]] = []
             for _, r_diluted in recent_diluted.iterrows():
-                q_entry = {
+                q_entry: dict[str, object] = {
                     "fiscal_year": str(r_diluted["fiscal_year"]),
                     "fiscal_period": str(r_diluted["fiscal_period"]),
                     "eps_diluted": round(float(r_diluted["value"]), 2),
@@ -466,7 +484,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                         q_entry["eps_basic"] = round(float(matching.iloc[0]["value"]), 2)
                 quarterly_eps.append(q_entry)
 
-            result = {
+            result: dict[str, object] = {
                 "ticker": ticker,
                 "quarterly_eps": quarterly_eps,
                 "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
@@ -482,6 +500,8 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             return result
         if metric == "dividends":
             facts = company.get_facts()
+            if facts is None:
+                return _no_data(ticker, "company facts not available")
             df = facts.to_dataframe()
             div = df[df["concept"].isin(
                 ["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT]
@@ -510,7 +530,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
             ].copy()
             if not fy.empty:
                 fy = _dedup_latest(fy)
-                fy_rows = [{"period_end": str(r["period_end"]), "value": float(r["value"])} for _, r in fy.iterrows()]
+                fy_rows: list[dict[str, str | float]] = [{"period_end": str(r["period_end"]), "value": float(r["value"])} for _, r in fy.iterrows()]
             else:
                 fy_rows = []
             history, annual = _dividend_annual_history(fy_rows)
@@ -533,7 +553,7 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict:
                 data = latest.to_dict() if hasattr(latest, "to_dict") else {"raw": str(latest)}
             except Exception:
                 data = {"raw": str(bs)}
-            out = {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
+            out: dict[str, object] = {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
             if _cik is not None:
                 out["cik"] = _cik
             if _facts_url:
@@ -551,7 +571,7 @@ _OWNERSHIP_FEED_TTL_SECONDS = 3600  # SEC current-filings feed covers ~24h
 _OWNERSHIP_TICKER_TTL_SECONDS = 7 * 86400  # ponytail: cached CIK->ticker map, refreshes weekly
 
 
-def get_recent_ownership_filings(form_type: str = "both", limit: int = 10) -> dict:
+def get_recent_ownership_filings(form_type: str = "both", limit: int = 10) -> dict[str, object]:
     """Most recent SC 13D/G filings market-wide (SEC current-filings feed, ~24h window)."""
     _ensure_init()
     key = f"ownership_feed:{form_type}:{limit}"
@@ -578,9 +598,9 @@ def _resolve_issuer_ticker(cik: int) -> str | None:
     return value or None
 
 
-def _ownership_feed_row(filing) -> dict:
+def _ownership_feed_row(filing: Filing) -> dict[str, object]:
     """One feed row with issuer/filer detail; never raises (detail degrades to filer-only)."""
-    row = {
+    row: dict[str, object] = {
         "form": str(getattr(filing, "form", "")),
         "filed": str(getattr(filing, "filing_date", "")),
         "accession_no": getattr(filing, "accession_no", None),
@@ -610,7 +630,12 @@ def _ownership_feed_row(filing) -> dict:
     return row
 
 
-def _fetch_recent_ownership_filings(form_type, limit) -> dict:
+def _filed_key(row: dict[str, object]) -> str:
+    """Sort key for ownership-feed rows (filed ISO date; missing sorts first)."""
+    return str(row.get("filed", ""))
+
+
+def _fetch_recent_ownership_filings(form_type: str, limit: int) -> dict[str, object]:
     label = str(form_type or "both").strip().upper()
     if label in ("BOTH", "13D/G", "13DG"):
         forms = list(_OWNERSHIP_FEED_FORMS)
@@ -627,7 +652,7 @@ def _fetch_recent_ownership_filings(form_type, limit) -> dict:
     try:
         from edgar import get_current_filings
 
-        rows: list[dict] = []
+        rows: list[dict[str, object]] = []
         seen: set[str] = set()
         for form in forms:
             try:
@@ -641,12 +666,13 @@ def _fetch_recent_ownership_filings(form_type, limit) -> dict:
                     continue
                 seen.add(accession)
                 rows.append(_ownership_feed_row(filing))
-        rows.sort(key=lambda r: r.get("filed", ""), reverse=True)
+        rows.sort(key=_filed_key, reverse=True)
         rows = rows[:limit]
         for row in rows:
-            if row.get("issuer_cik"):
+            issuer_cik = row.get("issuer_cik")
+            if issuer_cik:
                 try:
-                    row["ticker"] = _resolve_issuer_ticker(int(row["issuer_cik"]))
+                    row["ticker"] = _resolve_issuer_ticker(int(str(issuer_cik)))
                 except (TypeError, ValueError):
                     row["ticker"] = None
         return {
@@ -662,14 +688,14 @@ def _fetch_recent_ownership_filings(form_type, limit) -> dict:
 
 
 
-def get_latest_earnings_release(ticker: str) -> dict:
+def get_latest_earnings_release(ticker: str) -> dict[str, object]:
     """Return the text of the latest 8-K Item 2.02 press release."""
     _ensure_init()
     key = f"earnings_release:{ticker}"
     return _cached_or_fetch(key, lambda: _fetch_latest_earnings_release(ticker))
 
 
-def _fetch_latest_earnings_release(ticker: str) -> dict:
+def _fetch_latest_earnings_release(ticker: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
@@ -685,7 +711,7 @@ def _fetch_latest_earnings_release(ticker: str) -> dict:
                 logger.debug("8-K %s has Item 2.02 but no press_releases attr", filing.accession_no)
                 continue
             text = press_releases[0].text()
-            out = {
+            out: dict[str, object] = {
                 "ticker": ticker,
                 "filed": str(filing.filing_date),
                 "accession_no": filing.accession_no,
@@ -704,11 +730,12 @@ def _fetch_latest_earnings_release(ticker: str) -> dict:
         tenq_filings = company.get_filings(form=["10-Q"])
         if tenq_filings:
             filing = tenq_filings[0]
+            assert isinstance(filing, Filing)
             tenq = filing.obj()
             mda = getattr(tenq, "management_discussion", None)
             if mda is not None:
                 text = mda if isinstance(mda, str) else getattr(mda, "text", lambda: str(mda))()
-                out = {
+                out: dict[str, object] = {
                     "ticker": ticker,
                     "filed": str(filing.filing_date),
                     "accession_no": filing.accession_no,
@@ -728,14 +755,14 @@ def _fetch_latest_earnings_release(ticker: str) -> dict:
         return _no_data(ticker, f"error retrieving earnings release: {e}")
 
 
-def diff_risk_factors(ticker: str) -> dict:
+def diff_risk_factors(ticker: str) -> dict[str, object]:
     """Unified diff of risk factors between the last two 10-Qs."""
     _ensure_init()
     key = f"risk_diff:{ticker}"
     return _cached_or_fetch(key, lambda: _fetch_diff_risk_factors(ticker))
 
 
-def _risk_text(filing) -> str | None:
+def _risk_text(filing: Filing) -> str | None:
     try:
         rf = getattr(filing.obj(), "risk_factors", None)
     except Exception:
@@ -746,13 +773,13 @@ def _risk_text(filing) -> str | None:
     return text if text and str(text).strip() else None
 
 
-def _fetch_diff_risk_factors(ticker: str) -> dict:
+def _fetch_diff_risk_factors(ticker: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
-        with_text: list = []
+        with_text: list[tuple[Filing, str]] = []
         for form in (["10-Q"], ["10-K"]):
-            for f in company.get_filings(form=form)[:8]:
+            for f in itertools.islice(company.get_filings(form=form), 8):
                 text = _risk_text(f)
                 if text is not None:
                     with_text.append((f, text))
@@ -768,7 +795,7 @@ def _fetch_diff_risk_factors(ticker: str) -> dict:
             fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
             lineterm="",
         ))
-        out = {
+        out: dict[str, object] = {
             "ticker": ticker,
             "latest_filed": str(latest.filing_date),
             "prior_filed": str(prior.filing_date),
@@ -794,14 +821,14 @@ def _fetch_diff_risk_factors(ticker: str) -> dict:
         return _no_data(ticker, f"error diffing risk factors: {e}")
 
 
-def get_financial_statements(ticker: str, statement_type: str) -> dict:
+def get_financial_statements(ticker: str, statement_type: str) -> dict[str, object]:
     """Return parsed financial statement (income, balance sheet, or cash flow)."""
     _ensure_init()
     key = f"financial_statements:{ticker}:{statement_type}"
     return _cached_or_fetch(key, lambda: _fetch_financial_statements(ticker, statement_type))
 
 
-def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
+def _fetch_financial_statements(ticker: str, statement_type: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
@@ -831,7 +858,7 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
         except Exception:
             text = str(stmt)
 
-        out = {
+        out: dict[str, object] = {
             "ticker": ticker,
             "statement_type": statement_type,
             "text": text,
@@ -847,17 +874,19 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict:
         return _no_data(ticker, f"error retrieving {statement_type}: {e}")
 
 
-def get_xbrl_facts(ticker: str, concept: str) -> dict:
+def get_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
     """Return XBRL financial facts for any metric (Revenue, NetIncome, etc.)."""
     _ensure_init()
     key = f"xbrl_facts:{ticker}:{concept}"
     return _cached_or_fetch(key, lambda: _fetch_xbrl_facts(ticker, concept))
 
 
-def _fetch_xbrl_facts(ticker: str, concept: str) -> dict:
+def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         facts = company.get_facts()
+        if facts is None:
+            return _no_data(ticker, "company facts not available")
         df = facts.to_dataframe()
         
         # Search for concept (case-insensitive, partial match)
@@ -888,7 +917,7 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict:
 
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)
-        out = {
+        out: dict[str, object] = {
             "ticker": ticker,
             "concept_searched": concept,
             "matching_concepts": result_list,

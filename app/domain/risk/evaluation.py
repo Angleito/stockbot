@@ -7,6 +7,7 @@ are structured ``EvaluationIssue`` codes; renderers turn them into prose.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -17,7 +18,7 @@ from .mandate import Mandate, RiskLimit
 
 UNKNOWN_SECTOR = "unknown_sector"
 
-_OPS = {
+_OPS: dict[str, Callable[[Decimal, Decimal], bool]] = {
     "<=": lambda actual, threshold: actual <= threshold,
     ">=": lambda actual, threshold: actual >= threshold,
 }

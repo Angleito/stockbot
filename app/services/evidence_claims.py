@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from app.domain.evidence.claims import build_claim, claim_content_hash
-from app.domain.evidence.models import EvidenceClaim, ResolutionStatus
+from app.domain.evidence.models import EvidenceClaim, ResolutionStatus, SourceClassification
 from app.domain.evidence.source_quality import classify_source
-from app.domain.market.securities import TickerAlias
+from app.domain.market.securities import SecurityResolution, TickerAlias
 
 from .evidence_resolution import resolve_subject
 
 
-def _resolution(res) -> ResolutionStatus:
+def _resolution(res: SecurityResolution) -> ResolutionStatus:
     if res.resolved:
         return ResolutionStatus.RESOLVED
     if res.resolution_method == "ambiguous":
@@ -35,9 +36,9 @@ def _domain(url: str | None) -> str | None:
 
 def build_evidence_claims(
     *,
-    reader_items: list[dict],
-    classify: Callable[[str], object] = classify_source,  # type: ignore[assignment]
-    resolve=None,
+    reader_items: list[dict[str, Any]],
+    classify: Callable[[str], SourceClassification] = classify_source,
+    resolve: Callable[..., SecurityResolution] | None = None,
     aliases_by_ticker: Callable[[str], Sequence[TickerAlias]] | None = None,
     name_to_ticker: Callable[[str], str | None] | None = None,
     as_of: datetime | None = None,
@@ -61,8 +62,8 @@ def build_evidence_claims(
         return resolve_subject(
             ticker=ticker,
             name=name,
-            aliases_by_ticker=aliases_by_ticker,  # type: ignore[arg-type]
-            name_to_ticker=name_to_ticker,  # type: ignore[arg-type]
+            aliases_by_ticker=aliases_by_ticker,
+            name_to_ticker=name_to_ticker,
             as_of=instant,
         )
 
@@ -71,7 +72,7 @@ def build_evidence_claims(
         if not isinstance(item, dict):
             continue
         source_url = item.get("source_url")
-        classification = classify(source_url or "")  # type: ignore[operator]
+        classification = classify(source_url or "")
         subject_ticker = item.get("subject_ticker")
         subject_name = item.get("subject_name")
         subj = _resolve(
@@ -102,9 +103,9 @@ def build_evidence_claims(
                 source_domain=item.get("source_domain")
                 if isinstance(item.get("source_domain"), str)
                 else _domain(source_url if isinstance(source_url, str) else None),
-                publisher=classification.publisher,  # type: ignore[attr-defined]
-                source_tier=classification.source_tier,  # type: ignore[attr-defined]
-                integrity=classification.integrity,  # type: ignore[attr-defined]
+                publisher=classification.publisher,
+                source_tier=classification.source_tier,
+                integrity=classification.integrity,
                 evidence_summary=item.get("evidence_summary")
                 if isinstance(item.get("evidence_summary"), str)
                 else None,
@@ -114,7 +115,7 @@ def build_evidence_claims(
     return claims
 
 
-def claim_to_enriched_dict(claim: EvidenceClaim) -> dict:
+def claim_to_enriched_dict(claim: EvidenceClaim) -> dict[str, Any]:
     """EvidenceClaim → gateway/render/persist dict (enums as values)."""
     return {
         "claim_id": claim.claim_id,

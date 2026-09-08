@@ -7,6 +7,7 @@ that returns the same value with an explicit note.
 
 import pandas as pd
 import pytest
+from typing import Any, override
 
 from app import edgar_client
 from app.sec.events8k import KNOWN_8K_ITEMS, parse_8k_events
@@ -15,59 +16,86 @@ from app.tools import TOOLS
 
 
 class _FakeFacts:
-    def to_dataframe(self):
+    def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame([
             {"concept": "dei:EntityCommonStockSharesOutstanding", "value": 1000, "period_end": "2026-08-01"},
         ])
 
 
 class _FakeCompany:
-    def __init__(self, ticker):
+    def __init__(self, ticker: str) -> None:
         self.ticker = ticker
         self.name = "Fake Corp"
         self.cik = "0000000001"
         self.sic_description = "Fake Industry"
 
-    def get_facts(self):
+    def get_facts(self) -> _FakeFacts:
         return _FakeFacts()
 
 
 class _FakeCache:
-    def __init__(self):
-        self.store = {}
+    def __init__(self) -> None:
+        self.store: dict[str, Any] = {}
 
-    def get(self, key, ttl=None):
+    def get(self, key: str, ttl: float | None = None) -> Any | None:
         return self.store.get(key)
 
-    def set(self, key, value):
+    def set(self, key: str, value: Any) -> None:
         self.store[key] = value
 
 
 @pytest.fixture(autouse=True)
-def fake_edgar(monkeypatch):
+def fake_edgar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(edgar_client, "Company", _FakeCompany)
     monkeypatch.setattr(edgar_client, "cache", _FakeCache())
+
+
+def _as_seq(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, dict)
+    return value
 
 
 def test_shares_outstanding_is_sec_shares_not_float():
     result = edgar_client.get_fundamentals("FAKE", "shares_outstanding")
     assert result["shares_outstanding"] == 1000
     assert result["as_of"] == "2026-08-01"
-    assert "not public float" in result["note"]
+    note = result["note"]
+    assert isinstance(note, str)
+    assert "not public float" in note
 
 
 def test_shares_float_alias_returns_shares_outstanding():
     result = edgar_client.get_fundamentals("FAKE", "shares_float")
     assert result["shares_outstanding"] == 1000
-    assert "not public float" in result["note"]
+    note = result["note"]
+    assert isinstance(note, str)
+    assert "not public float" in note
 
 
 def test_tool_schema_offers_shares_outstanding_not_shares_float():
-    schema = next(item for item in TOOLS if item["function"]["name"] == "get_fundamentals")
-    enum = schema["function"]["parameters"]["properties"]["metric"]["enum"]
+    schema = next(
+        item for item in TOOLS
+        if isinstance(item, dict)
+        and isinstance(item["function"], dict)
+        and item["function"]["name"] == "get_fundamentals"
+    )
+    func = schema["function"]
+    assert isinstance(func, dict)
+    params = func["parameters"]
+    assert isinstance(params, dict)
+    props = params["properties"]
+    assert isinstance(props, dict)
+    metric = props["metric"]
+    assert isinstance(metric, dict)
+    enum = metric["enum"]
+    assert isinstance(enum, list)
     assert "shares_outstanding" in enum
     assert "shares_float" not in enum
-    assert "not public float" in schema["function"]["description"]
+    desc = func["description"]
+    assert isinstance(desc, str)
+    assert "not public float" in desc
 
 
 _EPS_ROWS = [
@@ -84,7 +112,7 @@ _EPS_ROWS = [
 ]
 
 
-def _eps_facts():
+def _eps_facts() -> pd.DataFrame:
     rows = []
     for i, (value, start, end, period, year) in enumerate(_EPS_ROWS):
         concept = "us-gaap:EarningsPerShareDiluted"
@@ -99,25 +127,27 @@ def _eps_facts():
 
 
 class _EpsFakeCompany(_FakeCompany):
-    def get_facts(self):
+    @override
+    def get_facts(self) -> _EpsFakeFacts:
         return _EpsFakeFacts(df=_eps_facts())
 
 
-class _EpsFakeFacts:
-    def __init__(self, df):
+class _EpsFakeFacts(_FakeFacts):
+    def __init__(self, df: pd.DataFrame) -> None:
         self._df = df
 
-    def to_dataframe(self):
+    @override
+    def to_dataframe(self) -> pd.DataFrame:
         return self._df
 
 
-def test_eps_ttm_uses_quarterly_facts_and_derives_q4(monkeypatch):
+def test_eps_ttm_uses_quarterly_facts_and_derives_q4(monkeypatch: pytest.MonkeyPatch):
     """TTM must not sum YTD/full-year facts (old bug: NVDA TTM was 8.13
     instead of 6.53) and must derive Q4 from FY_total - YTD_through_Q3."""
     monkeypatch.setattr(edgar_client, "Company", _EpsFakeCompany)
     monkeypatch.setattr(edgar_client, "cache", _FakeCache())
     result = edgar_client.get_fundamentals("FAKE", "eps")
-    by_end = {q["period_end"]: q["eps_diluted"] for q in result["quarterly_eps"]}
+    by_end = {q["period_end"]: q["eps_diluted"] for q in _as_seq(result["quarterly_eps"])}
     assert by_end["2025-07-27"] == 1.08
     assert by_end["2025-10-26"] == 1.30
     assert by_end["2026-01-25"] == 1.76  # derived: 4.90 - 3.14

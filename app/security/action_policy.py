@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from ..redact import _ACCOUNT_ID_RE, _BEARER_RE, _JWT_RE, _SK_OR_V1_RE
 from .context import RunSecurityContext
@@ -71,11 +72,11 @@ TOOL_DOMAINS: dict[str, str] = {
     "get_macro_context": "financial_research",
     "search_company_patents": "financial_research",
     # Bounded local thesis operations (RESEARCH-scoped, never broker data).
-    "thesis_create": "thesis_write",
-    "thesis_show": "thesis_read",
-    "thesis_refine": "thesis_write",
-    "thesis_watch": "thesis_write",
-    "thesis_journal": "thesis_write",
+    "thesis_create": "financial_research",
+    "thesis_show": "financial_research",
+    "thesis_refine": "financial_research",
+    "thesis_watch": "financial_research",
+    "thesis_journal": "financial_research",
     # Robinhood portfolio data (private).
     "evaluate_mandate": "portfolio_read",
     "get_portfolio_snapshot": "portfolio_read",
@@ -114,7 +115,7 @@ class EgressDecision:
 
 
 def authorize_tool_call(
-    name: str, arguments: dict, run_security: RunSecurityContext
+    name: str, arguments: dict[str, Any], run_security: RunSecurityContext
 ) -> tuple[bool, str]:
     """Gate one tool call against intent plus the explicit session grant."""
     domain = TOOL_DOMAINS.get(name)

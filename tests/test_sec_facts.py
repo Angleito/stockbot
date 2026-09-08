@@ -7,6 +7,8 @@ dispatch behavior.  Live paths are monkeypatched at the edgar_client seam.
 """
 
 from datetime import date
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import pytest
 
@@ -22,13 +24,13 @@ RETRIEVED_AT = "2026-08-01T00:00:00Z"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolated data root for every service query."""
     monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     return tmp_path
 
 
-def _seed_ticker(tmp_path, cik, ticker, retrieved_at=RETRIEVED_AT):
+def _seed_ticker(tmp_path: Path, cik: int, ticker: str, retrieved_at: str = RETRIEVED_AT) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
         retrieved_at=retrieved_at, content_hash=f"tickers-{cik}",
@@ -37,19 +39,27 @@ def _seed_ticker(tmp_path, cik, ticker, retrieved_at=RETRIEVED_AT):
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _seed_facts(tmp_path, cik, diluted=(), basic=(), shares=()):
-    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {}}
+def _seed_facts(
+    tmp_path: Path,
+    cik: int,
+    # SEC companyfacts JSON shapes (external boundary); normalized inward below.
+    diluted: Iterable[Mapping[str, object]] = (),
+    basic: Iterable[Mapping[str, object]] = (),
+    shares: Iterable[Mapping[str, object]] = (),
+) -> None:
+    facts: dict[str, object] = {}
+    payload: dict[str, object] = {"cik": cik, "entityName": f"CIK{cik}", "facts": facts}
     if shares:
-        payload["facts"]["dei"] = {
+        facts["dei"] = {
             "EntityCommonStockSharesOutstanding": {"units": {"shares": list(shares)}},
         }
-    us_gaap = {}
+    us_gaap: dict[str, object] = {}
     if diluted:
         us_gaap["EarningsPerShareDiluted"] = {"units": {"USD/shares": list(diluted)}}
     if basic:
         us_gaap["EarningsPerShareBasic"] = {"units": {"USD/shares": list(basic)}}
     if us_gaap:
-        payload["facts"]["us-gaap"] = us_gaap
+        facts["us-gaap"] = us_gaap
     datasets = normalize_sec_company_facts(
         payload, retrieved_at=RETRIEVED_AT, content_hash=f"facts-{cik}",
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
@@ -59,12 +69,12 @@ def _seed_facts(tmp_path, cik, diluted=(), basic=(), shares=()):
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _eps_fact(val, start, end, fy, fp, filed, accn):
+def _eps_fact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str):
     return {"start": start, "end": end, "val": val, "accn": accn,
             "fy": fy, "fp": fp, "filed": filed}
 
 
-def _shares_fact(val, end, filed, accn):
+def _shares_fact(val: int, end: str, filed: str, accn: str):
     return {"end": end, "val": val, "accn": accn, "filed": filed}
 
 
@@ -84,14 +94,14 @@ _NVDA_FACTS = [
 _NVDA_BASIC = (0.77, 2.40)
 
 
-def _seed_nvda(tmp_path):
+def _seed_nvda(tmp_path: Path) -> None:
     _seed_ticker(tmp_path, NVDA_CIK, "NVDA")
     diluted = [f for f in _NVDA_FACTS if f["val"] not in _NVDA_BASIC]
     basic = [f for f in _NVDA_FACTS if f["val"] in _NVDA_BASIC]
     _seed_facts(tmp_path, NVDA_CIK, diluted=diluted, basic=basic)
 
 
-def _live_eps(ticker="NVDA"):
+def _live_eps(ticker: str = "NVDA"):
     return {
         "ticker": ticker,
         "quarterly_eps": [
@@ -103,7 +113,7 @@ def _live_eps(ticker="NVDA"):
     }
 
 
-def _live_shares(ticker="NVDA"):
+def _live_shares(ticker: str = "NVDA"):
     return {
         "ticker": ticker, "shares_outstanding": 999.0, "as_of": "2026-01-01",
         "source": "SEC EDGAR company facts",
@@ -111,7 +121,7 @@ def _live_shares(ticker="NVDA"):
     }
 
 
-def test_eps_store_parity_with_live_algorithm(store):
+def test_eps_store_parity_with_live_algorithm(store: Path) -> None:
     _seed_nvda(store)
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
     assert result["data_source"] == "store"
@@ -131,7 +141,7 @@ def test_eps_store_parity_with_live_algorithm(store):
     assert result["source_label"] == "SEC EDGAR company facts (Basic & Diluted EPS)"
 
 
-def test_eps_store_restatement_uses_true_filed_at_not_fiscal_year_proxy(store):
+def test_eps_store_restatement_uses_true_filed_at_not_fiscal_year_proxy(store: Path) -> None:
     """The fiscal-year proxy (live _dedup_latest) would pick the fy2027
     version; the store must pick the true latest filed_at (fy2026, 1.30)."""
     _seed_ticker(store, NVDA_CIK, "NVDA")
@@ -147,7 +157,7 @@ def test_eps_store_restatement_uses_true_filed_at_not_fiscal_year_proxy(store):
     assert result["ttm_eps_diluted"] == 6.53
 
 
-def test_eps_store_as_of_gating_excludes_later_restatement(store):
+def test_eps_store_as_of_gating_excludes_later_restatement(store: Path) -> None:
     """A restatement filed after as_of must not change an earlier as_of."""
     _seed_ticker(store, NVDA_CIK, "NVDA")
     diluted = [
@@ -177,7 +187,7 @@ def test_derive_q4_uses_restated_fy_total():
     concept = sec_facts.DILUTED_EPS_CONCEPT
     fy_end = date(2026, 1, 25)
 
-    def _row(start, end, val, filed, accn):
+    def _row(start: str, end: str, val: float, filed: str, accn: str):
         return {
             "concept": concept, "period_start": start, "period_end": end,
             "value": val, "filed_at": filed, "accession": accn,
@@ -201,23 +211,30 @@ def test_derive_q4_uses_restated_fy_total():
 # ---------------------------------------------------------------------------
 
 
-def test_eps_live_fallback_when_store_empty(store, monkeypatch):
+def test_eps_live_fallback_when_store_empty(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")  # resolved entity, no facts
-    calls = []
+    calls: list[tuple[str, str]] = []
+
+    def _fake_get(ticker: str, metric: str):
+        calls.append((ticker, metric))
+        return _live_eps()
+
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals",
-        lambda ticker, metric: calls.append((ticker, metric)) or _live_eps(),
+        sec_facts.edgar_client, "get_fundamentals", _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2025-01-15")
     assert result["error_type"] == "pit_data_unavailable"
     assert calls == []
 
 
-def test_eps_omitted_as_of_defaults_to_today_live(store, monkeypatch):
+def test_eps_omitted_as_of_defaults_to_today_live(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")
+
+    def _fake_get(ticker: str, metric: str):
+        return _live_eps(ticker)
+
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals",
-        lambda ticker, metric: _live_eps(ticker),
+        sec_facts.edgar_client, "get_fundamentals", _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps")
     assert result["data_source"] == "live"
@@ -225,24 +242,30 @@ def test_eps_omitted_as_of_defaults_to_today_live(store, monkeypatch):
     assert "requested_as_of" not in result
 
 
-def test_ambiguous_ticker_skips_store_never_guesses(store, monkeypatch):
+def test_ambiguous_ticker_skips_store_never_guesses(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, 1, "NVDA")
     _seed_ticker(store, 2, "NVDA")
     _seed_facts(store, 1, diluted=[_eps_fact(1.0, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-05-01", "c1")])
-    calls = []
+    calls: list[str] = []
+
+    def _fake_get(ticker: str, metric: str):
+        calls.append(metric)
+        return _live_eps()
+
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals",
-        lambda ticker, metric: calls.append(metric) or _live_eps(),
+        sec_facts.edgar_client, "get_fundamentals", _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
     assert result["error_type"] == "pit_data_unavailable"
     assert calls == []
 
 
-def test_invalid_as_of_returns_tool_argument_error(store, monkeypatch):
+def test_invalid_as_of_returns_tool_argument_error(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_get(ticker: str, metric: str):
+        return _live_eps(ticker)
+
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals",
-        lambda ticker, metric: _live_eps(ticker),
+        sec_facts.edgar_client, "get_fundamentals", _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2025/01/15")
     assert result["error"] == "as_of must be a date in YYYY-MM-DD format"
@@ -254,7 +277,7 @@ def test_invalid_as_of_returns_tool_argument_error(store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_shares_outstanding_store_latest_period_wins(store):
+def test_shares_outstanding_store_latest_period_wins(store: Path) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")
     _seed_facts(store, NVDA_CIK, shares=[
         _shares_fact(1000, "2025-10-26", "2025-11-19", "s1"),
@@ -272,7 +295,7 @@ def test_shares_outstanding_store_latest_period_wins(store):
     assert result["source_label"] == "SEC EDGAR company facts"
 
 
-def test_shares_float_alias_preserved(store):
+def test_shares_float_alias_preserved(store: Path) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")
     _seed_facts(store, NVDA_CIK, shares=[_shares_fact(1000, "2025-10-26", "2025-11-19", "s1")])
     result = sec_facts.get_fundamentals("NVDA", "shares_float", as_of="2026-08-10")
@@ -281,11 +304,14 @@ def test_shares_float_alias_preserved(store):
     assert result["data_source"] == "store"
 
 
-def test_shares_live_fallback_empty_store(store, monkeypatch):
+def test_shares_live_fallback_empty_store(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")
+
+    def _fake_get(ticker: str, metric: str):
+        return _live_shares(ticker)
+
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals",
-        lambda ticker, metric: _live_shares(ticker),
+        sec_facts.edgar_client, "get_fundamentals", _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
     assert result["error_type"] == "pit_data_unavailable"
@@ -296,9 +322,9 @@ def test_shares_live_fallback_empty_store(store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store, monkeypatch):
-    calls = []
-    def _fake(ticker, metric):
+def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    def _fake(ticker: str, metric: str):
         calls.append(metric)
         return {
             "ticker": ticker, "balance_sheet": {"totalAssets": 1.0},
@@ -320,13 +346,16 @@ def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store, mo
     assert "requested_as_of" not in live_bs
 
 
-def test_get_xbrl_facts_always_live_enveloped(store, monkeypatch):
-    monkeypatch.setattr(sec_facts.edgar_client, "get_xbrl_facts", lambda ticker, concept: {
-        "ticker": ticker, "concept_searched": concept,
-        "matching_concepts": [{"concept": "Revenue", "value": 1.0, "period_end": "2026-01-25",
-                               "fiscal_period": "FY"}],
-        "count": 1, "source": "SEC EDGAR XBRL facts",
-    })
+def test_get_xbrl_facts_always_live_enveloped(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_facts(ticker: str, concept: str):
+        return {
+            "ticker": ticker, "concept_searched": concept,
+            "matching_concepts": [{"concept": "Revenue", "value": 1.0, "period_end": "2026-01-25",
+                                   "fiscal_period": "FY"}],
+            "count": 1, "source": "SEC EDGAR XBRL facts",
+        }
+
+    monkeypatch.setattr(sec_facts.edgar_client, "get_xbrl_facts", _fake_facts)
     result = sec_facts.get_xbrl_facts("NVDA", "Revenue")
     assert result["source"] == "sec"
     assert result["metric"] == "concept"
@@ -344,11 +373,31 @@ def test_get_xbrl_facts_always_live_enveloped(store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_tool_schema_and_dispatch(store, monkeypatch):
-    schema = next(item for item in TOOLS if item["function"]["name"] == "get_fundamentals")
-    properties = schema["function"]["parameters"]["properties"]
-    assert properties["as_of"]["type"] == "string"
-    assert "store-backed for eps/shares_outstanding" in properties["as_of"]["description"]
+def _is_get_fundamentals_schema(item: object) -> bool:
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("function"), dict)
+        and item["function"].get("name") == "get_fundamentals"
+    )
+
+
+def test_tool_schema_and_dispatch(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # TOOLS is untyped nested tool-schema data (app/tools.py); validate the
+    # get_fundamentals schema shape at this boundary before asserting on it.
+    candidates = [item for item in TOOLS if _is_get_fundamentals_schema(item)]
+    assert len(candidates) == 1
+    function = candidates[0]["function"]
+    assert isinstance(function, dict)
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    properties = parameters["properties"]
+    assert isinstance(properties, dict)
+    as_of_schema = properties["as_of"]
+    assert isinstance(as_of_schema, dict)
+    assert as_of_schema["type"] == "string"
+    description = as_of_schema["description"]
+    assert isinstance(description, str)
+    assert "store-backed for eps/shares_outstanding" in description
 
     _seed_nvda(store)
     result = execute_tool(
@@ -360,7 +409,7 @@ def test_tool_schema_and_dispatch(store, monkeypatch):
     assert result["ttm_eps_diluted"] == 6.53
 
 
-def test_render_sec_facts_envelope(store):
+def test_render_sec_facts_envelope(store: Path) -> None:
     _seed_nvda(store)
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
     text = render_tool_result(result)

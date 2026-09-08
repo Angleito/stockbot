@@ -14,20 +14,39 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import TOOLS  # noqa: E402
-from scripts.verify_tool_registry import get_registry_sets, registry_errors  # noqa: E402
+from app.tools import TOOLS, execute_tool  # noqa: E402
+from app.policy import Capability, RequestContext  # noqa: E402
+from scripts.verify_tool_registry import get_registry_sets, registry_errors, tool_schema_function, tool_schema_name  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 180
 DEFAULT_REPETITIONS = 3
 POLL_S = 2
+THESIS_ID_PLACEHOLDER = "thesis-placeholder"
+THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
 
 
-VERIFY_CASES: dict[str, dict] = {
+def ensure_thesis_fixture(store: Path) -> str:
+    """Create one verification thesis in the batch store; returns its ID."""
+    ctx = RequestContext(principal_id="verify", capabilities=frozenset({Capability.RESEARCH}), data_root=store)
+    out = execute_tool("thesis_create", {"user_thesis": "Verify wiring: NVDA AI demand stays strong."}, "verify", context=ctx)
+    if not isinstance(out, dict) or not out.get("thesis_id"):
+        raise RuntimeError(f"thesis fixture setup failed: {str(out)[:300]}")
+    return str(out["thesis_id"])
+
+
+class _VerifyCase(TypedDict):
+    arguments: dict[str, object]
+    natural_question: str
+
+
+VERIFY_CASES: dict[str, _VerifyCase] = {
     "get_fundamentals": {"arguments": {"ticker": "AAPL", "metric": "eps"}, "natural_question": "What is Apple's EPS?"},
     "find_sec_entities": {"arguments": {"query": "Apple"}, "natural_question": "Find SEC entities matching Apple."},
     "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "Full-text search SEC filing documents for Apple risk factor language."},
@@ -71,22 +90,33 @@ VERIFY_CASES: dict[str, dict] = {
     "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Investigate the Stanley discovery candidate."},
     "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "Show macro context for California."},
     "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "Show recent Apple patent publications."},
+    "thesis_create": {"arguments": {"user_thesis": "I think NVDA AI demand will stay strong."}, "natural_question": "Record my thesis that NVDA AI demand will stay strong."},
+    "thesis_show": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "Show thesis thesis-placeholder with its assessment and watch rules."},
+    "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_question": "Refine thesis thesis-placeholder: AI datacenter capex keeps growing."},
+    "thesis_watch": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "List the watch rules for thesis thesis-placeholder."},
+    "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_question": "Journal on thesis thesis-placeholder: still watching NVDA datacenter demand."},
 }
 
+def tool_schemas() -> dict[str, dict[str, object]]:
+    schemas: dict[str, dict[str, object]] = {}
+    for raw in TOOLS:
+        function = tool_schema_function(raw)
+        parameters = function.get("parameters", {})
+        schemas[tool_schema_name(raw)] = dict(parameters) if isinstance(parameters, Mapping) else {}
+    return schemas
 
-def tool_schemas() -> dict[str, dict]:
-    return {t["function"]["name"]: t["function"].get("parameters", {}) for t in TOOLS}
 
-
-def resolve_arguments(tool: str, schemas: dict[str, dict] | None = None) -> dict:
+def resolve_arguments(tool: str, schemas: dict[str, dict[str, object]] | None = None) -> dict[str, object]:
     schemas = schemas if schemas is not None else tool_schemas()
     params = schemas.get(tool, {})
-    required = params.get("required") or []
+    required_raw = params.get("required")
+    required: list[object] = list(required_raw) if isinstance(required_raw, list) else []
     case = VERIFY_CASES.get(tool)
     if case is None:
         if required:
             raise LookupError(f"missing verification fixture for tool '{tool}' (required={required})")
-        return {}
+        empty: dict[str, object] = {}
+        return empty
     args = dict(case.get("arguments", {}))
     missing = [k for k in required if k not in args]
     if missing:
@@ -98,7 +128,7 @@ def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]
     return [(t, n) for t in tool_names for n in range(1, repetitions + 1)]
 
 
-def build_explicit_prompt(tool: str, args: dict) -> str:
+def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
     return (
         f"You are verifying Stockbot tool wiring. Call the `{tool}` tool "
         f"with exactly these arguments: {json.dumps(args, sort_keys=True)}. "
@@ -107,9 +137,10 @@ def build_explicit_prompt(tool: str, args: dict) -> str:
     )
 
 
-def build_attempt_prompt(tool: str, args: dict, attempt: int) -> str:
+def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
     if attempt == 2:
-        natural = VERIFY_CASES.get(tool, {}).get("natural_question")
+        case = VERIFY_CASES.get(tool)
+        natural = case["natural_question"] if case is not None else ""
         if natural:
             return natural
         return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
@@ -119,14 +150,17 @@ def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]
 
 
 
-def check_discovery(describe: dict, doctor: dict) -> str | None:
+def check_discovery(describe: Mapping[str, object], doctor: Mapping[str, object]) -> str | None:
     if doctor.get("bridge_ok") is not True:
         return "bridge doctor not ok"
-    d_tools = describe.get("tools") or []
-    d_names = sorted(t["function"]["name"] for t in d_tools)
+    raw_tools = describe.get("tools")
+    d_tools: list[Mapping[str, object]] = [t for t in raw_tools if isinstance(t, Mapping)] if isinstance(raw_tools, list) else []
+    d_names = sorted(tool_schema_name(t) for t in d_tools)
     if doctor.get("tool_count") != len(d_tools):
         return f"doctor/describe count skew: doctor={doctor.get('tool_count')} describe={len(d_tools)}"
-    if sorted(doctor.get("tool_names") or []) != d_names:
+    raw_names = doctor.get("tool_names")
+    doc_names: list[str] = sorted(n for n in raw_names if isinstance(n, str)) if isinstance(raw_names, list) else []
+    if doc_names != d_names:
         return "doctor/describe tool_names mismatch"
     return None
 
@@ -192,7 +226,7 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
         return False, f"DB read failed: {exc}"
 
 
-def discover() -> tuple[dict, dict]:
+def discover() -> tuple[dict[str, object], dict[str, object]]:
     proc = subprocess.Popen(
         [sys.executable, "scripts/pi_bridge.py"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -202,10 +236,11 @@ def discover() -> tuple[dict, dict]:
         proc.stdin.write(json.dumps({"id": "discover-1", "op": "describe"}) + "\n")
         proc.stdin.write(json.dumps({"id": "discover-2", "op": "doctor"}) + "\n")
         proc.stdin.flush()
-        first = json.loads(proc.stdout.readline() or "{}")
-        second = json.loads(proc.stdout.readline() or "{}")
+        first: dict[str, object] = json.loads(proc.stdout.readline() or "{}")
+        second: dict[str, object] = json.loads(proc.stdout.readline() or "{}")
         by_id = {first.get("id"): first, second.get("id"): second}
-        return by_id.get("discover-1", {}), by_id.get("discover-2", {})
+        fallback: dict[str, object] = {}
+        return by_id.get("discover-1", fallback), by_id.get("discover-2", fallback)
     finally:
         try:
             assert proc.stdin is not None
@@ -256,7 +291,7 @@ def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, 
     out_log = attempt_dir / f"{attempt_dir.name}.pi.log"
     err_log = attempt_dir / f"{attempt_dir.name}.stderr.log"
     env = dict(os.environ, RUNS_DB_PATH=str(db_path))
-    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", EXTENSION, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--extension", EXTENSION, "--", prompt]
     with open(out_log, "w") as out_f, open(err_log, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env, start_new_session=True)
         deadline = time.monotonic() + TIMEOUT_S
@@ -314,7 +349,8 @@ def main() -> int:
     if err:
         print(f"discovery failed: {err}", file=sys.stderr)
         return 1
-    describe_names = sorted(t["function"]["name"] for t in (describe.get("tools") or []))
+    raw_tools = describe.get("tools")
+    describe_names: list[str] = sorted(tool_schema_name(t) for t in raw_tools if isinstance(t, Mapping)) if isinstance(raw_tools, list) else []
     if debug:
         assert args.tool is not None
         if args.tool not in describe_names:
@@ -339,7 +375,21 @@ def main() -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     root = Path("data/verify") / batch
     cwd = Path.cwd()
-    results: dict[str, list[dict]] = {}
+    # Contain live side effects (e.g. thesis_create) in the batch dir; never
+    # the operator's durable store. run_pi children inherit this env.
+    store = root / "store"
+    os.environ.setdefault("STOCKBOT_DATA_DIR", str(store.resolve()))
+    if any(t in THESIS_ID_TOOLS for t in tool_names):
+        try:
+            fixture_id = ensure_thesis_fixture(store.resolve())
+        except Exception as exc:
+            print(f"thesis fixture setup failed: {exc}", file=sys.stderr)
+            return 1
+        for t in tool_names:
+            args = case_args.get(t, {})
+            if args.get("id") == THESIS_ID_PLACEHOLDER:
+                args["id"] = fixture_id
+    results: dict[str, list[dict[str, object]]] = {}
     total = passed = procs = 0
     failed_tools: list[str] = []
     for tool in tool_names:
@@ -363,7 +413,9 @@ def main() -> int:
         if tool_ok:
             for rec in results[tool]:
                 try:
-                    Path(rec["db"]).unlink(missing_ok=True)
+                    db_value = rec.get("db")
+                    if isinstance(db_value, str):
+                        Path(db_value).unlink(missing_ok=True)
                 except Exception:
                     pass
         else:

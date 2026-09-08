@@ -18,7 +18,7 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 
 DEFAULT_TOKEN_PATH = Path.home() / ".stockbot" / "robinhood" / "oauth.json"
@@ -116,11 +116,12 @@ class LoopbackCallback:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, format, *args):  # noqa: A002 - stdlib handler API
+            @override
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib handler API
                 return
 
         self._handler_type = Handler
-        self.server = None
+        self.server: http.server.ThreadingHTTPServer | None = None
         self.redirect_uri = (
             f"http://{self.host}:{self.requested_port}{self.path}"
             if self.requested_port
@@ -275,7 +276,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
             tokens = state.get("tokens")
             return OAuthToken.model_validate(tokens) if tokens else None
 
-        async def set_tokens(self, tokens):
+        async def set_tokens(self, tokens: Any) -> None:
             state = state_for_origin()
             state["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
             state["issued_at"] = datetime.now(timezone.utc).isoformat()
@@ -286,7 +287,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
             info = state.get("client_info")
             return OAuthClientInformationFull.model_validate(info) if info else None
 
-        async def set_client_info(self, client_info):
+        async def set_client_info(self, client_info: Any) -> None:
             state = state_for_origin()
             state["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
             save_tokens(state, path)

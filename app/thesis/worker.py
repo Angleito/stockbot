@@ -17,16 +17,13 @@ from app.thesis import monitor
 log = logging.getLogger(__name__)
 
 
-def run_monitor_once(repository: Any, thesis_id: str, source_services: Any = None,
-                     gateway: Any = None, request_context: Any = None, *,
+def run_monitor_once(repository: Any, thesis_id: str, source_services: Any = None, *,
                      known_at: str | None = None) -> Any:
     """One monitor iteration: passthrough to :func:`monitor.tick`."""
-    return monitor.tick(repository, thesis_id, source_services, gateway,
-                        request_context, known_at=known_at)
+    return monitor.tick(repository, thesis_id, source_services, known_at=known_at)
 
 
 def monitor_loop(*, repository: Any, thesis_id: str, interval_seconds: float = 900,
-                 gateway: Any = None, request_context: Any = None,
                  source_services: Any = None,
                  known_at_fn: Callable[[], str] | None = None,
                  stop_event: threading.Event | None = None,
@@ -39,7 +36,7 @@ def monitor_loop(*, repository: Any, thesis_id: str, interval_seconds: float = 9
     while not stop.is_set():
         try:
             outcome = run_monitor_once(
-                repository, thesis_id, source_services, gateway, request_context,
+                repository, thesis_id, source_services,
                 known_at=known_at_fn() if known_at_fn else None)
         except ValueError as exc:
             if "closed" in str(exc).lower():

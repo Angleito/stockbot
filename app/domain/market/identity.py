@@ -10,7 +10,7 @@ resolver derives sec:cik security ids itself.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Sequence, overload
 
 from .ids import sec_security_id
 from .securities import SecurityResolution, TickerAlias
@@ -18,6 +18,10 @@ from .securities import SecurityResolution, TickerAlias
 _NEVER = datetime.min.replace(tzinfo=timezone.utc)
 
 
+@overload
+def _parse_iso(value: None) -> None: ...
+@overload
+def _parse_iso(value: str) -> datetime: ...
 def _parse_iso(value: str | None) -> datetime | None:
     """Parse a persisted ISO-8601 value to an aware UTC datetime.
 

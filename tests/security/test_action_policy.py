@@ -8,7 +8,7 @@ from app.security.context import RunSecurityContext, SessionAuthorization, class
 from app.tools import PORTFOLIO_AUTHORIZED_TOOLS, TOOL_CAPABILITIES
 
 
-def _run_security(user_turns):
+def _run_security(user_turns: list[str]) -> RunSecurityContext:
     return RunSecurityContext(
         original_intent=classify_intent(user_turns),
         capabilities=frozenset({"research", "portfolio_read"}),

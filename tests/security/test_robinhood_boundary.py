@@ -13,7 +13,13 @@ from app.tools import TOOLS
 
 
 def test_no_trading_tool_schemas_in_registry():
-    names = [tool["function"]["name"] for tool in TOOLS]
+    names: list[str] = []
+    for tool in TOOLS:
+        function = tool.get("function")
+        assert isinstance(function, dict)
+        name = function.get("name")
+        assert isinstance(name, str)
+        names.append(name)
     for name in names:
         lowered = name.lower()
         assert not is_blocked(lowered), f"trading-like tool in registry: {name}"

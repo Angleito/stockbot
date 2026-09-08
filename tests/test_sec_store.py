@@ -12,8 +12,9 @@ from app.storage import raw_archive
 URL = "https://www.sec.gov/Archives/edgar/data/1234567/000000000025000001/"
 
 
-def _filing(accession, form="10-K", filed_at="2024-02-01", known_at="2024-02-01",
-            amendment_of=None, is_amendment=False):
+def _filing(accession: str, form: str = "10-K", filed_at: str = "2024-02-01",
+            known_at: str = "2024-02-01", amendment_of: str | None = None,
+            is_amendment: bool = False) -> Filing:
     return Filing(
         accession_no=accession,
         form=form,
@@ -32,7 +33,7 @@ def _filing(accession, form="10-K", filed_at="2024-02-01", known_at="2024-02-01"
     )
 
 
-def test_rearchive_same_bytes_is_idempotent(tmp_path):
+def test_rearchive_same_bytes_is_idempotent(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
     filing = _filing("0000000000-25-000001")
     payloads = {"primary": b"<html>hi</html>", "submission": b'{"x": 1}'}
@@ -49,7 +50,7 @@ def test_rearchive_same_bytes_is_idempotent(tmp_path):
     assert find_archived("0000000000-25-000001", "primary", root=tmp_path / "elsewhere") is None
 
 
-def test_store_two_accessions_and_point_in_time(tmp_path):
+def test_store_two_accessions_and_point_in_time(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
     original = _filing("0000000000-25-000001", filed_at="2024-02-01", known_at="2024-02-01")
     amendment = _filing("0000000000-25-000002", form="10-K/A", filed_at="2024-03-01",
@@ -79,14 +80,14 @@ def test_store_two_accessions_and_point_in_time(tmp_path):
     assert len(query_filings(cik=1234567, forms=["10-K"], root=tmp_path)) == 1
 
 
-def test_query_filings_rejects_non_date_as_of(tmp_path):
+def test_query_filings_rejects_non_date_as_of(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         query_filings(as_of="recently", root=tmp_path)
     with pytest.raises(ValueError):
         query_filings(as_of="2024/02/01", root=tmp_path)
 
 
-def test_archive_document_revisions_retained(tmp_path):
+def test_archive_document_revisions_retained(tmp_path: Path) -> None:
     import warnings
 
     from app.sec.archive import archive_sec_document, find_archived_document
@@ -112,7 +113,7 @@ def test_archive_document_revisions_retained(tmp_path):
     assert again.sha256 == second.sha256
 
 
-def test_search_ledger_round_trip(tmp_path):
+def test_search_ledger_round_trip(tmp_path: Path) -> None:
     from app.sec.models import (
         SECSearchRequest,
         SECTextHit,
@@ -146,8 +147,11 @@ def test_search_ledger_round_trip(tmp_path):
     )
     assert written == {"searches": 1, "attempts": 1, "hits": 1}
     search = query_search("s9", root=tmp_path)
+    assert search is not None
     assert search["coverage_status"] == "complete"
-    assert "job-1" in search["pending_jobs_json"]
+    pending_jobs_json = search["pending_jobs_json"]
+    assert isinstance(pending_jobs_json, str)
+    assert "job-1" in pending_jobs_json
     attempts = query_attempts("s9", root=tmp_path)
     assert [a["backend"] for a in attempts] == ["efts"]
     assert attempts[0]["pit_basis"] == "known_at"
@@ -157,7 +161,7 @@ def test_search_ledger_round_trip(tmp_path):
     assert query_search("missing", root=tmp_path) is None
 
 
-def test_coverage_partition_lifecycle(tmp_path):
+def test_coverage_partition_lifecycle(tmp_path: Path) -> None:
     from app.sec.store import (
         is_partition_covered,
         query_coverage,
@@ -172,7 +176,7 @@ def test_coverage_partition_lifecycle(tmp_path):
     assert rows and rows[0]["status"] == "complete"
 
 
-def test_backfill_jobs_idempotent_queue_and_resume(tmp_path):
+def test_backfill_jobs_idempotent_queue_and_resume(tmp_path: Path) -> None:
     from app.sec.store import (
         claim_job,
         complete_job,
@@ -188,15 +192,20 @@ def test_backfill_jobs_idempotent_queue_and_resume(tmp_path):
     assert enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31",
                                 root=tmp_path) == first
     assert [j["id"] for j in list_jobs(root=tmp_path)] == [first]
-    assert claim_job(root=tmp_path)["status"] == "running"
-    assert complete_job(first, root=tmp_path)["status"] == "complete"
+    claimed = claim_job(root=tmp_path)
+    assert claimed is not None and claimed["status"] == "running"
+    completed = complete_job(first, root=tmp_path)
+    assert completed is not None and completed["status"] == "complete"
     assert claim_job(root=tmp_path) is None  # complete jobs are not auto-claimed
-    assert fail_job(first, "boom", root=tmp_path)["status"] == "failed"
-    assert requeue_job(first, root=tmp_path)["status"] == "queued"
-    assert get_job(first, root=tmp_path)["status"] == "queued"
+    failed = fail_job(first, "boom", root=tmp_path)
+    assert failed is not None and failed["status"] == "failed"
+    requeued = requeue_job(first, root=tmp_path)
+    assert requeued is not None and requeued["status"] == "queued"
+    fetched = get_job(first, root=tmp_path)
+    assert fetched is not None and fetched["status"] == "queued"
 
 
-def test_document_text_literal_and_term_paths(tmp_path):
+def test_document_text_literal_and_term_paths(tmp_path: Path) -> None:
     from app.sec.store import (
         search_document_text,
         store_document_text,
@@ -220,7 +229,7 @@ def test_document_text_literal_and_term_paths(tmp_path):
     assert early == []
 
 
-def test_typed_rows_pit_exclusion(tmp_path):
+def test_typed_rows_pit_exclusion(tmp_path: Path) -> None:
     from app.sec.store import (
         query_beneficial_ownership,
         store_beneficial_ownership,
@@ -237,7 +246,7 @@ def test_typed_rows_pit_exclusion(tmp_path):
         subject_cik=320193, as_of="2024-01-01", root=tmp_path) == []
 
 
-def test_query_filings_date_bounds_before_limit(tmp_path):
+def test_query_filings_date_bounds_before_limit(tmp_path: Path) -> None:
     from app.sec.store import query_filings, store_filing
     # Newer Form 4s plus one older 2024-Q1 row; limit=1 must still return Q1 when bounded.
     for i, day in enumerate(["2024-06-15", "2024-06-10", "2024-05-20"]):
@@ -247,8 +256,7 @@ def test_query_filings_date_bounds_before_limit(tmp_path):
     assert len(rows) == 1 and rows[0]["accession"] == "0000000000-25-000109"
     # Unbounded limit=None returns all.
     assert len(query_filings(forms=["4"], limit=None, root=tmp_path)) == 4
-    import pytest as _pt
-    with _pt.raises(ValueError):
+    with pytest.raises(ValueError):
         query_filings(forms=["4"], start_date="2024/01/01", root=tmp_path)
-    with _pt.raises(ValueError):
+    with pytest.raises(ValueError):
         query_filings(forms=["4"], end_date="2024-13-01", root=tmp_path)

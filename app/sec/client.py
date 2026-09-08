@@ -1,6 +1,24 @@
 """edgartools-only access. `edgar` is imported lazily so module import
 has no side effects and never touches the network."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    # Provider SDK types at the boundary only; `edgar` stays lazily imported.
+    from edgar import Company
+    from edgar.search.efts import EFTSResult
+
+    from .models import (
+        Filing,
+        SECSearchRequest,
+        SECSearchResult,
+        SECTextHit,
+        SearchAttempt,
+        SearchCoverage,
+    )
+
 
 class SECClientError(Exception):
     """SEC EDGAR transport/parse failure; never a no-data answer."""
@@ -22,7 +40,7 @@ def ensure_identity() -> None:
     _initialized = True
 
 
-def get_company(ticker_or_cik):
+def get_company(ticker_or_cik: str | int) -> Company:
     """Company handle: digits/int go by CIK, anything else by ticker."""
     ensure_identity()
     from edgar import Company
@@ -34,14 +52,14 @@ def get_company(ticker_or_cik):
     return Company(ticker_or_cik)
 
 
-def resolve_cik(ticker_or_cik) -> int | None:
+def resolve_cik(ticker_or_cik: str | int) -> int | None:
     """Ticker/CIK to int CIK; None on failure, never raises."""
     try:
         if isinstance(ticker_or_cik, int):
             return ticker_or_cik
         if isinstance(ticker_or_cik, str) and ticker_or_cik.strip().isdigit():
             return int(ticker_or_cik.strip())
-        return int(get_company(ticker_or_cik).cik)
+        return get_company(ticker_or_cik).cik
     except Exception:
         return None
 
@@ -86,7 +104,13 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _hit_to_text_hit(search_id, attempt_id, query, hit, page_num):
+def _hit_to_text_hit(
+    search_id: str,
+    attempt_id: str,
+    query: str,
+    hit: EFTSResult,
+    page_num: int,
+) -> SECTextHit:
     """EFTS hit -> SECTextHit; never infers identity beyond the filer."""
     from .models import SECTextHit
 
@@ -100,9 +124,9 @@ def _hit_to_text_hit(search_id, attempt_id, query, hit, page_num):
         score = float(getattr(hit, "score", 0.0) or 0.0)
     except (TypeError, ValueError):
         score = 0.0
-    items = getattr(hit, "items", None) or ()
+    raw_items = getattr(hit, "items", None) or ()
     try:
-        items = tuple(items)
+        items = tuple(raw_items)
     except TypeError:
         items = ()
     return SECTextHit(
@@ -135,7 +159,7 @@ def search_sec_filings(
     end_date: str | None = None,
     limit: int = 20,
     as_of: str | None = None,
-):
+) -> SECSearchResult:
     """EDGAR full-text search; text hits, never inferred identity.
 
     Paginates EFTS until the reported total, an empty page, the caller limit,
@@ -180,14 +204,20 @@ def search_sec_filings(
         )
         if value is not None
     }
-    attempts: list = []
-    hits: list = []
-    warnings: list = []
-    errors: list = []
-    seen: set = set()
+    attempts: list[SearchAttempt] = []
+    hits: list[SECTextHit] = []
+    warnings: list[str] = []
+    errors: list[str] = []
+    seen: set[tuple[str, str, str | None]] = set()
     pit_gaps = 0
 
-    def _attempt(page_num, status, reported, retrieved, **extra):
+    def _attempt(
+        page_num: int,
+        status: Literal["complete", "source_limited", "partial", "failed", "not_applicable"],
+        reported: int,
+        retrieved: int,
+        **extra: str,
+    ) -> None:
         now = _utcnow()
         attempts.append(SearchAttempt(
             attempt_id=f"{search_id}-p{page_num}",
@@ -278,10 +308,11 @@ def search_sec_filings(
         if page is None:
             source_capped = True
             break
-    if pit_gaps:
+    if pit_gaps > 0:
         warnings.append(
             f"{pit_gaps} EFTS hit(s) excluded by as_of {as_of} "
             "(no usable filed date or filed after as_of)")
+    status: Literal["complete", "complete_within_source_limits", "partial", "failed"]
     if failed_tail:
         status = "partial"
     elif len(hits) + pit_gaps >= reported and not source_capped:
@@ -294,7 +325,7 @@ def search_sec_filings(
         status = "complete"
     else:
         status = "partial"
-    limits: tuple = ()
+    limits: tuple[str, ...] = ()
     if status == "complete_within_source_limits":
         limits = ("efts:deep-pagination-cap",)
         warnings.append(
@@ -355,7 +386,7 @@ def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, obj
         want = _norm(query)
         if not want:
             return []
-        rows = []
+        rows: list[tuple[int, str, int]] = []
         for row in frame.itertuples():
             try:
                 cik = int(str(getattr(row, "cik")).strip())
@@ -374,11 +405,11 @@ def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, obj
             rows.append((rank, name, cik))
     except Exception as exc:
         raise SECClientError(f"cik lookup parse failed for {query!r}: {exc}") from exc
-    rows.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [
-        {"name": name, "cik": cik, "tickers": [], "exchange": None}
-        for _, name, cik in rows[:limit]
-    ]
+    rows.sort()
+    out: list[dict[str, object]] = []
+    for _, name, cik in rows[:limit]:
+        out.append({"name": name, "cik": cik, "tickers": [], "exchange": None})
+    return out
 
 
 def _maybe_str(value: object) -> str | None:
@@ -390,14 +421,17 @@ def _maybe_str(value: object) -> str | None:
 
 
 def _address_dict(address: object) -> dict[str, object | None]:
-    get = (lambda name: address.get(name)) if isinstance(address, dict) else (
-        lambda name: getattr(address, name, None)
-    )
+    """Best-effort address projection over dict or attribute surfaces."""
+    def _get(name: str) -> object:
+        if isinstance(address, dict):
+            return address.get(name)
+        return getattr(address, name, None)
+
     out: dict[str, object | None] = {}
     for key in ("street1", "street2", "city", "stateOrCountry",
                 "stateOrCountryDescription", "zipCode"):
         try:
-            out[key] = _maybe_str(get(key))
+            out[key] = _maybe_str(_get(key))
         except Exception:
             out[key] = None
     return out
@@ -430,11 +464,13 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
         return None
     try:
         raw_tickers = getattr(data, "tickers", None) or []
+        tickers: list[str] = []
         try:
             tickers = [str(t).strip() for t in raw_tickers if str(t).strip()]
         except TypeError:
             tickers = []
         raw_exchanges = getattr(data, "exchanges", None) or []
+        exchanges: list[str] = []
         try:
             exchanges = [str(e).strip() for e in raw_exchanges if str(e).strip()]
         except TypeError:
@@ -452,7 +488,9 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
         history: list[dict[str, object | None]] = []
         try:
             filings = getattr(data, "filings", None)
-            candidates = getattr(filings, "data", filings)
+            candidates: list[object] | None = getattr(filings, "data", filings)
+            if candidates is None:
+                candidates = []
             for item in list(candidates)[:5]:
                 history.append({
                     "form": _maybe_str(getattr(item, "form", None)),
@@ -486,8 +524,14 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
             f"submissions parse failed for CIK {cik!r}: {exc}") from exc
 
 
-def get_global_filings(year=None, quarter=None, form=None, filing_date=None,
-                       *, amendments=True):
+def get_global_filings(
+    year: int | list[int] | range | None = None,
+    quarter: int | list[int] | range | None = None,
+    form: str | list[str | int] | None = None,
+    filing_date: str | None = None,
+    *,
+    amendments: bool = True,
+) -> list[Filing]:
     """Global quarterly filing index -> normalized ``Filing`` list.
 
     Thin wrapper over installed ``edgar.get_filings`` for 1993+ quarterly
@@ -510,7 +554,7 @@ def get_global_filings(year=None, quarter=None, form=None, filing_date=None,
         iterator = iter(filings)
     except TypeError:
         return []
-    out = []
+    out: list[Filing] = []
     for item in iterator:
         try:
             out.append(filing_from_edgar(item))
@@ -519,7 +563,12 @@ def get_global_filings(year=None, quarter=None, form=None, filing_date=None,
     return out
 
 
-def get_current_filings(form="", *, page_size=40, owner="include"):
+def get_current_filings(
+    form: str = "",
+    *,
+    page_size: int | None = 40,
+    owner: str = "include",
+) -> list[Filing]:
     """Current-quarter SEC feed -> normalized ``Filing`` list.
 
     Thin wrapper over installed ``edgar.get_current_filings`` (near
@@ -538,7 +587,7 @@ def get_current_filings(form="", *, page_size=40, owner="include"):
         iterator = iter(feed)
     except TypeError:
         return []
-    out = []
+    out: list[Filing] = []
     for item in iterator:
         try:
             out.append(filing_from_edgar(item))

@@ -10,6 +10,7 @@ rendering — it never slices serialized JSON or rendered text blindly.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Optional
 
 from app.domain.risk.evaluation import EvaluationIssue
@@ -20,6 +21,16 @@ MAX_TOOL_MESSAGE_BYTES = 64 * 1024
 TRUNCATED_MARKER = "... [Tool output truncated]"
 
 _TEXT_KEYS = ("text", "diff", "summary")
+
+
+def _as_dict(value: object) -> dict[str, object]:
+    """Narrow untrusted render JSON to a mapping ({} when absent/mistyped)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: object) -> list[object]:
+    """Narrow untrusted render JSON to a list ([] when absent/mistyped)."""
+    return value if isinstance(value, list) else []
 
 
 def render_tool_result(
@@ -78,7 +89,7 @@ def render_tool_result(
     return _minimal(result, max_bytes)
 
 
-def _render_market_snapshot(result: dict, max_bytes: int) -> str:
+def _render_market_snapshot(result: dict[str, object], max_bytes: int) -> str:
     retrieved = f"Retrieved: {_cell(result.get('retrieved_at')) or 'unavailable'}"
     if result.get("retrieved_at_local"):
         retrieved += f" (local {result['retrieved_at_local']})"
@@ -93,7 +104,7 @@ def _render_market_snapshot(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_option_chain(result: dict, max_bytes: int) -> str:
+def _render_option_chain(result: dict[str, object], max_bytes: int) -> str:
     fields = ("expiration", "dte", "strike", "bid", "ask", "mark", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega")
     labels = ("Expiration", "DTE", "Strike", "Bid", "Ask", "Mark", "Mid", "Spread", "IV", "Delta", "Gamma", "Theta", "Vega")
     lines = [
@@ -101,7 +112,7 @@ def _render_option_chain(result: dict, max_bytes: int) -> str:
         "| " + " | ".join(labels) + " |",
         "|" + "|".join("---" for _ in fields) + "|",
     ]
-    for row in result.get("contracts") or []:
+    for row in _as_list(result.get("contracts")):
         if not isinstance(row, dict):
             continue
         values = []
@@ -120,7 +131,7 @@ def _render_option_chain(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_option_analysis(result: dict, max_bytes: int) -> str:
+def _render_option_analysis(result: dict[str, object], max_bytes: int) -> str:
     fields = ("ticker", "expiration", "dte", "strike", "bid", "ask", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega", "target_price", "target_pnl", "target_return_pct")
     lines = ["Option contract analysis"]
     for field in fields:
@@ -131,13 +142,13 @@ def _render_option_analysis(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_option_comparison(result: dict, max_bytes: int) -> str:
+def _render_option_comparison(result: dict[str, object], max_bytes: int) -> str:
     lines = [
         f"{result.get('ticker', '?')} option comparison",
         "| Contract | Expiration | Strike | Mid | Spread % | IV | Delta | Theta | Vega | Target P/L |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for row in result.get("contracts") or []:
+    for row in _as_list(result.get("contracts")):
         if not isinstance(row, dict):
             continue
         lines.append("| " + " | ".join(_table_cell(row.get(field, "unavailable")) for field in (
@@ -148,11 +159,11 @@ def _render_option_comparison(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_web_search(result: dict, max_bytes: int) -> str:
+def _render_web_search(result: dict[str, object], max_bytes: int) -> str:
     lines = [
         f"CURRENT EXTERNAL EVIDENCE (search: {result.get('query') or '?'})"
     ]
-    evidence = result.get("evidence") or []
+    evidence = _as_list(result.get("evidence"))
     if not evidence:
         lines.append("No evidence returned.")
     for index, item in enumerate(evidence, start=1):
@@ -202,10 +213,11 @@ def _render_web_search(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
+def _render_portfolio_snapshot(result: dict[str, object], max_bytes: int) -> str:
     created = f"Created: {_cell(result.get('created_at')) or 'unavailable'}"
-    if result.get("created_at_local"):
-        created += f" (local {result['created_at_local']})"
+    created_local = result.get("created_at_local")
+    if created_local:
+        created += f" (local {created_local})"
     lines = [
         f"Portfolio snapshot — {_cell(result.get('broker')) or 'robinhood'}",
         created,
@@ -217,15 +229,16 @@ def _render_portfolio_snapshot(result: dict, max_bytes: int) -> str:
     if result.get("concentration"):
         lines.append(f"Concentration: {_cell(result['concentration'])}")
     lines.append("Positions:")
-    for row in result.get("positions") or []:
+    for row in _as_list(result.get("positions")):
         if isinstance(row, dict):
             lines.append(_portfolio_position_line(row))
-    if result.get("omitted_count"):
-        lines.append(f"... {result['omitted_count']} smaller positions omitted")
-    unresolved = result.get("unresolved") or []
+    omitted_count = result.get("omitted_count")
+    if omitted_count:
+        lines.append(f"... {omitted_count} smaller positions omitted")
+    unresolved = _as_list(result.get("unresolved"))
     if unresolved:
         lines.append("Unresolved securities: " + ", ".join(_cell(t) for t in unresolved))
-    freshness = result.get("freshness") or {}
+    freshness = _as_dict(result.get("freshness"))
     freshness_parts = []
     created = freshness.get("snapshot_created_at") or result.get("created_at")
     created_local = freshness.get("snapshot_created_at_local") or result.get("created_at_local")
@@ -258,13 +271,15 @@ def issue_to_prose(issue: EvaluationIssue) -> str:
     return f"{issue.metric}: {issue.code}"
 
 
-def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
+def _render_mandate_evaluation(result: dict[str, object], max_bytes: int) -> str:
     """Compact mandate report: breaches, sector exposures, issues."""
 
-    def value_text(value, metric: str, unit: str) -> str:
+    def value_text(value: object, metric: str, unit: str) -> str:
         if value is None:
             return "unavailable"
         if metric == "prohibited_assets":
+            return _cell(value)
+        if not isinstance(value, (int, float, str, Decimal)):
             return _cell(value)
         if unit == "dollars":
             return f"${float(value):,.2f}"
@@ -280,7 +295,7 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
         "Mandate evaluation",
         snapshot_created,
     ]
-    breaches = result.get("breaches") or []
+    breaches = _as_list(result.get("breaches"))
     if breaches:
         lines.append("Breaches:")
         for breach in breaches:
@@ -301,16 +316,16 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
             lines.append(line)
     else:
         lines.append("No breaches.")
-    exposures = result.get("sector_exposures") or {}
+    exposures = _as_dict(result.get("sector_exposures"))
     if exposures:
         exposure_parts = []
         for sector, weight in exposures.items():
             try:
-                exposure_parts.append(f"{_cell(sector)} {float(weight) * 100:.1f}%")
+                exposure_parts.append(f"{_cell(sector)} {float(str(weight)) * 100:.1f}%")
             except (TypeError, ValueError):
                 exposure_parts.append(f"{_cell(sector)} {_cell(weight)}")
         lines.append("Sector exposures: " + ", ".join(exposure_parts))
-    issues = result.get("issues") or []
+    issues = _as_list(result.get("issues"))
     if issues:
         lines.append("Not evaluable:")
         for issue in issues:
@@ -320,7 +335,7 @@ def _render_mandate_evaluation(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _portfolio_position_line(row: dict) -> str:
+def _portfolio_position_line(row: dict[str, object]) -> str:
     parts = [f"- {_cell(row.get('ticker')) or '?'}"]
     quantity = _cell(row.get("quantity"))
     price = _cell(row.get("market_price")) or "unavailable"
@@ -341,7 +356,7 @@ def _portfolio_position_line(row: dict) -> str:
         parts.append(f"gain {gain}")
     if not row.get("resolved", True):
         parts.append("[UNRESOLVED]")
-    sec = row.get("sec") or {}
+    sec = _as_dict(row.get("sec"))
     sec_parts = []
     for concept in SEC_CONCEPTS:
         fact = sec.get(concept)
@@ -350,7 +365,7 @@ def _portfolio_position_line(row: dict) -> str:
             sec_parts.append(f"{label} {_cell(fact['value'])}")
     if sec_parts:
         parts.append("SEC " + " ".join(sec_parts))
-    finra = row.get("finra") or {}
+    finra = _as_dict(row.get("finra"))
     finra_parts = []
     if _cell(finra.get("short_position")):
         finra_parts.append(f"short {_cell(finra['short_position'])}")
@@ -363,8 +378,8 @@ def _portfolio_position_line(row: dict) -> str:
     return "  ".join(parts)
 
 
-def _render_scan_specs(result: dict, max_bytes: int) -> str:
-    specs = result.get("specs") or []
+def _render_scan_specs(result: dict[str, object], max_bytes: int) -> str:
+    specs = _as_list(result.get("specs"))
     lines = [
         f"Scanner filter specs ({result.get('count', len(specs))} filter types)",
         "Live data from Robinhood MCP; call this before constructing scan filters.",
@@ -382,8 +397,8 @@ def _render_scan_specs(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_scan_list(result: dict, max_bytes: int) -> str:
-    scans = result.get("scans") or []
+def _render_scan_list(result: dict[str, object], max_bytes: int) -> str:
+    scans = _as_list(result.get("scans"))
     lines = [f"Saved scanners ({result.get('count', len(scans))})"]
     for scan in scans:
         if not isinstance(scan, dict):
@@ -404,8 +419,8 @@ def _render_scan_list(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_scan_results(result: dict, max_bytes: int) -> str:
-    rows = result.get("rows") or []
+def _render_scan_results(result: dict[str, object], max_bytes: int) -> str:
+    rows = _as_list(result.get("rows"))
     title = _cell(result.get("title")) or "Scan"
     lines = [
         f"{title} — live results ({result.get('total', len(rows))} matches)",
@@ -429,7 +444,7 @@ def _render_scan_results(result: dict, max_bytes: int) -> str:
 
 
 
-def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:
+def _render_short_interest_leaderboard(result: dict[str, object], max_bytes: int) -> str:
     fields = ("rank", "ticker", "short_interest_percent", "short_shares", "shares_outstanding", "sec_shares_as_of", "sec_filed_at")
     labels = ("Rank", "Ticker", "Short %", "Short shares", "Shares outstanding", "SEC shares as of", "SEC filed")
     lines = [
@@ -440,7 +455,9 @@ def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:
     stale_banner = _datapoints_stale_banner(result)
     if stale_banner:
         lines.append(stale_banner)
-    for entry in result.get("entries") or []:
+    for entry in _as_list(result.get("entries")):
+        if not isinstance(entry, dict):
+            continue
         values = []
         for field in fields:
             value = entry.get(field, "")
@@ -450,7 +467,7 @@ def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:
                 value = f"{float(value):,.0f}"
             values.append(_table_cell(value))
         lines.append("| " + " | ".join(values) + " |")
-    coverage = result.get("coverage") or {}
+    coverage = _as_dict(result.get("coverage"))
     lines.append("Source: " + str(result.get("source", "FINRA + SEC EDGAR")))
     lines.append("Metric: " + str(result.get("metric", "")))
     lines.append("Coverage: " + f"{coverage.get('eligible_rows', 0)} eligible of {coverage.get('finra_rows', 0)} FINRA rows; exclusions {coverage.get('exclusions', {})}")
@@ -460,11 +477,11 @@ def _render_short_interest_leaderboard(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_analyst_estimates(result: dict, max_bytes: int) -> str:
+def _render_analyst_estimates(result: dict[str, object], max_bytes: int) -> str:
     ticker = result.get("ticker", "?")
-    quote = result.get("quote") or {}
-    targets = result.get("price_targets") or {}
-    valuation = result.get("valuation") or {}
+    quote = _as_dict(result.get("quote"))
+    targets = _as_dict(result.get("price_targets"))
+    valuation = _as_dict(result.get("valuation"))
     lines = [
         f"{ticker} analyst consensus (as of {result.get('as_of', '?')})",
         f"Source: {result.get('source', 'Yahoo Finance')}",
@@ -489,7 +506,9 @@ def _render_analyst_estimates(result: dict, max_bytes: int) -> str:
         f"  |  P/E trailing {_cell(valuation.get('trailing_pe'))}"
         f" / forward {_cell(valuation.get('forward_pe'))}"
     )
-    for row in result.get("forward_estimates") or []:
+    for row in _as_list(result.get("forward_estimates")):
+        if not isinstance(row, dict):
+            continue
         eps = row.get("eps_avg")
         rev = row.get("revenue_avg")
         lines.append(
@@ -510,7 +529,7 @@ def _render_analyst_estimates(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_sp500_weight(result: dict, max_bytes: int) -> str:
+def _render_sp500_weight(result: dict[str, object], max_bytes: int) -> str:
     ticker = result.get("ticker", "?")
     lines = [
         f"{ticker} S&P 500 index weight (as of {result.get('as_of', '?')})",
@@ -524,13 +543,15 @@ def _render_sp500_weight(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_obligations(result: dict, max_bytes: int) -> str:
+def _render_obligations(result: dict[str, object], max_bytes: int) -> str:
     ticker = result.get("ticker", "?")
     lines = [
         f"{ticker} contractual obligations & commitments (filed {result.get('filed', '?')})",
         f"Source: {result.get('source', 'SEC EDGAR notes')}",
     ]
-    for row in result.get("obligations") or []:
+    for row in _as_list(result.get("obligations")):
+        if not isinstance(row, dict):
+            continue
         if row.get("schedule_component"):
             continue
         amount = row.get("amount_billions")
@@ -577,20 +598,24 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
             lines.append(
                 f"    FY{y.get('fiscal_year')}: ${y.get('amount_billions')}B"
             )
-    exposures = result.get("unquantified_exposures") or []
+    exposures = _as_list(result.get("unquantified_exposures"))
     if exposures:
         lines.append("Unquantified exposures (excluded from totals):")
         for exp in exposures:
+            if not isinstance(exp, dict):
+                continue
             lines.append(
                 f"- {exp.get('type', '?')}: unquantified"
                 f" | trigger: {exp.get('trigger', '?')} | filed {exp.get('filed', '?')}"
                 f" | {exp.get('reason', 'excluded from quantified totals')}"
                 f" | {_table_cell(exp.get('excerpt') or '')}"
             )
-    capital = result.get("capital_allocation") or []
+    capital = _as_list(result.get("capital_allocation"))
     if capital:
         lines.append("Capital allocation (discretionary, not obligations):")
         for entry in capital:
+            if not isinstance(entry, dict):
+                continue
             lines.append(
                 f"- {entry.get('type', '?')}: discretionary, not an obligation"
                 f" | filed {entry.get('filed', '?')}"
@@ -601,11 +626,12 @@ def _render_obligations(result: dict, max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
+def _render_valuation_metrics(result: dict[str, object], max_bytes: int) -> str:
     ticker = result.get("ticker", "?")
-    price = result.get("price") or {}
-    fe = result.get("forward_eps") or {}
-    ob = result.get("obligations") or {}
+    price = _as_dict(result.get("price"))
+    fe_raw = result.get("forward_eps")
+    fe = fe_raw if isinstance(fe_raw, dict) else {}
+    ob = _as_dict(result.get("obligations"))
     year_cur = str(result.get("fiscal_year_current") or "").strip() or None
     year_next = str(result.get("fiscal_year_next") or "").strip() or None
 
@@ -615,7 +641,7 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
 
     fy_cur, fy_next = _fy(True), _fy(False)
 
-    def _pe(value: Any) -> str:
+    def _pe(value: object) -> str:
         return f"{value}x" if value is not None else "unavailable (no live price)"
 
     last = price.get("last")
@@ -649,7 +675,7 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
             f" | implied revenue coverage ~${ob.get('revenue_matched_implied_revenue_billions')}B/yr"
         )
 
-    def _line(label: str, row: Optional[dict], scenario: bool = False) -> None:
+    def _line(label: str, row: Optional[dict[str, object]], scenario: bool = False) -> None:
         if not row:
             return
         pe = _pe(row.get("pe"))
@@ -716,23 +742,31 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
             f" EPS ${worst2['eps_after_all_obligations']}"
             f" | P/E {_pe(worst2.get('pe_after_all_obligations'))}"
         )
-    projected = result.get("projected_prices") or {}
-    tiers = projected.get("tiers") or []
+    projected = _as_dict(result.get("projected_prices"))
+    tiers = _as_list(projected.get("tiers"))
     if tiers:
         cur = projected.get("current_price")
         vs = f"(vs live ${cur})" if cur is not None else "(live price unavailable; moves vs current n/a)"
         lines.append("Projected share price by assumed P/E " + vs + ":")
         for t in tiers:
+            if not isinstance(t, dict):
+                continue
             cells = []
-            for m, c in t.get("prices", {}).items():
-                pct = c.get("pct_change_vs_current")
-                pct_s = f"{pct:+}%" if pct is not None else "n/a (no live price)"
-                cells.append(f"{m} ${c.get('price')} ({pct_s})")
+            for m, c in _as_dict(t.get("prices")).items():
+                price_info = _as_dict(c)
+                pct = price_info.get("pct_change_vs_current")
+                if isinstance(pct, (int, float, Decimal)):
+                    pct_s = f"{pct:+}%"
+                elif pct is None:
+                    pct_s = "n/a (no live price)"
+                else:
+                    pct_s = f"{pct}%"
+                cells.append(f"{m} ${price_info.get('price')} ({pct_s})")
             lines.append(
                 f"  {t['tier']} (EPS ${t['eps']}): " + " | ".join(cells)
             )
-    scenarios = result.get("obligation_eps_scenarios") or {}
-    scenario_rows = scenarios.get("scenarios") or []
+    scenarios = _as_dict(result.get("obligation_eps_scenarios"))
+    scenario_rows = _as_list(scenarios.get("scenarios"))
     if scenario_rows:
         rate = scenarios.get("effective_tax_rate")
         lines.append(
@@ -740,6 +774,8 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
             f"tax rate {rate if rate is not None else 'unavailable'}):"
         )
         for s in scenario_rows:
+            if not isinstance(s, dict):
+                continue
             eps_impact = s.get("eps_impact")
             reason_s = f" ({s['reason']})" if s.get("reason") else ""
             lines.append(
@@ -747,17 +783,17 @@ def _render_valuation_metrics(result: dict, max_bytes: int) -> str:
                 f" ({'one-time' if s['one_time'] else 'annual'})"
                 f" — {s.get('note', '')}{reason_s}"
             )
-    cov = result.get("coverage") or {}
+    cov = _as_dict(result.get("coverage"))
     if cov:
-        filings = [str(f) for f in (cov.get("filings_examined") or [])]
-        sections = cov.get("sections_examined") or []
+        filings = [str(f) for f in _as_list(cov.get("filings_examined"))]
+        sections = _as_list(cov.get("sections_examined"))
         lines.append(
             f"Coverage: {cov.get('quantified_count', '?')} quantified / "
             f"{cov.get('unquantified_count', '?')} unquantified"
             f" | filings: {', '.join(filings) if filings else 'none with quantified rows'}"
             f" | sections examined: {len(sections)}"
         )
-        warnings = [str(w) for w in (cov.get("warnings") or []) if str(w).strip()]
+        warnings = [str(w) for w in _as_list(cov.get("warnings")) if str(w).strip()]
         if warnings:
             lines.append("Warnings: " + "; ".join(warnings))
     if result.get("note"):
@@ -805,7 +841,7 @@ def _fit_lines(lines: list[str], max_bytes: int) -> tuple[list[str], int]:
     return kept, omitted
 
 
-def _cell(value: Any) -> str:
+def _cell(value: object) -> str:
     if value is None:
         return ""
     s = str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
@@ -815,7 +851,7 @@ def _cell(value: Any) -> str:
 _MAX_TABLE_CELL_CHARS = 200
 
 
-def _table_cell(value: Any) -> str:
+def _table_cell(value: object) -> str:
     """Single table cell; oversized values are truncated with a marker so
     one huge field cannot balloon the whole table."""
     s = _cell(value)
@@ -824,7 +860,7 @@ def _table_cell(value: Any) -> str:
     return s[:_MAX_TABLE_CELL_CHARS].rstrip() + f"... [{len(s)} chars]"
 
 
-def _minimal(result: dict, max_bytes: int) -> str:
+def _minimal(result: dict[str, object], max_bytes: int) -> str:
     source = result.get("source") or result.get("dataset_id") or "tool result"
     text = f"Source: {source} | {TRUNCATED_MARKER}"
     return _truncate_bytes(text, max_bytes, marker="")
@@ -835,7 +871,7 @@ def _minimal(result: dict, max_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_error(result: dict, max_bytes: int) -> str:
+def _render_error(result: dict[str, object], max_bytes: int) -> str:
     msg = str(result.get("error") or "Unknown error").strip()
     lines = [f"Error: {msg}"]
     for key in ("dataset", "dataset_id", "source", "request_purpose"):
@@ -857,11 +893,11 @@ def _render_error(result: dict, max_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_datapoints(result: dict, max_bytes: int) -> str:
-    fields = [str(f) for f in (result.get("fields") or [])]
+def _render_datapoints(result: dict[str, object], max_bytes: int) -> str:
+    fields = [str(f) for f in _as_list(result.get("fields"))]
     if not fields:
         return _render_generic(result, max_bytes)
-    records = result.get("records") or []
+    records = _as_list(result.get("records"))
 
     header = "| " + " | ".join(_table_cell(f) for f in fields) + " |"
     sep = "|" + "|".join("---" for _ in fields) + "|"
@@ -906,7 +942,7 @@ def _render_datapoints(result: dict, max_bytes: int) -> str:
     return text
 
 
-def _datapoints_footer(result: dict) -> str:
+def _datapoints_footer(result: dict[str, object]) -> str:
     parts = []
     if result.get("source"):
         parts.append(f"Source: {result['source']}")
@@ -930,14 +966,14 @@ def _datapoints_footer(result: dict) -> str:
         )
     if result.get("environment"):
         parts.append(f"Environment: {result['environment']}")
-    warnings = [str(w) for w in (result.get("warnings") or []) if str(w).strip()]
+    warnings = [str(w) for w in _as_list(result.get("warnings")) if str(w).strip()]
     non_stale = [w for w in warnings if "STALE" not in w]
     if non_stale:
         parts.append("Warnings: " + "; ".join(non_stale))
     return "\n".join(parts)
 
 
-def _datapoints_stale_banner(result: dict) -> str:
+def _datapoints_stale_banner(result: dict[str, object]) -> str:
     if result.get("data_freshness") == "stale" and result.get("as_of_date"):
         return (
             f"!! STALE/HISTORICAL DATA !! Newest record is "
@@ -952,9 +988,9 @@ def _datapoints_stale_banner(result: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_briefing(result: dict, max_bytes: int) -> str:
-    cov = result.get("coverage") or {}
-    query = result.get("query") or {}
+def _render_briefing(result: dict[str, object], max_bytes: int) -> str:
+    cov = _as_dict(result.get("coverage"))
+    query = _as_dict(result.get("query"))
 
     name = result.get("name") or result.get("dataset") or result.get("dataset_id")
     ticker = query.get("ticker") or result.get("ticker")
@@ -1028,7 +1064,7 @@ def _render_briefing(result: dict, max_bytes: int) -> str:
     briefing = _render_briefing_prose(result)
     if briefing:
         optional.append(("Briefing", briefing))
-    trends = [str(t) for t in (result.get("trends") or [])]
+    trends = [str(t) for t in _as_list(result.get("trends"))]
     if trends:
         optional.append(("Trends", trends))
     categorical = _render_categorical(result)
@@ -1056,10 +1092,10 @@ def _render_briefing(result: dict, max_bytes: int) -> str:
     return "\n".join(out)
 
 
-def _render_metrics(result: dict) -> list[str]:
-    metrics = result.get("metrics") or {}
+def _render_metrics(result: dict[str, object]) -> list[str]:
+    metrics = _as_dict(result.get("metrics"))
     lines: list[str] = []
-    for entry in metrics.get("latest_vs_prior") or []:
+    for entry in _as_list(metrics.get("latest_vs_prior")):
         if not isinstance(entry, dict):
             continue
         field = entry.get("field", "?")
@@ -1076,8 +1112,9 @@ def _render_metrics(result: dict) -> list[str]:
                 base += f", {pct:+.2f}%"
             base += ")"
         lines.append(base)
-    for name in sorted(metrics.get("fields") or {}):
-        stats = metrics["fields"][name]
+    fields = _as_dict(metrics.get("fields"))
+    for name in sorted(fields):
+        stats = fields.get(name)
         if not isinstance(stats, dict):
             continue
         parts = [f"{key} {stats[key]}" for key in ("min", "max", "mean", "median", "sum") if key in stats]
@@ -1087,7 +1124,7 @@ def _render_metrics(result: dict) -> list[str]:
     return lines
 
 
-def _render_briefing_prose(result: dict) -> list[str]:
+def _render_briefing_prose(result: dict[str, object]) -> list[str]:
     briefing = result.get("briefing")
     if not isinstance(briefing, dict) or not briefing.get("summary"):
         return []
@@ -1098,8 +1135,8 @@ def _render_briefing_prose(result: dict) -> list[str]:
     return lines
 
 
-def _render_categorical(result: dict) -> list[str]:
-    breakdowns = (result.get("metrics") or {}).get("categorical") or {}
+def _render_categorical(result: dict[str, object]) -> list[str]:
+    breakdowns = _as_dict(_as_dict(result.get("metrics")).get("categorical"))
     lines: list[str] = []
     for field, counts in breakdowns.items():
         if not isinstance(counts, dict):
@@ -1109,18 +1146,18 @@ def _render_categorical(result: dict) -> list[str]:
     return lines
 
 
-def _render_warnings(result: dict) -> list[str]:
-    return [str(w) for w in (result.get("warnings") or []) if str(w).strip()]
+def _render_warnings(result: dict[str, object]) -> list[str]:
+    return [str(w) for w in _as_list(result.get("warnings")) if str(w).strip()]
 
 
-def _render_pagination(result: dict) -> str:
+def _render_pagination(result: dict[str, object]) -> str:
     total = result.get("total_records")
     source = result.get("pagination_source")
-    parts = []
+    parts: list[str] = []
     if total is not None:
         parts.append(f"{total} total records")
     if source:
-        parts.append(source)
+        parts.append(str(source))
     if result.get("may_have_more") is not None:
         parts.append(
             f"more pages: {'yes' if result['may_have_more'] else 'no'}"
@@ -1133,7 +1170,7 @@ def _render_pagination(result: dict) -> str:
 # ---------------------------------------------------------------------------
 # SEC filing-style results: header + byte-safe truncated text
 # ---------------------------------------------------------------------------
-def _render_sec_facts(result: dict, max_bytes: int) -> str:
+def _render_sec_facts(result: dict[str, object], max_bytes: int) -> str:
     """Compact render for the sec_facts envelope (get_fundamentals +
     get_xbrl_facts): header with provenance, scalar payload fields, then
     quarterly/matching rows one per line within the byte budget."""
@@ -1185,13 +1222,13 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
         _add(f"{key}: {_cell(value)}")
 
     if "last_dividend" in result or "next_declared_dividend" in result:
-        last = result.get("last_dividend") or {}
-        if isinstance(last, dict) and last.get("amount_per_share") is not None:
+        last = _as_dict(result.get("last_dividend"))
+        if last.get("amount_per_share") is not None:
             _add(f"LAST PAID: {last.get('amount_per_share')} on {last.get('payment_date', '?')}")
         else:
             _add("LAST PAID: none")
-        nxt = result.get("next_declared_dividend") or {}
-        if isinstance(nxt, dict) and nxt.get("amount_per_share") is not None:
+        nxt = _as_dict(result.get("next_declared_dividend"))
+        if nxt.get("amount_per_share") is not None:
             text = f"NEXT DECLARED: {nxt.get('amount_per_share')} payable {nxt.get('payment_date', '?')}"
             if nxt.get("record_date"):
                 text += f" (record {nxt['record_date']})"
@@ -1219,7 +1256,7 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
         if result.get("annual_history"):
             _add("HISTORY:")
 
-    for row in result.get("quarterly_eps") or []:
+    for row in _as_list(result.get("quarterly_eps")):
         if not isinstance(row, dict):
             continue
         text = (
@@ -1231,12 +1268,12 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
             text += f" | basic {row['eps_basic']}"
         _add(text)
 
-    for row in result.get("annual_history") or []:
+    for row in _as_list(result.get("annual_history")):
         if not isinstance(row, dict):
             continue
         _add(f"- {row.get('fiscal_year', '?')}: dividend {row.get('dividend_per_share', '?')}")
 
-    for row in result.get("matching_concepts") or []:
+    for row in _as_list(result.get("matching_concepts")):
         if not isinstance(row, dict):
             continue
         _add(
@@ -1256,7 +1293,7 @@ def _render_sec_facts(result: dict, max_bytes: int) -> str:
     return "\n".join(lines)
 
 
-def _is_text_result(result: dict) -> bool:
+def _is_text_result(result: dict[str, object]) -> bool:
     for key in _TEXT_KEYS:
         value = result.get(key)
         if isinstance(value, str) and len(value) > 400:
@@ -1264,7 +1301,7 @@ def _is_text_result(result: dict) -> bool:
     return False
 
 
-def _render_text_result(result: dict, max_bytes: int) -> str:
+def _render_text_result(result: dict[str, object], max_bytes: int) -> str:
     header_lines = []
     ticker = result.get("ticker")
     if ticker:
@@ -1287,8 +1324,8 @@ def _render_text_result(result: dict, max_bytes: int) -> str:
         return header
     body_lines: list[str] = []
     for key in body_keys:
-        text = result[key]
-        if not text.strip():
+        text = result.get(key)
+        if not isinstance(text, str) or not text.strip():
             continue
         label = "" if key == "text" and len(body_keys) == 1 else f"{key}: "
         body_lines.append(label + text)
@@ -1303,7 +1340,7 @@ def _render_text_result(result: dict, max_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_generic(result: dict, max_bytes: int) -> str:
+def _render_generic(result: dict[str, object], max_bytes: int) -> str:
     lines: list[str] = []
     used = 0
     omitted: list[str] = []
@@ -1350,7 +1387,7 @@ def _render_generic(result: dict, max_bytes: int) -> str:
     return "\n".join(lines)
 
 
-def _summarize_dict(item: dict) -> str:
+def _summarize_dict(item: dict[str, object]) -> str:
     parts = []
     for key in ("dataset", "group", "name", "description", "concept", "value", "period_end"):
         if key in item and item[key] not in (None, ""):

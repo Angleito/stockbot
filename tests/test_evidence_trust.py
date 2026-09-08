@@ -1,5 +1,7 @@
 """Trust/taint regressions for the Exa ontology layer."""
 import inspect
+from datetime import datetime
+from pathlib import Path
 
 from app.domain.evidence.models import ResolutionStatus
 from app.domain.evidence.source_quality import classify_source
@@ -38,15 +40,15 @@ def test_sec_gov_not_canonical_or_primary():
     assert c.integrity not in (Integrity.CANONICAL, Integrity.PRIMARY_EXTERNAL)
 
 
-def _amb(ticker=None, name=None, as_of=None):
-    return SecurityResolution(None, None, ticker or name, False, "ambiguous")
+def _amb(ticker: str | None = None, name: str | None = None, as_of: datetime | None = None) -> SecurityResolution:
+    return SecurityResolution(None, None, ticker or name or "UNKNOWN", False, "ambiguous")
 
 
-def _unr(ticker=None, name=None, as_of=None):
-    return SecurityResolution(None, None, ticker or name, False, "unresolved")
+def _unr(ticker: str | None = None, name: str | None = None, as_of: datetime | None = None) -> SecurityResolution:
+    return SecurityResolution(None, None, ticker or name or "UNKNOWN", False, "unresolved")
 
 
-def _item(ticker="ABC"):
+def _item(ticker: str = "ABC") -> dict[str, str]:
     return {
         "subject_ticker": ticker,
         "subject_name": "Abc",
@@ -77,7 +79,7 @@ def test_unknown_ticker_unresolved():
     assert c.subject_resolution == ResolutionStatus.UNRESOLVED
 
 
-def test_claim_persist_writes_only_evidence_claims(tmp_path):
+def test_claim_persist_writes_only_evidence_claims(tmp_path: Path):
     root = tmp_path / "parquet"
     (c,) = build_evidence_claims(
         reader_items=[_item("ABC")], resolve=_amb, retrieved_fallback="2026-01-01T00:00:00+00:00"
@@ -96,7 +98,14 @@ def test_planner_exposes_no_portfolio_or_snapshot():
         assert not {p for p in params if "portfolio" in p or "snapshot" in p or p == "data_root"}
         assert "include_portfolio" not in params
     queries = plan_public_search_queries(primary_name="Acme", primary_ticker="ACME", related_names=["Beta"])
-    assert queries and all("TSLA" not in q["query"] for q in queries)
+    assert queries
+    for q in queries:
+        query = q["query"]
+        assert isinstance(query, str)
+        assert "TSLA" not in query
     queries2 = suggest_public_search_queries("e1", "Acme", "ACME", relationships=(), names_by_entity={})
-    assert all("TSLA" not in q["query"] for q in queries2)
+    for q in queries2:
+        query2 = q["query"]
+        assert isinstance(query2, str)
+        assert "TSLA" not in query2
 

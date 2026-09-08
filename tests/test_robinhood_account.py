@@ -18,11 +18,11 @@ from app.robinhood.account import (
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
 
-def _fixture(name):
+def _fixture(name: str):
     return json.loads((FIXTURES / name).read_text())
 
 
-def test_decimal_parsing_from_string_and_numeric_payloads():
+def test_decimal_parsing_from_string_and_numeric_payloads() -> None:
     from_string = normalize_cash_balance({"account_id": "a", "cash": "1234.56"})
     from_number = normalize_cash_balance({"account_id": "a", "cash": 1234.56})
     assert from_string.cash == Decimal("1234.56")
@@ -31,42 +31,42 @@ def test_decimal_parsing_from_string_and_numeric_payloads():
     assert position.quantity == Decimal("10")
 
 
-def test_missing_cost_basis_is_none():
+def test_missing_cost_basis_is_none() -> None:
     position = normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1"})
     assert position.average_cost is None
 
 
-def test_fractional_shares():
+def test_fractional_shares() -> None:
     position = normalize_position({"id": "p", "accountId": "a", "symbol": "aapl", "quantity": "0.5"})
     assert position.ticker == "AAPL"
     assert position.quantity == Decimal("0.5")
 
 
-def test_zero_quantity_is_valid():
+def test_zero_quantity_is_valid() -> None:
     position = normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "0"})
     assert position.quantity == Decimal("0")
 
 
 @pytest.mark.parametrize("quantity", ["abc", None, ""])
-def test_malformed_or_missing_quantity_raises(quantity):
-    payload = {"id": "p", "account_id": "a", "ticker": "WING"}
+def test_malformed_or_missing_quantity_raises(quantity: str | None) -> None:
+    payload: dict[str, object] = {"id": "p", "account_id": "a", "ticker": "WING"}
     if quantity is not None:
         payload["quantity"] = quantity
     with pytest.raises(ValueError, match="quantity"):
         normalize_position(payload)
 
 
-def test_missing_ticker_raises():
+def test_missing_ticker_raises() -> None:
     with pytest.raises(ValueError, match="ticker"):
         normalize_position({"id": "p", "account_id": "a", "quantity": "1"})
 
 
-def test_blank_ticker_raises():
+def test_blank_ticker_raises() -> None:
     with pytest.raises(ValueError, match="ticker"):
         normalize_position({"id": "p", "account_id": "a", "ticker": "", "quantity": "1"})
 
 
-def test_missing_account_id_raises():
+def test_missing_account_id_raises() -> None:
     with pytest.raises(ValueError, match="account_id"):
         normalize_account({"type": "individual"})
     with pytest.raises(ValueError, match="account_id"):
@@ -75,14 +75,14 @@ def test_missing_account_id_raises():
         normalize_position({"id": "p", "ticker": "WING", "quantity": "1"})
 
 
-def test_position_account_id_kwarg_wins():
+def test_position_account_id_kwarg_wins() -> None:
     position = normalize_position(
         {"id": "p", "account_id": "ignored", "ticker": "WING", "quantity": "1"}, account_id="kwarg-id"
     )
     assert position.account_id == "kwarg-id"
 
 
-def test_accounts_fixture_returns_multiple_accounts():
+def test_accounts_fixture_returns_multiple_accounts() -> None:
     payload = _fixture("accounts.json")["structured_content"]["data"]
     accounts = [normalize_account(item) for item in payload["accounts"]]
     assert len(accounts) == 2
@@ -91,7 +91,7 @@ def test_accounts_fixture_returns_multiple_accounts():
     assert {account.status for account in accounts} == {"active"}
 
 
-def test_balances_fixture_matches_real_get_portfolio_shape():
+def test_balances_fixture_matches_real_get_portfolio_shape() -> None:
     payload = _fixture("balances.json")["structured_content"]["data"]
     balance = normalize_cash_balance(payload, account_id="100000001")
     assert balance.account_id == "100000001"
@@ -100,7 +100,7 @@ def test_balances_fixture_matches_real_get_portfolio_shape():
     assert balance.withdrawable_cash is None
 
 
-def test_positions_fixture_normalizes_rows():
+def test_positions_fixture_normalizes_rows() -> None:
     payload = _fixture("positions.json")["structured_content"]["data"]
     wing, aapl, tsla = (normalize_position(item, account_id="acc-123") for item in payload["positions"][:3])
     assert wing.ticker == "WING"
@@ -115,13 +115,13 @@ def test_positions_fixture_normalizes_rows():
     assert tsla.average_cost == Decimal("200.00")
 
 
-def test_positions_fixture_has_malformed_row_that_raises():
+def test_positions_fixture_has_malformed_row_that_raises() -> None:
     payload = _fixture("positions.json")["structured_content"]["data"]
     with pytest.raises(ValueError, match="quantity"):
         normalize_position(payload["positions"][3], account_id="acc-123")
 
 
-def test_alias_merging_snake_and_camel_normalize_identically():
+def test_alias_merging_snake_and_camel_normalize_identically() -> None:
     snake = normalize_cash_balance(
         {"account_id": "acc-1", "cash": "100.00", "buying_power": "200.00", "withdrawable_cash": "50.00"}
     )
@@ -137,26 +137,26 @@ def test_alias_merging_snake_and_camel_normalize_identically():
     assert (snake_account.account_type, snake_account.status) == (camel_account.account_type, camel_account.status)
 
 
-def test_explicit_retrieved_at_is_honored():
+def test_explicit_retrieved_at_is_honored() -> None:
     when = datetime(2026, 8, 25, 15, 0)
     account = normalize_account({"id": "acc-1"}, retrieved_at=when)
     assert account.retrieved_at == when.replace(tzinfo=timezone.utc)
     assert account.retrieved_at.tzinfo == timezone.utc
 
 
-def test_naive_payload_timestamp_becomes_utc():
+def test_naive_payload_timestamp_becomes_utc() -> None:
     position = normalize_position(
         {"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1", "retrieved_at": "2026-08-25T15:00:00"}
     )
     assert position.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
 
 
-def test_z_suffix_timestamp_normalizes():
+def test_z_suffix_timestamp_normalizes() -> None:
     balance = normalize_cash_balance({"account_id": "a", "cash": "1.00", "retrievedAt": "2026-08-25T15:00:00Z"})
     assert balance.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
 
 
-def test_missing_retrieved_at_defaults_to_now_utc():
+def test_missing_retrieved_at_defaults_to_now_utc() -> None:
     before = datetime.now(timezone.utc)
     balance = normalize_cash_balance({"account_id": "a", "cash": "1.00"})
     after = datetime.now(timezone.utc)
@@ -165,13 +165,13 @@ def test_missing_retrieved_at_defaults_to_now_utc():
     assert before <= balance.retrieved_at <= after
 
 
-def test_source_defaults_to_robinhood_mcp():
+def test_source_defaults_to_robinhood_mcp() -> None:
     assert normalize_account({"id": "a"}).source == "robinhood_mcp"
     assert normalize_cash_balance({"account_id": "a"}).source == "robinhood_mcp"
     assert normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1"}).source == "robinhood_mcp"
 
 
-def test_malformed_monetary_values_are_none_never_zero():
+def test_malformed_monetary_values_are_none_never_zero() -> None:
     balance = normalize_cash_balance({"account_id": "a", "cash": "abc", "buying_power": "", "withdrawable_cash": "oops"})
     assert balance.cash is None
     assert balance.buying_power is None
@@ -180,14 +180,14 @@ def test_malformed_monetary_values_are_none_never_zero():
     assert valid_zero.cash == Decimal("0")
 
 
-def test_non_string_instrument_id_is_none():
+def test_non_string_instrument_id_is_none() -> None:
     position = normalize_position(
         {"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1", "instrument_id": 123}
     )
     assert position.provider_instrument_id is None
 
 
-def test_domain_models_are_frozen_and_hold_values():
+def test_domain_models_are_frozen_and_hold_values() -> None:
     position = Position(
         position_id="p",
         account_id="a",
@@ -207,7 +207,7 @@ def test_domain_models_are_frozen_and_hold_values():
     assert position.quantity == Decimal("0.5")
     assert position.average_cost == Decimal("95.50")
     with pytest.raises(FrozenInstanceError):
-        position.ticker = "AAPL"
+        setattr(position, "ticker", "AAPL")
 
     snapshot = PortfolioSnapshot(
         snapshot_id="snap-1",
@@ -223,10 +223,10 @@ def test_domain_models_are_frozen_and_hold_values():
     assert snapshot.cash == Decimal("1234.56")
     assert snapshot.positions[0] is position
     with pytest.raises(FrozenInstanceError):
-        snapshot.cash = Decimal("0")
+        setattr(snapshot, "cash", Decimal("0"))
 
 
-def test_to_json_dict_serializes_decimals_and_datetimes():
+def test_to_json_dict_serializes_decimals_and_datetimes() -> None:
     data = to_json_dict(normalize_cash_balance({"account_id": "a", "cash": "1234.56", "retrieved_at": "2026-08-25T15:00:00Z"}))
     assert data["cash"] == "1234.56"
     assert data["retrieved_at"] == "2026-08-25T15:00:00+00:00"

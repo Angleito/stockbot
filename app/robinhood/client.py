@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 from .auth import DEFAULT_TOKEN_PATH, OAuthConfig, build_oauth_provider
 from .capabilities import (
@@ -12,6 +14,8 @@ from .capabilities import (
     allowed_read_tools,
     is_blocked,
 )
+
+_T = TypeVar("_T")
 
 
 class RobinhoodDependencyError(RuntimeError):
@@ -52,7 +56,7 @@ def normalize_tools(result: Any) -> list[dict[str, Any]]:
 
 class RobinhoodClient:
     def __init__(self, server_url: str, *, oauth: OAuthConfig | None = None,
-                 token_path=DEFAULT_TOKEN_PATH,
+                 token_path: Path = DEFAULT_TOKEN_PATH,
                  market_tools: frozenset[str] | None = None,
                  account_tools: frozenset[str] | None = None,
                  allowed_tools: set[str] | None = None,
@@ -101,7 +105,7 @@ class RobinhoodClient:
         if name not in self.permitted_tools:
             raise RobinhoodToolError(f"Tool is not in the configured allowlist: {name}")
 
-    def _run(self, coroutine):
+    def _run(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -113,14 +117,14 @@ class RobinhoodClient:
         async with self._session() as session:
             return normalize_tools(await session.list_tools())
 
-    async def _call_tool(self, name, arguments):
+    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         async with self._session() as session:
             result = await session.call_tool(name, arguments)
             if getattr(result, "is_error", getattr(result, "isError", False)):
                 raise RobinhoodToolError("Robinhood MCP tool returned an error")
             return normalize_result(result)
 
-    async def _run_readonly(self, calls):
+    async def _run_readonly(self, calls: list[tuple[str, dict[str, Any]]]) -> list[Any]:
         results = []
         async with self._session() as session:
             for name, arguments in calls:
@@ -145,10 +149,10 @@ class RobinhoodClient:
 
 
 class _SessionContext:
-    def __init__(self, transport, session_type):
+    def __init__(self, transport: Any, session_type: Any) -> None:
         self.transport, self.session_type = transport, session_type
-        self.transport_context = None
-        self.session_context = None
+        self.transport_context: Any | None = None
+        self.session_context: Any | None = None
 
     async def __aenter__(self):
         self.transport_context = self.transport
@@ -156,21 +160,21 @@ class _SessionContext:
         self.session_context = client
         return await self.session_context.__aenter__()
 
-    async def __aexit__(self, *args):
+    async def __aexit__(self, *args: object) -> Any:
         if self.session_context:
             return await self.session_context.__aexit__(*args)
 
 
 class _HttpSessionContext:
-    def __init__(self, url, auth, transport_factory, client_type, httpx_module):
+    def __init__(self, url: str, auth: Any | None, transport_factory: Callable[..., Any], client_type: Any, httpx_module: Any) -> None:
         self.url = url
         self.auth = auth
         self.transport_factory = transport_factory
         self.client_type = client_type
         self.httpx_module = httpx_module
-        self.http_client = None
-        self.transport_context = None
-        self.client_context = None
+        self.http_client: Any | None = None
+        self.transport_context: Any | None = None
+        self.client_context: Any | None = None
 
     async def __aenter__(self):
         self.http_client = self.httpx_module.AsyncClient(
@@ -183,7 +187,7 @@ class _HttpSessionContext:
         self.client_context = self.client_type(self.transport_context)
         return await self.client_context.__aenter__()
 
-    async def __aexit__(self, *args):
+    async def __aexit__(self, *args: object) -> Any:
         if self.client_context:
             await self.client_context.__aexit__(*args)
         if self.http_client:

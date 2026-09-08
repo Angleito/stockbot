@@ -7,20 +7,28 @@ via accession_no + source.
 """
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Literal, Optional
 from .cusip import normalize_cusip as normalize_cusip
 
 
-def pit_of(record) -> tuple[Optional[str], Optional[str]]:
+# Duck-typed PIT boundary: storage mapping rows and attribute records
+# (dataclasses, namespaces) share no nominal type, so object is honest here.
+def pit_of(record: object) -> tuple[Optional[str], Optional[str]]:
     """Point-in-time timestamp precedence: known_at > accepted_at > filed_at.
 
     Returns (value, basis). (None, None) when the record carries no timestamp;
     callers with an as_of bound must exclude such records and record a gap.
     """
-    get = (lambda name: record.get(name)) if isinstance(record, dict) else (
-        lambda name: getattr(record, name, None)
+    mapping: Mapping[str, object] | None = (
+        record if isinstance(record, dict) else None
     )
+
+    def get(name: str) -> object:
+        if mapping is not None:
+            return mapping.get(name)
+        return getattr(record, name, None)
     for basis in ("known_at", "accepted_at", "filed_at"):
         try:
             value = get(basis)
@@ -49,7 +57,7 @@ class Filing:
     subject_name: Optional[str] = None
     accepted_at_missing: bool = False
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -63,7 +71,7 @@ class FilingDocument:
     document_type: Optional[str]
     file_type: Optional[str] = None
     file_description: Optional[str] = None
-    items: tuple = field(default_factory=tuple)
+    items: tuple[str, ...] = field(default_factory=tuple)
     sic: Optional[str] = None
     location: Optional[str] = None
     state: Optional[str] = None
@@ -74,7 +82,7 @@ class FilingDocument:
     known_at: Optional[str] = None
     source_url: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -88,7 +96,7 @@ class SECSearchRequest:
     domain: Optional[str] = None
     accession_no: Optional[str] = None
     security_identifier: Optional[str] = None
-    forms: Optional[tuple] = None
+    forms: Optional[tuple[str, ...]] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     as_of: Optional[str] = None
@@ -98,7 +106,7 @@ class SECSearchRequest:
     exhaustive: bool = False
     max_results: Optional[int] = 20
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -106,7 +114,7 @@ class SECSearchRequest:
 class EntityCandidate:
     cik: Optional[int]
     name: str
-    tickers: tuple = field(default_factory=tuple)
+    tickers: tuple[str, ...] = field(default_factory=tuple)
     exchange: Optional[str] = None
     match_source: str = ""
     match_score: float = 0.0
@@ -114,7 +122,7 @@ class EntityCandidate:
     verification_status: Literal["unverified", "verified", "ambiguous", "conflict", "not_found"] = "unverified"
     entity_id: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -129,7 +137,7 @@ class FilingParty:
     known_at: str
     parser_version: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -146,7 +154,7 @@ class SECTextHit:
     matched_document: Optional[str] = None
     file_type: Optional[str] = None
     file_description: Optional[str] = None
-    items: tuple = field(default_factory=tuple)
+    items: tuple[str, ...] = field(default_factory=tuple)
     sic: Optional[str] = None
     location: Optional[str] = None
     state: Optional[str] = None
@@ -155,7 +163,7 @@ class SECTextHit:
     source_url: Optional[str] = None
     page: int = 1
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -165,7 +173,7 @@ class SearchAttempt:
     search_id: str
     backend: str
     query: str
-    filters: dict = field(default_factory=dict)
+    filters: dict[str, object] = field(default_factory=dict)
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     status: Literal["complete", "source_limited", "partial", "failed", "not_applicable"] = "complete"
@@ -178,25 +186,25 @@ class SearchAttempt:
     error_type: Optional[str] = None
     error_message: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
 @dataclass(frozen=True)
 class SearchCoverage:
     status: Literal["complete", "complete_within_source_limits", "partial", "failed"] = "complete"
-    sources_attempted: tuple = field(default_factory=tuple)
-    sources_completed: tuple = field(default_factory=tuple)
-    sources_failed: tuple = field(default_factory=tuple)
-    source_limits: tuple = field(default_factory=tuple)
+    sources_attempted: tuple[str, ...] = field(default_factory=tuple)
+    sources_completed: tuple[str, ...] = field(default_factory=tuple)
+    sources_failed: tuple[str, ...] = field(default_factory=tuple)
+    source_limits: tuple[str, ...] = field(default_factory=tuple)
     results_reported: int = 0
     results_retrieved: int = 0
     pages: int = 0
     date_coverage: Optional[str] = None
-    forms_covered: tuple = field(default_factory=tuple)
-    pending_backfill_jobs: tuple = field(default_factory=tuple)
+    forms_covered: tuple[str, ...] = field(default_factory=tuple)
+    pending_backfill_jobs: tuple[str, ...] = field(default_factory=tuple)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -204,19 +212,19 @@ class SearchCoverage:
 class SECSearchResult:
     search_id: str
     request: SECSearchRequest
-    entities: tuple = field(default_factory=tuple)
-    filings: tuple = field(default_factory=tuple)
-    documents: tuple = field(default_factory=tuple)
-    relationships: tuple = field(default_factory=tuple)
-    text_hits: tuple = field(default_factory=tuple)
+    entities: tuple[EntityCandidate, ...] = field(default_factory=tuple)
+    filings: tuple[Filing, ...] = field(default_factory=tuple)
+    documents: tuple[FilingDocument, ...] = field(default_factory=tuple)
+    relationships: tuple[FilingParty, ...] = field(default_factory=tuple)
+    text_hits: tuple[SECTextHit, ...] = field(default_factory=tuple)
     coverage: SearchCoverage = field(default_factory=SearchCoverage)
-    attempts: tuple = field(default_factory=tuple)
-    warnings: tuple = field(default_factory=tuple)
-    errors: tuple = field(default_factory=tuple)
-    retrieval_order: tuple = field(default_factory=tuple)
-    evidence_packet_ids: tuple = field(default_factory=tuple)
+    attempts: tuple[SearchAttempt, ...] = field(default_factory=tuple)
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+    errors: tuple[str, ...] = field(default_factory=tuple)
+    retrieval_order: tuple[str, ...] = field(default_factory=tuple)
+    evidence_packet_ids: tuple[str, ...] = field(default_factory=tuple)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -227,9 +235,9 @@ class CurrentReportEvent:
     item_name: str
     event_date: Optional[str]
     text: str
-    exhibit_refs: tuple = ()
+    exhibit_refs: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         d = asdict(self)
         d["exhibit_refs"] = list(d["exhibit_refs"])
         return d
@@ -280,9 +288,9 @@ class RegulatoryEvent:
     event_type: str
     effective_date: Optional[str]
     known_at: str
-    source_accessions: tuple
+    source_accessions: tuple[str, ...]
     severity: str = "routine"
-    structured_data: dict = field(default_factory=dict)
+    structured_data: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.event_type not in EVENT_TYPES:
@@ -292,7 +300,7 @@ class RegulatoryEvent:
             raise ValueError("source_accessions must be non-empty")
         object.__setattr__(self, "source_accessions", accessions)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         d = asdict(self)
         d["source_accessions"] = list(d["source_accessions"])
         return d
@@ -320,7 +328,7 @@ class BeneficialOwnership:
     known_at: Optional[str] = None
     source_url: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -341,7 +349,7 @@ class OwnershipChangeEvent:
     voting_changed: bool = False
     text_changed: bool = False
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -352,7 +360,7 @@ class Insider:
     issuer: str
     position: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -381,7 +389,7 @@ class InsiderTransaction:
     document_name: Optional[str] = None
     known_at: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -398,7 +406,7 @@ class ProposedInsiderSale:
     document_name: Optional[str] = None
     known_at: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -428,7 +436,7 @@ class InstitutionalHolding:
     document_name: Optional[str] = None
     source_url: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -449,7 +457,7 @@ class Registration:
     is_shelf: bool = False
     status: str = "filed"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -463,7 +471,7 @@ class Offering:
     shares: Optional[int] = None
     price_per_share: Optional[float] = None
     gross_proceeds: Optional[float] = None
-    underwriters: tuple = ()
+    underwriters: tuple[str, ...] = ()
     has_warrants: Optional[bool] = None
     has_convertibles: Optional[bool] = None
     is_atm: bool = False
@@ -486,7 +494,7 @@ class Offering:
     def __post_init__(self):
         object.__setattr__(self, "underwriters", tuple(self.underwriters or ()))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         d = asdict(self)
         d["underwriters"] = list(d["underwriters"])
         return d
@@ -531,7 +539,7 @@ class GovernanceEvent:
         if self.event_type not in GOVERNANCE_EVENT_TYPES:
             raise ValueError(f"unknown governance event_type: {self.event_type!r}")
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -549,7 +557,7 @@ class ProxyProposal:
     source_span: Optional[str] = None
     document_name: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -567,7 +575,7 @@ class ShareholderVote:
     source_span: Optional[str] = None
     document_name: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -591,7 +599,7 @@ class Transaction:
     expected_close: Optional[str] = None
     competing_offer: bool = False
     status: str = "unknown"
-    source_accessions: tuple = ()
+    source_accessions: tuple[str, ...] = ()
     # Phase 7: filer/subject/target/acquirer/offeror/security split.
     # Subject comes only from structured/explicit evidence; target
     # additionally falls back to exact document spans, never a filer copy.
@@ -613,7 +621,7 @@ class Transaction:
         object.__setattr__(self, "source_accessions",
                            tuple(self.source_accessions or ()))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         d = asdict(self)
         d["source_accessions"] = list(d["source_accessions"])
         return d

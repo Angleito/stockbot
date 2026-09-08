@@ -33,8 +33,10 @@ def main() -> int:
     if args.tool:
         print(render_tool_result(client.call_tool(args.tool)))
     elif args.ticker:
-        stockbot_tools._robinhood_client = lambda: client
-        print(render_tool_result(stockbot_tools.get_market_snapshot(args.ticker)))
+        def _smoke_client(*, account_tools: frozenset[str] = frozenset()) -> RobinhoodClient:
+            return client
+
+        stockbot_tools._robinhood_client = _smoke_client
         chain = stockbot_tools.get_option_chain(
             args.ticker,
             args.option_type,

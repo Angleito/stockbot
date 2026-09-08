@@ -9,20 +9,19 @@ from app.sec import filings as filings_mod
 from app.sec.material import EIGHT_K_ITEM_EVENTS
 from app.sec.models import EVENT_TYPES, CurrentReportEvent, RegulatoryEvent
 
-
-def test_event_vocabulary_covers_mapped_items():
+def test_event_vocabulary_covers_mapped_items() -> None:
     assert len(EVENT_TYPES) > 0
     assert set(EIGHT_K_ITEM_EVENTS.values()) <= set(EVENT_TYPES)
 
 
-def test_regulatory_event_rejects_bad_inputs():
+def test_regulatory_event_rejects_bad_inputs() -> None:
     with pytest.raises(ValueError):
         RegulatoryEvent("e", "Acme", "nope", None, "k", ("a",))
     with pytest.raises(ValueError):
         RegulatoryEvent("e", "Acme", "earnings", None, "k", ())
 
 
-def test_material_events_from_8k_mapping_and_drops():
+def test_material_events_from_8k_mapping_and_drops() -> None:
     acc = "ACC"
     evts = events8k.parse_8k_events(acc, {
         "Item 1.03": "bankruptcy text",
@@ -38,7 +37,7 @@ def test_material_events_from_8k_mapping_and_drops():
     assert out[0].to_dict()["source_accessions"] == ["ACC"]
 
 
-def test_material_events_missing_dates_never_crash():
+def test_material_events_missing_dates_never_crash() -> None:
     evt = CurrentReportEvent("ACC", "2.02", "Results", None, "t", ())
     (one,) = material.material_events_from_8k("ACC", [evt], issuer="Acme")
     assert one.effective_date is None and one.known_at == "unknown"
@@ -46,30 +45,30 @@ def test_material_events_missing_dates_never_crash():
 
 
 class _Report:
-    def __init__(self, texts):
+    def __init__(self, texts: dict[str, str]) -> None:
         self._texts = texts
 
-    def items(self):
+    def items(self) -> list[str]:
         return list(self._texts)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> str:
         return self._texts[key]
 
 
-def test_get_material_events_sorted_and_skips_bad_load(monkeypatch):
-    seen = {}
+def test_get_material_events_sorted_and_skips_bad_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
     fakes = [
         SimpleNamespace(accession_no="ACC1", filer_name="Acme"),
         SimpleNamespace(accession_no="ACC2", filer_name="Acme"),
         SimpleNamespace(accession_no="BAD", filer_name="Acme"),
     ]
 
-    def fake_list(ticker_or_cik, **kwargs):
+    def fake_list(ticker_or_cik: str, **kwargs: object) -> list[SimpleNamespace]:
         seen.update(kwargs)
         seen["ticker_or_cik"] = ticker_or_cik
         return fakes
 
-    def fake_load(accession_no):
+    def fake_load(accession_no: str) -> tuple[_Report, str, str]:
         if accession_no == "ACC1":
             return _Report({"Item 2.02": "beat"}), "2024-02-01", "2024-02-02"
         if accession_no == "ACC2":
@@ -86,7 +85,7 @@ def test_get_material_events_sorted_and_skips_bad_load(monkeypatch):
     assert seen["forms"] == ["8-K", "8-K/A"] and seen["start_date"] == "2024-01-01"
 
 
-def test_get_material_events_rejects_bad_since(monkeypatch):
+def test_get_material_events_rejects_bad_since(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         material.get_material_events("ACME", "2024/01/01")
     with pytest.raises(ValueError):

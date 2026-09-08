@@ -1,9 +1,14 @@
 """Offline tests for app/sec/lineage.py (no network)."""
 
+from pathlib import Path
+
 import pytest
 
 import app.sec.lineage as lineage
 from app.storage import parquet
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
 
 
 def test_fact_lineage_projects_all_keys():
@@ -26,12 +31,12 @@ def test_period_lineage_restatement():
     ]
     out = lineage.period_lineage(rows)
     assert len(out) == 1 and out[0]["restated"] is True
-    assert out[0]["originally_reported"]["value"] == 1.0
-    assert out[0]["latest"]["value"] == 2.0
+    assert _as_dict(out[0]["originally_reported"])["value"] == 1.0
+    assert _as_dict(out[0]["latest"])["value"] == 2.0
     assert out[0]["originally_reported"] != out[0]["latest"]
 
 
-def test_xbrl_lineage_as_of_excludes_restatement(tmp_path):
+def test_xbrl_lineage_as_of_excludes_restatement(tmp_path: Path) -> None:
     rows = [
         {"fact_id": "f1", "entity_id": "E1", "concept": "Revenues",
          "value": 1.0, "period_end": "2024-12-31",

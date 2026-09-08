@@ -83,7 +83,7 @@ def _sec_get(url: str) -> bytes:
     return resp.content
 
 
-def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict:
+def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict[str, Any]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_TICKERS_URL
@@ -107,8 +107,11 @@ def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict:
         ticker = str(item.get("ticker") or "").strip().upper()
         if not ticker:
             continue
+        cik_raw = item.get("cik_str")
+        if cik_raw is None:
+            continue
         try:
-            cik = int(item.get("cik_str"))
+            cik = int(cik_raw)
         except (TypeError, ValueError):
             continue
         ticker_ciks[ticker] = cik
@@ -136,7 +139,7 @@ def _normalize_and_write_company_facts(
     )
 
 
-def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict:
+def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict[str, Any]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_FACTS_URL.format(cik=cik)
@@ -158,7 +161,7 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
     }
 
 
-def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
+def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[str, Any]:
     """Replay archived SEC companyfacts payloads through normalize -> Parquet.
 
     Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
@@ -170,7 +173,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
     raw_root = data_root / "raw"
     archived_payloads = 0
     written_rows = 0
-    failed: list[dict] = []
+    failed: list[dict[str, Any]] = []
     sec_dir = raw_root / "sec"
     if sec_dir.is_dir():
         for cik_dir in sorted(p for p in sec_dir.iterdir() if p.is_dir()):
@@ -200,7 +203,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict:
     }
 
 
-def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict:
+def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict[str, Any]:
     data_root = Path(data_root) if data_root else get_data_root()
     name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
     url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
@@ -208,12 +211,12 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
         "symbolCode", "issueName", "settlementDate", "currentShortPositionQuantity",
         "previousShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity",
     )
-    all_rows: list[dict] = []
+    all_rows: list[dict[str, Any]] = []
     total: Optional[int] = None
     offset = 0
     while True:
         time.sleep(0.2)  # politeness pacing, same interval as the pre-cut pipeline
-        payload = {
+        payload: dict[str, Any] = {
             "limit": finra_client.MAX_LIMIT,
             "offset": offset,
             "fields": list(fields),
@@ -232,7 +235,7 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
         raw_total = headers.get("record-total")
         if raw_total is None:
             raise ValueError("FINRA omitted Record-Total; cannot prove the short-interest snapshot is complete.")
-        page_total = int(raw_total)
+        page_total = int(str(raw_total))
         if total is None:
             total = page_total
         elif page_total != total:
@@ -275,7 +278,7 @@ def prepare_short_interest_data(
     tickers: Sequence[str] = (),
     ciks: Sequence[int] = (),
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, Any]:
     """Refresh the SEC ticker universe and the full FINRA snapshot, and
     enrich SEC company facts only for the explicitly requested tickers/CIKs.
 
@@ -295,8 +298,8 @@ def prepare_short_interest_data(
     ))
     finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
     cik_to_ticker = {cik: ticker for ticker, cik in ticker_ciks.items()}
-    sec_facts: list[dict] = []
-    failed_enrichments: list[dict] = []
+    sec_facts: list[dict[str, Any]] = []
+    failed_enrichments: list[dict[str, Any]] = []
     for cik in enrich_ciks:
         try:
             sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))

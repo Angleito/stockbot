@@ -318,69 +318,11 @@ def _thesis_repo(args):
     return ThesisRepository(base / "thesis")
 
 
-def _thesis_ctx():
-    from app.policy import LOCAL_CONTEXT
-    return LOCAL_CONTEXT
-
-
 def _thesis_load(repo, id_or_slug):
     try:
         return repo.load_thesis(id_or_slug)
     except KeyError as exc:
         raise SystemExit(f"thesis: {exc}") from exc
-
-
-def _print_proposal(proposal) -> None:
-    print(f"Thesis: {proposal.user_thesis}")
-    print(f"Scope: {proposal.scope}")
-    for c in proposal.claims:
-        print(f"- claim [{c['status']}]: {c['statement']}")
-    for e in proposal.expressions:
-        print(f"- expression {e['instrument']}/{e['direction']} "
-              f"({e['structure']}, {e['horizon']}): {e['intent']} [{e['status']}]")
-    for q in proposal.questions:
-        print(f"- question ({q.question_id}): {q.question}")
-    if proposal.unknowns:
-        print(f"Unknowns: {', '.join(proposal.unknowns)}")
-
-
-def _thesis_create(args) -> None:
-    from app.thesis.intake import create_thesis_from_proposal, interpret_idea
-    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
-    idea = args.idea
-    if not idea:
-        if sys.stdin.isatty():
-            raise SystemExit("thesis create: provide IDEA as an argument or pipe it on stdin")
-        idea = sys.stdin.read().strip()
-    if not idea:
-        raise SystemExit("thesis create: empty idea")
-    gateway = PiJsonGateway()
-    proposal = interpret_idea(idea, None, gateway, _thesis_ctx())
-    if proposal.questions:
-        answers = {}
-        for q in proposal.questions:
-            try:
-                answers[q.question_id] = input(f"{q.question}\n> ").strip()
-            except EOFError:
-                answers[q.question_id] = ""
-        proposal = interpret_idea(idea, answers, gateway, _thesis_ctx())
-    _print_proposal(proposal)
-    try:
-        ok = input("Create this thesis? [y/N] ").strip().lower()
-    except EOFError:
-        ok = ""
-    if not ok.startswith("y"):
-        print("Not created.")
-        return
-    repo = _thesis_repo(args)
-    out = create_thesis_from_proposal(repo, proposal)
-    print(f"Created {out['thesis_id']} ({out['slug']})")
-    for r in out["rules"]:
-        print(f"- watch {r['rule_type']} [{r['support_status']}]")
-    if out["setup_needed"]:
-        print("Setup needed: no monitorable target resolved.")
-        for q in out["missing_questions"]:
-            print(f"- question ({q['question_id']}): {q['text']}")
 
 
 def _thesis_list(args) -> None:
@@ -414,48 +356,6 @@ def _thesis_show(args) -> None:
     for e in thesis.expressions:
         print(f"  - {e.intent} {e.instrument}/{e.direction} "
               f"({e.structure}, {e.horizon}) [{e.status}]")
-
-
-def _thesis_refine(args) -> None:
-    from app.thesis.intake import apply_refinement, interpret_idea, plan_refinement
-    from app.thesis.pi_json import PiJsonGateway  # production reasoning runtime
-    repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
-    clarification = args.clarification
-    if not clarification:
-        if sys.stdin.isatty():
-            try:
-                clarification = input("Clarification:\n> ").strip()
-            except EOFError:
-                clarification = ""
-        else:
-            clarification = sys.stdin.read().strip()
-    if not clarification:
-        raise SystemExit("thesis refine: provide CLARIFICATION as an argument or on stdin")
-    proposal = interpret_idea(
-        f"{thesis.user_thesis}\n{clarification}", None, PiJsonGateway(), _thesis_ctx())
-    plan = plan_refinement(thesis, proposal)
-    added_claims, added_expr, added_reqs = (
-        plan["added_claims"], plan["added_expressions"], plan["added_requirements"])
-    print(f"+{len(added_claims)} claims, +{len(added_expr)} expressions, +{len(added_reqs)} requirements")
-    for c in added_claims:
-        print(f"- claim: {c['statement']}")
-    for e in added_expr:
-        print(f"- expression {e['instrument']}/{e['direction']} ({e['structure']}): {e['intent']}")
-    if not added_claims and not added_expr and plan["merged"]["user_thesis"] == thesis.user_thesis:
-        print("No changes.")
-        return
-    try:
-        ok = input("Apply refinement? [y/N] ").strip().lower()
-    except EOFError:
-        ok = ""
-    if not ok.startswith("y"):
-        print("Not applied.")
-        return
-    out = apply_refinement(repo, thesis.thesis_id, plan, proposal)
-    print(f"Refined {out['thesis_id']} ({out['slug']})")
-    for r in out["rules_added"]:
-        print(f"- watch {r['rule_type']} [{r['support_status']}]")
 
 
 def _thesis_status(args) -> None:
@@ -575,33 +475,18 @@ def _thesis_journal(args) -> None:
 
 
 def _thesis_runtime(args, what="thesis tick"):
-    """Shared tick/monitor wiring: repo, thesis ID, request context, source services."""
-    from app.config import get_data_root
-    from app.policy import Capability, RequestContext
+    """Shared tick/monitor wiring: repo, thesis ID, source services."""
     from app.thesis import monitor
-    from app.thesis.runner import capabilities_for_grants
 
-    try:
-        extra = capabilities_for_grants(list(getattr(args, "grants", None) or []))
-    except ValueError as exc:
-        raise SystemExit(f"{what}: {exc}") from exc
     repo = _thesis_repo(args)
     thesis = _thesis_load(repo, args.id)
-    override = getattr(args, "data_root", None) or None
-    base = Path(override) if override else get_data_root()
-    ctx = RequestContext(
-        principal_id=_thesis_ctx().principal_id,
-        capabilities=frozenset({Capability.RESEARCH}) | extra,
-        data_root=base,
-        as_of=getattr(args, "as_of", None),
-    )
     targets = monitor.targets_for_thesis(thesis)
     services = {
         "sec_filings": monitor.SecFilingsService(targets, since_default=thesis.created_at),
         "material_events": monitor.MaterialEventsService(targets, since_default=thesis.created_at),
         "finra_short_interest": monitor.FinraShortInterestService(targets),
     }
-    return repo, thesis.thesis_id, ctx, services
+    return repo, thesis.thesis_id, services
 
 
 def _thesis_tick(args) -> None:
@@ -609,12 +494,10 @@ def _thesis_tick(args) -> None:
     from datetime import datetime, timezone
 
     from app.thesis import monitor
-    from app.thesis.pi_json import PiJsonGateway
 
-    repo, thesis_id, ctx, services = _thesis_runtime(args)
+    repo, thesis_id, services = _thesis_runtime(args)
     known_at = getattr(args, "known_at", None) or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    result = monitor.tick(repo, thesis_id, services, PiJsonGateway(), ctx,
-                          known_at=known_at)
+    result = monitor.tick(repo, thesis_id, services, known_at=known_at)
     if result.no_op:
         print("no meaningful change" + (f": {result.no_op_reason}" if result.no_op_reason else ""))
         return
@@ -628,14 +511,13 @@ def _thesis_monitor(args) -> None:
     import signal
     import threading
 
-    from app.thesis.pi_json import PiJsonGateway
     from app.thesis.worker import monitor_loop
 
-    interval = getattr(args, "interval_seconds", 900)
+    interval = args.interval_seconds
     if interval <= 0:
         print("thesis monitor: --interval-seconds must be > 0", file=sys.stderr)
         raise SystemExit(2)
-    repo, thesis_id, ctx, services = _thesis_runtime(args, what="thesis monitor")
+    repo, thesis_id, services = _thesis_runtime(args, what="thesis monitor")
     fixed_known_at = getattr(args, "known_at", None)
     stop = threading.Event()
 
@@ -657,7 +539,6 @@ def _thesis_monitor(args) -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
     monitor_loop(repository=repo, thesis_id=thesis_id, interval_seconds=interval,
-                 gateway=PiJsonGateway(), request_context=ctx,
                  source_services=services,
                  known_at_fn=(lambda: fixed_known_at) if fixed_known_at else None,
                  stop_event=stop, on_tick=_report)
@@ -666,14 +547,10 @@ def _thesis_monitor(args) -> None:
 
 def _cmd_thesis(args) -> None:
     cmd = getattr(args, "thesis_command", None)
-    if cmd == "create":
-        _thesis_create(args)
-    elif cmd == "list":
+    if cmd == "list":
         _thesis_list(args)
     elif cmd == "show":
         _thesis_show(args)
-    elif cmd == "refine":
-        _thesis_refine(args)
     elif cmd in ("pause", "resume", "close"):
         _thesis_status(args)
     elif cmd == "inspect":
@@ -688,7 +565,7 @@ def _cmd_thesis(args) -> None:
         _thesis_monitor(args)
     else:
         raise SystemExit(
-            "thesis: choose from create, list, show, refine, pause, resume, close, "
+            "thesis: choose from list, show, pause, resume, close, "
             "inspect, inbox, journal, tick, monitor"
         )
 
@@ -817,19 +694,10 @@ def _build_parser() -> argparse.ArgumentParser:
     thesis_parser = subparsers.add_parser("thesis", parents=[thesis_common],
                                           help="persistent thesis management")
     thesis_sub = thesis_parser.add_subparsers(dest="thesis_command")
-    create_parser = thesis_sub.add_parser("create", parents=[thesis_common],
-                                          help="normalize an idea and persist a thesis")
-    create_parser.add_argument("idea", nargs="?", default=None,
-                               help="thesis idea (default: read stdin)")
     thesis_sub.add_parser("list", parents=[thesis_common], help="list theses")
     show_parser = thesis_sub.add_parser("show", parents=[thesis_common],
                                         help="show thesis and assessment")
     show_parser.add_argument("id", help="thesis ID or slug")
-    refine_parser = thesis_sub.add_parser("refine", parents=[thesis_common],
-                                          help="refine a thesis with extra clarification")
-    refine_parser.add_argument("id", help="thesis ID or slug")
-    refine_parser.add_argument("clarification", nargs="?", default=None,
-                               help="extra natural-language clarification (default: stdin)")
     for _name in ("pause", "resume", "close"):
         _p = thesis_sub.add_parser(_name, parents=[thesis_common], help=f"{_name} a thesis")
         _p.add_argument("id", help="thesis ID or slug")
@@ -847,9 +715,6 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser = thesis_sub.add_parser("tick", parents=[thesis_common],
                                         help="run one deterministic monitor tick")
     tick_parser.add_argument("id", help="thesis ID or slug")
-    tick_parser.add_argument("--grant", dest="grants", action="append", default=[],
-                             help="explicit read grant for this tick only "
-                             "(repeatable: broker-market-read | portfolio-read)")
     tick_parser.add_argument("--known-at", default=None,
                              help="PIT upper bound ISO timestamp (default: now UTC)")
     monitor_parser = thesis_sub.add_parser("monitor", parents=[thesis_common],
@@ -858,9 +723,6 @@ def _build_parser() -> argparse.ArgumentParser:
     monitor_parser.add_argument("id", help="thesis ID or slug")
     monitor_parser.add_argument("--interval-seconds", type=int, default=900,
                                 help="seconds between ticks (default 900; must be > 0)")
-    monitor_parser.add_argument("--grant", dest="grants", action="append", default=[],
-                                help="explicit read grant for this monitor process only "
-                                "(repeatable: broker-market-read | portfolio-read)")
     monitor_parser.add_argument("--known-at", default=None,
                                 help="PIT upper bound ISO timestamp (default: now UTC per tick)")
     return parser

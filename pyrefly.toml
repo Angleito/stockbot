@@ -3,4 +3,4 @@ project-excludes = ["venv", "data"]
 search-path = ["."]
 python-platform = "linux"
 python-version = "3.14"
-preset = "basic"
+preset = "strict"

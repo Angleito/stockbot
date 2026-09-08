@@ -14,6 +14,7 @@ data).
 """
 
 import os
+from collections.abc import Iterator
 
 import pytest
 
@@ -35,7 +36,7 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def _mock_mode(monkeypatch):
+def _mock_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("FINRA_USE_MOCK", "1")
     finra_client.reset_token_cache()
     finra_client.reset_discovery_cache()
@@ -46,7 +47,26 @@ def _mock_mode(monkeypatch):
     finra_client.reset_partitions_cache()
 
 
-def _acceptable(result: dict) -> bool:
+def _as_seq(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, dict)
+    return value
+
+
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _as_str_list(value: object) -> list[str]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, str)
+    return value
+
+
+def _acceptable(result: dict[str, object]) -> bool:
     """A smoke query passes when FINRA answered (briefing or honest no-data)."""
     if "metrics" in result:
         return True
@@ -56,16 +76,19 @@ def _acceptable(result: dict) -> bool:
 def test_smoke_catalog_reachable():
     result = finra_client.list_datasets()
     assert "error" not in result, result
-    assert result["count"] > 0
+    count = result["count"]
+    assert isinstance(count, int)
+    assert count > 0
 
 
 def test_smoke_catalog_ranked_weekly_summary_discovery():
     """'OTC weekly trading volume' must rank otcMarket/weeklySummary first."""
     result = finra_client.list_datasets(search="OTC weekly trading volume")
     assert "error" not in result, result
-    assert result["datasets"], "expected ranked matches"
-    assert result["datasets"][0]["dataset"] == "otcMarket/weeklySummary", [
-        d["dataset"] for d in result["datasets"]
+    datasets = _as_seq(result["datasets"])
+    assert datasets, "expected ranked matches"
+    assert datasets[0]["dataset"] == "otcMarket/weeklySummary", [
+        d["dataset"] for d in datasets
     ]
     described = finra_client.describe_dataset("otcMarket/weeklySummary")
     assert "error" not in described, described
@@ -77,20 +100,21 @@ def test_smoke_short_interest_uses_canonical_fields():
     result = finra_client.query_dataset(
         "otcMarket/consolidatedShortInterest", ticker="AAPL", limit=5
     )
-    assert _acceptable(result), result
     if "metrics" in result:
-        fields = result["metrics"]["fields"]
+        fields = _as_dict(result["metrics"])["fields"]
+        assert isinstance(fields, list)
         assert "daysToCoverQuantity" in fields
         assert "averageDailyVolumeQuantity" in fields
         assert result["as_of_date"] is not None
         assert result["data_freshness"] in ("current", "stale")
         assert result["environment"] in ("production", "mock")
         # Truthfulness: stale data must be surfaced, never silently current.
+        warnings = _as_str_list(result["warnings"])
         if result["data_freshness"] == "stale":
-            assert any("STALE" in w for w in result["warnings"])
+            assert any("STALE" in w for w in warnings)
             assert "STALE" in render_tool_result(result)
         else:
-            assert not any("STALE" in w for w in result["warnings"])
+            assert not any("STALE" in w for w in warnings)
 
 
 def test_smoke_latest_five_datapoints_partitions_flow():
@@ -112,9 +136,14 @@ def test_smoke_latest_five_datapoints_partitions_flow():
     assert "http_status" not in result  # no 400: unrestricted sortFields never sent
     assert result["sort_source"] == "partitions"
     assert result["pagination_source"] == "partitions"
-    dates = [r["settlementDate"] for r in result["records"]]
+    records = _as_seq(result["records"])
+    dates: list[str] = []
+    for r in records:
+        d = r["settlementDate"]
+        assert isinstance(d, str)
+        dates.append(d)
     assert dates == sorted(dates, reverse=True)
-    row_fields = set(result["records"][0])
+    row_fields = set(records[0])
     assert {"settlementDate", "daysToCoverQuantity", "averageDailyVolumeQuantity"} <= row_fields
     assert result["as_of_date"] is not None
     assert result["data_freshness"] in ("current", "stale")

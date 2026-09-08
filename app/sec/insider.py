@@ -1,10 +1,14 @@
 """Deterministic Forms 3/4/5 + 144 insider normalization (no network)."""
 
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .cusip import normalize_cusip, normalize_isin
-from .models import InsiderTransaction, ProposedInsiderSale
+from .models import Filing, InstitutionalHolding, InsiderTransaction, ProposedInsiderSale
+
+# `object` marks the edgar SDK dynamic boundary (no stubs): attrs are read
+# via getattr and validated before building insider/13F domain objects.
 
 TRANSACTION_KINDS = {
     "P": "open_market_purchase",
@@ -21,14 +25,20 @@ _DEFAULT_FORMS = ("3", "3/A", "4", "4/A", "5", "5/A")
 _DEFAULT_144_FORMS = ("144", "144/A")
 
 
-def list_sec_filings(*args, **kwargs):
+def list_sec_filings(ticker_or_cik: str | int,
+                     forms: str | list[str] | tuple[str, ...] | None = None,
+                     start_date: str | date | datetime | None = None,
+                     end_date: str | date | datetime | None = None,
+                     as_of: str | date | datetime | None = None,
+                     limit: int | None = 50) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
-def classify_transaction(code) -> str:
+def classify_transaction(code: object) -> str:
     try:
         key = str(code).strip().upper()
     except Exception:
@@ -36,7 +46,7 @@ def classify_transaction(code) -> str:
     return TRANSACTION_KINDS.get(key, "other")
 
 
-def _safe_int(value):
+def _safe_int(value: object) -> int | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -50,7 +60,7 @@ def _safe_int(value):
         return None
 
 
-def _safe_float(value):
+def _safe_float(value: object) -> float | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -62,7 +72,7 @@ def _safe_float(value):
         return None
 
 
-def _first(obj, *names):
+def _first(obj: object, *names: str) -> object:
     for name in names:
         try:
             value = getattr(obj, name)
@@ -73,7 +83,7 @@ def _first(obj, *names):
     return None
 
 
-def _str_or_none(value):
+def _str_or_none(value: object) -> str | None:
     if value is None:
         return None
     try:
@@ -83,7 +93,7 @@ def _str_or_none(value):
     return text or None
 
 
-def _insider_cik(obj):
+def _insider_cik(obj: object) -> str | None:
     cik = _first(obj, "insider_cik", "reporting_owner_cik", "owner_cik", "cik")
     if cik is not None:
         try:
@@ -101,17 +111,18 @@ def _insider_cik(obj):
     return None
 
 
-def _owners_of(obj, fallback_name=None, fallback_cik=None):
+def _owners_of(obj: object, fallback_name: str | None = None,
+               fallback_cik: str | None = None) -> list[dict[str, object]]:
     """Reporting owners: structured list first, legacy attrs as one owner."""
     try:
         container = getattr(obj, "reporting_owners", None)
         candidates = getattr(container, "owners", None) if container is not None else None
         if candidates is None and isinstance(container, (list, tuple)):
             candidates = container
-        owners = list(candidates) if candidates else []
+        owners: list[object] = list(candidates) if candidates else []
     except Exception:
         owners = []
-    out = []
+    out: list[dict[str, object]] = []
     for owner in owners:
         try:
             out.append({
@@ -142,7 +153,7 @@ def _owners_of(obj, fallback_name=None, fallback_cik=None):
     }]
 
 
-def _issuer_of(obj):
+def _issuer_of(obj: object) -> tuple[str | None, str | None, str | None]:
     """Authoritative issuer from structured ownership XML; never the filer."""
     try:
         issuer = getattr(obj, "issuer", None)
@@ -156,7 +167,7 @@ def _issuer_of(obj):
     return cik, name, ticker
 
 
-def _bool_or_none(value):
+def _bool_or_none(value: object) -> bool | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -172,9 +183,11 @@ def _bool_or_none(value):
     return None
 
 
-def normalize_ownership_filing(obj, *, issuer, form, filed_at, accession_no,
-                               issuer_cik=None, document_name=None,
-                               known_at=None):
+def normalize_ownership_filing(obj: object, *, issuer: str, form: str,
+                               filed_at: str | None, accession_no: str,
+                               issuer_cik: str | int | None = None,
+                               document_name: str | None = None,
+                               known_at: str | None = None) -> list[InsiderTransaction]:
     """One InsiderTransaction per (owner, activity) row; never raises."""
     try:
         fallback_name = _str_or_none(_first(obj, "insider_name",
@@ -184,7 +197,8 @@ def normalize_ownership_filing(obj, *, issuer, form, filed_at, accession_no,
     except Exception:
         return []
     try:
-        activities = obj.get_transaction_activities()
+        get_activities = getattr(obj, "get_transaction_activities")
+        activities = get_activities()
     except Exception:
         return []
     if not activities:
@@ -201,19 +215,21 @@ def normalize_ownership_filing(obj, *, issuer, form, filed_at, accession_no,
     resolved_issuer_cik = explicit_cik or info_cik
     resolved_issuer = info_name or issuer
     try:
-        known = str(known_at) if known_at is not None else filed_at
+        known = (known_at if isinstance(known_at, str)
+                 else str(known_at) if known_at is not None
+                 else filed_at)
     except Exception:
         known = filed_at
     owners = _owners_of(obj, fallback_name, fallback_cik)
-    out = []
+    out: list[InsiderTransaction] = []
     for activity in rows:
         for owner in owners:
             try:
                 code = _str_or_none(_first(activity, "transaction_code",
                                                   "code", "transaction_type"))
                 out.append(InsiderTransaction(
-                    insider_name=owner["name"],
-                    insider_cik=owner["cik"],
+                    insider_name=_str_or_none(owner["name"]),
+                    insider_cik=_str_or_none(owner["cik"]),
                     issuer=resolved_issuer,
                     form=form,
                     filed_at=filed_at,
@@ -246,7 +262,7 @@ def normalize_ownership_filing(obj, *, issuer, form, filed_at, accession_no,
                     is_officer=_bool_or_none(owner["is_officer"]),
                     is_ten_percent=_bool_or_none(owner["is_ten_percent"]),
                     is_other=_bool_or_none(owner["is_other"]),
-                    role_title=owner["role_title"],
+                    role_title=_str_or_none(owner["role_title"]),
                     document_name=document_name,
                     known_at=known,
                 ))
@@ -255,18 +271,19 @@ def normalize_ownership_filing(obj, *, issuer, form, filed_at, accession_no,
     return out
 
 
-def load_ownership(accession_no: str):
+def load_ownership(accession_no: str) -> object:
     """Live seam: filing.obj() stays here; raises on failure."""
     from .documents import get_by_accession_number
 
     return get_by_accession_number(accession_no).obj()
 
 
-def get_insider_activity(ticker_or_cik, *, as_of=None, limit=50,
-                         forms=_DEFAULT_FORMS):
+def get_insider_activity(ticker_or_cik: str | int, *, as_of: str | None = None,
+                         limit: int | None = 50,
+                         forms: tuple[str, ...] | list[str] = _DEFAULT_FORMS) -> list[InsiderTransaction]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
-    out = []
+    out: list[InsiderTransaction] = []
     for filing in filings:
         try:
             accession = getattr(filing, "accession_no", "")
@@ -291,24 +308,30 @@ def get_insider_activity(ticker_or_cik, *, as_of=None, limit=50,
     return out
 
 
-def _sum_shares_column(df):
+def _sum_shares_column(df: object) -> int | None:
     """Sum the first 'share'-like column; None when nothing parses."""
+    columns: list[object] = []
     try:
         columns = list(getattr(df, "columns", None) or [])
     except Exception:
         columns = []
+    values: object = None
     if columns:
         target = next((c for c in columns if "share" in str(c).lower()), None)
         if target is None:
             return None
         try:
-            values = df[target]
+            values = getattr(df, "__getitem__")(target)
         except Exception:
+            if not isinstance(df, Iterable):
+                return None
             try:
                 values = [row[target] for row in df]
             except Exception:
                 return None
     else:
+        if not isinstance(df, Iterable):
+            return None
         try:
             rows = list(df)
         except Exception:
@@ -326,7 +349,7 @@ def _sum_shares_column(df):
     total = 0
     found = False
     try:
-        iterator = list(values)
+        iterator = list(values) if isinstance(values, Iterable) else []
     except Exception:
         return None
     for value in iterator:
@@ -337,8 +360,10 @@ def _sum_shares_column(df):
     return total if found else None
 
 
-def normalize_144(form144, *, issuer, filed_at, accession_no, issuer_cik=None,
-                   form=None, document_name=None, known_at=None):
+def normalize_144(form144: object, *, issuer: str, filed_at: str | None,
+                   accession_no: str, issuer_cik: str | int | None = None,
+                   form: str | None = None, document_name: str | None = None,
+                   known_at: str | None = None) -> ProposedInsiderSale:
     """Build a ProposedInsiderSale; never raises."""
     try:
         seller = _str_or_none(_first(form144, "person_selling", "seller_name",
@@ -358,7 +383,9 @@ def normalize_144(form144, *, issuer, filed_at, accession_no, issuer_cik=None,
             df = None
         shares = _sum_shares_column(df) if df is not None else None
         try:
-            known = str(known_at) if known_at is not None else filed_at
+            known = (known_at if isinstance(known_at, str)
+                     else str(known_at) if known_at is not None
+                     else filed_at)
         except Exception:
             known = filed_at
         return ProposedInsiderSale(
@@ -383,21 +410,24 @@ def normalize_144(form144, *, issuer, filed_at, accession_no, issuer_cik=None,
             raise
 
 
-def load_144(accession_no: str):
+def load_144(accession_no: str) -> object:
     """Live seam: Form144 import stays here; raises on failure."""
     from .documents import get_by_accession_number
 
     filing = get_by_accession_number(accession_no)
-    from edgar import Form144
+    import edgar
 
-    return Form144.from_filing(filing)
+    # edgar ships no Form144 stub; getattr keeps the live seam raising on
+    # failure instead of failing the checker on a missing SDK attribute.
+    return getattr(edgar, "Form144").from_filing(filing)
 
 
-def get_planned_insider_sales(ticker_or_cik, *, as_of=None, limit=20,
-                              forms=_DEFAULT_144_FORMS):
+def get_planned_insider_sales(ticker_or_cik: str | int, *, as_of: str | None = None,
+                              limit: int | None = 20,
+                              forms: tuple[str, ...] | list[str] = _DEFAULT_144_FORMS) -> list[ProposedInsiderSale]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
-    out = []
+    out: list[ProposedInsiderSale] = []
     for filing in filings:
         try:
             accession = getattr(filing, "accession_no", "")
@@ -415,10 +445,10 @@ def get_planned_insider_sales(ticker_or_cik, *, as_of=None, limit=20,
     return out
 
 
-def compare_144_to_form4(proposed: ProposedInsiderSale, transactions) -> dict:
+def compare_144_to_form4(proposed: ProposedInsiderSale, transactions: Iterable[InsiderTransaction] | None) -> dict[str, object]:
     """Match a 144 proposal against later open-market Form 4 sales."""
     try:
-        rows = list(transactions or [])
+        rows: list[InsiderTransaction] = list(transactions or [])
     except Exception:
         rows = []
     seller = (proposed.seller_name or "")
@@ -457,7 +487,7 @@ _FORMS_13F_HOLDINGS = ("13F-HR", "13F-HR/A")
 _FORMS_13F_NOTICE = ("13F-NT", "13F-NT/A")
 
 
-def is_13f_notice(form) -> bool:
+def is_13f_notice(form: object) -> bool:
     """True for 13F-NT notice filings: manager filing with no holdings."""
     try:
         return str(form or "").strip().upper() in _FORMS_13F_NOTICE
@@ -475,25 +505,29 @@ def _13f_security_id(cusip: str | None, isin: str | None) -> str | None:
     return None
 
 
-def _voting_label(sole=None, shared=None, non=None) -> "str | None":
-    parts = []
+def _voting_label(sole: int | None = None, shared: int | None = None,
+                  non: int | None = None) -> str | None:
+    parts: list[str] = []
     for label, value in (("sole", sole), ("shared", shared), ("none", non)):
         try:
             if value is None:
                 continue
-            parts.append(f"{label}={int(value)}")
+            parts.append(f"{label}={value}")
         except Exception:
             continue
     return " ".join(parts) or None
 
 
-def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
-                           report_period, filed_at, document_name, known_at,
-                           source_url, source_row: int):
+def _holding_row_to_record(row: object, *, manager_name: str | None,
+                           manager_cik: str | int | None, accession_no: str,
+                           report_period: str | None, filed_at: str | None,
+                           document_name: str | None, known_at: str | None,
+                           source_url: str | None,
+                           source_row: int) -> InstitutionalHolding:
     """One information-table row -> InstitutionalHolding; raises on bad row."""
-    from .models import InstitutionalHolding, institutional_holding_id
+    from .models import institutional_holding_id
 
-    def _cell(*names):
+    def _cell(*names: str) -> object:
         for name in names:
             try:
                 if isinstance(row, dict):
@@ -519,7 +553,9 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
     shared = _safe_int(_cell("SharedVoting", "shared_voting", "Shared"))
     non = _safe_int(_cell("NonVoting", "non_voting", "None"))
     try:
-        known = str(known_at) if known_at is not None else filed_at
+        known = (known_at if isinstance(known_at, str)
+                 else str(known_at) if known_at is not None
+                 else filed_at)
     except Exception:
         known = filed_at
     isin_raw = _str_or_none(_cell("Isin", "isin", "ISIN"))
@@ -567,18 +603,28 @@ def _holding_row_to_record(row, *, manager_name, manager_cik, accession_no,
     )
 
 
-def normalize_13f_holdings(infotable, *, manager_name=None, manager_cik=None,
-                           accession_no, report_period=None, filed_at=None,
-                           form=None, document_name=None, known_at=None,
-                           source_url=None):
+def normalize_13f_holdings(infotable: object, *, manager_name: str | None = None,
+                           manager_cik: str | int | None = None,
+                           accession_no: str, report_period: str | None = None,
+                           filed_at: str | None = None, form: str | None = None,
+                           document_name: str | None = None,
+                           known_at: str | None = None,
+                           source_url: str | None = None) -> list[InstitutionalHolding]:
     """13F-HR/A information tables -> holdings; NT -> no holdings. Never raises."""
-    from .models import InstitutionalHolding  # noqa: F401
 
     if is_13f_notice(form):
         return []
+    rows: list[object] | dict[str, object] = []
     try:
-        rows = infotable.to_dict(orient="records") if hasattr(
-            infotable, "to_dict") else list(infotable or [])
+        to_dict = getattr(infotable, "to_dict", None)
+        if callable(to_dict):
+            raw_rows: object = to_dict(orient="records")
+            rows = (raw_rows if isinstance(raw_rows, (list, dict))
+                    else list(raw_rows) if isinstance(raw_rows, Iterable) else [])
+        elif isinstance(infotable, Iterable):
+            rows = list(infotable)
+        else:
+            rows = []
     except Exception:
         return []
     if isinstance(rows, dict):
@@ -587,7 +633,7 @@ def normalize_13f_holdings(infotable, *, manager_name=None, manager_cik=None,
         manager_cik = str(manager_cik).strip() if manager_cik is not None else None
     except Exception:
         manager_cik = None
-    out = []
+    out: list[InstitutionalHolding] = []
     for source_row, row in enumerate(rows, start=1):
         try:
             out.append(_holding_row_to_record(
@@ -601,7 +647,7 @@ def normalize_13f_holdings(infotable, *, manager_name=None, manager_cik=None,
     return out
 
 
-def observe_13f_security(holding, *, raw_archive_path, content_hash, retrieved_at, root=None) -> int:
+def observe_13f_security(holding: InstitutionalHolding, *, raw_archive_path: str | Path | None, content_hash: str | None, retrieved_at: str | None, root: Path | str | None = None) -> int:
     """Persist one 13F security + governed CUSIP/ISIN issuer aliases.
 
     Provisional security only; issuer mapping comes from exact
@@ -705,7 +751,7 @@ def observe_13f_security(holding, *, raw_archive_path, content_hash, retrieved_a
         except Exception:
             c_ret = ""
         alias_known = max([v for v in [known or "", c_known] if v]) if (known or c_known) else known
-        alias_ret = max([v for v in [str(retrieved_at or ""), c_ret] if v]) if (retrieved_at or c_ret) else retrieved_at
+        alias_ret = max([v for v in [retrieved_at or "", c_ret] if v]) if (retrieved_at or c_ret) else retrieved_at
         for alias_type, alias_value in (("cusip", cusip), ("isin", isin)):
             if not alias_value:
                 continue
@@ -731,7 +777,7 @@ def observe_13f_security(holding, *, raw_archive_path, content_hash, retrieved_a
     return written
 
 
-def query_issuer_insiders(issuer_cik, *, as_of=None, root=None, limit=200):
+def query_issuer_insiders(issuer_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
     """Issuer -> reporting owners over ``sec_insider_transactions`` (PIT)."""
     from . import store as _store
 
@@ -739,7 +785,7 @@ def query_issuer_insiders(issuer_cik, *, as_of=None, root=None, limit=200):
         issuer_cik=issuer_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_person_transactions(owner_cik, *, as_of=None, root=None, limit=200):
+def query_person_transactions(owner_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
     """Person -> transactions over ``sec_insider_transactions`` (PIT)."""
     from . import store as _store
 
@@ -747,7 +793,7 @@ def query_person_transactions(owner_cik, *, as_of=None, root=None, limit=200):
         owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_manager_holdings(manager_cik, *, as_of=None, root=None, limit=200):
+def query_manager_holdings(manager_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
     """Manager -> holdings over ``sec_13f_holdings`` (PIT)."""
     from . import store as _store
 
@@ -755,7 +801,7 @@ def query_manager_holdings(manager_cik, *, as_of=None, root=None, limit=200):
         manager_cik=manager_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_security_managers(security, *, as_of=None, root=None, limit=200):
+def query_security_managers(security: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
     """Security (CUSIP/ISIN/security_id) -> managers over ``sec_13f_holdings``."""
     from . import store as _store
 

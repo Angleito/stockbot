@@ -65,7 +65,7 @@ def test_envelope_is_frozen():
         retrieved_at=None,
     )
     try:
-        envelope.security_status = SecurityStatus.ALLOWED
+        setattr(envelope, "security_status", SecurityStatus.ALLOWED)
         raise AssertionError("frozen dataclass must reject mutation")
     except Exception:
         pass
