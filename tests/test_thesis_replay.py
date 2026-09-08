@@ -144,12 +144,14 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path: Path, monke
     body4 = _journals(root, t.slug)[-1].read_text(encoding="utf-8")
     assert "pushout" in body4 and len(_journals(root, t.slug)) == 2
     assert any(q.question_id == "q:t4" for q in r.load_questions(tid))
+    assert gw.calls == 2 and len(res4.triggers_created) == 1
 
     res5 = tick(r, tid, {"sec_filings": src}, known_at=T5)
     c5 = build_context(r, tid, r.load_triggers(tid)[-1], known_at=T5)
     assert all(_as_str(e["known_at"]) <= T5 for e in c5.evidence_refs)
     assert len(_journals(root, t.slug)) == 3 == gw.calls
     assert any(q.question_id == "q:t5" for q in r.load_questions(tid))
+    assert gw.calls == 3 and len(res5.triggers_created) == 1
 
     # Claim/expression changes stayed separate; counterevidence persisted.
     assert r.load_thesis(tid).claims[0].status == "unvalidated"

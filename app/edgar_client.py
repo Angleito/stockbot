@@ -593,8 +593,6 @@ def _resolve_issuer_ticker(cik: int) -> str | None:
     hit = cache.get(key, ttl=_OWNERSHIP_TICKER_TTL_SECONDS)
     if isinstance(hit, str):
         return hit or None
-    if hit is not None:
-        return None
     try:
         tickers = Company(int(cik)).tickers
         value = tickers[0] if tickers else ""

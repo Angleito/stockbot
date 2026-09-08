@@ -18,6 +18,30 @@ from enum import StrEnum
 JSONScalar = str | int | float | bool | None
 type JSONValue = JSONScalar | list[JSONValue] | dict[str, JSONValue]
 
+
+def validate_json_value(value: object, where: str = "<dict>") -> JSONValue:
+    """Recursively prove an untrusted payload is a true JSON value (deep copy)."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [validate_json_value(v, where) for v in value]
+    if isinstance(value, dict):
+        out: dict[str, JSONValue] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValueError(f"{where}: dict key must be a string, got {type(k).__name__}")
+            out[k] = validate_json_value(v, where)
+        return out
+    raise ValueError(f"{where}: not a JSON value, got {type(value).__name__}")
+
+
+def validate_json_mapping(value: object, where: str = "<dict>") -> dict[str, JSONValue]:
+    """Validate untrusted payload as a JSON object (narrowed dict for strict fields)."""
+    validated = validate_json_value(value, where)
+    if not isinstance(validated, dict):
+        raise ValueError(f"{where}: must be a mapping, got {type(value).__name__}")
+    return validated
+
 SCHEMA_VERSION = 1
 
 UNKNOWN = "unknown"
@@ -238,8 +262,8 @@ class TradeExpression:
             direction=direction,
             structure=structure,  # accepted unchanged
             horizon=_opt_unknown(d.get("horizon", UNKNOWN)),
-            leverage=dict(leverage or {}),
-            parameters=dict(parameters or {}),
+            leverage=validate_json_mapping(leverage or {}, f"{where}: 'leverage'"),
+            parameters=validate_json_mapping(parameters or {}, f"{where}: 'parameters'"),
             deterministic_support=_opt_unknown(d.get("deterministic_support", UNKNOWN)),
             status=_coerce_enum(ExpressionStatus, d.get("status", ExpressionStatus.UNDECIDED.value), "status", where),
         )
@@ -399,7 +423,7 @@ class Trigger:
             summary=str(d.get("summary", "")),
             processed_at=processed_at,
             run_id=run_id,
-            metadata=dict(meta or {}),
+            metadata=validate_json_mapping(meta or {}, f"{where}: 'metadata'"),
         )
 
 
@@ -519,8 +543,8 @@ class ThesisState:
         return cls(
             thesis_id=_req_str(d, "thesis_id", where),
             assessment=str(d.get("assessment", "unresolved")),
-            claim_assessments=dict(claim_assessments),
-            expression_assessments=dict(expression_assessments),
+            claim_assessments=validate_json_mapping(claim_assessments, f"{where}: 'claim_assessments'"),
+            expression_assessments=validate_json_mapping(expression_assessments, f"{where}: 'expression_assessments'"),
         )
 
 
@@ -613,7 +637,7 @@ class Checkpoint:
         hashes = d.get("recent_hashes", [])
         if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
             raise ValueError(f"{where}: 'recent_hashes' must be a list of strings")
-        return cls(thesis_id=_req_str(d, "thesis_id", where), sources=dict(sources),
+        return cls(thesis_id=_req_str(d, "thesis_id", where), sources=validate_json_mapping(sources, f"{where}: 'sources'"),
                    recent_hashes=list(hashes))
 
 
@@ -683,23 +707,29 @@ class ThesisStateSnapshot:
                 pid = payload.get("thesis_id")
                 if pid != thesis_id:
                     raise ValueError(f"{where}: '{key}' thesis_id {pid!r} != snapshot thesis_id {thesis_id!r}")
-                sections[key] = dict(payload)
+                sections[key] = validate_json_mapping(payload, f"{where}: '{key}'")
             Thesis.from_dict(sections["thesis"], where)
             ThesisState.from_dict(sections["state"], where)
             _qlist = sections["questions"].get("questions", [])
             if not isinstance(_qlist, list):
                 raise ValueError(f"{where}: 'questions' must be a list")
             for q in _qlist:
+                if not isinstance(q, dict):
+                    raise ValueError(f"{where}: 'questions' must be a list of mappings")
                 ThesisQuestion.from_dict(q, where)
             _rlist = sections["watch"].get("rules", [])
             if not isinstance(_rlist, list):
                 raise ValueError(f"{where}: 'rules' must be a list")
             for r in _rlist:
+                if not isinstance(r, dict):
+                    raise ValueError(f"{where}: 'rules' must be a list of mappings")
                 WatchRule.from_dict(r, where)
             _mlist = sections["memory"].get("memories", [])
             if not isinstance(_mlist, list):
                 raise ValueError(f"{where}: 'memories' must be a list")
             for m in _mlist:
+                if not isinstance(m, dict):
+                    raise ValueError(f"{where}: 'memories' must be a list of mappings")
                 ThesisMemory.from_dict(m, where)
         except ValueError as e:
             if str(e).startswith(where):
