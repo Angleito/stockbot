@@ -48,7 +48,7 @@ Stack Overflow tag activity. Pending: official Trends API
 
 Observations land in the `google_observations` warehouse
 (`observation_id=sha256(source|table|period|geo|term|list_kind)`,
-`content_hash` over metrics+evidence). Identical rows preserve the first
+`content_hash` over metrics, features, evidence, and `calc_version`). Identical rows preserve the first
 `known_at`; revised content is invisible before its new `known_at`. Only the
 last ~30 Trends `refresh_date` partitions are queryable (TTL); each carries
 rolling 5-year `week` backfill. Scores/ranks compare only within one

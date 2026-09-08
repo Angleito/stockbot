@@ -806,6 +806,114 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path)
     assert {(r.get("metrics") or {}).get("score") for r in new if r.get("week") == w4} == {40}
 
 
+def test_trend_features_persist_through_query_signals(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return [_dma_row("New York", term="alpha", week=w, refresh=params["start_date"],
+                         rank=r, score=s)
+                for w, r, s in [(w1, 4, 10), (w2, 3, 20), (w3, 2, 30), (w4, 1, 50)]]
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]))
+    assert result["status"] == "ok"
+    assert result["observations"]
+    collected = {o["term"]: o["features"] for o in result["observations"]}
+    assert collected["alpha"]
+    queried = {s["term"]: s for s in signals.query_signals(data_root=tmp_path)}
+    assert queried["alpha"]["features"] == collected["alpha"]
+    from app.storage import parquet as _pq
+    raw = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
+    assert raw
+    for row in raw:
+        assert row.get("features_json")
+        assert row.get("calc_version") == "2"
+    for name, rule in collected["alpha"]["rules"].items():
+        assert rule["rule"] == f"trend_{name}_v2"
+        assert rule["calc_version"] == "2"
+    legacy = {
+        "observation_id": "obs-legacy-no-features", "source": "trends", "table": "trends_top",
+        "term": "legacy-term", "geo": "US", "list_kind": "top", "period": "2026-W99",
+        "observed_at": "2026-W99", "known_at": "2026-09-02T00:00:00+00:00",
+        "retrieved_at": "2026-09-02T00:00:00+00:00",
+        "source_record_id": "trends_top|2026-09-02|US|legacy-term|top",
+        "content_hash": "hash-legacy-no-features", "collector_version": "1",
+        "calc_version": "1",
+        "metrics_json": json.dumps({"rank": 1}, sort_keys=True),
+        "evidence_json": "[]", "source_url": "bq://trends_top",
+    }
+    _pq.write_rows("google_observations", [legacy], root=tmp_path / "parquet")
+    by_term = {s["term"]: s for s in signals.query_signals(data_root=tmp_path)}
+    assert by_term["legacy-term"]["features"] is None
+
+
+def test_feature_calculation_isolates_mixed_geographies(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+    weeks = [w1, w2, w3, w4]
+    us_scores, us_ranks = [10, 20, 30, 50], [4, 3, 2, 1]
+    ny_scores, ny_ranks = [100, 70, 60, 40], [1, 2, 3, 4]
+    gb_scores, gb_ranks = [5, 5, 10, 30], [4, 4, 2, 2]
+
+    def _rows(template, params):
+        refresh = params["start_date"]
+        if template == "trends_us_top_national":
+            return [{**_national_row("alpha", week=w, refresh=refresh,
+                                    dma_count=2, score=s), "rank": r}
+                    for w, s, r in zip(weeks, us_scores, us_ranks)]
+        if template == "trends_us_top":
+            return [_dma_row("New York", term="alpha", week=w, refresh=refresh,
+                             rank=r, score=s)
+                    for w, r, s in zip(weeks, ny_ranks, ny_scores)]
+        if template == "trends_intl_top_national":
+            return [{**_intl_national_row("alpha", week=w, refresh=refresh,
+                                          country="GB", region_count=5, score=s), "rank": r}
+                    for w, s, r in zip(weeks, gb_scores, gb_ranks)]
+        return []
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["US", "New York", "GB"],
+        limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]))
+    assert result["status"] == "ok"
+    by_geo: dict = {}
+    for obs in result["observations"]:
+        by_geo.setdefault(obs["geo"], []).append(obs)
+    assert set(by_geo) == {"US", "New York", "GB"}
+    us_features = by_geo["US"][0]["features"]
+    ny_features = by_geo["New York"][0]["features"]
+    gb_features = by_geo["GB"][0]["features"]
+    assert us_features["velocity"] == pytest.approx(10.0)
+    assert ny_features["velocity"] == pytest.approx(-15.0)
+    assert gb_features["velocity"] == pytest.approx(6.25)
+    assert us_features["acceleration"] == pytest.approx(5.0)
+    assert ny_features["acceleration"] == pytest.approx(5.0)
+    assert gb_features["acceleration"] == pytest.approx(10.0)
+    assert us_features["percentile"] == pytest.approx(1.0)
+    assert ny_features["percentile"] == pytest.approx(0.25)
+    assert gb_features["percentile"] == pytest.approx(1.0)
+    assert us_features["rank_improvement"] == 1
+    assert ny_features["rank_improvement"] == -1
+    assert gb_features["rank_improvement"] == 0
+    assert us_features["diffusion"] is None
+    assert us_features["rules"]["diffusion"]["value"] is None
+    assert us_features["coverage"]["missing"]["diffusion"] == "subregion rows aggregated"
+    assert by_geo["US"][0]["metrics"]["dma_count"] == 2
+    assert gb_features["diffusion"] is None
+    assert gb_features["rules"]["diffusion"]["value"] is None
+    assert gb_features["coverage"]["missing"]["diffusion"] == "subregion rows aggregated"
+    assert by_geo["GB"][0]["metrics"]["region_count"] == 5
+    assert ny_features["diffusion"] == pytest.approx(1.0)
+    assert ny_features["coverage"]["geos_covered"] == ["New York"]
+
+
 def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path):
     from app.storage import parquet as _pq
     table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"

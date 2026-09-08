@@ -92,7 +92,7 @@ def _rank_improvement(present: list) -> int | None:
     return best[-2][1] - best[-1][1]
 
 
-CALC_VERSION = "1"
+CALC_VERSION = "2"
 
 # Informational thresholds only; candidates remain status="candidate" regardless.
 RULES = {"velocity_min": None, "persistence_min": 0.5, "diffusion_min": 0.25}
@@ -188,7 +188,7 @@ def compute_candidate_features(observations, periods_covered=None, geos_covered=
         "percentile": percentile,
         "new_entry": new_entry,
     }
-    values["rules"] = {name: {"value": value, "rule": f"trend_{name}_v1",
+    values["rules"] = {name: {"value": value, "rule": f"trend_{name}_v{CALC_VERSION}",
                               "calc_version": CALC_VERSION}
                        for name, value in values.items()}
     values["coverage"] = {"periods_covered": covered_periods, "geos_covered": covered_geos,
@@ -323,13 +323,16 @@ def migrate_jsonl_once(data_root=None) -> int:
             continue
         metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
         evidence = record.get("evidence") if isinstance(record.get("evidence"), list) else []
+        raw_features = record.get("features")
+        features = dict(raw_features) if isinstance(raw_features, dict) else None
         table = record.get("table") or "trends"
         period = record.get("period") or record.get("observed_at") or ""
         geo, term = record.get("geo") or "", record.get("term") or ""
         list_kind = record.get("list_kind") or "top"
         source = record.get("source") or "trends"
         content_hash = hashlib.sha256(json.dumps(
-            {"metrics": metrics, "evidence": evidence},
+            {"metrics": metrics, "features": features, "evidence": evidence,
+             "calc_version": "1"},
             sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         rows.append({
             "observation_id": hashlib.sha256(
@@ -343,6 +346,8 @@ def migrate_jsonl_once(data_root=None) -> int:
             "content_hash": content_hash, "collector_version": "1",
             "calc_version": "1",
             "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
+            "features_json": (json.dumps(features, sort_keys=True, default=str)
+                              if isinstance(features, dict) else None),
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{table}",
         })
@@ -374,6 +379,15 @@ def _record_to_signal(row: dict) -> dict:
         evidence = json.loads(row.get("evidence_json") or "[]")
     except ValueError:
         evidence = []
+    raw_features = row.get("features_json")
+    if raw_features is None or raw_features == "":
+        features = None
+    else:
+        try:
+            decoded = json.loads(raw_features)
+        except ValueError:
+            decoded = None
+        features = decoded if isinstance(decoded, dict) else None
     return {
         "signal_id": _signal_id_for(table, period, geo, term, list_kind),
         "status": "candidate", "signal_type": "trend",
@@ -385,7 +399,7 @@ def _record_to_signal(row: dict) -> dict:
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
         "metrics": metrics, "entities": [],
-        "evidence": evidence,
+        "evidence": evidence, "features": features,
     }
 
 

@@ -223,10 +223,12 @@ def _checkpoint_key(template: str, refresh: str, params: dict) -> str:
 
 
 def _observation_identity(table: str, period: str, geo: str, term: str,
-                          list_kind: str, metrics: dict, evidence: list) -> tuple:
+                          list_kind: str, metrics: dict, evidence: list,
+                          features: dict | None = None, calc_version: str = "1") -> tuple:
     """Durable (observation_id, content_hash) identity shared by store and verify."""
     content_hash = hashlib.sha256(
-        json.dumps({"metrics": metrics, "evidence": evidence},
+        json.dumps({"metrics": metrics, "features": features, "evidence": evidence,
+                    "calc_version": calc_version},
                    sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     observation_id = hashlib.sha256(
         f"{SOURCE}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
@@ -283,6 +285,15 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
             evidence = json.loads(row.get("evidence_json") or "[]")
         except ValueError:
             continue
+        raw_features = row.get("features_json")
+        if raw_features is None or raw_features == "":
+            features = None
+        else:
+            try:
+                decoded = json.loads(raw_features)
+            except ValueError:
+                decoded = None
+            features = decoded if isinstance(decoded, dict) else None
         out.append({
             "table": row.get("table") or table,
             "period": row.get("period"), "week": row.get("period"),
@@ -292,6 +303,7 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
             "observed_at": row.get("observed_at"),
             "known_at": row.get("known_at"), "retrieved_at": row.get("retrieved_at"),
             "metrics": metrics, "evidence": evidence,
+            "features": features, "calc_version": row.get("calc_version") or "1",
         })
     return out
 
@@ -338,9 +350,12 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
     for obs in observations:
         metrics = dict(obs.get("metrics") or {})
         evidence = list(obs.get("evidence") or [])
+        raw_features = obs.get("features")
+        features = dict(raw_features) if isinstance(raw_features, dict) else None
+        calc_version = _signals.CALC_VERSION
         observation_id, content_hash = _observation_identity(
             obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"],
-            metrics, evidence)
+            metrics, evidence, features, calc_version)
         refresh_date = str(metrics.get("refresh_date") or "")
         if not refresh_date:
             parts = str(obs.get("source_record_id") or "").split("|")
@@ -356,8 +371,10 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
             "known_at": known_at, "retrieved_at": retrieved_at,
             "source_record_id": obs.get("source_record_id") or observation_id,
             "content_hash": content_hash, "collector_version": _COLLECTOR_VERSION,
-            "calc_version": "1",
+            "calc_version": calc_version,
             "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
+            "features_json": (json.dumps(features, sort_keys=True, default=str)
+                              if isinstance(features, dict) else None),
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{obs['table']}",
         })
@@ -666,8 +683,6 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             intl_rows.append(staged_row)
 
     staged_all = national_rows + dma_rows + intl_rows
-    final_geos = {str(r["_geo"]) for r in staged_all}
-    periods_all = sorted({str(r["_week"]) for r in staged_all}) or [end_date]
     winners: dict = {}
     for staged_row in staged_all:
         wkey = (staged_row.get("_table"), staged_row.get("_kind"),
@@ -675,23 +690,92 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         prev = winners.get(wkey)
         if prev is None or str(staged_row.get("_refresh") or "") > str(prev.get("_refresh") or ""):
             winners[wkey] = staged_row
-    by_term: dict = {}
+
+    def _series_basis(staged_row: dict) -> str:
+        metrics = staged_row.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        basis = metrics.get("score_basis")
+        if basis:
+            return str(basis)
+        if (staged_row.get("dma_count") is not None
+                or staged_row.get("region_count") is not None
+                or metrics.get("dma_count") is not None
+                or metrics.get("region_count") is not None):
+            return "mean_list_score_where_listed"
+        return ""
+
+    def _series_score(staged_row: dict):
+        score = staged_row.get("score")
+        if isinstance(score, bool):
+            score = None
+        if score is None:
+            metrics = staged_row.get("metrics")
+            if isinstance(metrics, dict):
+                score = metrics.get("score")
+        return score
+
+    def _series_rank(staged_row: dict):
+        rank = staged_row.get("rank")
+        if rank is None:
+            metrics = staged_row.get("metrics")
+            if isinstance(metrics, dict):
+                rank = metrics.get("rank")
+        return rank
+
+    by_series: dict = {}
+    periods_by_series: dict = {}
     for staged_row in winners.values():
-        by_term.setdefault(staged_row.get("term"), []).append({
+        basis = _series_basis(staged_row)
+        skey = (staged_row.get("term"), staged_row.get("_table"), staged_row.get("_kind"),
+                staged_row.get("_geo"), basis)
+        by_series.setdefault(skey, []).append({
             "table": staged_row.get("_table"), "period": staged_row.get("_week"),
             "geo": staged_row.get("_geo"), "term": staged_row.get("term"),
-            "list_kind": staged_row.get("_kind"), "rank": staged_row.get("rank"),
-            "score": staged_row.get("score")})
-    term_features = {term: _signals.compute_candidate_features(
-        rows, periods_covered=periods_all, geos_covered=sorted(final_geos))
-        for term, rows in by_term.items()}
-
+            "list_kind": staged_row.get("_kind"), "rank": _series_rank(staged_row),
+            "score": _series_score(staged_row)})
+        pkey = (staged_row.get("_table"), staged_row.get("_kind"), staged_row.get("_geo"), basis)
+        periods_by_series.setdefault(pkey, set()).add(str(staged_row.get("_week")))
+    series_features: dict = {}
+    for skey, rows in by_series.items():
+        _term, _table, _kind, _geo, _basis = skey
+        pkey = (_table, _kind, _geo, _basis)
+        periods = sorted(periods_by_series.get(pkey) or set())
+        series_features[skey] = _signals.compute_candidate_features(rows, periods_covered=periods)
+    if dma_set:
+        dma_groups: dict = {}
+        for staged_row in winners.values():
+            if str(staged_row.get("_geo")) not in dma_set:
+                continue
+            basis = _series_basis(staged_row)
+            gkey = (staged_row.get("term"), staged_row.get("_table"),
+                    staged_row.get("_kind"), basis)
+            dma_groups.setdefault(gkey, []).append({
+                "table": staged_row.get("_table"), "period": staged_row.get("_week"),
+                "geo": staged_row.get("_geo"), "term": staged_row.get("term"),
+                "list_kind": staged_row.get("_kind"), "rank": _series_rank(staged_row),
+                "score": _series_score(staged_row)})
+        for gkey, rows in dma_groups.items():
+            diff = _signals.compute_candidate_features(rows, geos_covered=sorted(dma_set))
+            for skey in [k for k in series_features
+                         if k[0] == gkey[0] and k[1] == gkey[1] and k[2] == gkey[2]
+                         and k[4] == gkey[3] and str(k[3]) in dma_set]:
+                feat = series_features[skey]
+                feat["diffusion"] = diff.get("diffusion")
+                feat["rules"]["diffusion"] = dict(diff.get("rules", {}).get("diffusion", {}))
+                feat["coverage"]["geos_covered"] = list(
+                    diff.get("coverage", {}).get("geos_covered", []))
     observations = []
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    for row, is_national in ([(r, True) for r in national_rows]
-                             + [(r, False) for r in dma_rows + intl_rows]):
-        features = term_features.get(row.get("term"))
-        if is_national and isinstance(features, dict):
+    for row in national_rows + dma_rows + intl_rows:
+        basis = _series_basis(row)
+        skey = (row.get("term"), row.get("_table"), row.get("_kind"), row.get("_geo"), basis)
+        features = series_features.get(skey)
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        is_aggregate = (row.get("dma_count") is not None
+                        or row.get("region_count") is not None
+                        or metrics.get("dma_count") is not None
+                        or metrics.get("region_count") is not None)
+        if is_aggregate and isinstance(features, dict):
             features = copy.deepcopy(features)
             features["diffusion"] = None
             features["rules"]["diffusion"]["value"] = None
@@ -708,11 +792,15 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                     for _cached in _warehouse_rows(data_root, _table, _refresh):
                         _metrics = _cached.get("metrics") or {}
                         _evidence = _cached.get("evidence") or []
+                        _raw = _cached.get("features")
+                        _features = dict(_raw) if isinstance(_raw, dict) else None
+                        _calc = str(_cached.get("calc_version") or "1")
                         actual.add(_observation_identity(
                             _cached.get("table") or _table,
                             str(_cached.get("period") or _cached.get("week") or ""),
                             str(_cached.get("geo") or ""), str(_cached.get("term") or ""),
-                            str(_cached.get("list_kind") or ""), _metrics, _evidence))
+                            str(_cached.get("list_kind") or ""), _metrics, _evidence,
+                            _features, _calc))
                     if not expected.get((_table, _refresh), set()) <= actual:
                         raise RuntimeError(f"warehouse verify failed for {_table}|{_refresh}")
             for _key, _template, _refresh, _hash, _count, _tables in fetched:

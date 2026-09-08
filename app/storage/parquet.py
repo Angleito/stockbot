@@ -502,6 +502,7 @@ DATASETS["google_observations"] = Dataset(
         ("retrieved_at", TEXT), ("source_record_id", TEXT),
         ("content_hash", TEXT), ("collector_version", TEXT),
         ("calc_version", TEXT), ("metrics_json", TEXT),
+        ("features_json", TEXT),
         ("evidence_json", TEXT), ("source_url", TEXT),
     )),
     unique_keys=("observation_id", "content_hash"),
