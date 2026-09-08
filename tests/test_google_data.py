@@ -773,22 +773,28 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path)
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
 
     def _rows(template, params):
-        if template != "trends_us_top":
+        if template == "trends_us_top":
+            refresh = params["start_date"]
+            if refresh == "2026-09-01":
+                return [_dma_row("New York", term="alpha", week=w, refresh=refresh,
+                                 rank=r, score=s)
+                        for w, r, s in [(w1, 4, 10), (w2, 3, 20), (w3, 2, 30), (w4, 1, 100)]]
+            if refresh == "2026-09-02":
+                return [_dma_row("New York", term="alpha", week=w4, refresh=refresh,
+                                 rank=5, score=40)]
             return []
-        refresh = params["start_date"]
-        if refresh == "2026-09-01":
-            return [_dma_row("New York", term="alpha", week=w, refresh=refresh,
-                             rank=r, score=s)
-                    for w, r, s in [(w1, 4, 10), (w2, 3, 20), (w3, 2, 30), (w4, 1, 100)]]
-        if refresh == "2026-09-02":
-            return [_dma_row("New York", term="alpha", week=w4, refresh=refresh,
-                             rank=5, score=40)]
+        if template == "trends_us_rising":
+            refresh = params["start_date"]
+            score = 70 if refresh == "2026-09-01" else 71
+            return [_dma_row("New York", term="control", week=w4, refresh=refresh,
+                             rank=1, score=score, kind="rising")]
         return []
 
+    executor = _scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen)
     result = trends.collect_trends(
         start_date="2026-09-01", end_date="2026-09-02", geos=["New York"],
         limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
-        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+        executor=executor)
     assert result["status"] == "ok"
     alpha = [o for o in result["observations"] if o.get("term") == "alpha"]
     assert alpha
@@ -804,6 +810,28 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch, tmp_path)
     assert {r.get("week") for r in new} == {w4}
     assert {(r.get("metrics") or {}).get("score") for r in old if r.get("week") == w4} == {100}
     assert {(r.get("metrics") or {}).get("score") for r in new if r.get("week") == w4} == {40}
+    queried = signals.query_signals(query="alpha", geo="New York", data_root=tmp_path)
+    week4 = [s for s in queried if s.get("period") == w4]
+    assert len(week4) == 1
+    latest = week4[0]
+    assert (latest.get("metrics") or {}).get("refresh_date") == "2026-09-02"
+    assert (latest.get("metrics") or {}).get("score") == 40
+    assert latest.get("features") == features
+    assert len(latest.get("available_feature_scopes") or []) == 1
+    seen.clear()
+    replayed = trends.collect_trends(
+        start_date="2026-09-01", end_date="2026-09-02", geos=["New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=executor)
+    assert replayed["status"] == "ok"
+    strip = lambda o: {k: v for k, v in o.items() if k not in ("known_at", "retrieved_at")}
+    skey = lambda o: (o.get("signal_id"), o.get("period"),
+                       str((o.get("metrics") or {}).get("refresh_date")), o.get("term"))
+    assert sorted((strip(o) for o in replayed["observations"]), key=skey) == \
+        sorted((strip(o) for o in result["observations"]), key=skey)
+    replayed_alpha = [o for o in replayed["observations"] if o.get("term") == "alpha"]
+    assert replayed_alpha and (replayed_alpha[0].get("features") or {}) == features
+    assert seen and all(t == "trends_refreshes" for t, _ in seen)
 
 
 def test_trend_features_persist_through_query_signals(monkeypatch, tmp_path):

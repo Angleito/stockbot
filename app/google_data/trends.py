@@ -261,7 +261,7 @@ def _series_basis(staged_row: dict) -> str:
 
 def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
                           basis: str, geo: str, candidates: list) -> str:
-    """Scope-complete input identity shared by writes, replay gating, and PIT reads."""
+    """Scope-complete input identity shared by writes and PIT reads."""
     geos = scope.get("geos") or []
     week_start = str(scope.get("week_start") or "")
     week_end = str(scope.get("week_end") or "")
@@ -398,67 +398,6 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
             "features": None, "calc_version": row.get("calc_version") or "1",
         }
     return list(collapsed.values())
-
-
-def _features_for(data_root, observation_id: str, scope_hash: str,
-                  calc_version: str | None = None, expected_inputs_hash=None):
-    proot = _parquet_root(data_root)
-    if proot is None or _parquet is None:
-        return None
-    if calc_version is None:
-        calc_version = _signals.CALC_VERSION
-    try:
-        rows = _parquet.read_table("google_signal_features", proot).to_pylist()
-    except Exception:
-        return None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("observation_id") or "") != str(observation_id):
-            continue
-        if str(row.get("feature_scope_hash") or "") != str(scope_hash):
-            continue
-        if str(row.get("calc_version") or "") != str(calc_version):
-            continue
-        if expected_inputs_hash is not None and str(row.get("inputs_hash") or "") != str(expected_inputs_hash):
-            continue
-        raw = row.get("features_json")
-        if raw is None or raw == "":
-            return None
-        try:
-            decoded = json.loads(raw)
-        except ValueError:
-            return None
-        return decoded if isinstance(decoded, dict) else None
-    return None
-
-
-def _scope_geos_from_params(params: dict) -> list:
-    if params.get("national"):
-        if "country_code" not in params:
-            return ["US"]
-        return [str(params.get("country_code") or "")]
-    if "all_dmas" in params:
-        if params.get("all_dmas"):
-            return ["US"]
-        return sorted(params.get("dmas") or [])
-    if "country_code" in params:
-        return [str(params.get("country_code") or "")]
-    return []
-
-
-def _requested_scope(template: str, params: dict) -> tuple:
-    table = _template_table(template)
-    scope = _feature_scope_json(
-        week_start=str(params.get("week_start") or ""),
-        week_end=str(params.get("week_end") or ""),
-        geos=_scope_geos_from_params(params),
-        table=table, list_kind=_TEMPLATE_LIST_KIND.get(template, "top"))
-    return scope, _feature_scope_hash(scope)
-
-
-def _requested_scope_hash(template: str, params: dict) -> str:
-    return _requested_scope(template, params)[1]
 
 
 def backfill_legacy_feature_rows(data_root) -> int:
@@ -773,65 +712,21 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                      reverse=True)
                     cached_rows = cached_rows[:_MAX_LIMIT]
                     if cached_rows:
-                        scope, scope_hash = _requested_scope(template, params)
-                        _gate_cands = []
-                        _gate_ids = []
-                        _gate_ok = True
-                        for _c in cached_rows:
-                            try:
-                                _oid, _ch = _observation_identity(
-                                    _c.get("table") or table,
-                                    str(_c.get("period") or _c.get("week") or ""),
-                                    str(_c.get("geo") or ""), str(_c.get("term") or ""),
-                                    str(_c.get("list_kind") or ""),
-                                    _c.get("metrics") or {}, _c.get("evidence") or [])
-                            except Exception:
-                                _gate_ok = False
-                                break
-                            _gate_ids.append((_c, _oid))
-                            _gate_cands.append({
-                                "observation_id": _oid, "content_hash": _ch,
-                                "table": _c.get("table") or table,
-                                "period": str(_c.get("period") or _c.get("week") or ""),
-                                "geo": str(_c.get("geo") or ""),
-                                "term": str(_c.get("term") or ""),
-                                "list_kind": str(_c.get("list_kind") or ""),
-                                "metrics": _c.get("metrics") or {}})
-                        gated = []
-                        if _gate_ok:
-                            for _c, _oid in _gate_ids:
-                                _cand = {"table": _c.get("table") or table,
-                                         "period": str(_c.get("period") or _c.get("week") or ""),
-                                         "geo": str(_c.get("geo") or ""),
-                                         "term": str(_c.get("term") or ""),
-                                         "list_kind": str(_c.get("list_kind") or ""),
-                                         "metrics": _c.get("metrics") or {}}
-                                _expected = expected_inputs_hash(
-                                    scope, str(_c.get("term") or ""),
-                                    str(_c.get("table") or table),
-                                    str(_c.get("list_kind") or ""),
-                                    _series_basis(_cand), str(_c.get("geo") or ""), _gate_cands)
-                                if _features_for(data_root, _oid, scope_hash,
-                                                  expected_inputs_hash=_expected) is not None:
-                                    gated.append(_c)
-                        if len(gated) != len(cached_rows):
-                            pass
-                        else:
-                            for cached in gated:
-                                crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
-                                if not crefresh:
-                                    parts = str(cached.get("source_record_id") or "").split("|")
-                                    if len(parts) >= 2 and parts[0] == cached.get("table"):
-                                        crefresh = parts[1]
-                                if not crefresh:
-                                    crefresh = str(cached.get("week") or cached.get("period") or refresh)
-                                key = (cached["table"], crefresh,
-                                       str(cached.get("week") or cached.get("period")),
-                                       str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
-                                merged.setdefault(key, cached)
-                            if template not in used_templates:
-                                used_templates.append(template)
-                            continue
+                        for cached in cached_rows:
+                            crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
+                            if not crefresh:
+                                parts = str(cached.get("source_record_id") or "").split("|")
+                                if len(parts) >= 2 and parts[0] == cached.get("table"):
+                                    crefresh = parts[1]
+                            if not crefresh:
+                                crefresh = str(cached.get("week") or cached.get("period") or refresh)
+                            key = (cached["table"], crefresh,
+                                   str(cached.get("week") or cached.get("period")),
+                                   str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
+                            merged.setdefault(key, cached)
+                        if template not in used_templates:
+                            used_templates.append(template)
+                        continue
                     # Checkpointed but warehouse empty/out of scope: fall through to a fresh fetch.
                 result = _submit(template, params, executor, data_root)
                 if not isinstance(result, dict) or "error" in result:
@@ -1002,6 +897,8 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                 feat["coverage"]["geos_covered"] = list(
                     diff.get("coverage", {}).get("geos_covered", []))
     observations = []
+    effective_observations = []
+    winner_ids = {id(_w) for _w in winners.values()}
     retrieved_at = datetime.now(timezone.utc).isoformat()
     for row in national_rows + dma_rows + intl_rows:
         basis = _series_basis(row)
@@ -1017,7 +914,10 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
             features["diffusion"] = None
             features["rules"]["diffusion"]["value"] = None
             features["coverage"]["missing"]["diffusion"] = "subregion rows aggregated"
-        observations.append(_normalize_row(row, retrieved_at, data_root, features=features))
+        _norm = _normalize_row(row, retrieved_at, data_root, features=features)
+        observations.append(_norm)
+        if id(row) in winner_ids:
+            effective_observations.append(_norm)
 
     continuation = len(observations) > limit
     if data_root is not None and (observations or fetched):
@@ -1049,6 +949,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                     _shash = _feature_scope_hash(_scope)
                     infos.append((_obs, _oid, _ch, _scope, _shash, _series_basis(_obs), _feats))
                 if infos:
+                    _effective_ids = {id(_o) for _o in effective_observations}
                     _candidates = [{
                         "observation_id": _oid, "content_hash": _ch,
                         "table": str(_obs.get("table") or ""),
@@ -1057,7 +958,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         "term": str(_obs.get("term") or ""),
                         "list_kind": str(_obs.get("list_kind") or ""),
                         "metrics": _obs.get("metrics") or {},
-                    } for _obs, _oid, _ch, _, _, _, _ in infos]
+                    } for _obs, _oid, _ch, _, _, _, _ in infos if id(_obs) in _effective_ids]
                     _empty_hash = expected_inputs_hash({}, "", "", "", "", "", [])
                     try:
                         _existing = _parquet.read_table(
