@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 from ..analytics.screens import _resolve_as_of
 from ..config import get_data_root
@@ -33,9 +32,9 @@ DEFAULT_DATA_ROOT = get_data_root()
 @dataclass(frozen=True)
 class PortfolioResearchPosition:
     position: Position
-    latest_sec_metrics: dict[str, Any]
-    latest_finra_metrics: dict[str, Any]
-    research_data_freshness: dict[str, Any]
+    latest_sec_metrics: dict[str, object]
+    latest_finra_metrics: dict[str, object]
+    research_data_freshness: dict[str, object]
 
 
 def enrich_portfolio_research(
@@ -53,12 +52,12 @@ def enrich_portfolio_research(
         if position.entity_id is not None:
             sec_metrics = _sec_metrics(position.entity_id, as_of_str, data_root)
         else:
-            sec_metrics: dict[str, Any] = {}
+            sec_metrics: dict[str, object] = {}
         ticker = (position.ticker or "").strip()
         if ticker:
             finra_metrics = _finra_metrics(ticker, as_of_str, data_root)
         else:
-            finra_metrics: dict[str, Any] = {}
+            finra_metrics: dict[str, object] = {}
         results.append(PortfolioResearchPosition(
             position=position,
             latest_sec_metrics=sec_metrics,
@@ -68,10 +67,10 @@ def enrich_portfolio_research(
     return results
 
 
-def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, Any]:
+def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, object]:
     """Latest knowable fact per SEC concept for an entity; missing concepts
     are simply absent from the result."""
-    metrics: dict[str, Any] = {}
+    metrics: dict[str, object] = {}
     for concept in SEC_CONCEPTS:
         fact = _latest_sec_fact(entity_id, concept, as_of, data_root)
         if fact is not None:
@@ -79,7 +78,7 @@ def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, Any]:
     return metrics
 
 
-def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) -> dict[str, Any] | None:
+def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) -> dict[str, object] | None:
     clause, param = duckdb.as_of_clause(as_of)
     rows = duckdb.query(
         "SELECT value, period_end, filed_at, accession, source_url "
@@ -102,7 +101,7 @@ def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) 
     }
 
 
-def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
+def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object]:
     """Latest knowable short-interest metrics for a ticker's newest
     eligible settlement cycle.
 
@@ -151,10 +150,12 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
     }
 
 
-def _freshness(as_of: str, sec_metrics: dict[str, Any], finra_metrics: dict[str, Any]) -> dict[str, Any]:
+def _freshness(as_of: str, sec_metrics: dict[str, object], finra_metrics: dict[str, object]) -> dict[str, object]:
     filed_dates = [
         d
-        for d in (_parse_date(fact.get("filed_at")) for fact in sec_metrics.values())
+        for fact in sec_metrics.values()
+        if isinstance(fact, dict)
+        for d in (_parse_date(fact.get("filed_at")),)
         if d is not None
     ]
     return {
@@ -165,7 +166,7 @@ def _freshness(as_of: str, sec_metrics: dict[str, Any], finra_metrics: dict[str,
     }
 
 
-def _parse_date(value: Any) -> date | None:
+def _parse_date(value: object) -> date | None:
     if not value:
         return None
     try:
@@ -174,7 +175,7 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-def _decimal(value: Any) -> Decimal | None:
+def _decimal(value: object) -> Decimal | None:
     if value is None:
         return None
     try:

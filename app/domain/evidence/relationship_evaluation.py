@@ -36,7 +36,6 @@ import hashlib
 import json
 import statistics
 from collections.abc import Collection
-from typing import Any
 
 #: Horizons (trading days) always reported separately in stored output.
 HORIZONS = (1, 5, 20)
@@ -63,14 +62,14 @@ DEMOTED_BOOST = 0.5
 def _date_part(value: object) -> str:
     return str(value or "")[:10]
 
-def is_pit_safe(instance: dict[str, Any]) -> bool:
+def is_pit_safe(instance: dict[str, object]) -> bool:
     """True only when evidence ``known_at`` strictly precedes the prediction."""
     known = _date_part(instance.get("evidence_known_at"))
     predicted = _date_part(instance.get("prediction_date"))
     return bool(known) and bool(predicted) and known < predicted
 
 
-def _rate(items: list[dict[str, Any]], key: str, default: bool) -> float:
+def _rate(items: list[dict[str, object]], key: str, default: bool) -> float:
     if not items:
         return 0.0
     return sum(1 for it in items if bool(it.get(key, default))) / len(items)
@@ -136,20 +135,20 @@ def _max_drawdown(ordered_excess: list[float]) -> float:
     return worst
 
 
-def _instance_key(it: dict[str, Any]) -> tuple[str, str]:
+def _instance_key(it: dict[str, object]) -> tuple[str, str]:
     """Chronological sort key: prediction date, then instance id."""
     return (_date_part(it.get("prediction_date")),
             str(it.get("instance_id") or ""))
 
 
 def evaluate_window(
-    instances: list[dict[str, Any]],
+    instances: list[dict[str, object]],
     observations: dict[tuple[str, str], float] | None,
     benchmark: dict[str, float] | None,
     window_start: str,
     window_end: str,
     horizons: tuple[int, ...] = HORIZONS,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Evaluate one chronological window; never raises on missing data."""
     in_window = sorted(
         (it for it in instances
@@ -170,7 +169,7 @@ def evaluate_window(
 
     identity = _rate(safe, "identity_correct", True)
     baseline_identity = _rate(safe, "baseline_identity_correct", True)
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "window_start": window_start,
         "window_end": window_end,
         "n_instances": len(in_window),
@@ -205,7 +204,7 @@ def evaluate_window(
     calendar = sorted(str(d) for d in benchmark)
     positions = {day: idx for idx, day in enumerate(calendar)}
 
-    def _composite(flag: str) -> tuple[dict[str, Any], float] | None:
+    def _composite(flag: str) -> tuple[dict[str, dict[str, float]], float] | None:
         picked = sorted(
             (it for it in safe if it.get(flag)),
             key=_instance_key,
@@ -238,27 +237,28 @@ def evaluate_window(
     if model_market is None or baseline_market is None:
         result.update(complete=False, incomplete_reason="missing-market-prices")
         return result
-    result["market"], result["market_composite"] = model_market
-    _, result["baseline_market_composite"] = baseline_market
+    model_per_horizon, model_composite = model_market
+    _, baseline_composite = baseline_market
+    result["market"], result["market_composite"] = model_per_horizon, model_composite
+    result["baseline_market_composite"] = baseline_composite
 
 
     retrieval_ok = _improves(f1, b_f1)
-    market_ok = _improves(result["market_composite"], result["baseline_market_composite"])
+    market_ok = _improves(model_composite, baseline_composite)
     no_regression = violations == 0 and identity >= baseline_identity
     result["qualifying"] = bool(retrieval_ok and market_ok and no_regression)
-    result["below_baseline"] = bool(
-        f1 < b_f1 or result["market_composite"] < result["baseline_market_composite"])
+    result["below_baseline"] = bool(f1 < b_f1 or model_composite < baseline_composite)
     return result
 
 
 def evaluate_type(
     relationship_type: str,
-    instances: list[dict[str, Any]],
+    instances: list[dict[str, object]],
     observations: dict[tuple[str, str], float] | None,
     benchmark: dict[str, float] | None,
     windows: list[tuple[str, str]],
     horizons: tuple[int, ...] = HORIZONS,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Walk windows chronologically; return per-window metrics plus a decision.
 
     Decisions: ``activate`` (100+ PIT-safe instances and the trailing two
@@ -269,7 +269,11 @@ def evaluate_type(
     ordered = sorted(windows)
     evaluated = [evaluate_window(list(instances or []), observations, benchmark,
                                  start, end, horizons) for start, end in ordered]
-    total_safe = sum(w["n_pit_safe"] for w in evaluated)
+    total_safe = 0
+    for w in evaluated:
+        n = w.get("n_pit_safe")
+        if isinstance(n, int):
+            total_safe += n
     if any(not w["complete"] for w in evaluated):
         decision, reason = "incomplete", "missing-market-data-type-unchanged"
     elif total_safe < MIN_PIT_SAFE_INSTANCES:

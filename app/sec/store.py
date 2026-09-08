@@ -78,7 +78,7 @@ def store_filing(
 ) -> int:
     """Append one normalized filing row; returns rows written (0 on rerun)."""
     canonical = json.dumps(filing.to_dict(), sort_keys=True).encode("utf-8")
-    row = {
+    row: dict[str, object] = {
         "accession": filing.accession_no,
         "form": filing.form,
         "cik": str(filing.filer_cik),
@@ -594,7 +594,7 @@ def persist_search_ledger(
     """
     now = _utcnow()
     req = _as_dict(request)
-    search_row = {
+    search_row: dict[str, object] = {
         "search_id": str(search_id),
         "request_json": _json(req),
         "coverage_status": coverage_status,
@@ -733,7 +733,7 @@ def store_coverage(
 ) -> int:
     """Append one ingestion-coverage row (source + form + partition key)."""
     now = retrieved_at or _utcnow()
-    row = {
+    row: dict[str, object] = {
         "source": str(source),
         "form": str(form),
         "family": family,
@@ -795,7 +795,7 @@ def store_checkpoint(
 ) -> int:
     """Append one checkpoint row; reruns with identical keys write nothing."""
     now = _utcnow()
-    row = {
+    row: dict[str, object] = {
         "pipeline": str(pipeline),
         "source": str(source),
         "key": str(key),

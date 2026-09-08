@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, override
+from typing import override
 
 import pytest
 
@@ -100,7 +100,7 @@ class FakeClient:
         self.payloads = payloads
         self.calls: list[tuple[str, object]] = []
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
         self.calls.append((name, arguments))
         payload = self.payloads[name]
         if callable(payload):
@@ -912,7 +912,11 @@ class TestScanProvider:
         client = FakeClient({"get_scanner_filter_specs": _fixture("scan_specs.json")})
         data = RobinhoodPortfolioProvider(client).get_scanner_filter_specs()
         assert client.calls == [("get_scanner_filter_specs", {})]
-        assert data["filter_specs"][0]["filter_type"] == "FILTER_TYPE_INSTRUMENT_TYPE"
+        filter_specs = data["filter_specs"]
+        assert isinstance(filter_specs, list)
+        first_spec = filter_specs[0]
+        assert isinstance(first_spec, dict)
+        assert first_spec["filter_type"] == "FILTER_TYPE_INSTRUMENT_TYPE"
 
     def test_get_scans_returns_rows(self):
         client = FakeClient({"get_scans": _fixture("scans.json")})
@@ -926,4 +930,8 @@ class TestScanProvider:
         data = RobinhoodPortfolioProvider(client).run_scan("scan-rsi-1")
         assert client.calls == [("run_scan", {"scan_id": "scan-rsi-1"})]
         assert data["total"] == 3
-        assert data["results"][0]["ticker"] == "WING"
+        results = data["results"]
+        assert isinstance(results, list)
+        first_result = results[0]
+        assert isinstance(first_result, dict)
+        assert first_result["ticker"] == "WING"

@@ -6,7 +6,7 @@ Network-free and agent-free: raw payloads in, normalized rows out.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from .domain.market import ids
 
@@ -40,10 +40,11 @@ CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def normalize_sec_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict[str, Any]]]:
-    entities: list[dict[str, Any]] = []
-    aliases: list[dict[str, Any]] = []
-    items = raw.values() if isinstance(raw, dict) else (raw or [])
+def normalize_sec_tickers(raw: object, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict[str, object]]]:
+    entities: list[dict[str, object]] = []
+    aliases: list[dict[str, object]] = []
+    values: list[object] = list(raw.values()) if isinstance(raw, dict) else (list(raw) if isinstance(raw, (list, tuple)) else [])
+    items = values
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -83,15 +84,32 @@ def normalize_sec_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> 
     return {"entities": entities, "entity_aliases": aliases}
 
 
-def _extract_shares_facts(raw: Any) -> list[dict[str, Any]]:
-    units = (((raw.get("facts") or {}).get("dei") or {}).get(SHARES_OUTSTANDING_CONCEPT) or {}).get("units") or {}
-    facts = units.get("shares") or []
-    return [fact for fact in facts if isinstance(fact, dict)]
+def _extract_shares_facts(raw: object) -> list[dict[str, object]]:
+    if not isinstance(raw, dict):
+        return []
+    facts_obj: object = raw.get("facts")
+    if not isinstance(facts_obj, dict):
+        return []
+    dei_obj: object = facts_obj.get("dei")
+    if not isinstance(dei_obj, dict):
+        return []
+    concept_obj: object = dei_obj.get(SHARES_OUTSTANDING_CONCEPT)
+    if not isinstance(concept_obj, dict):
+        return []
+    units_obj: object = concept_obj.get("units")
+    if not isinstance(units_obj, dict):
+        return []
+    shares_obj: object = units_obj.get("shares") or []
+    if not isinstance(shares_obj, list):
+        return []
+    return [fact for fact in shares_obj if isinstance(fact, dict)]
 
 
-def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
-    entries: list[tuple[str, str, str, dict[str, Any]]] = []
-    namespaces = raw.get("facts") or {}
+def _extract_canonical_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
+    entries: list[tuple[str, str, str, dict[str, object]]] = []
+    if not isinstance(raw, dict):
+        return entries
+    namespaces: object = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
     for namespace, concepts in namespaces.items():
@@ -101,16 +119,25 @@ def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict[str, An
             canonical = next((name for name, aliases in CANONICAL_CONCEPTS.items() if tag in aliases), None)
             if canonical is None:
                 continue
-            units = (payload or {}).get("units") or {}
-            for fact in units.get("USD") or []:
+            if not isinstance(payload, dict):
+                continue
+            units_obj: object = payload.get("units") or {}
+            if not isinstance(units_obj, dict):
+                continue
+            usd_obj: object = units_obj.get("USD") or []
+            if not isinstance(usd_obj, list):
+                continue
+            for fact in usd_obj:
                 if isinstance(fact, dict):
                     entries.append((canonical, f"{namespace}:{tag}", "USD", fact))
     return entries
 
-def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
+def _extract_eps_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
     """Per-share earnings facts, accepted only under the ``USD/shares`` unit."""
-    entries: list[tuple[str, str, str, dict[str, Any]]] = []
-    namespaces = raw.get("facts") or {}
+    entries: list[tuple[str, str, str, dict[str, object]]] = []
+    if not isinstance(raw, dict):
+        return entries
+    namespaces: object = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
     for namespace, concepts in namespaces.items():
@@ -119,17 +146,26 @@ def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
         for tag, payload in concepts.items():
             if tag not in EPS_CONCEPT_NAMES:
                 continue
-            units = (payload or {}).get("units") or {}
-            for fact in units.get(EPS_UNIT) or []:
+            if not isinstance(payload, dict):
+                continue
+            units_obj: object = payload.get("units") or {}
+            if not isinstance(units_obj, dict):
+                continue
+            eps_obj: object = units_obj.get(EPS_UNIT) or []
+            if not isinstance(eps_obj, list):
+                continue
+            for fact in eps_obj:
                 if isinstance(fact, dict):
                     entries.append((tag, f"{namespace}:{tag}", EPS_UNIT, fact))
     return entries
 
 
-def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
+def _extract_dividend_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
     """Declared dividend-per-share facts, accepted only under ``USD/shares``."""
-    entries: list[tuple[str, str, str, dict[str, Any]]] = []
-    namespaces = raw.get("facts") or {}
+    entries: list[tuple[str, str, str, dict[str, object]]] = []
+    if not isinstance(raw, dict):
+        return entries
+    namespaces: object = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
     for namespace, concepts in namespaces.items():
@@ -138,15 +174,22 @@ def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any
         for tag, payload in concepts.items():
             if tag != DIVIDEND_PER_SHARE_CONCEPT:
                 continue
-            units = (payload or {}).get("units") or {}
-            for fact in units.get(EPS_UNIT) or []:
+            if not isinstance(payload, dict):
+                continue
+            units_obj: object = payload.get("units") or {}
+            if not isinstance(units_obj, dict):
+                continue
+            div_obj: object = units_obj.get(EPS_UNIT) or []
+            if not isinstance(div_obj, list):
+                continue
+            for fact in div_obj:
                 if isinstance(fact, dict):
                     entries.append((tag, f"{namespace}:{tag}", EPS_UNIT, fact))
     return entries
 
 
 def _extract_dividend_event_facts(
-    raw: Any,
+    raw: object,
     *,
     cik: int,
     entity_id: str,
@@ -154,12 +197,13 @@ def _extract_dividend_event_facts(
     source_url: str,
     retrieved_at: str,
     content_hash: str,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     """Declared-dividend events from structured XBRL facts; never infers dates."""
     del retrieved_at  # known_at is filed_at, never extraction time.
-    namespaces = (raw.get("facts") if isinstance(raw, dict) else None) or {}
-    if not isinstance(namespaces, dict):
+    namespaces_obj: object = (raw.get("facts") if isinstance(raw, dict) else None) or {}
+    if not isinstance(namespaces_obj, dict):
         return []
+    namespaces = namespaces_obj
     amounts: list[tuple[str, str, float, str, str]] = []
     dates: dict[tuple[str, str], dict[str, set[str]]] = {}
     for namespace, concepts in namespaces.items():
@@ -170,19 +214,25 @@ def _extract_dividend_event_facts(
             role = _DIVIDEND_EVENT_DATE_ROLES.get(tag)
             if not is_amount and role is None:
                 continue
-            units = (payload or {}).get("units") or {}
-            if not isinstance(units, dict):
+            if not isinstance(payload, dict):
                 continue
+            units_obj: object = payload.get("units") or {}
+            if not isinstance(units_obj, dict):
+                continue
+            units = units_obj
             if is_amount:
-                unit_facts: list[tuple[str, list[Any]]] = [
+                unit_facts: list[tuple[str, list[object]]] = [
                     (unit, facts) for unit, facts in units.items()
-                    if isinstance(facts, list) and facts
+                    if isinstance(unit, str) and isinstance(facts, list) and facts
                 ]
                 preferred = [u for u, _ in unit_facts if u == EPS_UNIT]
                 # Contingency A: fall back to the sole observed unit for this concept.
                 chosen = preferred[:1] if preferred else ([unit_facts[0][0]] if len(unit_facts) == 1 else [])
                 for unit in chosen:
-                    for fact in units.get(unit) or []:
+                    facts_obj: object = units.get(unit) or []
+                    if not isinstance(facts_obj, list):
+                        continue
+                    for fact in facts_obj:
                         if not isinstance(fact, dict):
                             continue
                         val_raw = fact.get("val")
@@ -212,7 +262,7 @@ def _extract_dividend_event_facts(
     groups: dict[tuple[str, str], list[tuple[float, str, str]]] = {}
     for accession, filed, amount, unit, source_concept in amounts:
         groups.setdefault((accession, filed), []).append((amount, unit, source_concept))
-    events: list[dict[str, Any]] = []
+    events: list[dict[str, object]] = []
     for (accession, filed) in sorted(groups):
         seen: dict[float, tuple[str, str]] = {}
         for amount, unit, source_concept in groups[(accession, filed)]:
@@ -329,9 +379,9 @@ def _extract_dividend_events_from_text(
     filed_at: str,
     source_url: str,
     content_hash: str,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     """Proposed dividend events from filing prose; amount mandatory, dates optional."""
-    events: list[dict[str, Any]] = []
+    events: list[dict[str, object]] = []
     for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
         sentence = sentence.strip()
         match = _DIVIDEND_DECLARE_RE.search(sentence)
@@ -382,7 +432,7 @@ def _extract_dividend_events_from_text(
     return events
 
 
-def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
+def _extract_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
     entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
     entries.extend(_extract_canonical_facts(raw))
     entries.extend(_extract_eps_facts(raw))
@@ -391,21 +441,22 @@ def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
 
 
 def normalize_sec_company_facts(
-    raw: Any,
+    raw: object,
     *,
     retrieved_at: str,
     content_hash: str,
     source_url: str,
     source_record_id: str,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, list[dict[str, object]]]:
+    cik_raw: object = raw.get("cik") if isinstance(raw, dict) else None
     try:
-        cik = int(raw.get("cik") or 0)
+        cik = int(cik_raw or 0) if isinstance(cik_raw, (int, float, str, bytes)) else (int(str(cik_raw) or 0) if cik_raw is not None else 0)
     except (TypeError, ValueError):
         cik = 0
     entity_id = ids.sec_entity_id(cik)
     security_id = ids.sec_security_id(cik)
     extracted_facts = _extract_facts(raw)
-    documents = [{
+    documents: list[dict[str, object]] = [{
         "doc_id": ids.sec_doc_id("companyfacts", source_record_id, content_hash),
         "source": "sec",
         "kind": "companyfacts",
@@ -419,14 +470,19 @@ def normalize_sec_company_facts(
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
-    financial_facts: list[dict[str, Any]] = []
+    financial_facts: list[dict[str, object]] = []
     for concept, original_concept, unit, fact in extracted_facts:
         period_end = str(fact.get("end") or "")
         filed_at = str(fact.get("filed") or "")
         accession = str(fact.get("accn") or "")
-        val_raw = fact.get("val")
+        val_raw: object = fact.get("val")
         try:
-            value = float(val_raw) if val_raw is not None else None
+            if val_raw is None:
+                value = None
+            elif isinstance(val_raw, (int, float, str, bytes)):
+                value = float(val_raw)
+            else:
+                value = float(str(val_raw))
         except (TypeError, ValueError):
             value = None
         if value is None:
@@ -435,9 +491,14 @@ def normalize_sec_company_facts(
             continue
         start_raw = fact.get("start")
         period_start = str(start_raw) if start_raw else None
-        fy_raw = fact.get("fy")
+        fy_raw: object = fact.get("fy")
         try:
-            fiscal_year = int(fy_raw) if fy_raw is not None else None
+            if fy_raw is None:
+                fiscal_year = None
+            elif isinstance(fy_raw, (int, float, str, bytes)):
+                fiscal_year = int(fy_raw)
+            else:
+                fiscal_year = int(str(fy_raw))
         except (TypeError, ValueError):
             fiscal_year = None
         fiscal_period = str(fact.get("fp") or "") or None
@@ -469,7 +530,7 @@ def normalize_sec_company_facts(
         raw, cik=cik, entity_id=entity_id, security_id=security_id,
         source_url=source_url, retrieved_at=retrieved_at, content_hash=content_hash,
     )
-    securities = [{
+    securities: list[dict[str, object]] = [{
         "security_id": security_id,
         "entity_id": entity_id,
         "security_type": "equity-common" if financial_facts else "unknown",
@@ -488,17 +549,30 @@ def normalize_sec_company_facts(
 SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
 
 
-def _to_float(value: Any) -> Optional[float]:
-    try:
-        if value is None or str(value).strip() == "":
-            return None
+def _to_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
         return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (str, bytes)):
+        try:
+            text = value.decode() if isinstance(value, bytes) else value
+            if text.strip() == "":
+                return None
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+    try:
+        text = str(value).strip()
+        if text == "":
+            return None
+        return float(text)
     except (TypeError, ValueError):
         return None
-
-
 def normalize_finra_short_interest(
-    rows: list[dict[str, Any]],
+    rows: list[dict[str, object]],
     *,
     settlement_date: str,
     known_at: str,
@@ -506,8 +580,8 @@ def normalize_finra_short_interest(
     content_hash: str,
     source_url: str,
     source_record_id: str,
-) -> dict[str, list[dict[str, Any]]]:
-    short_interest: list[dict[str, Any]] = []
+) -> dict[str, list[dict[str, object]]]:
+    short_interest: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+
+from app.thesis.models import JSONValue
 
 
-def _decimal(value: Any) -> Decimal | None:
+def _decimal(value: object) -> Decimal | None:
     if value in (None, ""):
         return None
     try:
@@ -17,11 +19,11 @@ def _decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _first_present(payload: dict[str, Any], *keys: str) -> Any:
+def _first_present(payload: Mapping[str, object], *keys: str) -> object:
     return next((payload[key] for key in keys if key in payload and payload[key] is not None), None)
 
 
-def _unwrap_nested(payload: dict[str, Any], outer_keys: tuple[str, ...], inner_keys: tuple[str, ...]) -> Any:
+def _unwrap_nested(payload: Mapping[str, object], outer_keys: tuple[str, ...], inner_keys: tuple[str, ...]) -> object:
     """Return a value, descending one level when the outer value is a dict.
 
     Robinhood returns some scalars as nested objects (e.g. buying_power is
@@ -34,7 +36,7 @@ def _unwrap_nested(payload: dict[str, Any], outer_keys: tuple[str, ...], inner_k
     return value
 
 
-def _coerce_retrieved_at(payload: dict[str, Any], explicit: datetime | None) -> datetime:
+def _coerce_retrieved_at(payload: Mapping[str, object], explicit: datetime | None) -> datetime:
     if explicit is not None:
         value = explicit
     else:
@@ -81,21 +83,27 @@ class BrokeragePosition:
     source: str = "robinhood_mcp"
 
 
-def _json_value(value: Any) -> Any:
+def _json_value(value: object) -> JSONValue:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
-    return value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _json_value(v) for k, v in value.items()}
+    return str(value)
 
 
-def to_json_dict(value: Any) -> dict[str, Any]:
+def to_json_dict(value: BrokerageAccount | CashBalance | BrokeragePosition) -> dict[str, JSONValue]:
     """Serialize a normalized model without leaking provider payloads."""
     data = asdict(value)
     return {key: _json_value(item) for key, item in data.items()}
 
 
-def normalize_account(payload: dict[str, Any], *, retrieved_at: datetime | None = None) -> BrokerageAccount:
+def normalize_account(payload: Mapping[str, object], *, retrieved_at: datetime | None = None) -> BrokerageAccount:
     """Normalize a get_accounts entry while keeping absent values nullable."""
     account_id = _first_present(payload, "account_id", "id", "accountNumber", "account_number")
     if account_id is None:
@@ -111,14 +119,14 @@ def normalize_account(payload: dict[str, Any], *, retrieved_at: datetime | None 
 
 
 def normalize_cash_balance(
-    payload: dict[str, Any], *, account_id: str | None = None, retrieved_at: datetime | None = None
+    payload: Mapping[str, object], *, account_id: str | None = None, retrieved_at: datetime | None = None
 ) -> CashBalance:
     """Normalize a get_portfolio entry while keeping absent values nullable."""
-    account_id = account_id or _first_present(payload, "account_id", "id", "accountNumber", "account_number", "accountId")
-    if account_id is None:
+    resolved_account_id: object = account_id or _first_present(payload, "account_id", "id", "accountNumber", "account_number", "accountId")
+    if resolved_account_id is None:
         raise ValueError("Account response is missing account_id")
     return CashBalance(
-        account_id=str(account_id),
+        account_id=str(resolved_account_id),
         cash=_decimal(_first_present(payload, "cash", "cash_available", "cashAvailable", "available_cash", "availableCash")),
         buying_power=_decimal(
             _unwrap_nested(
@@ -141,12 +149,12 @@ def normalize_cash_balance(
 
 
 def normalize_position(
-    payload: dict[str, Any], *, account_id: str | None = None, retrieved_at: datetime | None = None
+    payload: Mapping[str, object], *, account_id: str | None = None, retrieved_at: datetime | None = None
 ) -> BrokeragePosition:
     """Normalize a get_equity_positions entry while keeping absent values nullable."""
     position_id = str(_first_present(payload, "position_id", "id", "positionId") or "")
-    account_id = account_id or _first_present(payload, "account_id", "accountId", "account_number", "accountNumber")
-    if account_id is None:
+    resolved_account_id: object = account_id or _first_present(payload, "account_id", "accountId", "account_number", "accountNumber")
+    if resolved_account_id is None:
         raise ValueError("Position response is missing account_id")
     ticker = str(_first_present(payload, "ticker", "symbol", "instrument_symbol", "instrumentSymbol") or "").upper()
     if not ticker:
@@ -157,7 +165,7 @@ def normalize_position(
         raise ValueError("Position response is missing or malformed quantity")
     return BrokeragePosition(
         position_id=position_id,
-        account_id=str(account_id),
+        account_id=str(resolved_account_id),
         ticker=ticker,
         provider_instrument_id=instrument if isinstance(instrument, str) else None,
         quantity=quantity,

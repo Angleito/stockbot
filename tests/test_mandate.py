@@ -450,7 +450,7 @@ def test_empty_mandate_zero_breaches():
 # ---------------------------------------------------------------------------
 
 
-def _sector_row(entity_id: str, sector: str, known_at: str) -> dict[str, str]:
+def _sector_row(entity_id: str, sector: str, known_at: str) -> dict[str, object]:
     return {
         "entity_id": entity_id,
         "sector": sector,

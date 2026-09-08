@@ -12,7 +12,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from .config import get_data_root, get_sec_edgar_identity, init_config
 
@@ -78,14 +78,18 @@ def _result_content_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(tmp, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-def _companyfacts_url(cik: Any) -> str | None:
-    try:
-        return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
-    except (TypeError, ValueError):
+def _companyfacts_url(cik: object) -> str | None:
+    if isinstance(cik, (int, float, str, bytes)):
+        try:
+            return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _filing_dir_url(cik: object, accession: object) -> str | None:
+    if not isinstance(cik, (int, float, str, bytes)):
         return None
-
-
-def _filing_dir_url(cik: Any, accession: Any) -> str | None:
     try:
         acc = str(accession).replace("-", "")
         return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/"
@@ -96,12 +100,12 @@ def _filing_dir_url(cik: Any, accession: Any) -> str | None:
 def _cached_or_fetch(key: str, fetch: Callable[[], dict[str, object]]) -> dict[str, object]:
     """24h parsed-result cache; retrieved_at preserved, transient flags unstored."""
     hit = cache.get(key, ttl=SEC_RESULT_CACHE_TTL_SECONDS)
-    if hit is not None:
-        out = dict(hit) if isinstance(hit, dict) else hit
-        if isinstance(out, dict):
-            out["cache_hit"] = True
-            out["cache_type"] = "stockbot_parsed"
+    if isinstance(hit, dict):
+        out = dict(hit)
+        out["cache_hit"] = True
+        out["cache_type"] = "stockbot_parsed"
         return out
+    # Non-dict hit (corrupt cache): fall through and refetch, as before.
     value = fetch()
     if isinstance(value, dict) and "error" not in value:
         canonical = dict(value)
@@ -131,7 +135,7 @@ _MISSING_QUARTER_GAP_DAYS = 130
 _DERIVED_Q4_OFFSET_DAYS = 91
 
 
-def _fact_duration_days(frame: pd.DataFrame) -> pd.Series:
+def _fact_duration_days(frame: pd.DataFrame) -> pd.Series[int]:
     """Duration in days between period_start and period_end (XBRL facts)."""
     import pandas as pd
 
@@ -214,7 +218,7 @@ _DIVIDEND_SOURCE = "SEC EDGAR company facts (Declared dividends per share)"
 _DIVIDEND_TTM_MAX_AGE_DAYS = 180
 
 
-def _is_recent_dividend_period(period_end: Any, as_of: _dt.date, max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS) -> bool:
+def _is_recent_dividend_period(period_end: object, as_of: _dt.date, max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS) -> bool:
     """True only when period_end is on/before as_of and within max_age_days."""
     try:
         end = _dt.date.fromisoformat(str(period_end)[:10])
@@ -242,7 +246,7 @@ def _null_dividend_payload(ticker: str) -> dict[str, object]:
     }
 
 
-def _has_contiguous_gaps(period_ends: list[Any], day_range: tuple[int, int], count: int) -> bool:
+def _has_contiguous_gaps(period_ends: list[object], day_range: tuple[int, int], count: int) -> bool:
     """True only for exactly count parseable ends with gaps inside day_range."""
     if len(period_ends) != count:
         return False
@@ -253,7 +257,7 @@ def _has_contiguous_gaps(period_ends: list[Any], day_range: tuple[int, int], cou
     return all(day_range[0] <= (b - a).days <= day_range[1] for a, b in zip(ends, ends[1:]))
 
 
-def _has_contiguous_quarters(period_ends: list[Any]) -> bool:
+def _has_contiguous_quarters(period_ends: list[object]) -> bool:
     """True only for exactly four parseable ends with quarterly gaps."""
     return _has_contiguous_gaps(period_ends, _QUARTER_DAYS, 4)
 
@@ -279,7 +283,7 @@ def _dividend_growth(annual: dict[int, float]) -> dict[str, float | None]:
 _NO_HISTORICAL_PRICE_STORE = "no_historical_price_store"
 
 
-def _dividend_valuation_stub() -> dict[str, Any]:
+def _dividend_valuation_stub() -> dict[str, object]:
     """Historical-price valuation is unavailable (no OHLCV store): nulls with reason."""
     return {
         "historical_yield": None,
@@ -293,13 +297,13 @@ def _dividend_valuation_stub() -> dict[str, Any]:
     }
 
 
-def _dividend_valuation(ticker: str, ttm: Any, *, include_price: bool) -> dict[str, Any]:
+def _dividend_valuation(ticker: str, ttm: object, *, include_price: bool) -> dict[str, object]:
     """Point-in-time valuation: stale/absent TTM or historical requests expose no price."""
     nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None, **_dividend_valuation_stub()}
     if not include_price or ttm is None:
         return dict(nulls)
     try:
-        ttm_f = float(ttm)
+        ttm_f = float(ttm) if isinstance(ttm, (int, float, str, bytes)) else float(str(ttm))
     except (TypeError, ValueError):
         return dict(nulls)
     try:
@@ -520,8 +524,8 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict[str, object]:
                 )
             else:
                 recent = q
-            ttm: Any = None
-            latest_end: Any = str(recent.iloc[-1]["period_end"]) if len(recent) else None
+            ttm: float | None = None
+            latest_end: str | None = str(recent.iloc[-1]["period_end"]) if len(recent) else None
             if len(recent) == 4 and _has_contiguous_quarters(list(recent["period_end"])):
                 ttm = round(sum(float(r["value"]) for _, r in recent.iterrows()), 4)
             fy = div[
@@ -576,7 +580,7 @@ def get_recent_ownership_filings(form_type: str = "both", limit: int = 10) -> di
     _ensure_init()
     key = f"ownership_feed:{form_type}:{limit}"
     hit = cache.get(key, ttl=_OWNERSHIP_FEED_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, dict):
         return hit
     value = _fetch_recent_ownership_filings(form_type, limit)
     cache.set(key, value)
@@ -587,7 +591,7 @@ def _resolve_issuer_ticker(cik: int) -> str | None:
     """Best-effort CIK -> ticker for drill-down (cached; None when unresolvable)."""
     key = f"cik_ticker:{int(cik):010d}"
     hit = cache.get(key, ttl=_OWNERSHIP_TICKER_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, str):
         return hit or None
     try:
         tickers = Company(int(cik)).tickers

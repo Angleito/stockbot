@@ -548,3 +548,55 @@ def test_entity_51_row_probe_marks_partial(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.coverage.status == "partial"
     assert any(a.backend == "cik-lookup" and a.status == "partial" and a.truncated
                and a.source_limit == "50 candidates" for a in out.attempts)
+
+
+def test_list_sec_filings_stops_after_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    sgml_calls: list[int] = []
+
+    class _Bomb(_FakeFiling):
+        def sgml(self) -> NoReturn:
+            sgml_calls.append(1)
+            raise RuntimeError("unbounded sgml download")
+
+    # Each normalization calls sgml exactly once (accepted=None falls
+    # through to the sgml fallback, swallowed by _best), so sgml_calls
+    # counts normalizations. Pre-fix normalizes all 100; post-fix 10.
+    _patch_company(monkeypatch, [_Bomb(filed="2024-01-15", accession=f"{i:04d}") for i in range(100)])
+    out = filings.list_sec_filings("AAPL", limit=10)
+    assert [f.accession_no for f in out] == [f"{i:04d}" for i in range(10)]
+    assert len(sgml_calls) <= 10
+
+
+def test_list_sec_filings_as_of_keeps_lazy_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec.models import pit_of
+
+    sgml_calls: list[int] = []
+
+    class _Bomb(_FakeFiling):
+        def sgml(self) -> NoReturn:
+            sgml_calls.append(1)
+            raise RuntimeError("unbounded sgml download")
+
+    fakes: list[_FakeFiling] = [
+        _Bomb(
+            filed="2024-01-10" if i % 2 == 0 else "2024-06-10",
+            accession=f"{i:04d}",
+        )
+        for i in range(100)
+    ]
+    as_of = "2024-03-01"
+    _patch_company(monkeypatch, fakes)
+    # Unlimited call normalizes everything: the old normalize-all-then-
+    # filter-then-slice semantics. The limited call must match its prefix.
+    full = filings.list_sec_filings("AAPL", as_of=as_of, limit=None)
+    assert [f.accession_no for f in full] == [f"{i:04d}" for i in range(0, 100, 2)]
+    expected = full[:10]
+    raw_tenth = next(i for i, f in enumerate(fakes) if f.accession_no == expected[9].accession_no)
+    bound = raw_tenth + 1
+    sgml_calls.clear()
+    out = filings.list_sec_filings("AAPL", as_of=as_of, limit=10)
+    assert out == expected
+    for x in out:
+        value, _basis = pit_of(x)
+        assert value is not None and value[:10] <= as_of
+    assert len(sgml_calls) <= bound

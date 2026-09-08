@@ -7,16 +7,18 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Protocol, Self, TypeVar
+from types import ModuleType
+from collections.abc import Mapping
+from typing import Protocol, Self, TypeVar
 
 import yaml
 
 try:
     import fcntl  # Linux-only; thesis locking is explicitly Linux-only.
 except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
+    fcntl: ModuleType | None = None
 
-from app.thesis.models import SCHEMA_VERSION
+from app.thesis.models import JSONValue, SCHEMA_VERSION
 
 _M = TypeVar("_M", bound="YamlModel")
 
@@ -25,7 +27,7 @@ class YamlModel(Protocol):
     """Structural thesis-model surface consumed by load_yaml (all models share from_dict)."""
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], path: str = ..., /) -> Self:
+    def from_dict(cls, data: Mapping[str, object], path: str = ..., /) -> Self:
         ...
 
 
@@ -70,7 +72,7 @@ def load_yaml(path: Path | str, model_type: type[_M]) -> _M:
     return model_type.from_dict(data, str(p))
 
 
-def load_raw_yaml(path: Path | str) -> dict[str, Any]:
+def load_raw_yaml(path: Path | str) -> dict[str, JSONValue]:
     """Safe-load + mapping/schema check without model validation."""
     p = Path(path)
     try:
@@ -81,10 +83,10 @@ def load_raw_yaml(path: Path | str) -> dict[str, Any]:
         raise ValueError(f"{p}: root must be a mapping, got {type(data).__name__}")
     if data.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"{p}: unknown schema_version {data.get('schema_version')!r}, expected {SCHEMA_VERSION}")
-    return data
+    return dict(data)
 
 
-def atomic_write_yaml(path: Path | str, value: dict[str, Any], root: Path | str) -> Path:
+def atomic_write_yaml(path: Path | str, value: dict[str, JSONValue], root: Path | str) -> Path:
     """Validate-then-replace ``path`` atomically under ``root``.
 
     Writes a same-directory temp file, flushes + fsyncs, loads it back to
@@ -115,7 +117,7 @@ def atomic_write_yaml(path: Path | str, value: dict[str, Any], root: Path | str)
     return dest
 
 
-def atomic_write_json(path: Path | str, value: dict[str, Any], root: Path | str) -> Path:
+def atomic_write_json(path: Path | str, value: dict[str, JSONValue], root: Path | str) -> Path:
     """Same temp/flush/fsync/atomic-replace discipline as YAML, for JSON intents."""
     if not isinstance(value, dict):
         raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")

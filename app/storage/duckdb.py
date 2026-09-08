@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 import duckdb
 
@@ -89,9 +89,9 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
 
 def query(
     sql: str,
-    params: Sequence[Any] = (),
+    params: Sequence[object] = (),
     data_root: Optional[Path] = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     """Run a read-only SQL query over the parquet views; returns rows as
     dicts.
 

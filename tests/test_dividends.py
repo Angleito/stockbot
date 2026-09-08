@@ -222,7 +222,9 @@ def test_exact_gap_growth_and_cagr(store: Path, monkeypatch: pytest.MonkeyPatch)
     assert result["growth_3y_cagr"] == 0.1006
     assert result["growth_5y_cagr"] == 0.0986
     assert result["growth_10y_cagr"] == 0.0718
-    years = [row["fiscal_year"] for row in result["annual_history"]]
+    annual_history = result["annual_history"]
+    assert isinstance(annual_history, list)
+    years = [row["fiscal_year"] for row in annual_history]
     assert years == sorted(years, reverse=True) == list(range(2025, 2014, -1))
 
 

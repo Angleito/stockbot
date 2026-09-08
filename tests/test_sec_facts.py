@@ -128,7 +128,9 @@ def test_eps_store_parity_with_live_algorithm(store: Path) -> None:
     assert result["as_of_date"] == "2026-08-10"
     assert "requested_as_of" not in result
     assert result["row_count"] == 4  # tail(4): Q1'26 drops, mirroring live
-    by_end = {q["period_end"]: q for q in result["quarterly_eps"]}
+    quarterly_eps = result["quarterly_eps"]
+    assert isinstance(quarterly_eps, list)
+    by_end = {q["period_end"]: q for q in quarterly_eps}
     assert set(by_end) == {"2025-07-27", "2025-10-26", "2026-01-25", "2026-04-26"}
     assert by_end["2025-07-27"]["eps_diluted"] == 1.08
     assert by_end["2025-10-26"]["eps_diluted"] == 1.30
@@ -152,7 +154,9 @@ def test_eps_store_restatement_uses_true_filed_at_not_fiscal_year_proxy(store: P
     _seed_facts(store, NVDA_CIK, diluted=diluted, basic=basic)
 
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
-    by_end = {q["period_end"]: q for q in result["quarterly_eps"]}
+    quarterly_eps = result["quarterly_eps"]
+    assert isinstance(quarterly_eps, list)
+    by_end = {q["period_end"]: q for q in quarterly_eps}
     assert by_end["2025-10-26"]["eps_diluted"] == 1.30  # latest filed_at wins
     assert result["ttm_eps_diluted"] == 6.53
 
@@ -170,12 +174,16 @@ def test_eps_store_as_of_gating_excludes_later_restatement(store: Path) -> None:
     _seed_facts(store, NVDA_CIK, diluted=diluted)
 
     earlier = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-12-20")
-    by_end = {q["period_end"]: q for q in earlier["quarterly_eps"]}
+    quarterly_eps = earlier["quarterly_eps"]
+    assert isinstance(quarterly_eps, list)
+    by_end = {q["period_end"]: q for q in quarterly_eps}
     assert by_end["2026-09-30"]["eps_diluted"] == 1.20
     assert earlier["ttm_eps_diluted"] == 4.60
 
     later = sec_facts.get_fundamentals("NVDA", "eps", as_of="2027-02-01")
-    by_end = {q["period_end"]: q for q in later["quarterly_eps"]}
+    quarterly_eps = later["quarterly_eps"]
+    assert isinstance(quarterly_eps, list)
+    by_end = {q["period_end"]: q for q in quarterly_eps}
     assert by_end["2026-09-30"]["eps_diluted"] == 1.25
     assert later["ttm_eps_diluted"] == 4.65
 
@@ -187,10 +195,12 @@ def test_derive_q4_uses_restated_fy_total():
     concept = sec_facts.DILUTED_EPS_CONCEPT
     fy_end = date(2026, 1, 25)
 
-    def _row(start: str, end: str, val: float, filed: str, accn: str):
+    def _row(start: str, end: str, val: float, filed: str, accn: str) -> sec_facts.FinancialFactRow:
         return {
             "concept": concept, "period_start": start, "period_end": end,
             "value": val, "filed_at": filed, "accession": accn,
+            "known_at": "", "source_url": None,
+            "fiscal_year": None, "fiscal_period": None,
         }
 
     rows = [
@@ -291,7 +301,9 @@ def test_shares_outstanding_store_latest_period_wins(store: Path) -> None:
     assert result["accession"] == "s3"
     assert result["filed_at"] == "2026-02-25"
     assert result["known_at"] == "2026-02-25"
-    assert "not public float" in result["note"]
+    note = result["note"]
+    assert isinstance(note, str)
+    assert "not public float" in note
     assert result["source_label"] == "SEC EDGAR company facts"
 
 
@@ -363,9 +375,13 @@ def test_get_xbrl_facts_always_live_enveloped(store: Path, monkeypatch: pytest.M
     assert result["row_count"] == 1
     assert result["returned_count"] == 1
     assert result["truncated"] is False
-    assert result["matching_concepts"][0]["concept"] == "Revenue"
+    matching_concepts = result["matching_concepts"]
+    assert isinstance(matching_concepts, list)
+    first_concept = matching_concepts[0]
+    assert isinstance(first_concept, dict)
+    assert first_concept["concept"] == "Revenue"
     assert result["source_label"] == "SEC EDGAR XBRL facts"
-    assert "source" not in result["matching_concepts"][0]
+    assert "source" not in first_concept
 
 
 # ---------------------------------------------------------------------------

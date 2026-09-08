@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
 
 from .account import _decimal, _first_present
 
 
-def _date(value: Any) -> date | None:
+def _date(value: object) -> date | None:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     if not value:
@@ -66,7 +66,7 @@ class OptionQuote:
         return self.mark
 
 
-def normalize_option_quote(payload: dict[str, Any], *, ticker: str = "") -> OptionQuote:
+def normalize_option_quote(payload: Mapping[str, object], *, ticker: str = "") -> OptionQuote:
     """Normalize common provider aliases while keeping absent values nullable."""
     expiration = _date(_first_present(payload, "expiration", "expiration_date", "expirationDate"))
     strike = _decimal(_first_present(payload, "strike", "strike_price", "strikePrice"))
@@ -83,11 +83,23 @@ def normalize_option_quote(payload: dict[str, Any], *, ticker: str = "") -> Opti
         raise ValueError("Option response is missing a supported option type")
 
     def integer(name: str, *aliases: str) -> int | None:
-        raw = next((payload.get(key) for key in (name, *aliases) if payload.get(key) is not None), None)
+        raw: object = next((payload.get(key) for key in (name, *aliases) if payload.get(key) is not None), None)
+        if raw is None or raw == "":
+            return None
         try:
-            return int(raw) if raw not in (None, "") else None
+            if isinstance(raw, bool):
+                return int(raw)
+            if isinstance(raw, int):
+                return raw
+            if isinstance(raw, float):
+                return int(raw)
+            if isinstance(raw, Decimal):
+                return int(raw)
+            if isinstance(raw, str):
+                return int(raw)
         except (TypeError, ValueError):
             return None
+        return None
 
     retrieved = _first_present(payload, "retrieved_at", "retrievedAt", "updated_at", "updatedAt")
     if isinstance(retrieved, str):

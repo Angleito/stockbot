@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from app.domain.evidence.claims import build_claim, claim_content_hash
-from app.domain.evidence.models import EvidenceClaim, ResolutionStatus, SourceClassification
+from app.domain.evidence.models import ClaimType, EvidenceClaim, ResolutionStatus, SourceClassification
 from app.domain.evidence.source_quality import classify_source
 from app.domain.market.securities import SecurityResolution, TickerAlias
 
@@ -36,7 +35,7 @@ def _domain(url: str | None) -> str | None:
 
 def build_evidence_claims(
     *,
-    reader_items: list[dict[str, Any]],
+    reader_items: list[dict[str, object]],
     classify: Callable[[str], SourceClassification] = classify_source,
     resolve: Callable[..., SecurityResolution] | None = None,
     aliases_by_ticker: Callable[[str], Sequence[TickerAlias]] | None = None,
@@ -71,18 +70,41 @@ def build_evidence_claims(
     for item in reader_items:
         if not isinstance(item, dict):
             continue
-        source_url = item.get("source_url")
+        source_url_raw = item.get("source_url")
+        source_url: str | None = source_url_raw if isinstance(source_url_raw, str) else None
         classification = classify(source_url or "")
         subject_ticker = item.get("subject_ticker")
-        subject_name = item.get("subject_name")
+        subject_name_raw = item.get("subject_name")
+        subject_name: str | None = subject_name_raw if isinstance(subject_name_raw, str) else None
         subj = _resolve(
             subject_ticker if isinstance(subject_ticker, str) else None,
-            subject_name if isinstance(subject_name, str) else None,
+            subject_name,
         )
-        object_name = item.get("object_name")
-        obj = _resolve(None, object_name if isinstance(object_name, str) else None)
-        text = item.get("claim") or ""
-        retrieved_at = item.get("retrieved_at") or retrieved_fallback
+        object_name_raw = item.get("object_name")
+        object_name: str | None = object_name_raw if isinstance(object_name_raw, str) else None
+        obj = _resolve(None, object_name)
+        text_raw = item.get("claim") or ""
+        text: str = text_raw if isinstance(text_raw, str) else ""
+        retrieved_raw = item.get("retrieved_at") or retrieved_fallback
+        retrieved_at: str = retrieved_raw if isinstance(retrieved_raw, str) else retrieved_fallback
+        raw_claim_type = item.get("claim_type")
+        if isinstance(raw_claim_type, ClaimType):
+            claim_type_val: ClaimType | str = raw_claim_type
+        elif isinstance(raw_claim_type, str) and raw_claim_type:
+            claim_type_val = raw_claim_type
+        else:
+            claim_type_val = "other"
+        event_raw = item.get("event_at")
+        event_at: str | None = event_raw if isinstance(event_raw, str) else None
+        published_raw = item.get("published_at")
+        published_at: str | None = published_raw if isinstance(published_raw, str) else None
+        domain_raw = item.get("source_domain")
+        source_domain: str | None = (
+            domain_raw if isinstance(domain_raw, str)
+            else _domain(source_url)
+        )
+        summary_raw = item.get("evidence_summary")
+        evidence_summary: str | None = summary_raw if isinstance(summary_raw, str) else None
         claims.append(
             build_claim(
                 entity_id=subj.entity_id,
@@ -91,31 +113,26 @@ def build_evidence_claims(
                 reported_ticker=(subject_ticker.strip().upper() if isinstance(subject_ticker, str) and subject_ticker.strip() else None),
                 subject_resolution=_resolution(subj),
                 object_resolution=_resolution(obj),
-                subject_name=subject_name if isinstance(subject_name, str) else None,
-                claim_type=item.get("claim_type") or "other",
-                text=text if isinstance(text, str) else "",
+                subject_name=subject_name,
+                claim_type=claim_type_val,
+                text=text,
                 object_entity_id=obj.entity_id,
-                object_name=object_name if isinstance(object_name, str) else None,
-                event_at=item.get("event_at") if isinstance(item.get("event_at"), str) else None,
-                published_at=item.get("published_at") if isinstance(item.get("published_at"), str) else None,
-                retrieved_at=retrieved_at if isinstance(retrieved_at, str) else retrieved_fallback,
-                source_url=source_url if isinstance(source_url, str) else None,
-                source_domain=item.get("source_domain")
-                if isinstance(item.get("source_domain"), str)
-                else _domain(source_url if isinstance(source_url, str) else None),
+                object_name=object_name,
+                event_at=event_at,
+                published_at=published_at,
+                retrieved_at=retrieved_at,
+                source_url=source_url,
+                source_domain=source_domain,
                 publisher=classification.publisher,
                 source_tier=classification.source_tier,
                 integrity=classification.integrity,
-                evidence_summary=item.get("evidence_summary")
-                if isinstance(item.get("evidence_summary"), str)
-                else None,
+                evidence_summary=evidence_summary,
                 confidence=None,
             )
         )
     return claims
 
-
-def claim_to_enriched_dict(claim: EvidenceClaim) -> dict[str, Any]:
+def claim_to_enriched_dict(claim: EvidenceClaim) -> dict[str, object]:
     """EvidenceClaim → gateway/render/persist dict (enums as values)."""
     return {
         "claim_id": claim.claim_id,

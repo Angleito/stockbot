@@ -94,4 +94,8 @@ def test_call_target_payoff_and_comparison_are_deterministic():
     assert result["target_pnl"] == "2600"
     compared = compare_options([call, put], target_price=150, as_of=date(2026, 8, 25))
     assert compared["ranking"] == "target_pnl_desc"
-    assert compared["contracts"][0]["contract_id"] == "wing-call-120"
+    contracts = compared["contracts"]
+    assert isinstance(contracts, list)
+    first = contracts[0]
+    assert isinstance(first, dict)
+    assert first["contract_id"] == "wing-call-120"

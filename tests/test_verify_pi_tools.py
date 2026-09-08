@@ -1,12 +1,14 @@
 """Offline unit tests for scripts/verify_pi_tools.py (fakes only, no Pi/network)."""
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 import scripts.verify_pi_tools as v
+from app.config import get_data_root
 from app.storage.runs import _SCHEMA
 
 MODEL = "test-model"
@@ -171,3 +173,33 @@ def test_completed_override_still_needs_db_evidence(tmp_path: Path):
 def test_db_terminal(tmp_path: Path):
     assert v.db_terminal(_ok(tmp_path))
     assert not v.db_terminal(tmp_path / "missing.sqlite")
+
+
+def test_isolated_store_overrides_preset_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(durable))
+    root = tmp_path / "batch"
+    store, captured = v.setup_isolated_store(root)
+    assert store == root / "store"
+    assert captured == durable
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) != durable.resolve()
+
+
+def test_isolated_store_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", "~/.stockbot-data")
+    root = tmp_path / "batch"
+    store, captured = v.setup_isolated_store(root)
+    assert captured == Path.home() / ".stockbot-data"
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
+
+
+def test_isolated_store_empty_value_falls_back_to_repo_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", "")
+    expected = get_data_root()
+    root = tmp_path / "batch"
+    store, captured = v.setup_isolated_store(root)
+    assert captured == expected
+    assert captured != Path(".")
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()

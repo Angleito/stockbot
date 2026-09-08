@@ -181,12 +181,22 @@ test("blocked stdin write still recycles child and releases permits", async () =
 	});
 	try {
 		const big = "x".repeat(200_000);
-		const stuck = await Promise.race([
-			Promise.all(
-				[0, 1, 2, 3].map(() => callBridge({ op: "tool_call", tool: "probe", blob: big }, 50, true)),
-			),
-			deadline(1000),
-		]);
+		const captured: string[] = [];
+		const origError = console.error;
+		console.error = (...a: unknown[]) => { captured.push(a.map(String).join(" ")); };
+		let stuck: Json[];
+		try {
+			stuck = await Promise.race([
+				Promise.all(
+					[0, 1, 2, 3].map(() => callBridge({ op: "tool_call", tool: "probe", blob: big }, 50, true)),
+				),
+				deadline(1000),
+			]);
+		} finally {
+			console.error = origError;
+		}
+		expect(captured.length).toBeGreaterThan(0);
+		for (const line of captured) expect(line).toMatch(/\[stockbot\] bridge \S+ failed: (no response in 50ms|bridge reset)/);
 		for (const res of stuck) expect(res).toEqual({ error: "bridge_unavailable" });
 		expect(await settledKilled(kids[0])).toBe(true);
 		const healthy = await Promise.race([
@@ -296,34 +306,44 @@ test("fatal tool timeout terminates run and recycles", async () => {
 	const runR = "run-R-terminated";
 	const runS = "run-S-clean";
 	try {
-		const resultsP = Promise.all(
-			[0, 1, 2, 3, 4].map((i) =>
-				callBridge(
-					{ op: "tool_call", run_id: runR, tool_call_id: `c${i}`, name: "search_web", arguments: { query: "q" } },
-					50,
-					true,
+		const captured: string[] = [];
+		const origError = console.error;
+		console.error = (...a: unknown[]) => { captured.push(a.map(String).join(" ")); };
+		let results: Json[];
+		try {
+			const resultsP = Promise.all(
+				[0, 1, 2, 3, 4].map((i) =>
+					callBridge(
+						{ op: "tool_call", run_id: runR, tool_call_id: `c${i}`, name: "search_web", arguments: { query: "q" } },
+						50,
+						true,
+					),
 				),
-			),
-		);
-		// Ordering gate: wait until the hanging bridge holds all four admitted
-		// calls, proving the fifth still waits in the permit queue. Real clock:
-		// the hanging child only advances on wall time (see file header).
-		const admittedAt = Date.now();
-		for (; ;) {
-			let admitted = 0;
-			try {
-				admitted = readFileSync(hangLog, "utf8").trim().split("\n").filter(Boolean)
-					.map((l) => JSON.parse(l)).filter((o) => o.op === "tool_call").length;
-			} catch {
-				admitted = 0;
+			);
+			// Ordering gate: wait until the hanging bridge holds all four admitted
+			// calls, proving the fifth still waits in the permit queue. Real clock:
+			// the hanging child only advances on wall time (see file header).
+			const admittedAt = Date.now();
+			for (; ;) {
+				let admitted = 0;
+				try {
+					admitted = readFileSync(hangLog, "utf8").trim().split("\n").filter(Boolean)
+						.map((l) => JSON.parse(l)).filter((o) => o.op === "tool_call").length;
+				} catch {
+					admitted = 0;
+				}
+				if (admitted >= 4) break;
+				if (Date.now() - admittedAt > 5000) throw new Error("hanging bridge never admitted four calls");
+				const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
+				setTimeout(wake, 5);
+				await tick;
 			}
-			if (admitted >= 4) break;
-			if (Date.now() - admittedAt > 5000) throw new Error("hanging bridge never admitted four calls");
-			const { promise: tick, resolve: wake } = Promise.withResolvers<void>();
-			setTimeout(wake, 5);
-			await tick;
+			results = await Promise.race([resultsP, deadline(5000)]);
+		} finally {
+			console.error = origError;
 		}
-		const results = await Promise.race([resultsP, deadline(5000)]);
+		expect(captured.length).toBeGreaterThan(0);
+		for (const line of captured) expect(line).toMatch(/\[stockbot\] bridge \S+ failed: (no response in 50ms|bridge reset)/);
 		for (const res of results.slice(0, 4)) expect(res).toEqual({ error: "bridge_unavailable" });
 		expect(results[4]).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
 		expect(await settledKilled(kids[0])).toBe(true);
@@ -401,14 +421,24 @@ test("finalized abort ack skips replacement retry", async () => {
 	});
 	const runId = "run-R-finalized";
 	try {
-		const res = await Promise.race([
-			callBridge(
-				{ op: "tool_call", run_id: runId, tool_call_id: "c0", name: "search_web", arguments: { query: "q" } },
-				50,
-				true,
-			),
-			deadline(5000),
-		]);
+		const captured: string[] = [];
+		const origError = console.error;
+		console.error = (...a: unknown[]) => { captured.push(a.map(String).join(" ")); };
+		let res: Json;
+		try {
+			res = await Promise.race([
+				callBridge(
+					{ op: "tool_call", run_id: runId, tool_call_id: "c0", name: "search_web", arguments: { query: "q" } },
+					50,
+					true,
+				),
+				deadline(5000),
+			]);
+		} finally {
+			console.error = origError;
+		}
+		expect(captured.length).toBeGreaterThan(0);
+		for (const line of captured) expect(line).toMatch(/\[stockbot\] bridge \S+ failed: (no response in 50ms|bridge reset)/);
 		expect(res).toEqual({ error: "bridge_unavailable" });
 		expect(await settledKilled(kids[0])).toBe(true);
 		const logged = readFileSync(hangLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));

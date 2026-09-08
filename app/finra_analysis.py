@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import re
 import statistics
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .finra_client import DatasetSpec
 
 ANALYSIS_MAX_RECORDS = 500
 MAX_CATEGORIES = 20
@@ -31,12 +34,12 @@ _NUMERIC_TYPE_HINTS = (
 
 
 def analyze_and_brief(
-    spec: Any,
-    records: list[dict[str, Any]],
+    spec: DatasetSpec,
+    records: list[dict[str, object]],
     analysis_goal: Optional[str],
     query_key: str,
-    pagination: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
+    pagination: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
     """Deterministic summary of FINRA rows. Pure function; never raises.
 
     analysis_goal and query_key are accepted for caller compatibility and
@@ -50,8 +53,8 @@ def analyze_and_brief(
 
 
 def summarize_records(
-    spec: Any, records: list[dict[str, Any]], pagination: Optional[dict[str, Any]] = None
-) -> dict[str, Any]:
+    spec: DatasetSpec, records: list[dict[str, object]], pagination: Optional[dict[str, object]] = None
+) -> dict[str, object]:
     """Deterministic summaries. Pure function of spec + rows; never raises.
 
     Coverage distinguishes retrieved-page coverage from full-query coverage:
@@ -68,10 +71,11 @@ def summarize_records(
 
     date_field = spec.date_field
 
-    def _date_key(r: dict[str, Any]) -> tuple[bool, Any]:
+    def _date_key(r: dict[str, object]) -> tuple[bool, str | None]:
+        cell: object = r.get(date_field) if isinstance(date_field, str) else None
         return (
-            r.get(date_field) is None,
-            _norm_date(r.get(date_field)),
+            cell is None,
+            _norm_date(cell),
         )
     if date_field and rows:
         rows = sorted(
@@ -91,7 +95,7 @@ def summarize_records(
         else bool(query_complete and page_complete and not capped)
     )
 
-    coverage: dict[str, Any] = {
+    coverage: dict[str, object] = {
         "rows_matched": total,
         "rows_analyzed": analyzed,
         "complete": not capped,
@@ -139,11 +143,11 @@ def summarize_records(
 # ---------------------------------------------------------------------------
 
 
-def _numeric_fields(spec: Any) -> list[str]:
+def _numeric_fields(spec: DatasetSpec) -> list[str]:
     out: list[str] = []
     for f in spec.fields:
-        name = f.get("name")
-        if not name:
+        name: object = f.get("name")
+        if not isinstance(name, str) or not name:
             continue
         t = str(f.get("type") or "").lower()
         if any(hint in t for hint in _NUMERIC_TYPE_HINTS) and "date" not in t:
@@ -151,7 +155,7 @@ def _numeric_fields(spec: Any) -> list[str]:
     return out
 
 
-def _to_number(value: Any) -> Optional[float]:
+def _to_number(value: object) -> Optional[float]:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -162,20 +166,20 @@ def _to_number(value: Any) -> Optional[float]:
         return None
 
 
-def _fmt(value: float) -> Any:
+def _fmt(value: float) -> int | float:
     if value.is_integer():
         return int(value)
     return round(value, 4)
 
 
-def _numeric_metrics(rows: list[dict[str, Any]], numeric_fields: list[str]) -> dict[str, Any]:
-    metrics: dict[str, Any] = {}
+def _numeric_metrics(rows: list[dict[str, object]], numeric_fields: list[str]) -> dict[str, object]:
+    metrics: dict[str, object] = {}
     for name in numeric_fields:
         values = [_to_number(r.get(name)) for r in rows]
         present = [v for v in values if v is not None]
         if not present:
             continue
-        entry: dict[str, Any] = {
+        entry: dict[str, object] = {
             "min": _fmt(min(present)),
             "max": _fmt(max(present)),
             "mean": _fmt(statistics.fmean(present)),
@@ -189,8 +193,8 @@ def _numeric_metrics(rows: list[dict[str, Any]], numeric_fields: list[str]) -> d
 
 
 def _latest_prior(
-    rows: list[dict[str, Any]], date_field: Optional[str], numeric_fields: list[str]
-) -> list[dict[str, Any]]:
+    rows: list[dict[str, object]], date_field: Optional[str], numeric_fields: list[str]
+) -> list[dict[str, object]]:
     """Latest-vs-prior values over date-ascending rows (last two rows)."""
     if len(rows) < 2:
         return []
@@ -201,7 +205,7 @@ def _latest_prior(
         and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field))
     ):
         return []
-    out: list[dict[str, Any]] = []
+    out: list[dict[str, object]] = []
     for name in numeric_fields:
         cur = _to_number(latest.get(name))
         prev = _to_number(prior.get(name))
@@ -223,23 +227,32 @@ def _latest_prior(
     return out
 
 
-def _derive_trends(latest_prior: list[dict[str, Any]]) -> list[str]:
+def _derive_trends(latest_prior: list[dict[str, object]]) -> list[str]:
     trends: list[str] = []
     for lp in latest_prior[:MAX_TRENDS]:
-        if lp["change_percent"] is None:
+        change: object = lp.get("change")
+        pct: object = lp.get("change_percent")
+        if not isinstance(change, (int, float)):
+            continue
+        if pct is None:
             trends.append(
-                f"{lp['field']}: {lp['latest']} vs prior {lp['prior']} "
-                f"(change {lp['change']:+,})"
+                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
+                f"(change {change:+,})"
             )
-        else:
+        elif isinstance(pct, (int, float)):
             direction = (
-                "up" if lp["change_percent"] > 0
-                else "down" if lp["change_percent"] < 0
+                "up" if pct > 0
+                else "down" if pct < 0
                 else "flat"
             )
             trends.append(
-                f"{lp['field']}: {lp['latest']} vs prior {lp['prior']} "
-                f"({lp['change']:+,}, {lp['change_percent']:+.2f}%) — {direction}"
+                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
+                f"({change:+,}, {pct:+.2f}%) — {direction}"
+            )
+        else:
+            trends.append(
+                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
+                f"(change {change:+,})"
             )
     return trends
 
@@ -249,13 +262,14 @@ def _count_key(kv: tuple[str, int]) -> tuple[int, str]:
     return (-kv[1], kv[0])
 
 
-def _categorical_breakdowns(spec: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
+def _categorical_breakdowns(spec: DatasetSpec, rows: list[dict[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {}
     symbol_field = spec.symbol_field
     for f in spec.fields:
-        name = f.get("name")
-        if not name:
+        name_obj: object = f.get("name")
+        if not isinstance(name_obj, str) or not name_obj:
             continue
+        name = name_obj
         t = str(f.get("type") or "").lower()
         if any(hint in t for hint in _NUMERIC_TYPE_HINTS) or "date" in t:
             continue
@@ -276,14 +290,15 @@ def _categorical_breakdowns(spec: Any, rows: list[dict[str, Any]]) -> dict[str, 
     return out
 
 
-def _missing_warnings(rows: list[dict[str, Any]], spec: Any) -> list[str]:
+def _missing_warnings(rows: list[dict[str, object]], spec: DatasetSpec) -> list[str]:
     warnings: list[str] = []
     if not rows:
         return warnings
     for f in spec.fields:
-        name = f.get("name")
-        if not name:
+        name_obj: object = f.get("name")
+        if not isinstance(name_obj, str) or not name_obj:
             continue
+        name = name_obj
         missing = sum(1 for r in rows if r.get(name) is None or r.get(name) == "")
         if missing:
             warnings.append(
@@ -292,7 +307,7 @@ def _missing_warnings(rows: list[dict[str, Any]], spec: Any) -> list[str]:
     return warnings
 
 
-def _norm_date(value: Any) -> Any:
+def _norm_date(value: object) -> str | None:
     if value is None:
         return None
     s = str(value)
@@ -302,7 +317,7 @@ def _norm_date(value: Any) -> Any:
 
 
 def _coverage_dates(
-    rows: list[dict[str, Any]], date_field: Optional[str]
+    rows: list[dict[str, object]], date_field: Optional[str]
 ) -> tuple[Optional[str], Optional[str]]:
     if not date_field:
         return None, None
@@ -313,15 +328,20 @@ def _coverage_dates(
     return dates[0], dates[-1]
 
 
-def _query_complete(pagination: Optional[dict[str, Any]], returned_count: int) -> Optional[bool]:
+def _query_complete(pagination: Optional[dict[str, object]], returned_count: int) -> Optional[bool]:
     """Whether this page holds every FINRA match, per Record-Total.
 
     None when FINRA omits Record-Total (completeness cannot be proven).
     """
     if not pagination:
         return None
-    total_records = pagination.get("total_records")
+    total_records: object = pagination.get("total_records")
     if total_records is None:
         return None
-    offset = int(pagination.get("offset") or 0)
-    return (offset + returned_count) >= int(total_records)
+    offset_raw: object = pagination.get("offset") or 0
+    try:
+        offset = int(offset_raw) if isinstance(offset_raw, (int, float, str)) else 0
+        total = int(total_records) if isinstance(total_records, (int, float, str)) else 0
+    except (TypeError, ValueError):
+        return None
+    return (offset + returned_count) >= total

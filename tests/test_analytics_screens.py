@@ -103,9 +103,11 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> No
     _seed_default(data_root)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
+    entries = result["entries"]
+    assert isinstance(entries, list)
 
-    assert [entry["ticker"] for entry in result["entries"]] == ["CCC", "AAA", "BBB"]
-    assert result["entries"][0]["short_interest_percent"] == 50
+    assert [entry["ticker"] for entry in entries] == ["CCC", "AAA", "BBB"]
+    assert entries[0]["short_interest_percent"] == 50
     assert result["coverage"] == {
         "finra_rows": 3, "eligible_rows": 3,
         "valid_short_interest_rows": 3, "mapped_rows": 3,
@@ -119,15 +121,19 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> No
     # Default as_of is the live horizon (UTC today), not the settlement date.
     assert result["as_of_date"] == datetime.now(timezone.utc).date().isoformat()
     assert result["source_records"]
-    assert result["entries"][0]["sec_accession"] == "c1"
-    assert result["entries"][0]["sec_source_url"].endswith("CIK0000000003.json")
+    assert entries[0]["sec_accession"] == "c1"
+    assert entries[0]["sec_source_url"].endswith("CIK0000000003.json")
 
 
 def test_rerun_is_deterministic_and_creates_no_duplicates(data_root: Path) -> None:
     _seed_default(data_root)
     first = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     second = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
-    assert [e["ticker"] for e in first["entries"]] == [e["ticker"] for e in second["entries"]]
+    first_entries = first["entries"]
+    assert isinstance(first_entries, list)
+    second_entries = second["entries"]
+    assert isinstance(second_entries, list)
+    assert [e["ticker"] for e in first_entries] == [e["ticker"] for e in second_entries]
     assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 1
     assert parquet.count_rows("screen_entries", root=data_root / "parquet") == 3
 
@@ -143,12 +149,18 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
     _seed_short_interest(data_root, _default_rows() + extra_ddd)
     _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
     first = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in first["entries"]] == ["CCC", "AAA", "BBB"]
-    assert first["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    first_entries = first["entries"]
+    assert isinstance(first_entries, list)
+    assert [e["ticker"] for e in first_entries] == ["CCC", "AAA", "BBB"]
+    first_coverage = first["coverage"]
+    assert isinstance(first_coverage, dict)
+    assert first_coverage["exclusions"]["not_classified_common_equity"] == 1
     # Mid-day enrichment: DDD facts (filed 2026-08-05 -> known_at, visible at as_of 08-14)
     _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
     second = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in second["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
+    second_entries = second["entries"]
+    assert isinstance(second_entries, list)
+    assert [e["ticker"] for e in second_entries] == ["CCC", "DDD", "AAA", "BBB"]
     # Both versions exist (append-only); deterministic no-op on identical inputs
     screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 2
@@ -163,7 +175,9 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
     assert ("CCC", "AAA", "BBB") in versions          # old version immutable
     # Reader serves the latest applicable version
     latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
+    latest_entries = latest["entries"]
+    assert isinstance(latest_entries, list)
+    assert [e["ticker"] for e in latest_entries] == ["CCC", "DDD", "AAA", "BBB"]
 
 
 def test_created_at_has_sub_second_precision(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,7 +210,9 @@ def test_same_second_versions_ordered_by_publication(data_root: Path, monkeypatc
     _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
     screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
+    latest_entries = latest["entries"]
+    assert isinstance(latest_entries, list)
+    assert [e["ticker"] for e in latest_entries] == ["CCC", "DDD", "AAA", "BBB"]
 
 
 def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) -> None:
@@ -263,27 +279,37 @@ def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) ->
         "parser_version": screens.SCREEN_CALC_VERSION,
     }], root=data_root / "parquet")
     old_again = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert old_again["coverage"]["mapped_rows"] == 4  # reconstructed, not clobbered
+    old_again_coverage = old_again["coverage"]
+    assert isinstance(old_again_coverage, dict)
+    assert old_again_coverage["mapped_rows"] == 4  # reconstructed, not clobbered
     new_result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    assert new_result["coverage"]["mapped_rows"] == 2  # stored counters used
-    assert new_result["coverage"]["eligible_rows"] == 2
+    new_result_coverage = new_result["coverage"]
+    assert isinstance(new_result_coverage, dict)
+    assert new_result_coverage["mapped_rows"] == 2  # stored counters used
+    assert new_result_coverage["eligible_rows"] == 2
 
 
 def test_read_is_bounded_by_limit(data_root: Path) -> None:
     _seed_default(data_root)
     screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     result = screens.get_short_interest_leaderboard(limit=2, settlement_date=SETTLEMENT, data_root=data_root)
-    assert [entry["ticker"] for entry in result["entries"]] == ["CCC", "AAA"]
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [entry["ticker"] for entry in entries] == ["CCC", "AAA"]
     result = screens.get_short_interest_leaderboard(limit=999, settlement_date=SETTLEMENT, data_root=data_root)
-    assert len(result["entries"]) == 3  # cap is a maximum, not a target
-    assert len(result["entries"]) <= screens.MAX_LIMIT
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert len(entries) == 3  # cap is a maximum, not a target
+    assert len(entries) <= screens.MAX_LIMIT
 
 
 def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
     _seed_default(data_root)
     result = screens.get_short_interest_leaderboard(settlement_date="2025-01-15", data_root=data_root)
     assert "error" in result
-    assert "not ingested" in result["error"] or "no normalized" in result["error"].lower()
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "not ingested" in error or "no normalized" in error.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +327,10 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
     _seed_short_interest(data_root, _default_rows())
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in early["entries"]] == ["CCC", "AAA", "BBB"]
-    assert early["entries"][1]["short_interest_percent"] == 20  # AAA: 20/100
+    early_entries = early["entries"]
+    assert isinstance(early_entries, list)
+    assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
+    assert early_entries[1]["short_interest_percent"] == 20  # AAA: 20/100
 
     # A later filing (known_at after 2026-08-14) restates AAA's shares to 400.
     _seed_facts(data_root, {
@@ -312,13 +340,17 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
     # The earlier as-of ranking must be byte-identical after the later filing.
     rerun = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert rerun["entries"] == early["entries"]
-    assert rerun["entries"][1]["sec_accession"] == "a1"
-    assert rerun["entries"][1]["short_interest_percent"] == 20
+    rerun_entries = rerun["entries"]
+    assert isinstance(rerun_entries, list)
+    assert rerun_entries[1]["sec_accession"] == "a1"
+    assert rerun_entries[1]["short_interest_percent"] == 20
 
     # A later as-of sees the restatement: AAA falls from 20% to 5%.
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    by_ticker = {e["ticker"]: e for e in later["entries"]}
-    assert [e["ticker"] for e in later["entries"]] == ["CCC", "BBB", "AAA"]
+    later_entries = later["entries"]
+    assert isinstance(later_entries, list)
+    by_ticker = {e["ticker"]: e for e in later_entries}
+    assert [e["ticker"] for e in later_entries] == ["CCC", "BBB", "AAA"]
     assert by_ticker["AAA"]["sec_accession"] == "a2"
     assert by_ticker["AAA"]["short_interest_percent"] == 5
 
@@ -336,9 +368,13 @@ def test_fact_with_period_after_settlement_is_never_used(data_root: Path) -> Non
     _seed_short_interest(data_root, _default_rows())
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    entries = result["entries"]
+    assert isinstance(entries, list)
 
-    assert result["coverage"]["exclusions"]["missing_shares_outstanding"] == 1
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
+    assert coverage["exclusions"]["missing_shares_outstanding"] == 1
+    assert [e["ticker"] for e in entries] == ["CCC", "BBB"]
 
 
 def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path: Path) -> None:
@@ -349,9 +385,11 @@ def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path: Path) -> Non
     _seed_default(data_root)
 
     result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+    entries = result["entries"]
+    assert isinstance(entries, list)
 
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
-    assert [e["short_interest_percent"] for e in result["entries"]] == [50.0, 20.0, 10.0]
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    assert [e["short_interest_percent"] for e in entries] == [50.0, 20.0, 10.0]
     assert result["source_records"]
 
 
@@ -379,10 +417,14 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) 
     }], root=data_root / "parquet")
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    entries = result["entries"]
+    assert isinstance(entries, list)
 
-    assert result["coverage"]["finra_rows"] == 6
-    assert result["coverage"]["eligible_rows"] == 3
-    assert result["coverage"]["exclusions"] == {
+    assert coverage["finra_rows"] == 6
+    assert coverage["eligible_rows"] == 3
+    assert coverage["exclusions"] == {
         "unmapped_symbol": 1,            # DDD
         "ambiguous_ticker_mapping": 1,   # EEE
         "not_classified_common_equity": 0,
@@ -390,7 +432,7 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) 
         "invalid_short_interest": 1,     # FFF
         "conflicting_versions": 0,
     }
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
 
 
 def test_stale_settlement_is_surfaced(data_root: Path) -> None:
@@ -425,7 +467,9 @@ def test_snapshot_not_knowable_at_as_of_is_rejected(data_root: Path) -> None:
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
 
     assert "error" in result
-    assert "knowable on or before 2026-08-14" in result["error"]
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "knowable on or before 2026-08-14" in error
 
 
 def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
@@ -437,12 +481,20 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
     _seed_short_interest(data_root, _default_rows())
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert early["coverage"]["exclusions"]["unmapped_symbol"] == 1
-    assert [e["ticker"] for e in early["entries"]] == ["AAA", "BBB"]
+    early_coverage = early["coverage"]
+    assert isinstance(early_coverage, dict)
+    early_entries = early["entries"]
+    assert isinstance(early_entries, list)
+    assert early_coverage["exclusions"]["unmapped_symbol"] == 1
+    assert [e["ticker"] for e in early_entries] == ["AAA", "BBB"]
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    assert later["coverage"]["exclusions"]["unmapped_symbol"] == 0
-    assert [e["ticker"] for e in later["entries"]] == ["CCC", "AAA", "BBB"]
+    later_coverage = later["coverage"]
+    assert isinstance(later_coverage, dict)
+    later_entries = later["entries"]
+    assert isinstance(later_entries, list)
+    assert later_coverage["exclusions"]["unmapped_symbol"] == 0
+    assert [e["ticker"] for e in later_entries] == ["CCC", "AAA", "BBB"]
 
 
 def test_corrected_snapshot_versions_selected_by_as_of(data_root: Path) -> None:
@@ -459,12 +511,18 @@ def test_corrected_snapshot_versions_selected_by_as_of(data_root: Path) -> None:
     _seed_short_interest(data_root, corrected, known_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in early["entries"]] == ["CCC", "AAA", "BBB"]
-    assert early["entries"][1]["short_shares"] == 20  # original version
+    early_entries = early["entries"]
+    assert isinstance(early_entries, list)
+    assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
+    assert early_entries[1]["short_shares"] == 20  # original version
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    assert later["entries"][1]["short_shares"] == 25  # corrected version
-    assert later["coverage"]["finra_rows"] == 3  # one version per symbol, not both
+    later_entries = later["entries"]
+    assert isinstance(later_entries, list)
+    later_coverage = later["coverage"]
+    assert isinstance(later_coverage, dict)
+    assert later_entries[1]["short_shares"] == 25  # corrected version
+    assert later_coverage["finra_rows"] == 3  # one version per symbol, not both
 
 
 def test_security_classification_is_consulted(data_root: Path) -> None:
@@ -499,11 +557,17 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
     )
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    assert "ETF" in [e["ticker"] for e in early["entries"]]
+    early_entries = early["entries"]
+    assert isinstance(early_entries, list)
+    assert "ETF" in [e["ticker"] for e in early_entries]
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
-    assert later["coverage"]["exclusions"]["not_classified_common_equity"] == 1
-    assert "ETF" not in [e["ticker"] for e in later["entries"]]
+    later_coverage = later["coverage"]
+    assert isinstance(later_coverage, dict)
+    later_entries = later["entries"]
+    assert isinstance(later_entries, list)
+    assert later_coverage["exclusions"]["not_classified_common_equity"] == 1
+    assert "ETF" not in [e["ticker"] for e in later_entries]
 
 
 def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
@@ -520,8 +584,10 @@ def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
     _seed_short_interest(data_root, corrected, known_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
-    assert result["entries"][1]["short_shares"] == 25  # the 12:30Z correction wins
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    assert entries[1]["short_shares"] == 25  # the 12:30Z correction wins
 
 
 def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
@@ -555,7 +621,9 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
     )
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]  # AAA stays classified
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]  # AAA stays classified
 
 
 def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> None:
@@ -568,8 +636,12 @@ def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> No
         known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
-    assert result["coverage"]["exclusions"]["conflicting_versions"] == 1
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    assert [e["ticker"] for e in entries] == ["CCC", "BBB"]
+    assert coverage["exclusions"]["conflicting_versions"] == 1
 
 def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> None:
     _seed_short_interest(
@@ -584,7 +656,9 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> No
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert "error" in result
-    assert "conflict at the same instant" in result["error"]
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "conflict at the same instant" in error
 
 
 def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path) -> None:
@@ -607,8 +681,12 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path
     )
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert "AAA" not in [e["ticker"] for e in result["entries"]]
-    assert result["coverage"]["exclusions"]["not_classified_common_equity"] == 1
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    assert "AAA" not in [e["ticker"] for e in entries]
+    assert coverage["exclusions"]["not_classified_common_equity"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -638,11 +716,13 @@ def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
     _seed_cycle(data_root, SETTLEMENT, _default_rows())
 
     result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+    entries = result["entries"]
+    assert isinstance(entries, list)
 
     assert result["settlement_current"] == SETTLEMENT
     assert result["settlement_prior"] == "2026-08-07"
     assert result["calculation_version"] == screens.SLICE_CALC_VERSION
-    by_ticker = {e["ticker"]: e for e in result["entries"]}
+    by_ticker = {e["ticker"]: e for e in entries}
     assert by_ticker["AAA"]["short_shares_current"] == 20
     assert by_ticker["AAA"]["short_shares_prior"] == 10
     assert by_ticker["AAA"]["short_change_pct"] == 100.0
@@ -652,7 +732,7 @@ def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
     assert by_ticker["AAA"]["sec_accession_prior"] == "a1"
     assert by_ticker["AAA"]["finra_source_url"].startswith("https://api.finra.org")
     # Sorted by signed short-interest pp change: AAA moved most.
-    assert [e["ticker"] for e in result["entries"]] == ["AAA", "BBB", "CCC"]
+    assert [e["ticker"] for e in entries] == ["AAA", "BBB", "CCC"]
 
 
 def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Path) -> None:
@@ -663,7 +743,9 @@ def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Pa
     result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
 
     assert result["settlement_prior"] is None
-    entry = result["entries"][0]
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    entry = entries[0]
     assert entry["short_shares_prior"] is None
     assert entry["short_change_pct"] is None
     assert entry["si_pp_change"] is None
@@ -685,8 +767,10 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-10T12:00:00Z")
 
     early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
-    assert early["entries"][0]["ticker"] == "AAA"
-    assert early["entries"][0]["shares_outstanding_current"] == 100.0
+    early_entries = early["entries"]
+    assert isinstance(early_entries, list)
+    assert early_entries[0]["ticker"] == "AAA"
+    assert early_entries[0]["shares_outstanding_current"] == 100.0
 
     # A filing known only after 2026-08-14 restates AAA's shares for a
     # period between the two settlements (end 2026-08-10, filed 2026-08-20).
@@ -698,7 +782,9 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     assert rerun["entries"] == early["entries"]
 
     later = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
-    aaa = next(e for e in later["entries"] if e["ticker"] == "AAA")
+    later_entries = later["entries"]
+    assert isinstance(later_entries, list)
+    aaa = next(e for e in later_entries if e["ticker"] == "AAA")
     assert aaa["sec_accession_current"] == "a2"
     assert aaa["shares_outstanding_current"] == 400.0
     assert aaa["shares_change_abs"] == 300.0
@@ -712,4 +798,6 @@ def test_change_slice_honors_finra_known_at(data_root: Path) -> None:
 
     result = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     assert "error" in result
-    assert "knowable" in result["error"]
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "knowable" in error

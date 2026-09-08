@@ -228,10 +228,18 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
         "accession": "accn-rev-2",
         "source_url": _fact_source_url(),
     }
-    assert sec["NetIncomeLoss"]["value"] == Decimal("265000000")
-    assert sec["CashAndCashEquivalents"]["value"] == Decimal("4100000000")
-    assert sec["LongTermDebt"]["value"] == Decimal("2300000000")
-    assert sec["EntityCommonStockSharesOutstanding"]["value"] == Decimal("1610000000")
+    net_income = sec["NetIncomeLoss"]
+    assert isinstance(net_income, dict)
+    assert net_income["value"] == Decimal("265000000")
+    cash = sec["CashAndCashEquivalents"]
+    assert isinstance(cash, dict)
+    assert cash["value"] == Decimal("4100000000")
+    debt = sec["LongTermDebt"]
+    assert isinstance(debt, dict)
+    assert debt["value"] == Decimal("2300000000")
+    shares = sec["EntityCommonStockSharesOutstanding"]
+    assert isinstance(shares, dict)
+    assert shares["value"] == Decimal("1610000000")
 
     finra = research.latest_finra_metrics
     assert finra == {
@@ -309,13 +317,17 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
     }
 
     later = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 25), data_root=data_root)[0]
-    assert later.latest_sec_metrics["Revenue"]["value"] == Decimal("5890000000")
-    assert later.latest_sec_metrics["Revenue"]["accession"] == "accn-rev-2"
+    later_revenue = later.latest_sec_metrics["Revenue"]
+    assert isinstance(later_revenue, dict)
+    assert later_revenue["value"] == Decimal("5890000000")
+    assert later_revenue["accession"] == "accn-rev-2"
     assert "LongTermDebt" not in later.latest_sec_metrics
     assert later.research_data_freshness["sec_latest_filed_at"] == date(2026, 8, 20)
 
     future = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 9, 5), data_root=data_root)[0]
-    assert future.latest_sec_metrics["LongTermDebt"]["value"] == Decimal("2300000000")
+    future_debt = future.latest_sec_metrics["LongTermDebt"]
+    assert isinstance(future_debt, dict)
+    assert future_debt["value"] == Decimal("2300000000")
 
 
 # ---------------------------------------------------------------------------

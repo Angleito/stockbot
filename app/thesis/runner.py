@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from app.config import get_data_root
 from app.policy import Capability
 from app.storage.ids import run_id as new_run_id
-from app.thesis.context import build_live_context
+from app.thesis.context import ResearchContext, build_live_context
+from app.thesis.models import Trigger
 from app.thesis.pi_runner import run_thesis_pi
+from app.thesis.repository import ThesisRepository
 
 _GRANTS: dict[str, Capability] = {
     "broker-market-read": Capability.BROKER_MARKET_READ,
@@ -54,7 +55,7 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _build_prompt(*, thesis_id: str, trigger: Any, data_cutoff: str, ctx: Any, run_id: str) -> str:
+def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: ResearchContext, run_id: str) -> str:
     refs = ", ".join(trigger.canonical_refs) or "(none)"
     packet = dict(ctx.thesis_packet)
     trig = packet.pop("trigger", {})
@@ -92,7 +93,7 @@ def _fail(run_id: str, exc: Exception) -> None:
 
 
 def run_trigger(
-    repository: Any,
+    repository: ThesisRepository,
     thesis_id: str,
     trigger_id: str,
     *,

@@ -163,7 +163,9 @@ def fake_deps(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_trailing_pe_from_live_price(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
-    assert result["price"]["last"] == 213.05
+    price = result["price"]
+    assert isinstance(price, dict)
+    assert price["last"] == 213.05
     assert result["ttm_gaap_eps"] == 6.53
     assert result["trailing_pe"] == pytest.approx(32.6, abs=0.1)
 
@@ -171,6 +173,7 @@ def test_trailing_pe_from_live_price(fake_deps: None) -> None:
 def test_three_eps_figures_never_conflated(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     consensus = fe["consensus"]
     adjusted = fe["adjusted"]
     scenario = fe["scenario"]
@@ -194,6 +197,7 @@ def test_three_eps_figures_never_conflated(fake_deps: None) -> None:
 def test_default_triggered_guarantees_separate_from_contingent(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     scenario = fe["scenario"]
     with_defaults = fe["scenario_with_defaults"]
     # 8-K $105B + facility $3.5B = $108.5B / 6y / 24.221B shares.
@@ -204,6 +208,7 @@ def test_default_triggered_guarantees_separate_from_contingent(fake_deps: None) 
 def test_supply_front_loaded_is_revenue_matched_not_drag(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     ob = result["obligations"]
+    assert isinstance(ob, dict)
     supply = ob["per_kind"]["supply_commitments"]
     assert supply["total_billions"] == 119.0
     assert supply["certainty"] == "contingent"
@@ -212,6 +217,7 @@ def test_supply_front_loaded_is_revenue_matched_not_drag(fake_deps: None) -> Non
     assert ob["revenue_matched_implied_revenue_billions"] > 400
     # Scenario EPS must NOT subtract supply spend (double-count).
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     scenario = fe["scenario"]
     assert scenario["eps_after_all_obligations"] > 8.0
 
@@ -228,6 +234,7 @@ def test_horizon_less_supply_falls_back_flat() -> None:
 def test_next_fy_figures(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     assert fe["consensus_next_fy"]["eps"] == 13.04
     assert fe["consensus_next_fy"]["pe"] == pytest.approx(16.3, abs=0.1)
     assert fe["scenario_next_fy"]["eps_after_all_obligations"] is not None
@@ -236,6 +243,7 @@ def test_next_fy_figures(fake_deps: None) -> None:
 def test_worst_case_tier_includes_revenue_matched_supply(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     worst = fe["worst_case"]
     scenario = fe["scenario"]
     # Worst case must be strictly worse than the stress scenario: it adds
@@ -248,9 +256,12 @@ def test_worst_case_tier_includes_revenue_matched_supply(fake_deps: None) -> Non
 def test_projected_prices_matrix(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
     pp = result["projected_prices"]
+    assert isinstance(pp, dict)
     assert pp["current_price"] == 213.05
     assert pp["multiples"] == [15, 20, 25, 30, 35]
-    by_tier = {t["tier"]: t for t in pp["tiers"]}
+    tiers_raw = pp["tiers"]
+    assert isinstance(tiers_raw, list)
+    by_tier = {t["tier"]: t for t in tiers_raw if isinstance(t, dict)}
     worst = by_tier["Worst case FY2027"]
     # Fixture worst-case FY27 EPS = 9.02 - 0.02 (leases FY27 0.46) - 3.92
     # (supply FY27 95.0 stranded) - 0.29 (cloud FY27 6.0 + vendor 1.0) -
@@ -269,7 +280,9 @@ def test_projected_prices_math_direct() -> None:
     pp = valuation._projected_prices(
         {"Worst case FY27": 2.56, "Consensus FY28": 13.04}, price=213.05
     )
-    tiers = {t["tier"]: t for t in pp["tiers"]}
+    tiers_raw = pp["tiers"]
+    assert isinstance(tiers_raw, list)
+    tiers = {t["tier"]: t for t in tiers_raw if isinstance(t, dict)}
     assert tiers["Consensus FY28"]["prices"]["20x"]["price"] == 260.8
     assert tiers["Consensus FY28"]["prices"]["35x"]["pct_change_vs_current"] == pytest.approx(114.2, abs=0.2)
 
@@ -347,6 +360,7 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
     shares = 24.221  # 24_221_000_000 from _estimates
     result = _run([scheduled])
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     assert fe["scenario"].get("contingent_drag_per_share", 0.0) == 0.0
     assert fe["scenario_next_fy"]["contingent_drag_per_share"] == pytest.approx(
         10.0 / shares, abs=0.01
@@ -357,6 +371,7 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
 
     result = _run([scheduled, flat_vendor])
     fe = result["forward_eps"]
+    assert isinstance(fe, dict)
     assert fe["scenario"]["contingent_drag_per_share"] == pytest.approx(
         1.0 / shares, abs=0.01
     )
@@ -424,7 +439,9 @@ def test_valuation_uses_snapshot_not_ledger(monkeypatch: pytest.MonkeyPatch, fak
         valuation.obligations, "get_obligations", _snap_fake
     )
     result = valuation.get_valuation_metrics("SYN")
-    assert result["obligations"]["contingent_annual_billions"] == pytest.approx(
+    obligations = result["obligations"]
+    assert isinstance(obligations, dict)
+    assert obligations["contingent_annual_billions"] == pytest.approx(
         13.0 / 6.0, abs=0.01
     )
 
@@ -438,13 +455,17 @@ def test_eps_scenarios_missing_inputs_yield_none_with_reason() -> None:
     out = valuation._obligation_eps_scenarios(ob, None, None)
     assert out["effective_tax_rate"] is None
     assert out["scenarios"]
-    for s in out["scenarios"]:
+    scenarios = out["scenarios"]
+    assert isinstance(scenarios, list)
+    for s in scenarios:
         assert s["after_tax_billions"] is None
         assert s["eps_impact"] is None
         assert s["reason"] == "effective tax rate unavailable"
     out2 = valuation._obligation_eps_scenarios(ob, None, 0.2)
     assert out2["effective_tax_rate"] == pytest.approx(0.2)
-    for s in out2["scenarios"]:
+    scenarios2 = out2["scenarios"]
+    assert isinstance(scenarios2, list)
+    for s in scenarios2:
         assert s["after_tax_billions"] is not None
         assert s["eps_impact"] is None
         assert s["reason"] == "diluted shares unavailable"
@@ -460,6 +481,7 @@ def test_missing_margin_yields_none_with_reason(monkeypatch: pytest.MonkeyPatch,
     )
     result = valuation.get_valuation_metrics("NVDA")
     ob = result["obligations"]
+    assert isinstance(ob, dict)
     assert ob["revenue_matched_gross_margin"] is None
     assert ob["revenue_matched_margin_source"] == "unavailable: gross margin fact missing"
     assert ob["revenue_matched_implied_revenue_billions"] is None
@@ -467,7 +489,11 @@ def test_missing_margin_yields_none_with_reason(monkeypatch: pytest.MonkeyPatch,
 
 def test_dynamic_fy_labels(fake_deps: None) -> None:
     result = valuation.get_valuation_metrics("NVDA")
-    by_tier = {t["tier"]: t for t in result["projected_prices"]["tiers"]}
+    pp = result["projected_prices"]
+    assert isinstance(pp, dict)
+    tiers_raw = pp["tiers"]
+    assert isinstance(tiers_raw, list)
+    by_tier = {t["tier"]: t for t in tiers_raw if isinstance(t, dict)}
     assert "Consensus FY2027" in by_tier
     assert "Consensus FY2028" in by_tier
     assert "Worst case FY2027" in by_tier
@@ -489,9 +515,15 @@ def test_unquantified_only_valuation_caveat(monkeypatch: pytest.MonkeyPatch, fak
 
     monkeypatch.setattr(valuation.obligations, "get_obligations", _unquantified_only)
     result = valuation.get_valuation_metrics("NVDA")
-    assert result["obligations"]["contingent_annual_billions"] == 0.0
-    assert result["obligations"]["contractual_annual_billions"] == 0.0
-    assert any("unquantified" in w for w in result["coverage"]["warnings"])
+    obligations = result["obligations"]
+    assert isinstance(obligations, dict)
+    assert obligations["contingent_annual_billions"] == 0.0
+    assert obligations["contractual_annual_billions"] == 0.0
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    warnings = coverage["warnings"]
+    assert isinstance(warnings, list)
+    assert any("unquantified" in w for w in warnings if isinstance(w, str))
 
 
 def test_valuation_skips_schedule_components() -> None:

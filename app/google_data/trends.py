@@ -21,7 +21,7 @@ import re
 from collections.abc import Callable
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional, Protocol, cast
 
 try:
     from .. import config as _config
@@ -137,7 +137,15 @@ def _check_bq_limits() -> Optional[dict[str, object]]:
     return None
 
 
-def _submit(template: str, params: dict[str, object], executor: Optional[object],
+class _Submitter(Protocol):
+    """Anything submit_template-compatible: the real client or a test double."""
+    def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
+
+
+_Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
+
+
+def _submit(template: str, params: dict[str, object], executor: _Executor | None,
             data_root: Optional[Path | str]) -> dict[str, object]:
     if executor is None:
         try:
@@ -157,10 +165,9 @@ def _submit(template: str, params: dict[str, object], executor: Optional[object]
             return {"status": "error", "source": SOURCE,
                     "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
     try:
-        if isinstance(executor, Callable):
+        if callable(executor):
             return executor(template, params)
-        submit = getattr(executor, "submit_template")
-        return submit(template, params)
+        return executor.submit_template(template, params)
     except Exception as exc:
         if type(exc).__name__ == "LedgerCorrupt":
             raise
@@ -187,8 +194,9 @@ def _template_table(template: str) -> str:
     if _bq is not None:
         try:
             spec = _bq.TEMPLATES.get(template, {})
-            if spec.get("table"):
-                return spec["table"]
+            table: object = spec.get("table")
+            if isinstance(table, str) and table:
+                return table
         except Exception:
             pass
     return _FALLBACK_TABLES.get(template, "trends")
@@ -603,7 +611,7 @@ def _mark_complete(data_root: Optional[Path | str], checkpoint_key: str, refresh
     }], root=proot)
 
 
-def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor: Optional[object],
+def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor: _Executor | None,
                          data_root: Optional[Path | str]) -> Optional[list[str]]:
     """Known refresh_date partitions for one table; None when the executor errors."""
     result = _submit("trends_refreshes", {
@@ -619,7 +627,7 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor: O
 
 def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: list[str] | str,
                    limit: int = 100, data_root: Optional[Path | str] = None,
-                   executor: Optional[object] = None, week_start: Optional[str] = None,
+                   executor: _Executor | None = None, week_start: Optional[str] = None,
                    week_end: Optional[str] = None, interval: Optional[str] = "daily",
                    term: Optional[str] = None) -> dict[str, object]:
     """Collect top/rising lists; each row becomes an idempotent candidate."""

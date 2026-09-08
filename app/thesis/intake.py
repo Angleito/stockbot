@@ -7,14 +7,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 
-from app.policy import Capability
+from app.policy import Capability, RequestContext
 from app.thesis.models import (
+    ExpressionRequirement, JSONValue, Thesis,
     new_claim_id, new_expression_id, new_question_id, new_requirement_id, new_rule_id,
 )
+from app.thesis.repository import ThesisRepository
 
 UNKNOWN = "unknown"
 
@@ -26,14 +28,14 @@ _REQUIREMENT_STATUSES = frozenset({"open", "answered"})
 _MAX_QUESTIONS = 3
 
 
-def _req_str(d: dict[str, Any], key: str, where: str) -> str:
+def _req_str(d: Mapping[str, object], key: str, where: str) -> str:
     v = d.get(key)
     if not isinstance(v, str) or not v.strip():
         raise ValueError(f"{where}: '{key}' must be a non-empty string")
     return v
 
 
-def _unknown_str(v: Any, key: str, where: str) -> str:
+def _unknown_str(v: object, key: str, where: str) -> str:
     if v is None or (isinstance(v, str) and not v.strip()):
         return UNKNOWN
     if isinstance(v, str):
@@ -41,14 +43,14 @@ def _unknown_str(v: Any, key: str, where: str) -> str:
     raise ValueError(f"{where}: '{key}' must be a string, got {type(v).__name__}")
 
 
-def _str_list(d: dict[str, Any], key: str, where: str) -> list[str]:
+def _str_list(d: Mapping[str, object], key: str, where: str) -> list[str]:
     vals = d.get(key, [])
     if not isinstance(vals, list) or not all(isinstance(i, str) for i in vals):
         raise ValueError(f"{where}: '{key}' must be a list of strings")
     return list(vals)
 
 
-def _as_list(d: dict[str, Any], key: str, where: str) -> list[Any]:
+def _as_list(d: Mapping[str, object], key: str, where: str) -> list[object]:
     vals = d.get(key, [])
     if not isinstance(vals, list):
         raise ValueError(f"{where}: '{key}' must be a list, got {type(vals).__name__}")
@@ -61,7 +63,7 @@ class IntakeQuestion:
     question: str
     question_type: str = UNKNOWN
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return {
             "question_id": self.question_id,
             "question": self.question,
@@ -69,10 +71,11 @@ class IntakeQuestion:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeQuestion:
+    def from_dict(cls, d: object, path: str = "<intake>") -> IntakeQuestion:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: question must be a mapping, got {type(d).__name__}")
-        qid = d.get("question_id") or new_question_id()
+        _qid = d.get("question_id")
+        qid = _qid if isinstance(_qid, str) and _qid else new_question_id()
         where = f"{path}: question {qid}"
         return cls(
             question_id=qid,
@@ -80,7 +83,7 @@ class IntakeQuestion:
             question_type=_unknown_str(d.get("question_type", UNKNOWN), "question_type", where),
         )
 
-def _validate_claim(c: Any, path: str) -> dict[str, Any]:
+def _validate_claim(c: object, path: str) -> dict[str, JSONValue]:
     if not isinstance(c, dict):
         raise ValueError(f"{path}: claim must be a mapping, got {type(c).__name__}")
     cid = c.get("claim_id") or new_claim_id()
@@ -94,7 +97,7 @@ def _validate_claim(c: Any, path: str) -> dict[str, Any]:
     }
 
 
-def _validate_expression(e: Any, path: str) -> dict[str, Any]:
+def _validate_expression(e: object, path: str) -> dict[str, JSONValue]:
     if not isinstance(e, dict):
         raise ValueError(f"{path}: expression must be a mapping, got {type(e).__name__}")
     eid = new_expression_id()
@@ -111,7 +114,7 @@ def _validate_expression(e: Any, path: str) -> dict[str, Any]:
     status = _unknown_str(e.get("status", "undecided"), "status", where)
     if status not in _EXPRESSION_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_EXPRESSION_STATUSES)}, got {status!r}")
-    out: dict[str, Any] = {
+    out: dict[str, JSONValue] = {
         "expression_id": eid,
         "intent": _unknown_str(e.get("intent", UNKNOWN), "intent", where),
         "instrument": instrument,
@@ -124,15 +127,15 @@ def _validate_expression(e: Any, path: str) -> dict[str, Any]:
         "status": status,
     }
     for k in ("leverage", "parameters"):
-        v: dict[str, Any] = e.get(k, {})
-        if v is None:
-            v = {}
-        if not isinstance(v, dict):
-            raise ValueError(f"{where}: '{k}' must be a mapping, got {type(v).__name__}")
-        out[k] = dict(v)
+        _v: object = e.get(k, {})
+        if _v is None:
+            _v = dict[str, JSONValue]()
+        if not isinstance(_v, dict):
+            raise ValueError(f"{where}: '{k}' must be a mapping, got {type(_v).__name__}")
+        out[k] = dict(_v)
     return out
 
-def _validate_requirement(r: Any, path: str, expression_ids: set[str]) -> dict[str, Any]:
+def _validate_requirement(r: object, path: str, expression_ids: set[object]) -> dict[str, JSONValue]:
     if not isinstance(r, dict):
         raise ValueError(f"{path}: requirement must be a mapping, got {type(r).__name__}")
     rid = r.get("requirement_id") or new_requirement_id()
@@ -163,12 +166,12 @@ def _validate_requirement(r: Any, path: str, expression_ids: set[str]) -> dict[s
 class IntakeProposal:
     user_thesis: str
     scope: str = UNKNOWN
-    claims: tuple[dict[str, Any], ...] = ()
+    claims: tuple[dict[str, JSONValue], ...] = ()
     assumptions: tuple[str, ...] = ()
     invalidators: tuple[str, ...] = ()
     unknowns: tuple[str, ...] = ()
-    expressions: tuple[dict[str, Any], ...] = ()
-    requirements: tuple[dict[str, Any], ...] = ()
+    expressions: tuple[dict[str, JSONValue], ...] = ()
+    requirements: tuple[dict[str, JSONValue], ...] = ()
     questions: tuple[IntakeQuestion, ...] = ()
 
     def __post_init__(self) -> None:
@@ -180,7 +183,7 @@ class IntakeProposal:
             raise ValueError(f"{where}: 'user_thesis' must be a non-empty string")
         if len(self.questions) > _MAX_QUESTIONS:
             raise ValueError(f"{where}: at most {_MAX_QUESTIONS} questions, got {len(self.questions)}")
-        seen: set[str] = set()
+        seen: set[object] = set()
         for c in self.claims:
             if c["status"] != "unvalidated":
                 raise ValueError(
@@ -204,21 +207,21 @@ class IntakeProposal:
                     f"{r['expression_id']!r}"
                 )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return {
             "user_thesis": self.user_thesis,
             "scope": self.scope,
-            "claims": [dict(c) for c in self.claims],
-            "assumptions": list(self.assumptions),
-            "invalidators": list(self.invalidators),
-            "unknowns": list(self.unknowns),
-            "expressions": [dict(e) for e in self.expressions],
-            "requirements": [dict(r) for r in self.requirements],
-            "questions": [q.to_dict() for q in self.questions],
+            "claims": list[JSONValue](dict(c) for c in self.claims),
+            "assumptions": list[JSONValue](self.assumptions),
+            "invalidators": list[JSONValue](self.invalidators),
+            "unknowns": list[JSONValue](self.unknowns),
+            "expressions": list[JSONValue](dict(e) for e in self.expressions),
+            "requirements": list[JSONValue](dict(r) for r in self.requirements),
+            "questions": list[JSONValue](q.to_dict() for q in self.questions),
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeProposal:
+    def from_dict(cls, d: Mapping[str, object], path: str = "<intake>") -> IntakeProposal:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: proposal must be a mapping, got {type(d).__name__}")
         where = f"{path}: proposal"
@@ -227,7 +230,7 @@ class IntakeProposal:
             scope = UNKNOWN
         if not isinstance(scope, str):
             raise ValueError(f"{where}: 'scope' must be a string, got {type(scope).__name__}")
-        expressions: list[dict[str, Any]] = []
+        expressions: list[dict[str, JSONValue]] = []
         for e in _as_list(d, "expressions", where):
             validated = _validate_expression(e, path)
             expressions.append(validated)
@@ -248,7 +251,7 @@ class IntakeProposal:
         )
 
 
-def _research_only_context(request_context: Any) -> Any:
+def _research_only_context(request_context: RequestContext | None) -> RequestContext:
     if request_context is None:
         raise ValueError("<intake>: request_context is required (must carry RESEARCH)")
     caps = set(getattr(request_context, "capabilities", ()))
@@ -261,7 +264,7 @@ def _research_only_context(request_context: Any) -> Any:
     return request_context
 
 
-def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict[str, Any]:
+def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict[str, JSONValue]:
     return {
         "expression_id": new_expression_id(),
         "intent": intent,
@@ -287,7 +290,7 @@ def _expression_choice_question() -> IntakeQuestion:
     )
 
 
-def _strategy_expression(combined: str) -> dict[str, Any] | None:
+def _strategy_expression(combined: str) -> dict[str, JSONValue] | None:
     if re.search(r"\bputs?\b", combined):
         return _expr(intent="bearish", instrument="option", direction="long", structure="long puts")
     if re.search(r"\bcalls?\b", combined):
@@ -299,13 +302,22 @@ def _strategy_expression(combined: str) -> dict[str, Any] | None:
     return None
 
 
-def _local_interpret(text: str, answers: dict[str, Any]) -> IntakeProposal:
-    blob = " ".join(str(v) for v in answers.values() if isinstance(v, (str, int, float)))
+class _ProposalBase(TypedDict):
+    user_thesis: str
+    scope: str
+    claims: tuple[dict[str, JSONValue], ...]
+    assumptions: tuple[str, ...]
+    invalidators: tuple[str, ...]
+    unknowns: tuple[str, ...]
+    requirements: tuple[dict[str, JSONValue], ...]
+
+def _local_interpret(text: str, answers: Mapping[str, object] | None) -> IntakeProposal:
+    blob = " ".join(str(v) for v in (answers or {}).values() if isinstance(v, (str, int, float)))
     blob = blob.lower()
     t = text.lower()
     combined = f"{t}\n{blob}"
-    claim = {"claim_id": new_claim_id(), "statement": text, "status": "unvalidated"}
-    base: dict[str, Any] = {
+    claim: dict[str, JSONValue] = {"claim_id": new_claim_id(), "statement": text, "status": "unvalidated"}
+    base: _ProposalBase = {
         "user_thesis": text,
         "scope": UNKNOWN,
         "claims": (claim,),
@@ -359,8 +371,8 @@ def _local_interpret(text: str, answers: dict[str, Any]) -> IntakeProposal:
 
 def interpret_idea(
     text: str,
-    answers: dict[str, Any] | None = None,
-    request_context: Any = None,
+    answers: Mapping[str, object] | None = None,
+    request_context: RequestContext | None = None,
 ) -> IntakeProposal:
     """Normalize ``text`` (+ optional ``answers``) into a validated IntakeProposal."""
     if not isinstance(text, str) or not text.strip():
@@ -376,15 +388,15 @@ _SETUP_QUESTION_ID = "setup:scope"
 
 
 def build_initial_watch_rules(
-    scope: str, requirements: Any, *, claim_ids: Sequence[str] = (), expression_ids: Sequence[str] = ()
-) -> list[dict[str, Any]]:
+    scope: str, requirements: Sequence[Mapping[str, object] | ExpressionRequirement], *, claim_ids: Sequence[object] = (), expression_ids: Sequence[object] = ()
+) -> list[dict[str, JSONValue]]:
     """Supported semantic rules only: explicit ticker scope -> ``new_filing`` plus
     any requirement whose type already names a supported monitor. No thresholds."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the table
 
     cids = [c for c in (claim_ids or []) if isinstance(c, str) and c]
     eids = [e for e in (expression_ids or []) if isinstance(e, str) and e]
-    rules: list[dict[str, Any]] = []
+    rules: list[dict[str, JSONValue]] = []
     if _SCOPE_RE.fullmatch((scope or "").strip()) and "new_filing" in SUPPORTED_HANDLERS and (cids or eids):
         rules.append({
             "rule_id": new_rule_id(),
@@ -392,8 +404,8 @@ def build_initial_watch_rules(
             "enabled": True,
             "support_status": "supported",
             "support_reason": "",
-            "claim_ids": list(cids),
-            "expression_ids": list(eids),
+            "claim_ids": list[JSONValue](cids),
+            "expression_ids": list[JSONValue](eids),
         })
     seen = {r["rule_type"] for r in rules}
     for r in requirements or []:
@@ -401,20 +413,22 @@ def build_initial_watch_rules(
         eid = r.get("expression_id") if isinstance(r, dict) else getattr(r, "expression_id", None)
         if not isinstance(rt, str) or rt not in SUPPORTED_HANDLERS or rt in seen or eid not in eids:
             continue
+        if not isinstance(eid, str):
+            continue
         rules.append({
             "rule_id": new_rule_id(),
             "rule_type": rt,
             "enabled": True,
             "support_status": "supported",
             "support_reason": "",
-            "claim_ids": [],
-            "expression_ids": [eid],
+            "claim_ids": list[JSONValue]([]),
+            "expression_ids": list[JSONValue]([eid]),
         })
         seen.add(rt)
     return rules
 
 
-def setup_needed_question() -> dict[str, Any]:
+def setup_needed_question() -> dict[str, JSONValue]:
     return {
         "question_id": _SETUP_QUESTION_ID,
         "text": "Which ticker should this thesis monitor? Reply with the single ticker symbol (e.g. NVDA).",
@@ -422,7 +436,7 @@ def setup_needed_question() -> dict[str, Any]:
     }
 
 
-def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
+def create_thesis_from_proposal(repository: ThesisRepository, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, object]:
     """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
 
     Unresolvable scope persists a setup question instead of a fake active
@@ -444,8 +458,8 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, ef
         watch_rules=rules,
         effective_at=effective_at,
     )
-    missing: list[dict[str, Any]] = []
-    questions_add: list[dict[str, Any]] = []
+    missing: list[dict[str, JSONValue]] = []
+    questions_add: list[dict[str, JSONValue]] = []
     for q in proposal.questions or ():
         if isinstance(q, dict):
             qid, text = q.get("question_id") or new_question_id(), q.get("question") or q.get("text", "")
@@ -468,7 +482,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, ef
     }
 
 
-def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict[str, Any]:
+def plan_refinement(thesis: Thesis, proposal: IntakeProposal) -> dict[str, object]:
     """Pure merge preview: added claims/expressions/requirements plus merged payload."""
     old_claims = {c.statement for c in thesis.claims}
     claims = [c.to_dict() for c in thesis.claims]
@@ -500,7 +514,7 @@ def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict[str, Any]:
     }
 
 
-def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
+def apply_refinement(repository: ThesisRepository, thesis_id: str, plan: Mapping[str, object], proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, object]:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
 
@@ -513,7 +527,10 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], prop
         snap_status = repository.load_state_as_of(tid, effective_at).thesis["status"]
         if snap_status != "active":
             raise ValueError(f"thesis {tid!r} is {snap_status}; refusing refinement")
-    updated = repository.update_thesis(tid, effective_at=effective_at, **plan["merged"])
+    merged = plan["merged"]
+    if not isinstance(merged, dict):
+        raise ValueError(f"thesis {tid!r} refinement plan 'merged' must be a mapping")
+    updated = repository.update_thesis(tid, effective_at=effective_at, **merged)
     covered_claims: dict[str, set[str]] = {}
     covered_exprs: dict[str, set[str]] = {}
     if effective_at is None:
@@ -528,24 +545,44 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], prop
             covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
     else:
         snap = repository.load_state_as_of(tid, effective_at)
-        fresh_scope = snap.thesis["scope"]
-        fresh_claim_ids = [c["claim_id"] for c in snap.thesis.get("claims", [])]
-        fresh_expr_ids = [e["expression_id"] for e in snap.thesis.get("expressions", [])]
-        for r in snap.watch["rules"]:
-            if not r.get("enabled") or r.get("support_status") != "supported" or r.get("rule_type") not in SUPPORTED_HANDLERS:
+        _scope = snap.thesis.get("scope", UNKNOWN)
+        fresh_scope = _scope if isinstance(_scope, str) else UNKNOWN
+        _sclaims = snap.thesis.get("claims", [])
+        fresh_claim_ids = [c["claim_id"] for c in (_sclaims if isinstance(_sclaims, list) else []) if isinstance(c, dict) and isinstance(c["claim_id"], str)]
+        _sexprs = snap.thesis.get("expressions", [])
+        fresh_expr_ids = [e["expression_id"] for e in (_sexprs if isinstance(_sexprs, list) else []) if isinstance(e, dict) and isinstance(e["expression_id"], str)]
+        _srules = snap.watch.get("rules", [])
+        for r in (_srules if isinstance(_srules, list) else []):
+            if not isinstance(r, dict):
                 continue
-            covered_claims.setdefault(r["rule_type"], set()).update(r.get("claim_ids", ()))
-            covered_exprs.setdefault(r["rule_type"], set()).update(r.get("expression_ids", ()))
+            if not r.get("enabled") or r.get("support_status") != "supported":
+                continue
+            rt = r.get("rule_type")
+            if not isinstance(rt, str) or rt not in SUPPORTED_HANDLERS:
+                continue
+            _rc = r.get("claim_ids", ())
+            covered_claims.setdefault(rt, set()).update([c for c in _rc if isinstance(c, str)] if isinstance(_rc, (list, tuple)) else [])
+            _re = r.get("expression_ids", ())
+            covered_exprs.setdefault(rt, set()).update([c for c in _re if isinstance(c, str)] if isinstance(_re, (list, tuple)) else [])
+    added_claims = plan["added_claims"]
+    added_expressions = plan["added_expressions"]
+    added_requirements = plan["added_requirements"]
+    if not isinstance(added_claims, list) or not isinstance(added_expressions, list) or not isinstance(added_requirements, list):
+        raise ValueError(f"thesis {tid!r} refinement plan must list added claims/expressions/requirements")
     new_rules = []
     for cand in build_initial_watch_rules(
             fresh_scope, proposal.requirements,
             claim_ids=fresh_claim_ids,
             expression_ids=fresh_expr_ids):
-        rt = cand["rule_type"]
+        rt = cand.get("rule_type")
+        if not isinstance(rt, str):
+            continue
         known_c = covered_claims.setdefault(rt, set())
         known_e = covered_exprs.setdefault(rt, set())
-        cids = [c for c in cand.get("claim_ids", []) if c not in known_c]
-        eids = [e for e in cand.get("expression_ids", []) if e not in known_e]
+        cids_raw = cand.get("claim_ids", [])
+        eids_raw = cand.get("expression_ids", [])
+        cids: list[str] = [c for c in cids_raw if isinstance(c, str) and c not in known_c] if isinstance(cids_raw, list) else []
+        eids: list[str] = [c for c in eids_raw if isinstance(c, str) and c not in known_e] if isinstance(eids_raw, list) else []
         if not (cids or eids):
             continue
         cand = dict(cand, rule_id=new_rule_id(), claim_ids=cids, expression_ids=eids)
@@ -557,8 +594,8 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], prop
     return {
         "thesis_id": tid,
         "slug": updated.slug,
-        "added_claims": len(plan["added_claims"]),
-        "added_expressions": len(plan["added_expressions"]),
-        "added_requirements": len(plan["added_requirements"]),
+        "added_claims": len(added_claims),
+        "added_expressions": len(added_expressions),
+        "added_requirements": len(added_requirements),
         "rules_added": [dict(r) for r in new_rules],
     }

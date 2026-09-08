@@ -22,7 +22,8 @@ def get_by_accession_number(accession_no: str) -> EdgarFiling:
     from edgar import get_by_accession_number as _get
 
     ensure_identity()
-    return _get(accession_no)
+    filing: EdgarFiling = _get(accession_no)
+    return filing
 
 
 def _filing(accession_no: str) -> EdgarFiling:
@@ -430,7 +431,8 @@ def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_
 def _exhibit_dict(accession_no: str, attachment: object) -> dict[str, object]:
     def _get(name: str) -> object:
         try:
-            return getattr(attachment, name)
+            value: object = getattr(attachment, name)
+            return value
         except Exception:
             return None
 

@@ -75,7 +75,7 @@ def _safe_float(value: object) -> float | None:
 def _first(obj: object, *names: str) -> object:
     for name in names:
         try:
-            value = getattr(obj, name)
+            value: object = getattr(obj, name)
         except Exception:
             continue
         if value is not None:
@@ -419,7 +419,8 @@ def load_144(accession_no: str) -> object:
 
     # edgar ships no Form144 stub; getattr keeps the live seam raising on
     # failure instead of failing the checker on a missing SDK attribute.
-    return getattr(edgar, "Form144").from_filing(filing)
+    form: object = getattr(edgar, "Form144").from_filing(filing)
+    return form
 
 
 def get_planned_insider_sales(ticker_or_cik: str | int, *, as_of: str | None = None,
@@ -531,7 +532,7 @@ def _holding_row_to_record(row: object, *, manager_name: str | None,
         for name in names:
             try:
                 if isinstance(row, dict):
-                    value = row.get(name)
+                    value: object = row.get(name)
                 else:
                     value = getattr(row, name, None)
                     if value is None and hasattr(row, "get"):

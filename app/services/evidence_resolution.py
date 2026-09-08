@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from app.domain.market.identity import resolve_ticker_aliases
 from app.domain.market.securities import SecurityResolution, TickerAlias
@@ -72,16 +72,18 @@ def warehouse_name_to_ticker(
         return None
     entity_ids: set[str] = set()
     for row in entity_rows:
-        if isinstance(row.get("name"), str) and row["name"].casefold() == lowered:
+        name_val = row.get("name")
+        if isinstance(name_val, str) and name_val.casefold() == lowered:
             entity_ids.add(str(row["entity_id"]))
     try:
         alias_rows = duckdb.query(
             "SELECT alias_value, entity_id FROM entity_aliases", data_root=data_root
         )
     except Exception:
-        alias_rows: list[dict[str, Any]] = []
+        alias_rows: list[dict[str, object]] = []
     for row in alias_rows:
-        if isinstance(row.get("alias_value"), str) and row["alias_value"].casefold() == lowered:
+        alias_val = row.get("alias_value")
+        if isinstance(alias_val, str) and alias_val.casefold() == lowered:
             entity_ids.add(str(row["entity_id"]))
     if not entity_ids:
         return None
@@ -94,7 +96,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            sec_rows: list[dict[str, Any]] = []
+            sec_rows: list[dict[str, object]] = []
         for row in sec_rows:
             if row.get("ticker"):
                 tickers.add(str(row["ticker"]).strip().upper())
@@ -105,7 +107,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            alias_tickers: list[dict[str, Any]] = []
+            alias_tickers: list[dict[str, object]] = []
         for row in alias_tickers:
             if row.get("alias_value"):
                 tickers.add(str(row["alias_value"]).strip().upper())

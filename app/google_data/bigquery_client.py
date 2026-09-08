@@ -21,7 +21,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, TypedDict, cast
+from typing import Optional, TypedDict, cast
 
 import requests  # already a direct dependency (requests==2.34.2)
 
@@ -70,7 +70,7 @@ def _table_allowed(table: str) -> bool:
         return True
     return isinstance(table, str) and table.startswith(_GSOD_PREFIX)
 
-TEMPLATES: dict[str, dict[str, Any]] = {
+TEMPLATES: dict[str, dict[str, object]] = {
     "trends_us_top": {
         "table": "bigquery-public-data.google_trends.top_terms",
         "max_rows": 1001,
@@ -280,7 +280,7 @@ TEMPLATES["trends_top"] = TEMPLATES["trends_us_top"]
 TEMPLATES["trends_rising"] = TEMPLATES["trends_us_rising"]
 
 
-def _ledger_path(data_root: Any = None) -> Path:
+def _ledger_path(data_root: Path | str | None = None) -> Path:
     base = Path(data_root) if data_root else (_get_data_root() if _get_data_root else Path("data"))
     return base / "google_data" / "bq_ledger.json"
 
@@ -313,7 +313,7 @@ class _LedgerBusy(Exception):
 
 
 @contextlib.contextmanager
-def _ledger_locked(data_root: Any = None):
+def _ledger_locked(data_root: Path | str | None = None):
     """Serialize ledger load/save/reconcile with flock on <ledger>.lock."""
     if fcntl is None:  # pragma: no cover - no flock platform: never proceed unlocked
         raise _LedgerBusy("ledger locking unavailable on this platform")
@@ -362,13 +362,13 @@ def _job_id(template: str, params: dict[str, object]) -> str:
     return hashlib.sha256(f"{template}:{canonical}".encode("utf-8")).hexdigest()
 
 
-def _err(message: str, error_type: str, **extra: Any) -> dict[str, object]:
+def _err(message: str, error_type: str, **extra: object) -> dict[str, object]:
     out: dict[str, object] = {"error": message, "error_type": error_type, "source": SOURCE}
     out.update(extra)
     return out
 
 
-def _billing_state(client: Any, project: Optional[str]) -> Optional[bool]:
+def _billing_state(client: object, project: Optional[str]) -> Optional[bool]:
     """True=billing disabled, False=enabled, None=unknown (refuse on not-True)."""
     if isinstance(client, dict):
         for key in ("billingEnabled", "billing_enabled"):
@@ -376,7 +376,7 @@ def _billing_state(client: Any, project: Optional[str]) -> Optional[bool]:
                 return not client[key]
         return None
     if hasattr(client, "billing_enabled"):
-        value = client.billing_enabled
+        value: object = getattr(client, "billing_enabled", None)
         return None if value is None else (not value)
     info_fn = getattr(client, "get_billing_info", None)
     if callable(info_fn):
@@ -415,7 +415,7 @@ def _billing_state(client: Any, project: Optional[str]) -> Optional[bool]:
         return None
 
 
-def check_billing_disabled(client: Any) -> bool:
+def check_billing_disabled(client: object) -> bool:
     """True only when Cloud Billing reports billingEnabled=False for the project."""
     return _billing_state(client, get_google_cloud_project()) is True
 
@@ -447,7 +447,7 @@ def _render_sql(spec: dict[str, object], params: dict[str, object], table: str) 
     """Fill {limit}/{table}/{table_suffix}/{columns}; pass only @-referenced params."""
     sql_obj = spec.get("sql", "")
     sql_template = sql_obj if isinstance(sql_obj, str) else ""
-    fmt: dict[str, Any] = {"limit": params["limit"], "table": table}
+    fmt: dict[str, object] = {"limit": params["limit"], "table": table}
     if "{table_suffix}" in sql_template:
         fmt["table_suffix"] = table.rsplit(".", 1)[-1]
     if "{columns}" in sql_template:
@@ -469,23 +469,25 @@ def _render_sql(spec: dict[str, object], params: dict[str, object], table: str) 
     return sql, {k: v for k, v in params.items() if k in names}
 
 
-def _query_parameters(bq: Any, params: dict[str, object]) -> list[object]:
+def _query_parameters(bq: object, params: dict[str, object]) -> list[object]:
     out: list[object] = []
+    scalar = getattr(bq, "ScalarQueryParameter")
+    array = getattr(bq, "ArrayQueryParameter")
     for key, value in params.items():
         if isinstance(value, bool):
-            out.append(bq.ScalarQueryParameter(key, "BOOL", value))
+            out.append(scalar(key, "BOOL", value))
         elif isinstance(value, int):
-            out.append(bq.ScalarQueryParameter(key, "INT64", value))
+            out.append(scalar(key, "INT64", value))
         elif isinstance(value, float):
-            out.append(bq.ScalarQueryParameter(key, "FLOAT64", value))
+            out.append(scalar(key, "FLOAT64", value))
         elif isinstance(value, (list, tuple)):
-            out.append(bq.ArrayQueryParameter(key, "STRING", [str(v) for v in value]))
+            out.append(array(key, "STRING", [str(v) for v in value]))
         else:
-            out.append(bq.ScalarQueryParameter(key, "STRING", str(value)))
+            out.append(scalar(key, "STRING", str(value)))
     return out
 
 
-def _real_dry_run(client: Any, sql: str, params: dict[str, object], cap: int) -> int:
+def _real_dry_run(client: object, sql: str, params: dict[str, object], cap: int) -> int:
     from google.cloud import bigquery as _bq
 
     job_config = _bq.QueryJobConfig(
@@ -494,11 +496,11 @@ def _real_dry_run(client: Any, sql: str, params: dict[str, object], cap: int) ->
         maximum_bytes_billed=cap,
         query_parameters=_query_parameters(_bq, params),
     )
-    return int(client.query(sql, job_config=job_config).total_bytes_processed)
+    return int(getattr(client, "query")(sql, job_config=job_config).total_bytes_processed)
 
 
 def _real_submit(
-    client: Any, sql: str, params: dict[str, object], cap: int, job_id: str, max_rows: int
+    client: object, sql: str, params: dict[str, object], cap: int, job_id: str, max_rows: int
 ) -> dict[str, object]:
     from google.cloud import bigquery as _bq
 
@@ -507,21 +509,21 @@ def _real_submit(
         maximum_bytes_billed=cap,
         query_parameters=_query_parameters(_bq, params),
     )
-    job = client.query(
+    job = getattr(client, "query")(
         sql, job_config=job_config, job_id=f"stockbot_{job_id[:56]}", location="US"
     )
-    rows = [dict(r) for r in job.result(max_results=max_rows)]
+    rows = [dict(r) for r in getattr(job, "result")(max_results=max_rows)]
     return {
         "job_id": job_id,
-        "total_bytes_billed": int(job.total_bytes_billed or 0),
+        "total_bytes_billed": int(getattr(job, "total_bytes_billed") or 0),
         "rows": rows,
         "state": "DONE",
     }
 
 
 def submit_template(
-    template: str, params: dict[str, object], client_factory: Callable[[], Any] | None = None,
-    data_root: Path | None = None,
+    template: str, params: dict[str, object], client_factory: Callable[[], object] | None = None,
+    data_root: Path | str | None = None,
 ) -> dict[str, object]:
     """Run one checked-in template; bounded, ledger-backed, billing-gated.
 
@@ -542,7 +544,8 @@ def submit_template(
         return _err(str(e), "source_unavailable")
     if not _table_allowed(table):
         return _err(f"unknown template: {template}", "source_unavailable")
-    sql = spec.get("sql", "")
+    sql_obj: object = spec.get("sql", "")
+    sql = sql_obj if isinstance(sql_obj, str) else ""
     if not sql.lstrip().upper().startswith("SELECT") or _WRITE_STMT.search(sql):
         return _err("template is not a read-only SELECT", "source_unavailable")
     project = get_google_cloud_project()
@@ -556,16 +559,18 @@ def submit_template(
     daily_limit = get_bq_daily_bytes_limit()
     if per_query_cap <= 0 or monthly_limit <= 0 or daily_limit <= 0:
         return _err("non-positive BigQuery byte limit", "cost_limit_exceeded")
+    max_rows_raw: object = spec["max_rows"]
+    max_rows = max_rows_raw if isinstance(max_rows_raw, int) else 0
     try:
-        raw_limit = params.get("limit", spec["max_rows"])
+        raw_limit: object = params.get("limit", max_rows)
         limit = (
             int(raw_limit)
             if isinstance(raw_limit, (int, str, float))
-            else spec["max_rows"]
+            else max_rows
         )
     except (TypeError, ValueError):
-        limit = spec["max_rows"]
-    params["limit"] = max(1, min(limit, spec["max_rows"]))
+        limit = max_rows
+    params["limit"] = max(1, min(limit, max_rows))
     jid = _job_id(template, params)
     month = _utc_month()
     day = _utc_day()
@@ -617,7 +622,7 @@ def submit_template(
             )
         try:
             if hasattr(client, "dry_run"):
-                estimate = int(client.dry_run(params))
+                estimate = int(getattr(client, "dry_run")(params))
             else:
                 sql_text, bq_params = _render_sql(spec, params, table)
                 estimate = int(_real_dry_run(client, sql_text, bq_params, per_query_cap))
@@ -669,10 +674,10 @@ def submit_template(
         entry = jobs[jid]
         try:
             if hasattr(client, "submit"):
-                result = client.submit(params, entry["max_bytes"], jid) or {}
+                result = getattr(client, "submit")(params, entry["max_bytes"], jid) or {}
             else:
                 sql_text, bq_params = _render_sql(spec, params, table)
-                result = _real_submit(client, sql_text, bq_params, reserve, jid, spec["max_rows"])
+                result = _real_submit(client, sql_text, bq_params, reserve, jid, max_rows)
         except Exception as e:
             # Unknown outcome: reservation retained, never refunded blindly.
             return _err(

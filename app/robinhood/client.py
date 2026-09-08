@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
+
+from app.thesis.models import JSONValue
 
 from .auth import DEFAULT_TOKEN_PATH, OAuthConfig, build_oauth_provider
 from .capabilities import (
@@ -30,7 +32,7 @@ class RobinhoodToolError(RuntimeError):
     pass
 
 
-def normalize_result(result: Any) -> Any:
+def normalize_result(result: object) -> JSONValue:
     """Convert SDK model objects and MCP content into JSON-like values."""
     if result is None or isinstance(result, (str, int, float, bool)):
         return result
@@ -39,19 +41,31 @@ def normalize_result(result: Any) -> Any:
     if isinstance(result, (list, tuple)):
         return [normalize_result(v) for v in result]
     if hasattr(result, "model_dump"):
-        return normalize_result(result.model_dump(exclude_none=True))
+        dumped: object = getattr(result, "model_dump")(exclude_none=True)
+        return normalize_result(dumped)
     if hasattr(result, "dict"):
-        return normalize_result(result.dict(exclude_none=True))
+        dumped_dict: object = getattr(result, "dict")(exclude_none=True)
+        return normalize_result(dumped_dict)
     if hasattr(result, "text"):
-        return result.text
+        text: object = getattr(result, "text")
+        if text is None or isinstance(text, (str, int, float, bool)):
+            return text
+        return normalize_result(text)
     return {k: normalize_result(v) for k, v in vars(result).items() if not k.startswith("_")}
 
 
-def normalize_tools(result: Any) -> list[dict[str, Any]]:
-    value = normalize_result(getattr(result, "tools", result))
-    if isinstance(value, dict):
-        value = value.get("tools", [])
-    return [v if isinstance(v, dict) else {"name": str(v)} for v in value]
+def normalize_tools(result: object) -> list[dict[str, object]]:
+    value: object = normalize_result(getattr(result, "tools", result))
+    candidates: object = value.get("tools", []) if isinstance(value, dict) else value
+    if not isinstance(candidates, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for item in candidates:
+        if isinstance(item, dict):
+            rows.append(item)
+        else:
+            rows.append({"name": str(item)})
+    return rows
 
 
 class RobinhoodClient:
@@ -60,7 +74,7 @@ class RobinhoodClient:
                  market_tools: frozenset[str] | None = None,
                  account_tools: frozenset[str] | None = None,
                  allowed_tools: set[str] | None = None,
-                 transport_factory: Callable[..., Any] | None = None):
+                 transport_factory: Callable[..., object] | None = None):
         if allowed_tools is not None:
             # Legacy generic configuration still cannot add capabilities:
             # classify it against the canonical registry before construction.
@@ -86,14 +100,14 @@ class RobinhoodClient:
         )
         self.transport_factory = transport_factory
 
-    def list_tools(self) -> list[dict[str, Any]]:
+    def list_tools(self) -> list[dict[str, object]]:
         return self._run(self._list_tools())
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> JSONValue:
         self._check_tool(name)
         return self._run(self._call_tool(name, arguments or {}))
 
-    def run_readonly(self, calls: list[tuple[str, dict[str, Any]]]) -> list[Any]:
+    def run_readonly(self, calls: list[tuple[str, dict[str, object]]]) -> list[JSONValue]:
         """Run read-only calls in one authenticated MCP session."""
         for name, _ in calls:
             self._check_tool(name)
@@ -105,7 +119,7 @@ class RobinhoodClient:
         if name not in self.permitted_tools:
             raise RobinhoodToolError(f"Tool is not in the configured allowlist: {name}")
 
-    def _run(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+    def _run(self, coroutine: Coroutine[object, object, _T]) -> _T:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -113,28 +127,32 @@ class RobinhoodClient:
         coroutine.close()
         raise RuntimeError("RobinhoodClient synchronous methods cannot run inside an active event loop")
 
-    async def _list_tools(self):
+    async def _list_tools(self) -> list[dict[str, object]]:
         async with self._session() as session:
-            return normalize_tools(await session.list_tools())
+            list_tools = getattr(session, "list_tools")
+            result: object = await list_tools()
+            return normalize_tools(result)
 
-    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def _call_tool(self, name: str, arguments: dict[str, object]) -> JSONValue:
         async with self._session() as session:
-            result = await session.call_tool(name, arguments)
+            call_tool = getattr(session, "call_tool")
+            result: object = await call_tool(name, arguments)
             if getattr(result, "is_error", getattr(result, "isError", False)):
                 raise RobinhoodToolError("Robinhood MCP tool returned an error")
             return normalize_result(result)
 
-    async def _run_readonly(self, calls: list[tuple[str, dict[str, Any]]]) -> list[Any]:
-        results = []
+    async def _run_readonly(self, calls: list[tuple[str, dict[str, object]]]) -> list[JSONValue]:
+        results: list[JSONValue] = []
         async with self._session() as session:
+            call_tool = getattr(session, "call_tool")
             for name, arguments in calls:
-                result = await session.call_tool(name, arguments)
+                result: object = await call_tool(name, arguments)
                 if getattr(result, "is_error", getattr(result, "isError", False)):
                     raise RobinhoodToolError("Robinhood MCP tool returned an error")
                 results.append(normalize_result(result))
         return results
 
-    def _session(self):
+    def _session(self) -> _SessionContext | _HttpSessionContext:
         try:
             import httpx2
             from mcp import Client
@@ -143,52 +161,69 @@ class RobinhoodClient:
             raise RobinhoodDependencyError("Install the optional 'mcp' package for Robinhood support") from exc
         auth = build_oauth_provider(self.oauth, self.token_path) if self.oauth else None
         if self.transport_factory:
-            transport = self.transport_factory(self.server_url, auth=auth)
+            transport: object = self.transport_factory(self.server_url, auth=auth)
             return _SessionContext(transport, Client)
         return _HttpSessionContext(self.server_url, auth, streamable_http_client, Client, httpx2)
 
 
 class _SessionContext:
-    def __init__(self, transport: Any, session_type: Any) -> None:
-        self.transport, self.session_type = transport, session_type
-        self.transport_context: Any | None = None
-        self.session_context: Any | None = None
+    def __init__(self, transport: object, session_type: Callable[..., object]) -> None:
+        self.transport = transport
+        self.session_type = session_type
+        self.transport_context: object | None = None
+        self.session_context: object | None = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> object:
         self.transport_context = self.transport
-        client = self.session_type(self.transport_context)
+        client: object = self.session_type(self.transport_context)
         self.session_context = client
-        return await self.session_context.__aenter__()
+        enter = getattr(client, "__aenter__")
+        result: object = await enter()
+        return result
 
-    async def __aexit__(self, *args: object) -> Any:
-        if self.session_context:
-            return await self.session_context.__aexit__(*args)
+    async def __aexit__(self, *args: object) -> bool | None:
+        if not self.session_context:
+            return None
+        exit_method = getattr(self.session_context, "__aexit__")
+        result: object = await exit_method(*args)
+        return True if result else None
 
 
 class _HttpSessionContext:
-    def __init__(self, url: str, auth: Any | None, transport_factory: Callable[..., Any], client_type: Any, httpx_module: Any) -> None:
+    def __init__(self, url: str, auth: object | None, transport_factory: Callable[..., object], client_type: Callable[..., object], httpx_module: object) -> None:
         self.url = url
         self.auth = auth
         self.transport_factory = transport_factory
         self.client_type = client_type
         self.httpx_module = httpx_module
-        self.http_client: Any | None = None
-        self.transport_context: Any | None = None
-        self.client_context: Any | None = None
+        self.http_client: object | None = None
+        self.transport_context: object | None = None
+        self.client_context: object | None = None
 
-    async def __aenter__(self):
-        self.http_client = self.httpx_module.AsyncClient(
+    async def __aenter__(self) -> object:
+        async_client_factory = getattr(self.httpx_module, "AsyncClient")
+        http_client: object = async_client_factory(
             auth=self.auth, follow_redirects=False
         )
-        await self.http_client.__aenter__()
-        self.transport_context = self.transport_factory(
+        self.http_client = http_client
+        enter_http = getattr(http_client, "__aenter__")
+        await enter_http()
+        transport: object = self.transport_factory(
             self.url, http_client=self.http_client, terminate_on_close=False
         )
-        self.client_context = self.client_type(self.transport_context)
-        return await self.client_context.__aenter__()
+        self.transport_context = transport
+        client: object = self.client_type(self.transport_context)
+        self.client_context = client
+        enter_client = getattr(client, "__aenter__")
+        result: object = await enter_client()
+        return result
 
-    async def __aexit__(self, *args: object) -> Any:
+    async def __aexit__(self, *args: object) -> bool | None:
         if self.client_context:
-            await self.client_context.__aexit__(*args)
+            exit_client = getattr(self.client_context, "__aexit__")
+            await exit_client(*args)
         if self.http_client:
-            return await self.http_client.__aexit__(*args)
+            exit_http = getattr(self.http_client, "__aexit__")
+            result: object = await exit_http(*args)
+            return True if result else None
+        return None

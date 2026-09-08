@@ -10,24 +10,26 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable
+from collections.abc import Mapping
+from typing import Callable
 
 from app.thesis import monitor
-
+from app.thesis.monitor import SourceService, TickResult
+from app.thesis.repository import ThesisRepository
 log = logging.getLogger(__name__)
 
 
-def run_monitor_once(repository: Any, thesis_id: str, source_services: Any = None, *,
-                     known_at: str | None = None) -> Any:
+def run_monitor_once(repository: ThesisRepository, thesis_id: str, source_services: Mapping[str, SourceService] | None = None, *,
+                     known_at: str | None = None) -> TickResult:
     """One monitor iteration: passthrough to :func:`monitor.tick`."""
     return monitor.tick(repository, thesis_id, source_services, known_at=known_at)
 
 
-def monitor_loop(*, repository: Any, thesis_id: str, interval_seconds: float = 900,
-                 source_services: Any = None,
+def monitor_loop(*, repository: ThesisRepository, thesis_id: str, interval_seconds: float = 900,
+                 source_services: Mapping[str, SourceService] | None = None,
                  known_at_fn: Callable[[], str] | None = None,
                  stop_event: threading.Event | None = None,
-                 on_tick: Callable[[Any], None] | None = None) -> int:
+                 on_tick: Callable[[TickResult], None] | None = None) -> int:
     if interval_seconds <= 0:
         raise ValueError(f"<worker>: interval_seconds must be > 0, got {interval_seconds!r}")
     stop = stop_event or threading.Event()

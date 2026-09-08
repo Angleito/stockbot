@@ -56,18 +56,18 @@ def list_sec_filings(
         # missing start means archive beginning, missing end means as_of/today.
         end = _date_str(end_date or as_of or date.today().isoformat())
         filing_date_arg = f"{_date_str(start_date) if start_date else '1994-01-01'}:{end}"
-    filings = get_company(ticker_or_cik).get_filings(
+    filings_raw = get_company(ticker_or_cik).get_filings(
         form=form_arg, filing_date=filing_date_arg)
-    out = [filing_from_edgar(f) for f in filings]
-    if as_of is not None:
-        kept: list[Filing] = []
-        for x in out:
+    out: list[Filing] = []
+    for f in filings_raw:
+        if limit is not None and len(out) >= limit:
+            break
+        x = filing_from_edgar(f)
+        if as_of is not None:
             value, _basis = pit_of(x)
-            if value is not None and value[:10] <= as_of:
-                kept.append(x)
-        out = kept
-    if limit is not None:
-        out = out[:limit]
+            if value is None or value[:10] > as_of:
+                continue
+        out.append(x)
     return out
 
 

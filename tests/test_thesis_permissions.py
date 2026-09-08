@@ -40,7 +40,9 @@ def _repo_with_thesis(tmp_path: Path, scope: str = "NVDA") -> tuple[ThesisReposi
     t = r.create_thesis(f"{scope} thesis", scope=scope, claims=[f"{scope} demand grows"])
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
     raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
-    raw["rules"].append({"rule_id": "rule:1", "rule_type": "new_filing",
+    rules = raw["rules"]
+    assert isinstance(rules, list)
+    rules.append({"rule_id": "rule:1", "rule_type": "new_filing",
                          "enabled": True, "support_status": "supported",
                          "support_reason": "", "claim_ids": [cid], "expression_ids": []})
     atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")

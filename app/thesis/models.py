@@ -8,14 +8,45 @@ Unknown/unavailable optional values serialize as the literal ``"unknown"``.
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+
+JSONScalar = str | int | float | bool | None
+type JSONValue = JSONScalar | list[JSONValue] | dict[str, JSONValue]
+
+
+def validate_json_value(value: object, where: str = "<dict>") -> JSONValue:
+    """Recursively normalize an object into a valid JSONValue (deep copy). Tuples normalize to lists; non-finite floats are rejected."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{where}: non-finite float not allowed, got {value!r}")
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [validate_json_value(v, where) for v in value]
+    if isinstance(value, dict):
+        out: dict[str, JSONValue] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValueError(f"{where}: dict key must be a string, got {type(k).__name__}")
+            out[k] = validate_json_value(v, where)
+        return out
+    raise ValueError(f"{where}: not a JSON value, got {type(value).__name__}")
+
+
+def validate_json_mapping(value: object, where: str = "<dict>") -> dict[str, JSONValue]:
+    """Validate untrusted payload as a JSON object (narrowed dict for strict fields)."""
+    validated = validate_json_value(value, where)
+    if not isinstance(validated, dict):
+        raise ValueError(f"{where}: must be a mapping, got {type(value).__name__}")
+    return validated
 
 SCHEMA_VERSION = 1
+
 UNKNOWN = "unknown"
 
 _RESERVED_SLUGS = {".", "..", ""}
@@ -99,7 +130,7 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _req_str(d: dict[str, Any], key: str, where: str) -> str:
+def _req_str(d: Mapping[str, object], key: str, where: str) -> str:
     v = d.get(key)
     if not isinstance(v, str) or not v:
         raise ValueError(f"{where}: '{key}' must be a non-empty string")
@@ -174,11 +205,11 @@ class ThesisClaim:
     statement: str
     status: str = ClaimStatus.UNVALIDATED.value
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisClaim:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisClaim:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: claim must be a mapping, got {type(d).__name__}")
         where = f"{_path}: claim {d.get('claim_id', '?')}"
@@ -197,16 +228,16 @@ class TradeExpression:
     direction: str = Direction.UNKNOWN.value
     structure: str = UNKNOWN  # open vocabulary, kept unchanged
     horizon: str = UNKNOWN
-    leverage: dict[str, Any] = field(default_factory=dict)
-    parameters: dict[str, Any] = field(default_factory=dict)
+    leverage: dict[str, JSONValue] = field(default_factory=dict)
+    parameters: dict[str, JSONValue] = field(default_factory=dict)
     deterministic_support: str = UNKNOWN
     status: str = ExpressionStatus.UNDECIDED.value
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> TradeExpression:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> TradeExpression:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: expression must be a mapping, got {type(d).__name__}")
         where = f"{_path}: expression {d.get('expression_id', '?')}"
@@ -221,9 +252,12 @@ class TradeExpression:
         structure = d.get("structure", UNKNOWN)
         if not isinstance(structure, str) or not structure.strip():
             raise ValueError(f"{where}: 'structure' must be a non-empty string (open vocabulary)")
-        for key in ("leverage", "parameters"):
-            if key in d and d[key] is not None and not isinstance(d[key], dict):
-                raise ValueError(f"{where}: '{key}' must be a mapping, got {type(d[key]).__name__}")
+        leverage = d.get("leverage")
+        if leverage is not None and not isinstance(leverage, dict):
+            raise ValueError(f"{where}: 'leverage' must be a mapping, got {type(leverage).__name__}")
+        parameters = d.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise ValueError(f"{where}: 'parameters' must be a mapping, got {type(parameters).__name__}")
         return cls(
             expression_id=_req_str(d, "expression_id", where),
             intent=_opt_unknown(d.get("intent", UNKNOWN)),
@@ -231,8 +265,8 @@ class TradeExpression:
             direction=direction,
             structure=structure,  # accepted unchanged
             horizon=_opt_unknown(d.get("horizon", UNKNOWN)),
-            leverage=dict(d.get("leverage") or {}),
-            parameters=dict(d.get("parameters") or {}),
+            leverage=validate_json_mapping(leverage or {}, f"{where}: 'leverage'"),
+            parameters=validate_json_mapping(parameters or {}, f"{where}: 'parameters'"),
             deterministic_support=_opt_unknown(d.get("deterministic_support", UNKNOWN)),
             status=_coerce_enum(ExpressionStatus, d.get("status", ExpressionStatus.UNDECIDED.value), "status", where),
         )
@@ -246,11 +280,11 @@ class ExpressionRequirement:
     statement: str
     status: str = QuestionStatus.OPEN.value
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ExpressionRequirement:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ExpressionRequirement:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: requirement must be a mapping, got {type(d).__name__}")
         where = f"{_path}: requirement {d.get('requirement_id', '?')}"
@@ -276,14 +310,14 @@ class WatchRule:
     claim_ids: tuple[str, ...] = ()
     expression_ids: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         d = asdict(self)
         d["claim_ids"] = list(self.claim_ids)
         d["expression_ids"] = list(self.expression_ids)
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> WatchRule:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> WatchRule:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: watch rule must be a mapping, got {type(d).__name__}")
         where = f"{_path}: rule {d.get('rule_id', '?')}"
@@ -301,8 +335,9 @@ class WatchRule:
                 f"{where}: unknown rule_type {rtype!r} must stay disabled/unsupported "
                 "(enabled: false, support_status: unsupported)"
             )
-        for key in ("claim_ids", "expression_ids"):
-            ids = d.get(key, [])
+        claim_ids = d.get("claim_ids", [])
+        expression_ids = d.get("expression_ids", [])
+        for key, ids in (("claim_ids", claim_ids), ("expression_ids", expression_ids)):
             if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
                 raise ValueError(f"{where}: '{key}' must be a list of IDs")
         return cls(
@@ -311,22 +346,21 @@ class WatchRule:
             enabled=enabled,
             support_status=support,
             support_reason=str(d.get("support_reason", "")),
-            claim_ids=tuple(d.get("claim_ids", [])),
-            expression_ids=tuple(d.get("expression_ids", [])),
+            claim_ids=tuple(claim_ids) if isinstance(claim_ids, list) else (),
+            expression_ids=tuple(expression_ids) if isinstance(expression_ids, list) else (),
         )
 
 
-def require_watch_targets(rule_like: Any, where: str) -> None:
+def require_watch_targets(rule_like: WatchRule | Mapping[str, object], where: str) -> None:
     """Reject targetless watch rules: need >=1 non-empty claim or expression ID."""
-    cids = getattr(rule_like, "claim_ids", None)
-    eids = getattr(rule_like, "expression_ids", None)
-    if cids is None or eids is None:
-        if isinstance(rule_like, dict):
-            cids, eids = rule_like.get("claim_ids", []), rule_like.get("expression_ids", [])
-        else:
-            cids, eids = list[str](), list[str]()
-    if not [c for c in (cids or []) if isinstance(c, str) and c]:
-        if not [e for e in (eids or []) if isinstance(e, str) and e]:
+    if isinstance(rule_like, Mapping):
+        cids: object = rule_like.get("claim_ids", [])
+        eids: object = rule_like.get("expression_ids", [])
+    else:
+        cids = rule_like.claim_ids
+        eids = rule_like.expression_ids
+    if not [c for c in (cids if isinstance(cids, (list, tuple)) else []) if isinstance(c, str) and c]:
+        if not [e for e in (eids if isinstance(eids, (list, tuple)) else []) if isinstance(e, str) and e]:
             raise ValueError(f"{where}: watch rule must name at least one claim_id or expression_id")
 
 
@@ -344,9 +378,9 @@ class Trigger:
     summary: str = ""
     processed_at: str | None = None
     run_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, JSONValue] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         d = asdict(self)
         d["claim_ids"] = list(self.claim_ids)
         d["expression_ids"] = list(self.expression_ids)
@@ -354,14 +388,26 @@ class Trigger:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Trigger:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> Trigger:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: trigger must be a mapping, got {type(d).__name__}")
         where = f"{_path}: trigger {d.get('trigger_id', '?')}"
-        for key in ("claim_ids", "expression_ids", "canonical_refs"):
-            vals = d.get(key, [])
+        claim_ids = d.get("claim_ids", [])
+        expression_ids = d.get("expression_ids", [])
+        canonical_refs = d.get("canonical_refs", [])
+        for key, vals in (
+            ("claim_ids", claim_ids),
+            ("expression_ids", expression_ids),
+            ("canonical_refs", canonical_refs),
+        ):
             if not isinstance(vals, list) or not all(isinstance(i, str) for i in vals):
                 raise ValueError(f"{where}: '{key}' must be a list of strings")
+        processed_at = d.get("processed_at")
+        if processed_at is not None and not isinstance(processed_at, str):
+            raise ValueError(f"{where}: 'processed_at' must be a string or null")
+        run_id = d.get("run_id")
+        if run_id is not None and not isinstance(run_id, str):
+            raise ValueError(f"{where}: 'run_id' must be a string or null")
         meta = d.get("metadata", {})
         if meta is not None and not isinstance(meta, dict):
             raise ValueError(f"{where}: 'metadata' must be a mapping")
@@ -374,13 +420,13 @@ class Trigger:
             importance=_coerce_enum(
                 TriggerImportance, d.get("importance", TriggerImportance.MEDIUM.value), "importance", where
             ),
-            claim_ids=tuple(d.get("claim_ids", [])),
-            expression_ids=tuple(d.get("expression_ids", [])),
-            canonical_refs=tuple(d.get("canonical_refs", [])),
+            claim_ids=tuple(claim_ids) if isinstance(claim_ids, list) else (),
+            expression_ids=tuple(expression_ids) if isinstance(expression_ids, list) else (),
+            canonical_refs=tuple(canonical_refs) if isinstance(canonical_refs, list) else (),
             summary=str(d.get("summary", "")),
-            processed_at=d.get("processed_at"),
-            run_id=d.get("run_id"),
-            metadata=dict(meta or {}),
+            processed_at=processed_at,
+            run_id=run_id,
+            metadata=validate_json_mapping(meta or {}, f"{where}: 'metadata'"),
         )
 
 
@@ -399,7 +445,7 @@ class Thesis:
     unknowns: tuple[str, ...] = ()
     expressions: tuple[TradeExpression, ...] = ()
     requirements: tuple[ExpressionRequirement, ...] = ()
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         d = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
         d["claims"] = [c.to_dict() if isinstance(c, ThesisClaim) else c for c in self.claims]
@@ -411,17 +457,32 @@ class Thesis:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Thesis:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> Thesis:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: thesis must be a mapping, got {type(d).__name__}")
         where = f"{_path}: thesis {d.get('thesis_id', '?')}"
-        for key in ("assumptions", "invalidators", "unknowns"):
-            vals = d.get(key, [])
+        assumptions = d.get("assumptions", [])
+        invalidators = d.get("invalidators", [])
+        unknowns = d.get("unknowns", [])
+        for key, vals in (
+            ("assumptions", assumptions),
+            ("invalidators", invalidators),
+            ("unknowns", unknowns),
+        ):
             if not isinstance(vals, list) or not all(isinstance(i, str) for i in vals):
                 raise ValueError(f"{where}: '{key}' must be a list of strings")
-        claims = [ThesisClaim.from_dict(c, _path) for c in d.get("claims", [])]
-        expressions = [TradeExpression.from_dict(e, _path) for e in d.get("expressions", [])]
-        requirements = [ExpressionRequirement.from_dict(r, _path) for r in d.get("requirements", [])]
+        claims_raw = d.get("claims", [])
+        if not isinstance(claims_raw, list):
+            raise ValueError(f"{where}: 'claims' must be a list, got {type(claims_raw).__name__}")
+        expressions_raw = d.get("expressions", [])
+        if not isinstance(expressions_raw, list):
+            raise ValueError(f"{where}: 'expressions' must be a list, got {type(expressions_raw).__name__}")
+        requirements_raw = d.get("requirements", [])
+        if not isinstance(requirements_raw, list):
+            raise ValueError(f"{where}: 'requirements' must be a list, got {type(requirements_raw).__name__}")
+        claims = [ThesisClaim.from_dict(c, _path) for c in claims_raw]
+        expressions = [TradeExpression.from_dict(e, _path) for e in expressions_raw]
+        requirements = [ExpressionRequirement.from_dict(r, _path) for r in requirements_raw]
         thesis = cls(
             thesis_id=_req_str(d, "thesis_id", where),
             slug=_req_str(d, "slug", where),
@@ -431,9 +492,9 @@ class Thesis:
             user_thesis=_req_str(d, "user_thesis", where),
             scope=_opt_unknown(d.get("scope", UNKNOWN)),
             claims=tuple(claims),
-            assumptions=tuple(d.get("assumptions", [])),
-            invalidators=tuple(d.get("invalidators", [])),
-            unknowns=tuple(d.get("unknowns", [])),
+            assumptions=tuple(assumptions) if isinstance(assumptions, list) else (),
+            invalidators=tuple(invalidators) if isinstance(invalidators, list) else (),
+            unknowns=tuple(unknowns) if isinstance(unknowns, list) else (),
             expressions=tuple(expressions),
             requirements=tuple(requirements),
         )
@@ -467,23 +528,26 @@ class Thesis:
 class ThesisState:
     thesis_id: str
     assessment: str = "unresolved"
-    claim_assessments: dict[str, Any] = field(default_factory=dict)
-    expression_assessments: dict[str, Any] = field(default_factory=dict)
-    def to_dict(self) -> dict[str, Any]:
+    claim_assessments: dict[str, JSONValue] = field(default_factory=dict)
+    expression_assessments: dict[str, JSONValue] = field(default_factory=dict)
+    def to_dict(self) -> dict[str, JSONValue]:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisState:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisState:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: state must be a mapping")
         where = f"{_path}: state {d.get('thesis_id', '?')}"
-        for key in ("claim_assessments", "expression_assessments"):
-            if key in d and not isinstance(d[key], dict):
-                raise ValueError(f"{where}: '{key}' must be a mapping")
+        claim_assessments = d.get("claim_assessments", {})
+        if not isinstance(claim_assessments, dict):
+            raise ValueError(f"{where}: 'claim_assessments' must be a mapping")
+        expression_assessments = d.get("expression_assessments", {})
+        if not isinstance(expression_assessments, dict):
+            raise ValueError(f"{where}: 'expression_assessments' must be a mapping")
         return cls(
             thesis_id=_req_str(d, "thesis_id", where),
             assessment=str(d.get("assessment", "unresolved")),
-            claim_assessments=dict(d.get("claim_assessments", {})),
-            expression_assessments=dict(d.get("expression_assessments", {})),
+            claim_assessments=validate_json_mapping(claim_assessments, f"{where}: 'claim_assessments'"),
+            expression_assessments=validate_json_mapping(expression_assessments, f"{where}: 'expression_assessments'"),
         )
 
 
@@ -494,18 +558,21 @@ class ThesisQuestion:
     status: str = QuestionStatus.OPEN.value
     answer: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisQuestion:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisQuestion:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: question must be a mapping")
         where = f"{_path}: question {d.get('question_id', '?')}"
+        answer = d.get("answer")
+        if answer is not None and not isinstance(answer, str):
+            raise ValueError(f"{where}: 'answer' must be a string or null")
         return cls(
             question_id=_req_str(d, "question_id", where),
             text=_req_str(d, "text", where),
             status=_coerce_enum(QuestionStatus, d.get("status", QuestionStatus.OPEN.value), "status", where),
-            answer=d.get("answer"),
+            answer=answer,
         )
 
 
@@ -515,10 +582,10 @@ class ThesisMemory:
     text: str
     created_at: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisMemory:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisMemory:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: memory must be a mapping")
         where = f"{_path}: memory {d.get('memory_id', '?')}"
@@ -537,10 +604,10 @@ class EvidenceRef:
     summary: str = ""
     known_at: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> EvidenceRef:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> EvidenceRef:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: evidence ref must be a mapping")
         where = f"{_path}: evidence {d.get('evidence_id', '?')}"
@@ -556,23 +623,24 @@ class EvidenceRef:
 @dataclass(frozen=True)
 class Checkpoint:
     thesis_id: str
-    sources: dict[str, Any] = field(default_factory=dict)
+    sources: dict[str, JSONValue] = field(default_factory=dict)
     recent_hashes: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Checkpoint:
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> Checkpoint:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: checkpoint must be a mapping")
         where = f"{_path}: checkpoint {d.get('thesis_id', '?')}"
-        if "sources" in d and not isinstance(d["sources"], dict):
+        sources = d.get("sources", {})
+        if not isinstance(sources, dict):
             raise ValueError(f"{where}: 'sources' must be a mapping")
         hashes = d.get("recent_hashes", [])
         if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
             raise ValueError(f"{where}: 'recent_hashes' must be a list of strings")
-        return cls(thesis_id=_req_str(d, "thesis_id", where), sources=dict(d.get("sources", {})),
+        return cls(thesis_id=_req_str(d, "thesis_id", where), sources=validate_json_mapping(sources, f"{where}: 'sources'"),
                    recent_hashes=list(hashes))
 
 
@@ -589,13 +657,13 @@ class ThesisStateSnapshot:
     reason: str
     run_id: str = ""
     trigger_id: str = ""
-    thesis: dict[str, Any] = field(default_factory=dict)
-    state: dict[str, Any] = field(default_factory=dict)
-    questions: dict[str, Any] = field(default_factory=dict)
-    watch: dict[str, Any] = field(default_factory=dict)
-    memory: dict[str, Any] = field(default_factory=dict)
+    thesis: dict[str, JSONValue] = field(default_factory=dict)
+    state: dict[str, JSONValue] = field(default_factory=dict)
+    questions: dict[str, JSONValue] = field(default_factory=dict)
+    watch: dict[str, JSONValue] = field(default_factory=dict)
+    memory: dict[str, JSONValue] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JSONValue]:
         return {
             "schema_version": SCHEMA_VERSION,
             "thesis_id": self.thesis_id,
@@ -613,7 +681,7 @@ class ThesisStateSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], where: str = "<dict>") -> ThesisStateSnapshot:
+    def from_dict(cls, d: Mapping[str, object], where: str = "<dict>") -> ThesisStateSnapshot:
         from app.thesis.monitor import _as_dt  # local: avoid import cycle
 
         if not isinstance(d, dict):
@@ -624,38 +692,47 @@ class ThesisStateSnapshot:
         thesis_id = d.get("thesis_id")
         if not isinstance(thesis_id, str) or not thesis_id:
             raise ValueError(f"{where}: 'thesis_id' must be a non-empty string")
-        for key in ("effective_at", "recorded_at"):
-            v = d.get(key)
-            if not isinstance(v, str) or not v or _as_dt(v) is None:
-                raise ValueError(f"{where}: '{key}' must be a parseable ISO-8601 timestamp, got {v!r}")
+        effective_at = d.get("effective_at")
+        if not isinstance(effective_at, str) or not effective_at or _as_dt(effective_at) is None:
+            raise ValueError(f"{where}: 'effective_at' must be a parseable ISO-8601 timestamp, got {effective_at!r}")
+        recorded_at = d.get("recorded_at")
+        if not isinstance(recorded_at, str) or not recorded_at or _as_dt(recorded_at) is None:
+            raise ValueError(f"{where}: 'recorded_at' must be a parseable ISO-8601 timestamp, got {recorded_at!r}")
         reason = d.get("reason")
         if not isinstance(reason, str) or not reason:
             raise ValueError(f"{where}: 'reason' must be a non-empty string")
         try:
-            thesis = d.get("thesis", {})
-            state = d.get("state", {})
-            questions = d.get("questions", {})
-            watch = d.get("watch", {})
-            memory = d.get("memory", {})
-            for key, payload in (
-                ("thesis", thesis),
-                ("state", state),
-                ("questions", questions),
-                ("watch", watch),
-                ("memory", memory),
-            ):
+            sections = {}
+            for key in ("thesis", "state", "questions", "watch", "memory"):
+                payload = d.get(key, {})
                 if not isinstance(payload, dict):
                     raise ValueError(f"{where}: '{key}' must be a mapping")
                 pid = payload.get("thesis_id")
                 if pid != thesis_id:
                     raise ValueError(f"{where}: '{key}' thesis_id {pid!r} != snapshot thesis_id {thesis_id!r}")
-            Thesis.from_dict(dict(thesis), where)
-            ThesisState.from_dict(dict(state), where)
-            for q in questions.get("questions", []):
+                sections[key] = validate_json_mapping(payload, f"{where}: '{key}'")
+            Thesis.from_dict(sections["thesis"], where)
+            ThesisState.from_dict(sections["state"], where)
+            _qlist = sections["questions"].get("questions", [])
+            if not isinstance(_qlist, list):
+                raise ValueError(f"{where}: 'questions' must be a list")
+            for q in _qlist:
+                if not isinstance(q, dict):
+                    raise ValueError(f"{where}: 'questions' must be a list of mappings")
                 ThesisQuestion.from_dict(q, where)
-            for r in watch.get("rules", []):
+            _rlist = sections["watch"].get("rules", [])
+            if not isinstance(_rlist, list):
+                raise ValueError(f"{where}: 'rules' must be a list")
+            for r in _rlist:
+                if not isinstance(r, dict):
+                    raise ValueError(f"{where}: 'rules' must be a list of mappings")
                 WatchRule.from_dict(r, where)
-            for m in memory.get("memories", []):
+            _mlist = sections["memory"].get("memories", [])
+            if not isinstance(_mlist, list):
+                raise ValueError(f"{where}: 'memories' must be a list")
+            for m in _mlist:
+                if not isinstance(m, dict):
+                    raise ValueError(f"{where}: 'memories' must be a list of mappings")
                 ThesisMemory.from_dict(m, where)
         except ValueError as e:
             if str(e).startswith(where):
@@ -664,14 +741,14 @@ class ThesisStateSnapshot:
         return cls(
             thesis_id=thesis_id,
             version=version,
-            effective_at=d["effective_at"],
-            recorded_at=d["recorded_at"],
+            effective_at=effective_at,
+            recorded_at=recorded_at,
             reason=reason,
             run_id=str(d.get("run_id", "") or ""),
             trigger_id=str(d.get("trigger_id", "") or ""),
-            thesis=dict(thesis),
-            state=dict(state),
-            questions=dict(questions),
-            watch=dict(watch),
-            memory=dict(memory),
+            thesis=sections["thesis"],
+            state=sections["state"],
+            questions=sections["questions"],
+            watch=sections["watch"],
+            memory=sections["memory"],
         )

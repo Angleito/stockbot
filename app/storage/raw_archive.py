@@ -15,7 +15,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 from ..config import get_data_root
 
@@ -47,7 +47,7 @@ class ArchiveRecord:
     size: int
     retrieved_at: str
     url: str
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 def _manifest_path(payload_path: Path) -> Path:
@@ -62,7 +62,7 @@ def archive(
     *,
     url: str,
     retrieved_at: Optional[str] = None,
-    metadata: Optional[dict[str, Any]] = None,
+    metadata: Optional[dict[str, object]] = None,
     root: Optional[Path] = None,
 ) -> ArchiveRecord:
     """Store one immutable payload and its manifest.
@@ -100,18 +100,27 @@ def _utc_now() -> str:
 
 
 def _load_record(payload_path: Path, manifest_path: Path) -> ArchiveRecord:
-    manifest = json.loads(manifest_path.read_text())
+    raw: object = json.loads(manifest_path.read_text())
+    manifest: dict[str, object] = raw if isinstance(raw, dict) else {}
+    source_value = manifest.get("source", "")
+    kind_value = manifest.get("kind", "")
+    key_value = manifest.get("key", "")
+    sha_value = manifest.get("sha256", "")
+    retrieved_value = manifest.get("retrieved_at", "")
+    url_value = manifest.get("url", "")
+    size_value = manifest.get("size", payload_path.stat().st_size)
+    metadata_value = manifest.get("metadata")
     return ArchiveRecord(
-        source=manifest.get("source", ""),
-        kind=manifest.get("kind", ""),
-        key=manifest.get("key", ""),
-        sha256=manifest.get("sha256", ""),
+        source=source_value if isinstance(source_value, str) else "",
+        kind=kind_value if isinstance(kind_value, str) else "",
+        key=key_value if isinstance(key_value, str) else "",
+        sha256=sha_value if isinstance(sha_value, str) else "",
         payload_path=payload_path,
         manifest_path=manifest_path,
-        size=int(manifest.get("size", payload_path.stat().st_size)),
-        retrieved_at=manifest.get("retrieved_at", ""),
-        url=manifest.get("url", ""),
-        metadata=manifest.get("metadata") or {},
+        size=size_value if isinstance(size_value, int) else payload_path.stat().st_size,
+        retrieved_at=retrieved_value if isinstance(retrieved_value, str) else "",
+        url=url_value if isinstance(url_value, str) else "",
+        metadata=metadata_value if isinstance(metadata_value, dict) else {},
     )
 
 

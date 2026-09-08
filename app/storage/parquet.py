@@ -16,7 +16,7 @@ import datetime as _dt
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,7 +38,7 @@ class Dataset:
     partition_field: Optional[str] = None
 
 
-def _fields(*pairs: tuple[str, Any]) -> list[pa.Field]:
+def _fields(*pairs: tuple[str, pa.DataType]) -> list[pa.Field]:
     return [pa.field(name, type_) for name, type_ in pairs]
 
 
@@ -547,7 +547,7 @@ def _exclusive_part_path(directory: Path) -> Path:
     return directory / f"part-{uuid.uuid4().hex}.parquet"
 
 
-def _unique_key(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[str, ...]:
+def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(str(row.get(key) or "") for key in keys)
 
 
@@ -565,7 +565,7 @@ def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
     return pa.concat_tables(tables, promote_options="permissive")
 
 
-def write_rows(name: str, rows: list[dict[str, Any]], root: Optional[Path] = None) -> int:
+def write_rows(name: str, rows: list[dict[str, object]], root: Optional[Path] = None) -> int:
     """Append rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
     root = Path(root) if root else get_data_root() / "parquet"
@@ -590,7 +590,7 @@ def write_rows(name: str, rows: list[dict[str, Any]], root: Optional[Path] = Non
     ]
     if not new_rows:
         return 0
-    by_partition: dict[str, list[dict[str, Any]]] = {}
+    by_partition: dict[str, list[dict[str, object]]] = {}
     for row in new_rows:
         if ds.partition_field:
             year = _partition_year(str(row.get(ds.partition_field) or "")) or "unknown"

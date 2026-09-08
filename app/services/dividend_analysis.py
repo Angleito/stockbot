@@ -9,9 +9,7 @@ latest fact per year instead of summing).
 
 import datetime as _dt
 import statistics as _statistics
-from collections.abc import Sequence
-from typing import Any
-
+from collections.abc import Mapping, Sequence
 from app.edgar_client import _dividend_growth
 
 _CADENCE_WINDOWS = (
@@ -34,16 +32,19 @@ def _series_day(entry: tuple[_dt.date, float]) -> _dt.date:
     return entry[0]
 
 
-def _regular_series(paid_events: Sequence[dict[str, Any]] | None) -> list[tuple[_dt.date, float]]:
+def _regular_series(paid_events: Sequence[Mapping[str, object]] | None) -> list[tuple[_dt.date, float]]:
     """(payment_date, amount) for regular paid events, ascending by date."""
     series: list[tuple[_dt.date, float]] = []
     for event in paid_events or []:
         if not isinstance(event, dict) or event.get("dividend_type") != "regular":
             continue
         day = _parse_day(event.get("payment_date"))
+        raw_amount = event.get("amount_per_share")
+        if not isinstance(raw_amount, (int, float, str)):
+            continue
         try:
-            amount = float(event["amount_per_share"])
-        except (KeyError, TypeError, ValueError):
+            amount = float(raw_amount)
+        except (TypeError, ValueError):
             continue
         if day is None:
             continue
@@ -52,7 +53,7 @@ def _regular_series(paid_events: Sequence[dict[str, Any]] | None) -> list[tuple[
     return series
 
 
-def cadence_from_events(paid_events: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
+def cadence_from_events(paid_events: Sequence[Mapping[str, object]] | None) -> dict[str, object]:
     """Median payment gap mapped onto a cadence window.
 
     >=3 gaps in one window -> high confidence, 2 gaps -> medium,
@@ -98,10 +99,11 @@ def _change_pct(prior: float, new: float) -> float | None:
     return round((new - prior) / prior, 4)
 
 
-def lifecycle_from_events(paid_events: Sequence[dict[str, Any]] | None, *, as_of: _dt.date | str | None = None) -> dict[str, Any]:
+def lifecycle_from_events(paid_events: Sequence[Mapping[str, object]] | None, *, as_of: _dt.date | str | None = None) -> dict[str, object]:
     """Increase/cut/freeze/specials/suspension/reinstatement from paid events."""
     cadence = cadence_from_events(paid_events)
     median_gap = cadence["median_interval_days"]
+    gap_days = median_gap if isinstance(median_gap, (int, float)) else 0
     observed = cadence["payment_cadence"] != "unknown" and median_gap
     series = _regular_series(paid_events)
 
@@ -126,14 +128,17 @@ def lifecycle_from_events(paid_events: Sequence[dict[str, Any]] | None, *, as_of
         if run >= threshold:
             freeze = {"amount": round(series[-1][1], 4), "count": run}
 
-    specials = []
+    specials: list[dict[str, object]] = []
     regular_total = special_total = total = 0.0
     for event in paid_events or []:
         if not isinstance(event, dict):
             continue
+        raw_amount = event.get("amount_per_share")
+        if not isinstance(raw_amount, (int, float, str)):
+            continue
         try:
-            amount = float(event["amount_per_share"])
-        except (KeyError, TypeError, ValueError):
+            amount = float(raw_amount)
+        except (TypeError, ValueError):
             continue
         total += amount
         dtype = event.get("dividend_type")
@@ -146,13 +151,13 @@ def lifecycle_from_events(paid_events: Sequence[dict[str, Any]] | None, *, as_of
     as_of_day = _parse_day(as_of) if as_of is not None else None
     possible_suspension = bool(
         observed and series and as_of_day is not None
-        and (as_of_day - series[-1][0]).days > 3 * median_gap
+        and (as_of_day - series[-1][0]).days > 3 * gap_days
     )
 
     reinstatement = None
     if observed and len(series) >= 2:
         for (prev_day, _), (day, _) in zip(series[:-1], series[1:]):
-            if (day - prev_day).days > 3 * median_gap:
+            if (day - prev_day).days > 3 * gap_days:
                 reinstatement = {"date": day.isoformat()}
                 break
 
@@ -170,7 +175,7 @@ def lifecycle_from_events(paid_events: Sequence[dict[str, Any]] | None, *, as_of
     }
 
 
-def _regular_annual_totals(paid_events: Sequence[dict[str, Any]] | None) -> dict[int, float]:
+def _regular_annual_totals(paid_events: Sequence[Mapping[str, object]] | None) -> dict[int, float]:
     totals: dict[int, float] = {}
     for day, amount in _regular_series(paid_events):
         totals[day.year] = round(totals.get(day.year, 0.0) + amount, 4)
@@ -186,9 +191,8 @@ def _has_consecutive_run(years: list[int], length: int = 5) -> bool:
             return True
     return False
 
-
-def analyze_dividends(*, paid_events: Sequence[dict[str, Any]] | None, as_of: _dt.date | str | None = None, ttm_dps: float | None = None, growth: dict[str, Any] | None = None,
-                      annual_history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def analyze_dividends(*, paid_events: Sequence[Mapping[str, object]] | None, as_of: _dt.date | str | None = None, ttm_dps: float | None = None, growth: Mapping[str, object] | None = None,
+                      annual_history: Sequence[Mapping[str, object]] | None = None) -> dict[str, object]:
     """Full lifecycle + growth-trend analysis.
 
     ``growth``/``annual_history`` arrive total-aggregate basis from the caller;
@@ -200,7 +204,7 @@ def analyze_dividends(*, paid_events: Sequence[dict[str, Any]] | None, as_of: _d
     growth = growth or {}
     growth_1y = growth.get("growth_1y")
     growth_5y = growth.get("growth_5y_cagr")
-    if growth_1y is None or growth_5y is None:
+    if not isinstance(growth_1y, (int, float)) or not isinstance(growth_5y, (int, float)):
         trend = "stable_or_unknown"
     elif growth_1y < growth_5y:
         trend = "decelerating"

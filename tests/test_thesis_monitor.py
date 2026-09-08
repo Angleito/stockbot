@@ -1,7 +1,7 @@
 """Trigger runs plus deterministic monitoring (monitor.tick)."""
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,7 @@ class _Src:
         self.key = key
         self.calls = 0
         self.cutoffs: list[str] = []
-    def query_since(self, checkpoint: dict[str, object], *, known_at: str) -> list[CanonicalEvent]:
+    def query_since(self, checkpoint: Mapping[str, object], *, known_at: str) -> list[CanonicalEvent]:
         self.calls += 1
         self.cutoffs.append(known_at)
         if self.fail:
@@ -256,9 +256,10 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path: Path, monkeypatch: 
                          "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
 
     class FilingSrc:
+        name = "sec_filings"
         calls = 0
 
-        def query_since(self, cp: dict[str, object], *, known_at: str) -> list[CanonicalEvent]:
+        def query_since(self, checkpoint: Mapping[str, object], *, known_at: str) -> list[CanonicalEvent]:
             type(self).calls += 1
             return [CanonicalEvent(event_id="f1", canonical_ref="edgar:NVDA:10-K:f1",
                                    source="sec_filings", known_at=T1, entity="NVDA",
@@ -477,18 +478,27 @@ def test_refinement_covers_only_new_targets_and_ignores_disabled(tmp_path: Path)
          "claims": [{"statement": "NVDA networking demand grows"}]}, "<test>")
     plan = plan_refinement(thesis, proposal)
     out = apply_refinement(r, t.thesis_id, plan, proposal)
-    new_cid = plan["added_claims"][0]["claim_id"]
-    assert len(out["rules_added"]) == 1
-    assert set(out["rules_added"][0]["claim_ids"]) == {new_cid}
-    assert old_cid not in out["rules_added"][0]["claim_ids"]
+    added = plan["added_claims"]
+    assert isinstance(added, list)
+    new_cid = added[0]["claim_id"]
+    rules_added = out["rules_added"]
+    assert isinstance(rules_added, list)
+    assert len(rules_added) == 1
+    assert set(rules_added[0]["claim_ids"]) == {new_cid}
+    assert old_cid not in rules_added[0]["claim_ids"]
     # Repeat refinement adds nothing.
     plan2 = plan_refinement(r.load_thesis(t.thesis_id), proposal)
     out2 = apply_refinement(r, t.thesis_id, plan2, proposal)
-    assert out2["rules_added"] == []
+    rules_added2 = out2["rules_added"]
+    assert isinstance(rules_added2, list)
+    assert rules_added2 == []
     # A disabled rule does not count as coverage and stays untouched.
-    added_id = out["rules_added"][0]["rule_id"]
+    added_id = rules_added[0]["rule_id"]
     raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
-    for rule in raw["rules"]:
+    rules = raw["rules"]
+    assert isinstance(rules, list)
+    for rule in rules:
+        assert isinstance(rule, dict)
         if rule["rule_id"] == added_id:
             rule["enabled"] = False
     atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")
@@ -498,9 +508,13 @@ def test_refinement_covers_only_new_targets_and_ignores_disabled(tmp_path: Path)
          "claims": [{"statement": "NVDA automotive demand grows"}]}, "<test>")
     plan3 = plan_refinement(thesis2, proposal3)
     out3 = apply_refinement(r, t.thesis_id, plan3, proposal3)
-    newest_cid = plan3["added_claims"][0]["claim_id"]
-    assert len(out3["rules_added"]) == 1
-    assert {new_cid, newest_cid} <= set(out3["rules_added"][0]["claim_ids"])
+    added3 = plan3["added_claims"]
+    assert isinstance(added3, list)
+    newest_cid = added3[0]["claim_id"]
+    rules_added3 = out3["rules_added"]
+    assert isinstance(rules_added3, list)
+    assert len(rules_added3) == 1
+    assert {new_cid, newest_cid} <= set(rules_added3[0]["claim_ids"])
     disabled = [x for x in r.load_watch_rules(t.thesis_id) if x.rule_id == added_id][0]
     assert disabled.enabled is False and set(disabled.claim_ids) == {new_cid}
 
@@ -592,7 +606,9 @@ def test_live_tick_uses_current_state_with_cutoff_bounded_evidence(tmp_path: Pat
     assert fake.last_as_of is None
     assert web_calls != []
     trig = next(t for t in r.load_triggers(tid) if t.trigger_id == res.triggers_created[0])
-    assert (trig.metadata or {}).get("event_known_at", T1) <= T1
+    event_known_at = (trig.metadata or {}).get("event_known_at", T1)
+    assert isinstance(event_known_at, str)
+    assert event_known_at <= T1
     run_id = res.runs[0].run_id
     assert run_id and run_id in prompt
     jdir = r.dir_for_thesis(tid) / "journal"

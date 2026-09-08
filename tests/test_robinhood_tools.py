@@ -2,7 +2,6 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -44,9 +43,9 @@ class FakeRobinhood:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
         self.calls.append((name, arguments))
-        return {
+        payloads: dict[str, object] = {
             "get_equity_quotes": _fixture("equity_quotes.json"),
             "get_option_chains": _fixture("option_chains.json"),
             "get_option_instruments": _fixture("option_instruments.json"),
@@ -57,7 +56,8 @@ class FakeRobinhood:
             "get_scanner_filter_specs": _fixture("scan_specs.json"),
             "get_scans": _fixture("scans.json"),
             "run_scan": _fixture("scan_results.json"),
-        }[name]
+        }
+        return payloads[name]
 
 
 def _client_for(fake: FakeRobinhood):
