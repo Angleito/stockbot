@@ -145,9 +145,6 @@ def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) ->
             return natural
         return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
     return build_explicit_prompt(tool, args)
-def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]]:
-    return [(t, n) for t in tool_names for n in range(1, repetitions + 1)]
-
 
 
 def check_discovery(describe: Mapping[str, object], doctor: Mapping[str, object]) -> str | None:
