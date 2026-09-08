@@ -8,6 +8,9 @@ Live paths are monkeypatched at the edgar_client / valuation seams.
 """
 
 import datetime as _dt
+from collections.abc import Iterable
+from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -33,23 +36,26 @@ QUOTE_RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolated data root for every service query."""
     monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     return tmp_path
 
 
 @pytest.fixture
-def priced(monkeypatch):
+def priced(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Stub the live-price seam shared by the store and live paths."""
+    def _priced_quote(ticker: str) -> dict[str, object]:
+        return {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT}
+
     monkeypatch.setattr(
         valuation, "get_live_quote",
-        lambda ticker: {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT},
+        _priced_quote,
     )
     return valuation
 
 
-def _seed_ticker(tmp_path, cik, ticker):
+def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
         retrieved_at=RETRIEVED_AT, content_hash=f"tickers-{cik}",
@@ -58,12 +64,12 @@ def _seed_ticker(tmp_path, cik, ticker):
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _div_fact(val, start, end, fy, fp, filed, accn):
+def _div_fact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
     return {"start": start, "end": end, "val": val, "accn": accn,
             "fy": fy, "fp": fp, "filed": filed}
 
 
-def _seed_dividends(tmp_path, cik, facts, distractors=()):
+def _seed_dividends(tmp_path: Path, cik: int, facts: list[dict[str, object]], distractors: Iterable[tuple[str, list[dict[str, object]]]] = ()) -> None:
     units = {"USD/shares": list(facts)}
     for unit, extra in distractors:
         units.setdefault(unit, []).extend(extra)
@@ -102,7 +108,7 @@ _KO_PAID = {"cik": KO_CIK, "entityName": "KO", "facts": {"us-gaap": {
 }}}
 
 
-def _seed_ko(tmp_path):
+def _seed_ko(tmp_path: Path) -> None:
     _seed_ticker(tmp_path, KO_CIK, "KO")
     _seed_dividends(tmp_path, KO_CIK, _KO_FACTS, _KO_DISTRACTORS)
 
@@ -122,13 +128,13 @@ _NVDA_DIV_FACTS = [
 ]
 
 
-def _fy_fact(year, total):
+def _fy_fact(year: int, total: float) -> dict[str, object]:
     """One full-year-duration fact per year."""
     return _div_fact(total, f"{year}-01-01", f"{year}-12-31", year, "FY",
                      f"{year + 1}-02-10", f"y{year}FY")
 
 
-def _quarter_facts(year, total):
+def _quarter_facts(year: int, total: float) -> list[dict[str, object]]:
     """Four contiguous quarterly facts splitting an annual total."""
     ends = [(f"{year}-01-01", f"{year}-03-31", "Q1"),
             (f"{year}-04-01", f"{year}-06-30", "Q2"),
@@ -144,7 +150,7 @@ _ANNUAL_TOTALS = {2015: 1.00, 2016: 1.05, 2017: 1.10, 2018: 1.16, 2019: 1.22,
                   2025: 2.00}
 
 
-def _seed_growth(tmp_path, skip_years=()):
+def _seed_growth(tmp_path: Path, skip_years: Iterable[int] = ()) -> None:
     _seed_ticker(tmp_path, KO_CIK, "KO")
     facts = [_fy_fact(year, total) for year, total in _ANNUAL_TOTALS.items()
              if year not in skip_years]
@@ -157,27 +163,27 @@ def _seed_growth(tmp_path, skip_years=()):
     _seed_dividends(tmp_path, KO_CIK, facts)
 
 
-def _fail_on_price(monkeypatch):
-    def _boom(ticker):
+def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(ticker: str) -> dict[str, object]:
         raise AssertionError("historical dividend query must not call Yahoo")
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
-def test_concept_parity_and_parser_bump():
+def test_concept_parity_and_parser_bump() -> None:
     assert DIVIDEND_PER_SHARE_CONCEPT == "CommonStockDividendsPerShareDeclared"
     assert sec_facts.DIVIDEND_PER_SHARE_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
     assert edgar_client._DIVIDEND_CONCEPT == DIVIDEND_PER_SHARE_CONCEPT
     assert COMPANY_FACTS_PARSER_VERSION == "sec-companyfacts-v6"
 
 
-def test_wrong_unit_and_paid_concept_rejected():
+def test_wrong_unit_and_paid_concept_rejected() -> None:
     out = normalize_sec_company_facts(
         _KO_PAID, retrieved_at=RETRIEVED_AT, content_hash="paid",
         source_url="u", source_record_id="r")
     assert out["financial_facts"] == []
 
 
-def test_historical_never_calls_yahoo(store, monkeypatch):
+def test_historical_never_calls_yahoo(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ko(store)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
@@ -192,7 +198,7 @@ def test_historical_never_calls_yahoo(store, monkeypatch):
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]
 
 
-def test_derived_q4_uses_fy_minus_ytd(store, monkeypatch):
+def test_derived_q4_uses_fy_minus_ytd(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, _NVDA_DIV_FACTS)
@@ -204,7 +210,7 @@ def test_derived_q4_uses_fy_minus_ytd(store, monkeypatch):
     assert result["annual_history"] == [{"fiscal_year": 2026, "dividend_per_share": 2.04}]
 
 
-def test_exact_gap_growth_and_cagr(store, monkeypatch):
+def test_exact_gap_growth_and_cagr(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_growth(store)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
@@ -220,7 +226,7 @@ def test_exact_gap_growth_and_cagr(store, monkeypatch):
     assert years == sorted(years, reverse=True) == list(range(2025, 2014, -1))
 
 
-def test_missing_comparison_year_yields_null(store, monkeypatch):
+def test_missing_comparison_year_yields_null(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_growth(store, skip_years=(2022,))
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
@@ -230,12 +236,16 @@ def test_missing_comparison_year_yields_null(store, monkeypatch):
     assert result["growth_10y_cagr"] == 0.0718
 
 
-def test_current_date_valuation(store, monkeypatch):
+def test_current_date_valuation(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ko(store)
     monkeypatch.setattr(sec_facts, "_today", lambda: _dt.date(2026, 8, 10))
+
+    def _quote_65(ticker: str) -> dict[str, object]:
+        return {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT}
+
     monkeypatch.setattr(
         valuation, "get_live_quote",
-        lambda ticker: {"price": 65.0, "retrieved_at": QUOTE_RETRIEVED_AT},
+        _quote_65,
     )
     result = sec_facts.get_fundamentals("KO", "dividends")
     assert result["data_source"] == "store"
@@ -248,12 +258,16 @@ def test_current_date_valuation(store, monkeypatch):
 
 
 @pytest.mark.parametrize("price", [None, 0, -3.0])
-def test_current_date_unusable_price_yields_null(store, monkeypatch, price):
+def test_current_date_unusable_price_yields_null(store: Path, monkeypatch: pytest.MonkeyPatch, price: float | None) -> None:
     _seed_ko(store)
     monkeypatch.setattr(sec_facts, "_today", lambda: _dt.date(2026, 8, 10))
+
+    def _quote_price(ticker: str) -> dict[str, object]:
+        return {"price": price, "retrieved_at": QUOTE_RETRIEVED_AT}
+
     monkeypatch.setattr(
         valuation, "get_live_quote",
-        lambda ticker: {"price": price, "retrieved_at": QUOTE_RETRIEVED_AT},
+        _quote_price,
     )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["ttm_dividend_per_share"] == 2.07
@@ -264,7 +278,7 @@ def test_current_date_unusable_price_yields_null(store, monkeypatch, price):
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]
 
 
-def test_shifted_fy_metadata_uses_period_end_year(store, monkeypatch):
+def test_shifted_fy_metadata_uses_period_end_year(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -277,7 +291,7 @@ def test_shifted_fy_metadata_uses_period_end_year(store, monkeypatch):
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.10}]
 
 
-def test_non_contiguous_ttm_reports_unknown_with_null_ttm(store, monkeypatch):
+def test_non_contiguous_ttm_reports_unknown_with_null_ttm(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -295,7 +309,7 @@ def test_non_contiguous_ttm_reports_unknown_with_null_ttm(store, monkeypatch):
     assert result["price_retrieved_at"] is None
 
 
-def test_future_known_restatements_excluded(store, monkeypatch):
+def test_future_known_restatements_excluded(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -315,13 +329,13 @@ def test_future_known_restatements_excluded(store, monkeypatch):
     assert result["annual_history"] == [{"fiscal_year": 2025, "dividend_per_share": 2.04}]
 
 
-def test_store_primary_with_incomplete_coverage_never_falls_back(store, monkeypatch):
+def test_store_primary_with_incomplete_coverage_never_falls_back(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
         _div_fact(0.50, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-04-29", "p1"),
     ])
 
-    def _boom(ticker, metric, **kwargs):
+    def _boom(ticker: str, metric: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError("incomplete store coverage must not call live fallback")
 
     monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _boom)
@@ -335,10 +349,10 @@ def test_store_primary_with_incomplete_coverage_never_falls_back(store, monkeypa
     assert result["growth_1y"] is None
 
 
-def test_stale_2021_quarters_report_unknown_without_yahoo(store, monkeypatch):
-    calls = []
+def test_stale_2021_quarters_report_unknown_without_yahoo(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
 
-    def _boom(ticker):
+    def _boom(ticker: str) -> dict[str, object]:
         calls.append(ticker)
         raise AssertionError("stale dividend query must not call Yahoo")
 
@@ -360,7 +374,7 @@ def test_stale_2021_quarters_report_unknown_without_yahoo(store, monkeypatch):
     assert calls == []
 
 
-def _seed_chain_ending(store, latest_end: _dt.date):
+def _seed_chain_ending(store: Path, latest_end: _dt.date) -> None:
     ends = [latest_end - _dt.timedelta(days=91 * i) for i in (3, 2, 1, 0)]
     facts = []
     for i, end in enumerate(ends):
@@ -378,7 +392,7 @@ def _seed_chain_ending(store, latest_end: _dt.date):
     ("age_days", "expected_status", "expected_ttm"),
     [(180, "paying", 2.00), (181, "unknown", None)],
 )
-def test_dividend_recency_boundary_days(store, monkeypatch, age_days, expected_status, expected_ttm):
+def test_dividend_recency_boundary_days(store: Path, monkeypatch: pytest.MonkeyPatch, age_days: int, expected_status: str, expected_ttm: float | None) -> None:
     _fail_on_price(monkeypatch)
     requested = _dt.date.fromisoformat(AS_OF)
     _seed_chain_ending(store, requested - _dt.timedelta(days=age_days))
@@ -388,23 +402,23 @@ def test_dividend_recency_boundary_days(store, monkeypatch, age_days, expected_s
     assert result["price_retrieved_at"] is None
 
 
-def test_live_cached_candidate_finalization_removes_private_and_nulls_stale(monkeypatch):
+def test_live_cached_candidate_finalization_removes_private_and_nulls_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     import pandas as pd
 
 
-    fake_store: dict = {}
+    fake_store: dict[str, object] = {}
 
     class _FakeCache:
-        def get(self, key, ttl=None):
+        def get(self, key: str, ttl: float | None = None) -> object | None:
             return fake_store.get(key)
 
-        def set(self, key, value):
+        def set(self, key: str, value: object) -> None:
             fake_store[key] = value
 
     monkeypatch.setattr(edgar_client, "cache", _FakeCache())
     monkeypatch.setattr(edgar_client, "_ensure_init", lambda: None)
 
-    def _boom(ticker):
+    def _boom(ticker: str) -> dict[str, object]:
         raise AssertionError("stale live candidate must not call Yahoo")
 
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
@@ -427,7 +441,9 @@ def test_live_cached_candidate_finalization_removes_private_and_nulls_stale(monk
             return pd.DataFrame(rows)
 
     class _Company:
-        def __init__(self, ticker):
+        ticker: str
+
+        def __init__(self, ticker: str) -> None:
             self.ticker = ticker
 
         def get_facts(self):
@@ -443,15 +459,17 @@ def test_live_cached_candidate_finalization_removes_private_and_nulls_stale(monk
     assert result["price_source"] is None
     assert result["price_retrieved_at"] is None
     # Cached facts-only candidate retains the private period end for next call.
-    assert fake_store["fundamentals:KO:dividends"]["_latest_dividend_period_end"] == "2021-12-31"
-    assert fake_store["fundamentals:KO:dividends"]["ttm_dividend_per_share"] == 2.00
+    cached = fake_store["fundamentals:KO:dividends"]
+    assert isinstance(cached, dict)
+    assert cached["_latest_dividend_period_end"] == "2021-12-31"
+    assert cached["ttm_dividend_per_share"] == 2.00
 
 
-def test_live_fallback_when_store_empty(store, monkeypatch):
+def test_live_fallback_when_store_empty(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, KO_CIK, "KO")  # resolved entity, no dividend facts
-    calls = []
+    calls: list[object] = []
 
-    def _live(ticker, metric, include_dividend_price=True):
+    def _live(ticker: str, metric: str, include_dividend_price: bool = True) -> dict[str, object]:
         calls.append((ticker, metric, include_dividend_price))
         return {"ticker": ticker, "dividend_status": "paying",
                 "ttm_dividend_per_share": 2.07,
@@ -474,10 +492,10 @@ def test_live_fallback_when_store_empty(store, monkeypatch):
     assert calls == [("KO", "dividends", True)]
 
 
-def test_explicit_as_of_empty_store_is_pit_unavailable(store, monkeypatch):
+def test_explicit_as_of_empty_store_is_pit_unavailable(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, KO_CIK, "KO")
-    calls = []
-    def _live(ticker, metric, include_dividend_price=True):
+    calls: list[object] = []
+    def _live(ticker: str, metric: str, include_dividend_price: bool = True) -> dict[str, object]:
         calls.append((ticker, metric))
         raise AssertionError("live must not be called with explicit as_of")
     monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _live)
@@ -486,10 +504,10 @@ def test_explicit_as_of_empty_store_is_pit_unavailable(store, monkeypatch):
     assert calls == []
 
 
-def test_insufficient_data_reports_uncertainty_not_error(store, monkeypatch):
+def test_insufficient_data_reports_uncertainty_not_error(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_ticker(store, KO_CIK, "KO")
 
-    def _live(ticker, metric, include_dividend_price=True):
+    def _live(ticker: str, metric: str, include_dividend_price: bool = True) -> dict[str, object]:
         return edgar_client._null_dividend_payload(ticker)
 
     monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _live)
@@ -503,15 +521,30 @@ def test_insufficient_data_reports_uncertainty_not_error(store, monkeypatch):
     assert result["annual_history"] == []
 
 
-def test_unknown_metric_still_errors(store):
+def test_unknown_metric_still_errors(store: Path) -> None:
     result = sec_facts.get_fundamentals("KO", "bogus", as_of=AS_OF)
     assert result["error"] == "Unknown metric 'bogus'"
 
 
-def test_tool_schema_and_dispatch(store, monkeypatch):
+def test_tool_schema_and_dispatch(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    schema = next(item for item in TOOLS if item["function"]["name"] == "get_fundamentals")
-    assert "dividends" in schema["function"]["parameters"]["properties"]["metric"]["enum"]
+    schema = None
+    for item in TOOLS:
+        fn = item.get("function")
+        assert isinstance(fn, dict)
+        if fn.get("name") == "get_fundamentals":
+            schema = fn
+            break
+    assert schema is not None
+    params = schema.get("parameters")
+    assert isinstance(params, dict)
+    props = params.get("properties")
+    assert isinstance(props, dict)
+    metric = props.get("metric")
+    assert isinstance(metric, dict)
+    enum_vals = metric.get("enum")
+    assert isinstance(enum_vals, list)
+    assert "dividends" in enum_vals
     _seed_ko(store)
     result = execute_tool(
         "get_fundamentals", {"ticker": "KO", "metric": "dividends", "as_of": AS_OF},
@@ -530,7 +563,7 @@ def test_tool_schema_and_dispatch(store, monkeypatch):
                            "dividend_status", "price", "price_source", "price_retrieved_at"}
 
 
-def test_render_annual_history(store, monkeypatch):
+def test_render_annual_history(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ko(store)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
@@ -540,7 +573,7 @@ def test_render_annual_history(store, monkeypatch):
     assert "- 2025: dividend 2.04" in text
 
 
-def test_semiannual_payer_ttm(store, monkeypatch):
+def test_semiannual_payer_ttm(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -551,7 +584,7 @@ def test_semiannual_payer_ttm(store, monkeypatch):
     assert result["ttm_dividend_per_share"] is None
     assert result["dividend_status"] == "unknown"
 
-def test_annual_payer_ttm(store, monkeypatch):
+def test_annual_payer_ttm(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -562,7 +595,7 @@ def test_annual_payer_ttm(store, monkeypatch):
     assert result["dividend_status"] == "unknown"
 
 
-def test_monthly_payer_ttm(store, monkeypatch):
+def test_monthly_payer_ttm(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     months = [("2025-08-01", "2025-08-31"), ("2025-09-01", "2025-09-30"),
@@ -579,7 +612,7 @@ def test_monthly_payer_ttm(store, monkeypatch):
     assert result["ttm_dividend_per_share"] is None
     assert result["dividend_status"] == "unknown"
 
-def test_stale_annual_reports_unknown(store, monkeypatch):
+def test_stale_annual_reports_unknown(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [
@@ -590,7 +623,7 @@ def test_stale_annual_reports_unknown(store, monkeypatch):
     assert result["dividend_status"] == "unknown"
 
 
-def test_fy_aggregate_plus_incomplete_quarters_is_not_ttm(store, monkeypatch):
+def test_fy_aggregate_plus_incomplete_quarters_is_not_ttm(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_dividends(store, KO_CIK, [

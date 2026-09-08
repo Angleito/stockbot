@@ -32,11 +32,11 @@ _NUMERIC_TYPE_HINTS = (
 
 def analyze_and_brief(
     spec: Any,
-    records: list[dict],
+    records: list[dict[str, Any]],
     analysis_goal: Optional[str],
     query_key: str,
-    pagination: Optional[dict] = None,
-) -> dict:
+    pagination: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Deterministic summary of FINRA rows. Pure function; never raises.
 
     analysis_goal and query_key are accepted for caller compatibility and
@@ -50,8 +50,8 @@ def analyze_and_brief(
 
 
 def summarize_records(
-    spec: Any, records: list[dict], pagination: Optional[dict] = None
-) -> dict:
+    spec: Any, records: list[dict[str, Any]], pagination: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
     """Deterministic summaries. Pure function of spec + rows; never raises.
 
     Coverage distinguishes retrieved-page coverage from full-query coverage:
@@ -67,13 +67,16 @@ def summarize_records(
     analyzed = len(rows)
 
     date_field = spec.date_field
+
+    def _date_key(r: dict[str, Any]) -> tuple[bool, Any]:
+        return (
+            r.get(date_field) is None,
+            _norm_date(r.get(date_field)),
+        )
     if date_field and rows:
         rows = sorted(
             rows,
-            key=lambda r: (
-                r.get(date_field) is None,
-                _norm_date(r.get(date_field)),
-            ),
+            key=_date_key,
         )
 
     numeric_fields = _numeric_fields(spec)
@@ -137,7 +140,7 @@ def summarize_records(
 
 
 def _numeric_fields(spec: Any) -> list[str]:
-    out = []
+    out: list[str] = []
     for f in spec.fields:
         name = f.get("name")
         if not name:
@@ -165,7 +168,7 @@ def _fmt(value: float) -> Any:
     return round(value, 4)
 
 
-def _numeric_metrics(rows: list[dict], numeric_fields: list[str]) -> dict:
+def _numeric_metrics(rows: list[dict[str, Any]], numeric_fields: list[str]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for name in numeric_fields:
         values = [_to_number(r.get(name)) for r in rows]
@@ -186,8 +189,8 @@ def _numeric_metrics(rows: list[dict], numeric_fields: list[str]) -> dict:
 
 
 def _latest_prior(
-    rows: list[dict], date_field: Optional[str], numeric_fields: list[str]
-) -> list[dict]:
+    rows: list[dict[str, Any]], date_field: Optional[str], numeric_fields: list[str]
+) -> list[dict[str, Any]]:
     """Latest-vs-prior values over date-ascending rows (last two rows)."""
     if len(rows) < 2:
         return []
@@ -198,7 +201,7 @@ def _latest_prior(
         and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field))
     ):
         return []
-    out = []
+    out: list[dict[str, Any]] = []
     for name in numeric_fields:
         cur = _to_number(latest.get(name))
         prev = _to_number(prior.get(name))
@@ -220,8 +223,8 @@ def _latest_prior(
     return out
 
 
-def _derive_trends(latest_prior: list[dict]) -> list[str]:
-    trends = []
+def _derive_trends(latest_prior: list[dict[str, Any]]) -> list[str]:
+    trends: list[str] = []
     for lp in latest_prior[:MAX_TRENDS]:
         if lp["change_percent"] is None:
             trends.append(
@@ -241,7 +244,12 @@ def _derive_trends(latest_prior: list[dict]) -> list[str]:
     return trends
 
 
-def _categorical_breakdowns(spec: Any, rows: list[dict]) -> dict:
+def _count_key(kv: tuple[str, int]) -> tuple[int, str]:
+    """Category counts descending, name ascending."""
+    return (-kv[1], kv[0])
+
+
+def _categorical_breakdowns(spec: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     symbol_field = spec.symbol_field
     for f in spec.fields:
@@ -264,12 +272,12 @@ def _categorical_breakdowns(spec: Any, rows: list[dict]) -> dict:
             continue
         if len(counts) < 2:
             continue  # a constant column adds no breakdown value
-        out[name] = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        out[name] = dict(sorted(counts.items(), key=_count_key))
     return out
 
 
-def _missing_warnings(rows: list[dict], spec: Any) -> list[str]:
-    warnings = []
+def _missing_warnings(rows: list[dict[str, Any]], spec: Any) -> list[str]:
+    warnings: list[str] = []
     if not rows:
         return warnings
     for f in spec.fields:
@@ -294,7 +302,7 @@ def _norm_date(value: Any) -> Any:
 
 
 def _coverage_dates(
-    rows: list[dict], date_field: Optional[str]
+    rows: list[dict[str, Any]], date_field: Optional[str]
 ) -> tuple[Optional[str], Optional[str]]:
     if not date_field:
         return None, None
@@ -305,7 +313,7 @@ def _coverage_dates(
     return dates[0], dates[-1]
 
 
-def _query_complete(pagination: Optional[dict], returned_count: int) -> Optional[bool]:
+def _query_complete(pagination: Optional[dict[str, Any]], returned_count: int) -> Optional[bool]:
     """Whether this page holds every FINRA match, per Record-Total.
 
     None when FINRA omits Record-Total (completeness cannot be proven).

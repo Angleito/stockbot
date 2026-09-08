@@ -1,5 +1,6 @@
 """Historical replay T0-T5: PIT isolation, separate changes, idempotent resume."""
 
+import pytest
 from pathlib import Path
 
 import app.thesis.runner as runner_mod
@@ -19,11 +20,11 @@ T5 = "2026-01-06T00:00:00+00:00"
 class _ReplaySource:
     name = "sec_filings"
 
-    def __init__(self, events):
+    def __init__(self, events: list[CanonicalEvent]) -> None:
         self.events = list(events)
         self.calls = 0
 
-    def query_since(self, checkpoint, *, known_at):
+    def query_since(self, checkpoint: dict[str, object], *, known_at: str) -> list[CanonicalEvent]:
         self.calls += 1
         return [e for e in self.events if e.known_at <= known_at]
 
@@ -32,11 +33,11 @@ class _ReplayPi:
     """Fake run_thesis_pi: each launch applies the repository writes Pi's tool
     calls would have made for that tick's event."""
 
-    def __init__(self, repository):
+    def __init__(self, repository: ThesisRepository) -> None:
         self.repository = repository
         self.calls = 0
 
-    def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170, as_of=None):
+    def __call__(self, *, thesis_id: str, trigger_id: str, prompt: str, data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None) -> None:
         import re as _re
         self.calls += 1
         n = self.calls
@@ -78,17 +79,17 @@ class _ReplayPi:
                 effective_at=as_of or T5)
 
 
-def _replay_pi(monkeypatch, repository):
+def _replay_pi(monkeypatch: pytest.MonkeyPatch, repository: ThesisRepository) -> _ReplayPi:
     fake = _ReplayPi(repository)
     monkeypatch.setattr(runner_mod, "run_thesis_pi", fake)
     return fake
 
 
-def _journals(root: Path, slug: str) -> list:
+def _journals(root: Path, slug: str) -> list[Path]:
     return sorted((root / slug / "journal").glob("*.md"))
 
 
-def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path, monkeypatch):
+def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
@@ -159,7 +160,7 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path, monkeypatch
     assert len(r.load_triggers(tid)) == 3
 
 
-def test_journal_known_at_gates_context(tmp_path):
+def test_journal_known_at_gates_context(tmp_path: Path) -> None:
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
@@ -176,7 +177,7 @@ def test_journal_known_at_gates_context(tmp_path):
     assert "future" in ctx.omitted_ids and "noka" in ctx.omitted_ids
 
 
-def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path, monkeypatch):
+def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"])

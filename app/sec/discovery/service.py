@@ -16,18 +16,25 @@ import re
 import threading
 import unicodedata
 import uuid
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from pathlib import Path
+from types import ModuleType
+from typing import Literal, TypedDict
 
 from ...domain.market.ids import sec_entity_id
 from ..context import TRANSACTION_FORMS
 from ..filings import _check_as_of
 from ..models import (
     EntityCandidate,
+    Filing,
+    FilingDocument,
     FilingParty,
     SECSearchRequest,
     SECSearchResult,
+    SECTextHit,
     SearchAttempt,
     SearchCoverage,
     pit_of,
@@ -58,6 +65,22 @@ _TIER_RANK = {
 }
 
 _FUZZY_FLOOR = 0.6
+
+_AttemptStatus = Literal["complete", "source_limited", "partial", "failed", "not_applicable"]
+_CoverageStatus = Literal["complete", "complete_within_source_limits", "partial", "failed"]
+
+
+class _PoolSlot(TypedDict):
+    """Pooled candidate slot: display name, ticker labels, source backends."""
+
+    name: str
+    tickers: list[str]
+    sources: list[str]
+
+
+def _object_list(value: object) -> list[object]:
+    """Raw SEC/store list payload -> plain list (dynamic boundary containment)."""
+    return list(value) if isinstance(value, (list, tuple)) else []
 
 _ACCESSION_RE = re.compile(r"^(\d{10})-?(\d{2})-?(\d{6})$")
 
@@ -99,7 +122,9 @@ def normalize_accession_no(value: object) -> str:
     return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
-def _former_valid_at(entry: dict, as_of: str | None) -> bool:
+# Raw EDGAR payloads stay Mapping[str, object] at the parse entry only
+# (provider SDK shape); validated before constructing domain objects.
+def _former_valid_at(entry: Mapping[str, object], as_of: str | None) -> bool:
     """Half-open [from, to) validity; null bounds are unbounded."""
     if as_of is None:
         return True
@@ -110,8 +135,8 @@ def _former_valid_at(entry: dict, as_of: str | None) -> bool:
 
 
 def _classify_name(query: str, current: object,
-                   former_names: list | None,
-                   as_of: str | None) -> tuple:
+                   former_names: list[dict[str, object]] | None,
+                   as_of: str | None) -> tuple[str | None, float, tuple[str, ...]]:
     """Query vs current/former names -> (match_type|None, score, warnings).
 
     ``None`` match_type means no evidence (or only PIT-excluded historical
@@ -132,7 +157,7 @@ def _classify_name(query: str, current: object,
         warnings.append(
             "former name(s) lack effective dates; historical alias "
             "coverage is source-limited")
-    best: tuple = (None, 0.0)
+    best: tuple[str | None, float] = (None, 0.0)
     for entry in former:
         if not isinstance(entry, dict):
             continue
@@ -159,9 +184,10 @@ def _classify_name(query: str, current: object,
     return None, 0.0, tuple(warnings)
 
 
-def _candidate(cik: int | None, name: str, tickers: tuple,
+def _candidate(cik: int | None, name: str, tickers: tuple[str, ...],
                match_source: str, match_type: str, score: float,
-               status: str, entity_id: str | None = None) -> EntityCandidate:
+               status: Literal["unverified", "verified", "ambiguous", "conflict", "not_found"],
+               entity_id: str | None = None) -> EntityCandidate:
     return EntityCandidate(
         cik=cik, name=name, tickers=tuple(tickers), exchange=None,
         match_source=match_source, match_score=score, match_type=match_type,
@@ -169,22 +195,31 @@ def _candidate(cik: int | None, name: str, tickers: tuple,
     )
 
 
-def _verify_against(meta: dict, *, expected_name=None,
-                    expected_ticker=None, as_of=None) -> tuple:
+def _verify_against(meta: Mapping[str, object], *,
+                    expected_name: str | None = None,
+                    expected_ticker: str | None = None,
+                    as_of: str | None = None) -> tuple[EntityCandidate, tuple[str, ...]]:
     """Shared strict verifier -> (EntityCandidate, warnings).
 
     Either expectation contradicting authoritative metadata is ``conflict``;
     fuzzy-only name evidence is ``ambiguous`` (may not map to an entity);
     otherwise ``verified`` with the mechanical ``sec:cik:`` entity id.
     """
-    cik = meta.get("cik")
-    current = meta.get("name") or ""
-    tickers = tuple(meta.get("tickers") or [])
+    cik_raw: object = meta.get("cik")
+    cik: int | None = None if cik_raw is None else int(str(cik_raw).strip())
+    current: object = meta.get("name") or ""
+    tickers: tuple[str, ...] = tuple(str(item) for item in _object_list(meta.get("tickers")))
+    former_raw: object = meta.get("former_names")
+    former_names: list[dict[str, object]] | None = (
+        [entry for entry in former_raw if isinstance(entry, dict)]
+        if isinstance(former_raw, list) else None
+    )
+    entity_id: str | None = sec_entity_id(cik) if cik is not None else None
     warnings: list[str] = []
     if expected_name is None and expected_ticker is None:
         return _candidate(cik, str(current), tickers, SOURCE,
                           "exact_cik", 1.0, "verified",
-                          sec_entity_id(cik)), tuple(warnings)
+                          entity_id), tuple(warnings)
     ticker_ok: bool | None = None
     if expected_ticker is not None:
         want = str(expected_ticker).strip().upper()
@@ -193,7 +228,7 @@ def _verify_against(meta: dict, *, expected_name=None,
     score = 0.0
     if expected_name is not None:
         match_type, score, name_warnings = _classify_name(
-            str(expected_name), current, meta.get("former_names"), as_of)
+            str(expected_name), current, former_names, as_of)
         warnings.extend(name_warnings)
     if (ticker_ok is False) or (expected_name is not None and match_type is None):
         return _candidate(cik, str(current), tickers, SOURCE,
@@ -206,15 +241,16 @@ def _verify_against(meta: dict, *, expected_name=None,
         return _candidate(cik, str(current), tickers, SOURCE,
                           match_type or "exact_ticker",
                           score or 1.0, "verified",
-                          sec_entity_id(cik)), tuple(warnings)
+                          entity_id), tuple(warnings)
     assert match_type is not None  # guarded by the conflict branch above
     return _candidate(cik, str(current), tickers, SOURCE,
                       match_type, score, "verified",
-                      sec_entity_id(cik)), tuple(warnings)
+                      entity_id), tuple(warnings)
 
 
-def verify_sec_entity(cik: int | str, *, expected_name=None,
-                      expected_ticker=None, as_of=None) -> EntityCandidate:
+def verify_sec_entity(cik: int | str, *, expected_name: str | None = None,
+                      expected_ticker: str | None = None,
+                      as_of: str | None = None) -> EntityCandidate:
     """Verify one CIK against submissions metadata.
 
     Missing CIK -> ``not_found``; contradicting expectations -> ``conflict``;
@@ -242,7 +278,8 @@ def verify_sec_entity(cik: int | str, *, expected_name=None,
     return candidate
 
 
-def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
+def _persist_entity(meta: Mapping[str, object], *, now: str,
+                    data_root: Path | str | None = None) -> str | None:
     """Persist a verified CIK into entities/entity_aliases; warning or None.
 
     Rows conform to ``resolve_ticker_aliases`` PIT semantics: ticker aliases
@@ -253,13 +290,13 @@ def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
     keeps the configured default root.
     """
     try:
-        from pathlib import Path as _Path
-
         from ...storage.parquet import write_rows
 
-        parquet_root = _Path(data_root) / "parquet" if data_root is not None else None
-        cik = meta.get("cik")
-        entity_id = sec_entity_id(cik)
+        parquet_root = Path(data_root) / "parquet" if data_root is not None else None
+        cik_raw: object = meta.get("cik")
+        if not isinstance(cik_raw, (int, str)):
+            return f"entity persistence skipped for CIK {cik_raw!r}: invalid cik"
+        entity_id = sec_entity_id(cik_raw)
         sic = meta.get("sic")
         write_rows("entities", [{
             "entity_id": entity_id,
@@ -272,8 +309,8 @@ def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
             "content_hash": None,
             "parser_version": PARSER_VERSION,
         }], root=parquet_root)
-        aliases = []
-        for ticker in meta.get("tickers") or []:
+        aliases: list[dict[str, object]] = []
+        for ticker in _object_list(meta.get("tickers")):
             if str(ticker).strip():
                 aliases.append({
                     "alias_type": "ticker",
@@ -288,8 +325,8 @@ def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
                     "content_hash": None,
                     "parser_version": PARSER_VERSION,
                 })
-        for entry in meta.get("former_names") or []:
-            if isinstance(entry, dict) and (entry.get("name") or "").strip():
+        for entry in _object_list(meta.get("former_names")):
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip():
                 aliases.append({
                     "alias_type": "former_name",
                     "alias_value": str(entry["name"]).strip(),
@@ -310,9 +347,9 @@ def _persist_entity(meta: dict, *, now: str, data_root=None) -> str | None:
     return None
 
 
-def find_sec_entities(query: str, *, as_of=None,
+def find_sec_entities(query: str, *, as_of: str | None = None,
                       exhaustive: bool = False, max_results: int | None = 20,
-                      data_root=None) -> SECSearchResult:
+                      data_root: Path | str | None = None) -> SECSearchResult:
     """Fan out over exact-CIK, exact-ticker, and general legal-name routes.
 
     General names merge the no-ticker ``cik-lookup-data.txt`` scan with the
@@ -345,7 +382,7 @@ def find_sec_entities(query: str, *, as_of=None,
     now = _utcnow()
 
     def _attempt(backend: str, reported: int, retrieved: int,
-                 status: str = "complete", error: Exception | None = None,
+                 status: _AttemptStatus = "complete", error: Exception | None = None,
                  pit_basis: str | None = None, truncated: bool = False,
                  source_limit: str | None = None) -> None:
         attempts.append(SearchAttempt(
@@ -356,7 +393,7 @@ def find_sec_entities(query: str, *, as_of=None,
             filters={"as_of": as_of} if as_of else {},
             started_at=now,
             completed_at=now,
-            status=status,  # type: ignore[arg-type]
+            status=status,
             results_reported=reported,
             results_retrieved=retrieved,
             pages_retrieved=1,
@@ -367,12 +404,12 @@ def find_sec_entities(query: str, *, as_of=None,
             error_message=str(error) if error else None,
         ))
 
-    ranked: list[tuple] = []  # (tier_rank, -score, cik, EntityCandidate)
-    pool: dict[int, dict] = {}
+    ranked: list[tuple[int, float, int, EntityCandidate]] = []  # (tier_rank, -score, cik, candidate)
+    pool: dict[int, _PoolSlot] = {}
     failed = 0
     meta_errors: list[str] = []
 
-    def _add(cik: object, name: object, tickers: list, source: str) -> None:
+    def _add(cik: object, name: object, tickers: Iterable[object], source: str) -> None:
         try:
             cik_int = int(str(cik).strip())
         except (TypeError, ValueError, AttributeError):
@@ -381,13 +418,14 @@ def find_sec_entities(query: str, *, as_of=None,
             cik_int, {"name": "", "tickers": [], "sources": []})
         if name and not slot["name"]:
             slot["name"] = str(name)
-        for ticker in tickers or []:
-            if ticker and ticker not in slot["tickers"]:
-                slot["tickers"].append(ticker)
+        for ticker in tickers:
+            label = str(ticker).strip()
+            if label and label not in slot["tickers"]:
+                slot["tickers"].append(label)
         if source not in slot["sources"]:
             slot["sources"].append(source)
 
-    metas: dict[int, dict] = {}
+    metas: dict[int, dict[str, object]] = {}
     if query.isdigit():
         backend = "exact-cik"
         try:
@@ -454,21 +492,21 @@ def find_sec_entities(query: str, *, as_of=None,
             if max_results is None and len(found or []) > 50:
                 for row in list(found or [])[:50]:
                     _add(row.get("cik"), row.get("name"),
-                         list(row.get("tickers") or []), backend)
+                         _object_list(row.get("tickers")), backend)
                 _attempt(backend, 51, 50, status="partial", truncated=True,
                          source_limit="50 candidates")
                 warnings.append(f"{backend} candidate retrieval capped at 50; entity coverage partial")
             elif max_results is not None and len(found or []) > max_results:
                 for row in found or []:
                     _add(row.get("cik"), row.get("name"),
-                         list(row.get("tickers") or []), backend)
+                         _object_list(row.get("tickers")), backend)
                 _attempt(backend, len(found), len(found), status="partial",
                          truncated=True,
                          source_limit=f"{max_results} candidates")
             else:
                 for row in found:
                     _add(row.get("cik"), row.get("name"),
-                         list(row.get("tickers") or []), backend)
+                         _object_list(row.get("tickers")), backend)
                 _attempt(backend, len(found), len(found))
         for cik_int, slot in sorted(pool.items()):
             try:
@@ -478,7 +516,8 @@ def find_sec_entities(query: str, *, as_of=None,
                 meta_errors.append(f"{cik_int}: {exc}")
             if meta is None:
                 continue
-            tickers = tuple(meta.get("tickers") or [])
+            tickers: tuple[str, ...] = tuple(
+                str(item) for item in _object_list(meta.get("tickers")))
             if query.strip().upper() in [str(t).strip().upper() for t in tickers]:
                 candidate, _w = _verify_against(
                     meta, expected_ticker=query, as_of=as_of)
@@ -500,7 +539,9 @@ def find_sec_entities(query: str, *, as_of=None,
                 f"submissions metadata unavailable: {meta_errors[0]}")
             failed += 1
 
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    def _ranked_sort_key(item: tuple[int, float, int, EntityCandidate]) -> tuple[int, float, int]:
+        return (item[0], item[1], item[2])
+    ranked.sort(key=_ranked_sort_key)
     entities: list[EntityCandidate] = [item[3] for item in ranked]
     if len(entities) > 1:
         top_tier, top_score = ranked[0][0], ranked[0][1]
@@ -541,7 +582,7 @@ def find_sec_entities(query: str, *, as_of=None,
             warnings.append(cap_warning)
     has_partial = any(getattr(a, "status", None) in ("partial", "source_limited") for a in attempts)
     if failed and not entities:
-        status: str = "failed"
+        status: _CoverageStatus = "failed"
     elif failed or has_partial:
         status = "partial"
     else:
@@ -553,7 +594,7 @@ def find_sec_entities(query: str, *, as_of=None,
         request=request,
         entities=tuple(entities),
         coverage=SearchCoverage(
-            status=status,  # type: ignore[arg-type]
+            status=status,
             sources_attempted=sources,
             sources_completed=tuple(
                 a.backend for a in attempts if a.status == "complete"),
@@ -572,7 +613,7 @@ def find_sec_entities(query: str, *, as_of=None,
     )
 
 
-def resolve_sec_accession(accession_no: str, *, as_of=None) -> SECSearchResult:
+def resolve_sec_accession(accession_no: str, *, as_of: str | None = None) -> SECSearchResult:
     """Exact accession lookup: normalize once, bypass fuzzy discovery.
 
     Returns filer/form/timestamps, the document inventory, and ``FilingParty``
@@ -583,7 +624,6 @@ def resolve_sec_accession(accession_no: str, *, as_of=None) -> SECSearchResult:
 
     from ..documents import list_sec_documents
     from ..filings import get_sec_filing
-    from ..models import pit_of
 
     as_of = _check_as_of(as_of)
     normalized = normalize_accession_no(accession_no)
@@ -619,11 +659,12 @@ def resolve_sec_accession(accession_no: str, *, as_of=None) -> SECSearchResult:
             errors=(str(exc),),
             retrieval_order=("exact-accession",),
         )
+    documents: list[FilingDocument]
     try:
         documents = list_sec_documents(normalized, as_of=as_of)
     except ValueError as exc:
         documents = []
-        doc_warning = (f"document inventory unavailable: {exc}",)
+        doc_warning: tuple[str, ...] = (f"document inventory unavailable: {exc}",)
     else:
         doc_warning = ()
     _pit_value, pit_basis = pit_of(filing)
@@ -734,7 +775,8 @@ _EVIDENCE_MAX_CHARS = 8000
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
-def _expand_entity_queries(entities, as_of=None):
+def _expand_entity_queries(entities: Iterable[EntityCandidate],
+                           as_of: str | None = None) -> list[str]:
     """Verified entities -> deterministic text variants for EFTS/global routes.
 
     Current legal name, legal-name comparison form, ticker(s), and former
@@ -775,7 +817,7 @@ def _expand_entity_queries(entities, as_of=None):
         if not isinstance(meta, dict):
             continue
         _push(meta.get("name") or "")
-        for entry in meta.get("former_names") or []:
+        for entry in _object_list(meta.get("former_names")):
             if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():
                 continue
             try:
@@ -842,7 +884,8 @@ def _expand_security_queries(identifier: str) -> list[str]:
     return [exact] if upper == exact else [exact, upper]
 
 
-def _quarters_for_range(start_date, end_date, *, cap=_GLOBAL_QUARTER_CAP):
+def _quarters_for_range(start_date: str | None, end_date: str | None, *,
+                        cap: int = _GLOBAL_QUARTER_CAP) -> tuple[list[tuple[int, int]], bool]:
     """(start, end) -> ([(year, quarter)] oldest-first, capped?).
 
     Empty when unbounded (caller uses the current feed instead of quarterly
@@ -906,26 +949,28 @@ def _partition_for_quarter(year: int, quarter: int) -> str:
     return f"{year}-Q{quarter}"
 
 
-def _sort_forms_by_priority(forms) -> list[str]:
+def _sort_forms_by_priority(forms: Iterable[str]) -> list[str]:
     """Requested forms first in BACKFILL_PRIORITY order, unknown forms last."""
     order = {name.upper(): i for i, name in enumerate(BACKFILL_PRIORITY)}
 
-    def _key(form: str) -> tuple:
+    def _key(form: str) -> tuple[int, str]:
         return (order.get(str(form).upper(), len(order)), str(form).upper())
     return sorted(forms, key=_key)
 
 
-def _filing_from_local_row(row: dict):
+def _filing_from_local_row(row: Mapping[str, object]) -> Filing:
     """Warehouse row -> ``Filing`` for covered-partition local reads."""
-    from ..models import Filing
 
-    def _opt_int(value) -> int | None:
+    def _opt_int(value: object) -> int | None:
         if value is None or str(value) == "":
             return None
         try:
             return int(str(value))
         except (TypeError, ValueError):
             return None
+
+    def _opt_str(value: object) -> str | None:
+        return None if value is None else str(value)
 
     cik = _opt_int(row.get("filer_cik", row.get("cik")))
     return Filing(
@@ -934,32 +979,33 @@ def _filing_from_local_row(row: dict):
         filer_cik=cik or 0,
         filer_name=str(row.get("filer_name") or row.get("company") or ""),
         filed_at=str(row.get("filed_at") or ""),
-        accepted_at=row.get("accepted_at"),
+        accepted_at=_opt_str(row.get("accepted_at")),
         known_at=str(row.get("known_at") or row.get("filed_at") or ""),
-        report_period=row.get("report_period"),
-        primary_document=row.get("primary_document"),
+        report_period=_opt_str(row.get("report_period")),
+        primary_document=_opt_str(row.get("primary_document")),
         is_amendment=bool(row.get("is_amendment")),
-        amendment_of=row.get("amendment_of"),
+        amendment_of=_opt_str(row.get("amendment_of")),
         source=str(row.get("source_url") or ""),
         subject_cik=_opt_int(row.get("subject_cik", row.get("issuer_cik"))),
-        subject_name=row.get("subject_name"),
+        subject_name=_opt_str(row.get("subject_name")),
     )
 
 _WORKER_LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
 
 
-def _raw_root_for(data_root) -> object:
+def _raw_root_for(data_root: Path | str | None) -> Path | None:
     if data_root is None:
         return None
-    from pathlib import Path as _Path
-    base = _Path(data_root)
+    base = Path(data_root)
     return base / "raw" if base.name != "parquet" else base.parent / "raw"
 
 
 _LOCAL_EXHAUSTIVE_GUARD = 100_000
 
-def _fetch_typed(query_fn, *, cap, root=None, **filters):
+def _fetch_typed(query_fn: Callable[..., list[dict[str, object]]], *,
+                 cap: int | None, root: Path | str | None = None,
+                 **filters: object) -> tuple[list[dict[str, object]], bool, int]:
     """Fetch one typed store query in a single snapshot. Returns (rows, exhausted, pages).
 
     cap=None reads up to a documented local guard and proves exhaustion with
@@ -967,10 +1013,10 @@ def _fetch_typed(query_fn, *, cap, root=None, **filters):
     most cap rows via one limit+1 probe. Rows dedupe by persisted identity
     (overlapping directions can return the same row twice).
     """
-    out: list[dict] = []
-    seen: set = set()
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
 
-    def _push(rows) -> None:
+    def _push(rows: Iterable[dict[str, object]] | None) -> None:
         for row in rows or []:
             try:
                 key = json.dumps(row, sort_keys=True, default=str)
@@ -994,7 +1040,8 @@ def _fetch_typed(query_fn, *, cap, root=None, **filters):
 
 
 
-def _warehouse_batch(store, form, qs, qe, *, root=None):
+def _warehouse_batch(store: ModuleType, form: str, qs: str, qe: str, *,
+                     root: Path | str | None = None) -> tuple[list[Filing], bool, str | None]:
     """Date-scoped warehouse read, amendments included.
 
     Returns (rows, exhausted, error): a limit=None date-scoped read is
@@ -1006,7 +1053,7 @@ def _warehouse_batch(store, form, qs, qe, *, root=None):
         rows = store.query_filings(forms=forms, start_date=qs, end_date=qe, limit=None, root=root)
     except Exception as exc:
         return [], False, str(exc)
-    out = []
+    out: list[Filing] = []
     for row in rows:
         try:
             filing = _filing_from_local_row(row)
@@ -1037,7 +1084,9 @@ def _needs_typed_hydration(value: object) -> bool:
     return _base_form(value) in _TYPED_HYDRATION_FORMS
 
 
-def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
+def _enqueue_or_requeue(store: ModuleType, source: str, form: str, qs: str, qe: str, *,
+                        batch_size: int,
+                        root: Path | str | None = None) -> str:
     """Enqueue a quarterly job; reset finished-but-uncovered ones for resume."""
     job_id = store.enqueue_backfill_job(
         source, form, qs, qe, PARSER_VERSION, batch_size=batch_size, root=root)
@@ -1073,7 +1122,8 @@ def _enqueue_or_requeue(store, source, form, qs, qe, *, batch_size, root=None):
     return job_id
 
 
-def _hydrate_relationship_filing(filing, *, data_root=None):
+def _hydrate_relationship_filing(filing: Filing, *,
+                                 data_root: Path | str | None = None) -> tuple[int, bool, str | None]:
     """Archive primary document + store typed rows for one filing.
 
     Returns (typed_rows, doc_ok, error): doc_ok tells the document stage
@@ -1103,10 +1153,14 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
             return 0, False, f"no supported primary document: {doc.get('error')}"
         try:
             text = doc.get("text") or ""
+            text = text if isinstance(text, str) else ""
             doc_name = doc.get("document_name") or getattr(filing, "primary_document", None) or "primary"
             raw_path = doc.get("raw_archive_path")
+            raw_path = raw_path if isinstance(raw_path, (str, Path)) else None
             retrieved_at = doc.get("retrieved_at")
+            retrieved_at = retrieved_at if isinstance(retrieved_at, str) else None
             content_hash = doc.get("content_hash")
+            content_hash = content_hash if isinstance(content_hash, str) else None
         except Exception as exc:
             return 0, False, f"document archive failed: {exc}"
         try:
@@ -1119,7 +1173,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     known_at=known_at, source_url=source_url or None)
                 written = 0
                 for rec in recs or []:
-                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d = rec.to_dict()
                     d.setdefault("raw_archive_path", raw_path)
                     d.setdefault("retrieved_at", retrieved_at)
                     d.setdefault("content_hash", content_hash)
@@ -1136,7 +1190,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     document_name=str(doc_name), known_at=known_at)
                 written = 0
                 for rec in recs or []:
-                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d = rec.to_dict()
                     d.setdefault("raw_archive_path", raw_path)
                     d.setdefault("retrieved_at", retrieved_at)
                     d.setdefault("content_hash", content_hash)
@@ -1171,7 +1225,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                             retrieved_at=retrieved_at, root=data_root)
                     except Exception as exc:
                         raise RuntimeError(f"identity observation failed: {exc}") from exc
-                    d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                    d = rec.to_dict()
                     d.setdefault("raw_archive_path", raw_path)
                     d.setdefault("retrieved_at", retrieved_at)
                     d.setdefault("content_hash", content_hash)
@@ -1191,7 +1245,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     subject_cik=subject_cik, subject_name=subject_name,
                     document_name=str(doc_name), known_at=known_at,
                     source_url=source_url or None)
-                d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                d = rec.to_dict()
                 d.setdefault("raw_archive_path", raw_path)
                 d.setdefault("retrieved_at", retrieved_at)
                 d.setdefault("content_hash", content_hash)
@@ -1205,7 +1259,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                 except Exception:
                     obj = None
                 try:
-                    terms = load_terms(accession)
+                    terms: dict[str, object] = load_terms(accession)
                 except Exception:
                     terms = {}
                 rec = normalize_offering(
@@ -1215,7 +1269,7 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
                     registrant_cik=filer_cik, registrant_name=filer_name,
                     document_name=str(doc_name), known_at=known_at,
                     source_url=source_url or None)
-                d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
+                d = rec.to_dict()
                 d.setdefault("raw_archive_path", raw_path)
                 d.setdefault("retrieved_at", retrieved_at)
                 d.setdefault("content_hash", content_hash)
@@ -1229,16 +1283,25 @@ def _hydrate_relationship_filing(filing, *, data_root=None):
         return 0, False, str(exc)
 
 
-def run_backfill_job(job: dict, data_root=None) -> bool:
+def run_backfill_job(job: dict[str, object], data_root: Path | str | None = None) -> bool:
     """Drain one leased job: archive + normalize + coverage + checkpoint."""
     from .. import archive as _archive
     from .. import store as _store
     from ..client import get_current_filings, get_global_filings
 
     source, form = str(job["source"]), str(job["form"])
-    batch_size = max(int(job.get("batch_size") or 50), 1)
+    job_id: str = str(job["id"])
+    batch_value: object = job.get("batch_size")
+    batch_size = max(int(batch_value) if batch_value and isinstance(batch_value, (int, float, str)) else 50, 1)
+    raw_start: object = job.get("start_date")
+    raw_end: object = job.get("end_date")
     quarters, _ = _quarters_for_range(
-        job.get("start_date"), job.get("end_date"), cap=10_000)
+        raw_start if raw_start is None or isinstance(raw_start, str) else str(raw_start),
+        raw_end if raw_end is None or isinstance(raw_end, str) else str(raw_end),
+        cap=10_000)
+    end_raw: object = job.get("end_date")
+    coverage_date: str | None = (
+        end_raw if end_raw is None or isinstance(end_raw, str) else str(end_raw))
     now = datetime.now(timezone.utc)
     current = (now.year, (now.month - 1) // 3 + 1)
     needs_typed = _needs_typed_hydration(form)
@@ -1281,7 +1344,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                                     _src, form, partition, root=data_root):
                                 _store.store_coverage(
                                     _src, form, partition, "complete",
-                                    coverage_date=job.get("end_date"), root=data_root)
+                                    coverage_date=coverage_date, root=data_root)
                         except Exception:
                             pass
                     continue
@@ -1293,7 +1356,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                     if _err is not None:
                         _store.store_coverage(
                             source, form, partition, "partial",
-                            coverage_date=job.get("end_date"), root=data_root)
+                            coverage_date=coverage_date, root=data_root)
                         _store.store_checkpoint(
                             "sec-backfill", source, key, "partial",
                             error=_err, root=data_root)
@@ -1310,7 +1373,9 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
             # quarterly partitions drain fully within the job, so "complete"
             # means the source was exhausted (never claimed after truncation).
             batch = list(rows)[:batch_size] if feed_snapshot else list(rows)
-            typed_rows, typed_errors, doc_bad = 0, [], 0
+            typed_rows = 0
+            typed_errors: list[str] = []
+            doc_bad = 0
             if not filing_skip:
                 for filing in batch:
                     payload = json.dumps(
@@ -1336,7 +1401,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
             elif feed_snapshot:
                 _store.store_coverage(
                     source, form, partition, "partial",
-                    coverage_date=job.get("end_date"),
+                    coverage_date=coverage_date,
                     accession_count=len(batch), last_key=last_key,
                     root=data_root)
                 _store.store_checkpoint(
@@ -1347,7 +1412,7 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
             else:
                 _store.store_coverage(
                     source, form, partition, "complete",
-                    coverage_date=job.get("end_date"),
+                    coverage_date=coverage_date,
                     accession_count=len(batch), last_key=last_key,
                     root=data_root)
                 _store.advance_checkpoint(
@@ -1372,12 +1437,12 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                     doc_status = typed_status = "partial"
                 _store.store_coverage(
                     DOC_SOURCE, form, partition, doc_status,
-                    coverage_date=job.get("end_date"),
+                    coverage_date=coverage_date,
                     accession_count=len(batch), last_key=last_key,
                     root=data_root)
                 _store.store_coverage(
                     TYPED_SOURCE, form, partition, typed_status,
-                    coverage_date=job.get("end_date"),
+                    coverage_date=coverage_date,
                     accession_count=typed_rows, last_key=last_key,
                     root=data_root)
                 if doc_status == "complete":
@@ -1411,13 +1476,13 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
                     if not feed_snapshot:
                         job_failed = True
         if job_failed:
-            _store.fail_job(job["id"], "typed stage incomplete; retryable", last_key=last_key, root=data_root)
+            _store.fail_job(job_id, "typed stage incomplete; retryable", last_key=last_key, root=data_root)
             return False
-        _store.complete_job(job["id"], last_key=last_key, root=data_root)
+        _store.complete_job(job_id, last_key=last_key, root=data_root)
         return True
     except Exception as exc:
         try:
-            _store.fail_job(job["id"], str(exc), root=data_root)
+            _store.fail_job(job_id, str(exc), root=data_root)
         except Exception:
             pass
         try:
@@ -1430,7 +1495,8 @@ def run_backfill_job(job: dict, data_root=None) -> bool:
         return False
 
 
-def drain_backfill_queue(data_root=None, max_jobs: int | None = None) -> dict:
+def drain_backfill_queue(data_root: Path | str | None = None,
+                             max_jobs: int | None = None) -> dict[str, int]:
     """Synchronously claim->ingest queued jobs (CLI/resume path)."""
     from .. import store as _store
 
@@ -1449,7 +1515,7 @@ def drain_backfill_queue(data_root=None, max_jobs: int | None = None) -> dict:
     return {"completed": done, "failed": failed}
 
 
-def ensure_backfill_worker(data_root=None) -> threading.Thread | None:
+def ensure_backfill_worker(data_root: Path | str | None = None) -> threading.Thread | None:
     """Start the single process-local daemon draining the durable queue."""
     global _WORKER_THREAD
     from .. import store as _store
@@ -1479,8 +1545,9 @@ def ensure_backfill_worker(data_root=None) -> threading.Thread | None:
         return _WORKER_THREAD
 
 
-def rank_hits(hits, *, verified_ciks=(), verified_names=(),
-              relevant_forms=()) -> tuple:
+def rank_hits(hits: Iterable[SECTextHit], *, verified_ciks: Iterable[int | None] = (),
+              verified_names: Iterable[str] = (),
+              relevant_forms: Iterable[str] = ()) -> tuple[SECTextHit, ...]:
     """Rank after retrieval: identity > phrase > form relevance > recency > score.
 
     Returns the hits tuple in rank order; nothing is discarded (low-ranked
@@ -1490,38 +1557,43 @@ def rank_hits(hits, *, verified_ciks=(), verified_names=(),
     names = {normalize_name(n) for n in verified_names or () if n}
     forms = {str(f).strip().upper() for f in relevant_forms or () if str(f).strip()}
 
-    def _filed(hit) -> str:
+    def _filed(hit: SECTextHit) -> str:
         return str(getattr(hit, "filed_at", "") or "")
 
-    def _score(hit) -> float:
+    def _score(hit: SECTextHit) -> float:
         try:
             return float(getattr(hit, "score", 0.0) or 0.0)
         except (TypeError, ValueError):
             return 0.0
 
-    def _identity(hit) -> int:
+    def _identity(hit: SECTextHit) -> int:
         filer_name = getattr(hit, "filer_name", None) or ""
         return 0 if (getattr(hit, "filer_cik", None) in ciks
                      or (filer_name and normalize_name(filer_name) in names)) else 1
 
-    def _phrase(hit) -> int:
+    def _phrase(hit: SECTextHit) -> int:
         query = getattr(hit, "query", "") or ""
         filer_name = getattr(hit, "filer_name", None) or ""
         return 0 if (query and filer_name
                      and normalize_name(query) == normalize_name(filer_name)) else 1
 
-    def _relevance(hit) -> int:
+    def _relevance(hit: SECTextHit) -> int:
         form = str(getattr(hit, "form", "") or "").strip().upper()
         return 0 if (form and form in forms) else 1
 
-    by_recency = sorted(hits or (), key=lambda h: (_filed(h), _score(h)), reverse=True)
-    return tuple(sorted(by_recency,
-                        key=lambda h: (_identity(h), _phrase(h), _relevance(h))))
+    def _recency_key(hit: SECTextHit) -> tuple[str, float]:
+        return (_filed(hit), _score(hit))
+    def _rank_key(hit: SECTextHit) -> tuple[int, int, int]:
+        return (_identity(hit), _phrase(hit), _relevance(hit))
+    by_recency = sorted(hits or (), key=_recency_key, reverse=True)
+    return tuple(sorted(by_recency, key=_rank_key))
 
 
-def build_evidence_packet(search_id: str, *, entities=(), filings=(),
-                          text_hits=(), max_items=_EVIDENCE_MAX_ITEMS,
-                          max_chars=_EVIDENCE_MAX_CHARS) -> tuple:
+def build_evidence_packet(search_id: str, *, entities: Iterable[EntityCandidate] = (),
+                          filings: Iterable[Filing] = (),
+                          text_hits: Iterable[SECTextHit] = (),
+                          max_items: int = _EVIDENCE_MAX_ITEMS,
+                          max_chars: int = _EVIDENCE_MAX_CHARS) -> tuple[str, ...]:
     """Bounded packet IDs (verified entities, ranked hits, filings); lists stay full.
 
     Only the packet is context-budgeted; the stored search keeps every
@@ -1564,7 +1636,7 @@ class SECDiscoveryService:
     """Cross-source discovery owner: accession, entity, EFTS, submissions,
     global, then local routes; inapplicable routes are explicit attempts."""
 
-    def __init__(self, data_root=None):
+    def __init__(self, data_root: Path | str | None = None) -> None:
         self._data_root = data_root
 
     def search(self, request: SECSearchRequest, *,
@@ -1575,7 +1647,7 @@ class SECDiscoveryService:
         if not isinstance(request, SECSearchRequest):
             raise TypeError(
                 f"request must be SECSearchRequest, got {type(request).__name__}")
-        as_of = _check_as_of(request.as_of)
+        as_of: str | None = _check_as_of(request.as_of)
         search_id = uuid.uuid4().hex[:12]
         now = _utcnow()
         # Interactive bound for global/current-feed reads and backfill batches.
@@ -1584,11 +1656,11 @@ class SECDiscoveryService:
         attempts: list[SearchAttempt] = []
         warnings: list[str] = []
         errors: list[str] = []
-        entities: dict = {}
-        filings: dict = {}
-        documents: dict = {}
-        relationships: dict = {}
-        hits: dict = {}
+        entities: dict[int | str, EntityCandidate] = {}
+        filings: dict[str, Filing] = {}
+        documents: dict[tuple[str, str | None], FilingDocument] = {}
+        relationships: dict[tuple[str, str, int | None, str], FilingParty] = {}
+        hits: dict[tuple[str, str, str | None], SECTextHit] = {}
         retrieval_order: list[str] = []
         pit_gaps = 0
         quarter_capped = False
@@ -1597,11 +1669,11 @@ class SECDiscoveryService:
         adopted_limits: list[str] = []
         adopted_not_complete: list[str] = []
 
-        def _record(backend: str, query: str, status: str, *,
+        def _record(backend: str, query: str, status: _AttemptStatus, *,
                     reported: int = 0, retrieved: int = 0, pages: int = 0,
-                    pit_basis: str | None = None, error=None,
+                    pit_basis: str | None = None, error: Exception | None = None,
                     source_limit: str | None = None,
-                    filters: dict | None = None) -> None:
+                    filters: dict[str, object] | None = None) -> None:
             entry_filters = dict(filters or {})
             if as_of and "as_of" not in entry_filters:
                 entry_filters["as_of"] = as_of
@@ -1613,7 +1685,7 @@ class SECDiscoveryService:
                 filters=entry_filters,
                 started_at=now,
                 completed_at=now,
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 results_reported=reported,
                 results_retrieved=retrieved,
                 pages_retrieved=pages,
@@ -1626,13 +1698,13 @@ class SECDiscoveryService:
             if backend not in retrieval_order:
                 retrieval_order.append(backend)
 
-        def _merge_entity(candidate) -> None:
+        def _merge_entity(candidate: EntityCandidate) -> None:
             key = (candidate.cik if candidate.cik is not None
                    else candidate.entity_id or f"name:{normalize_name(candidate.name)}")
             if key not in entities:
                 entities[key] = candidate
 
-        def _keep(record) -> bool:
+        def _keep(record: Filing) -> bool:
             nonlocal pit_gaps
             if as_of is None:
                 return True
@@ -1643,7 +1715,7 @@ class SECDiscoveryService:
             return True
 
         def _adopt(sub: SECSearchResult, *, route: str | None = None) -> None:
-            idmap = {}
+            idmap: dict[str, str] = {}
             for attempt in sub.attempts:
                 aid = f"{search_id}-{attempt.backend}-{len(attempts) + 1}"
                 idmap[attempt.attempt_id] = aid
@@ -1712,7 +1784,7 @@ class SECDiscoveryService:
             text = str(entity_query).strip()
             if text and all(text != seen for seen in entity_selectors):
                 entity_selectors.append(text)
-        verified: list = []
+        verified: list[EntityCandidate] = []
         if entity_selectors and request.search_entities:
             for selector in entity_selectors:
                 try:
@@ -1737,7 +1809,7 @@ class SECDiscoveryService:
         # Route 3: EFTS text/topic/person/domain/security variants.
         variants: list[tuple[str, str]] = []
 
-        def _add_variants(items, route: str) -> None:
+        def _add_variants(items: Iterable[object], route: str) -> None:
             for item in items or ():
                 text = str(item).strip()
                 if text and all(text != seen for seen, _ in variants):
@@ -1836,6 +1908,12 @@ class SECDiscoveryService:
             sub_forms = list(request.forms) if request.forms else None
             probe = None if result_limit is None else result_limit + 1
             for candidate in verified:
+                if candidate.cik is None:
+                    _record("filer-submissions", "unknown cik", "failed",
+                            error=ValueError("missing cik"),
+                            pit_basis="known_at" if as_of else None)
+                    errors.append("filer-submissions unknown cik failed: missing cik")
+                    continue
                 try:
                     rows = list_sec_filings(
                         candidate.cik, forms=sub_forms,
@@ -1888,7 +1966,7 @@ class SECDiscoveryService:
                 quarters, quarter_capped = _quarters_for_range(
                     request.start_date, request.end_date)
             except ValueError as exc:
-                quarters, quarter_capped = [], False
+                quarters, quarter_capped = list[tuple[int, int]](), False
                 _record("global-filings", str(global_forms), "failed", error=exc)
                 errors.append(str(exc))
             else:
@@ -1898,8 +1976,8 @@ class SECDiscoveryService:
                 # Local-first: covered partitions run locally; missing ones
                 # become bounded quarterly/form jobs, never a blocked call.
                 ordered_forms = _sort_forms_by_priority(global_forms)
-                missing: list[tuple] = []
-                covered: list[tuple] = []
+                missing: list[tuple[str, int, int]] = []
+                covered: list[tuple[str, int, int]] = []
                 for form in ordered_forms:
                     for year, quarter in quarters:
                         partition = _partition_for_quarter(year, quarter)
@@ -1971,7 +2049,7 @@ class SECDiscoveryService:
                         errors.append(
                             f"local-filings {partition} failed: {exc}")
                         continue
-                    kept_all = []
+                    kept_all: list[Filing] = []
                     for row in rows:
                         try:
                             filing = _filing_from_local_row(row)
@@ -2023,7 +2101,7 @@ class SECDiscoveryService:
                             errors.append(
                                 f"current-filings {form!r} failed: {exc}")
                             continue
-                        kept = []
+                        kept: list[Filing] = []
                         for filing in rows:
                             day = (filing.filed_at
                                    or filing.known_at or "")[:10]
@@ -2094,7 +2172,8 @@ class SECDiscoveryService:
             _rel_pages = [0]
             _rel_open = [0]
 
-            def _rel_rows(query_fn, **kw):
+            def _rel_rows(query_fn: Callable[..., list[dict[str, object]]],
+                          **kw: object) -> list[dict[str, object]]:
                 _rows, _exh, _pg = _fetch_typed(
                     query_fn, cap=_rel_cap[0], root=data_root, **kw)
                 _rel_pages[0] += _pg
@@ -2102,14 +2181,14 @@ class SECDiscoveryService:
                     _rel_open[0] += 1
                 return _rows
 
-            def _cik_int(value):
+            def _cik_int(value: object) -> int | None:
                 try:
                     return int(str(value).strip())
                 except Exception:
                     return None
 
-            def _add_party(accession, cik_value, name, role, source,
-                           known_at) -> None:
+            def _add_party(accession: object, cik_value: object, name: object,
+                           role: str, source: str, known_at: object) -> None:
                 try:
                     if not accession or not role or not known_at:
                         return
@@ -2117,7 +2196,7 @@ class SECDiscoveryService:
                     label = str(name or "").strip() or str(cik_value or "")
                     if not label:
                         return
-                    entity_id = None
+                    entity_id: str | None = None
                     if cik is not None:
                         try:
                             entity_id = sec_entity_id(cik)
@@ -2159,7 +2238,7 @@ class SECDiscoveryService:
                 quarters, _capped = _quarters_for_range(
                     request.start_date, request.end_date)
             except ValueError:
-                quarters = []
+                quarters = list[tuple[int, int]]()
             if quarters:
                 ordered = _sort_forms_by_priority(
                     list(dict.fromkeys(list(_REL_FORMS) + list(_SEC_FORMS) + sorted(_TRANSACTION_BASE_FORMS) + sorted(_OFFERING_BASE_FORMS))))
@@ -2167,12 +2246,12 @@ class SECDiscoveryService:
                     for year, quarter in quarters:
                         partition = _partition_for_quarter(year, quarter)
                         try:
-                            covered = _rel_store.is_partition_covered(
+                            is_covered = _rel_store.is_partition_covered(
                                 TYPED_SOURCE, form, partition,
                                 root=data_root)
                         except Exception:
-                            covered = False
-                        if covered:
+                            is_covered = False
+                        if is_covered:
                             continue
                         qs, qe = _quarter_dates(year, quarter)
                         try:
@@ -2449,7 +2528,7 @@ class SECDiscoveryService:
             a.backend for a in attempts if a.status == "complete"))
         failed = tuple(dict.fromkeys(
             a.backend for a in attempts if a.status == "failed"))
-        limits: tuple = ()
+        limits: tuple[str, ...] = ()
         if quarter_capped or any(a.status == "source_limited" for a in active):
             limits = ("global-filings:quarter-cap",)
         # Adopted sub-coverages (e.g. caller-limited EFTS partials whose page
@@ -2457,7 +2536,7 @@ class SECDiscoveryService:
         # an adopted partial to complete.
         limits = tuple(dict.fromkeys(tuple(limits) + tuple(adopted_limits)))
         if not active or all(a.status == "failed" for a in active):
-            status = "failed"
+            status: _CoverageStatus = "failed"
         elif (pending or capped or caller_capped
                 or any(a.status in ("failed", "partial") for a in active)
                 or any(s in ("partial", "failed")
@@ -2477,7 +2556,7 @@ class SECDiscoveryService:
         forms_seen.update(
             str(h.form).strip().upper() for h in ranked
             if str(getattr(h, "form", "") or "").strip())
-        date_coverage = None
+        date_coverage: str | None = None
         if request.start_date or request.end_date:
             date_coverage = f"{request.start_date or ''}:{request.end_date or ''}"
         try:
@@ -2510,7 +2589,7 @@ class SECDiscoveryService:
             relationships=tuple(relationships.values()),
             text_hits=ranked,
             coverage=SearchCoverage(
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 sources_attempted=tuple(retrieval_order),
                 sources_completed=completed,
                 sources_failed=failed,
@@ -2568,7 +2647,9 @@ def _relationship_ciks(entity: object) -> list[str]:
             _add(entity.get("entity_id"))
     return ciks
 
-def _resolve_relationship_identity(entity: object, *, as_of=None, data_root=None):
+def _resolve_relationship_identity(entity: object, *, as_of: str | None = None,
+                                   data_root: Path | str | None = None
+                                   ) -> tuple[list[str], list[EntityCandidate], str, Exception | None]:
     """Direct CIK/ID or single-verified-candidate CIK; else ([], candidates, status, err)."""
     direct = _relationship_ciks(entity)
     if direct:
@@ -2609,6 +2690,7 @@ def _resolve_relationship_identity(entity: object, *, as_of=None, data_root=None
                                 max_results=None, data_root=data_root)
     except Exception as exc:
         return [], [], "failed", exc
+    ents: list[EntityCandidate] = []
     try:
         ents = list(getattr(sub, "entities", ()) or ())
     except Exception:
@@ -2626,11 +2708,14 @@ def _resolve_relationship_identity(entity: object, *, as_of=None, data_root=None
             continue
     if len(uniq) == 1:
         return list(uniq), ents, "verified", None
+    coverage_status: object = None
+    sub_errors: list[object] = []
     try:
         coverage_status = getattr(getattr(sub, "coverage", None), "status", None)
         sub_errors = list(getattr(sub, "errors", ()) or ())
     except Exception:
-        coverage_status, sub_errors = None, []
+        coverage_status = None
+        sub_errors = []
     if coverage_status == "failed" and not ents:
         first = sub_errors[0] if sub_errors else "entity resolution failed"
         err = first if isinstance(first, Exception) else RuntimeError(str(first))
@@ -2642,9 +2727,9 @@ def _resolve_relationship_identity(entity: object, *, as_of=None, data_root=None
 
 
 
-def search_sec_relationships(entity: object, relationship_types=None,
-                             as_of: str | None = None, data_root=None,
-                             limit: int = 50, exhaustive: bool = True) -> dict:
+def search_sec_relationships(entity: object, relationship_types: Iterable[str] | None = None,
+                             as_of: str | None = None, data_root: Path | str | None = None,
+                             limit: int = 50, exhaustive: bool = True) -> dict[str, object]:
     """Fan out across typed, workflow, mention, and EFTS routes.
 
     Returns groups by ``relationship_type`` then status. Typed
@@ -2656,26 +2741,26 @@ def search_sec_relationships(entity: object, relationship_types=None,
 
     if as_of is not None:
         _check_as_of(as_of)
-    wanted = None
+    wanted: set[str] | None = None
     if relationship_types is not None:
         wanted = {normalize_label(t) for t in relationship_types}
     ciks, _candidates, _resolution, _resolution_err = _resolve_relationship_identity(
         entity, as_of=as_of, data_root=data_root)
-    attempts: list[dict] = []
+    attempts: list[dict[str, object]] = []
     warnings: list[str] = []
     errors: list[str] = []
-    typed: list[dict] = []
-    workflow: list[dict] = []
-    mentions: list[dict] = []
-    managers: list = []
+    typed: list[dict[str, object]] = []
+    workflow: list[dict[str, object]] = []
+    mentions: list[dict[str, object]] = []
+    managers: list[EntityCandidate] = []
 
     def _want(label: object) -> bool:
         return wanted is None or normalize_label(label) in wanted
 
-    def _record(backend: str, status: str, **extra) -> None:
+    def _record(backend: str, status: str, **extra: object) -> None:
         attempts.append({"backend": backend, "status": status, **extra})
 
-    def _emit(label: object, status: str, row: dict) -> None:
+    def _emit(label: object, status: str, row: dict[str, object]) -> None:
         if _want(label):
             typed.append({"relationship_type": normalize_label(label),
                           "status": status, **row})
@@ -2718,7 +2803,8 @@ def search_sec_relationships(entity: object, relationship_types=None,
     _t1_pages = [0]
     _t1_open = [0]
 
-    def _typed_rows(query_fn, **kw):
+    def _typed_rows(query_fn: Callable[..., list[dict[str, object]]],
+                    **kw: object) -> list[dict[str, object]]:
         _rows, _exh, _pg = _fetch_typed(
             query_fn, cap=_t1_cap, root=data_root, **kw)
         _t1_pages[0] += _pg
@@ -2810,7 +2896,8 @@ def search_sec_relationships(entity: object, relationship_types=None,
     _inv_pages = [0]
     _inv_open = [0]
 
-    def _inv_rows(query_fn, **kw):
+    def _inv_rows(query_fn: Callable[..., list[dict[str, object]]],
+                    **kw: object) -> list[dict[str, object]]:
         _rows, _exh, _pg = _fetch_typed(
             query_fn, cap=_t1_cap, root=data_root, **kw)
         _inv_pages[0] += _pg
@@ -2871,7 +2958,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
                 entity_ids.append(sec_entity_id(int(cik)))
             except Exception:
                 entity_ids.append(f"sec:cik:{cik}")
-        ev_all: list[dict] = []
+        ev_all: list[dict[str, object]] = []
         if entity_ids:
             for eid in entity_ids:
                 ev_all.extend(_store.query_relationship_evidence(
@@ -2879,10 +2966,11 @@ def search_sec_relationships(entity: object, relationship_types=None,
                     limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else limit,
                     root=data_root))
         # ponytail: no unfiltered fallback; without an entity filter there is no query
-        by_rel: dict = {}
+        by_rel: dict[str, list[dict[str, object]]] = {}
         for ev in ev_all:
-            if ev.get("relationship_id"):
-                by_rel.setdefault(ev["relationship_id"], []).append(ev)
+            rid_value: object = ev.get("relationship_id")
+            if rid_value:
+                by_rel.setdefault(str(rid_value), []).append(ev)
         kept = 0
         for rid, ev_rows in by_rel.items():
             label = next((str(e.get("relationship_type") or "").strip()
@@ -2890,6 +2978,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
                          "relationship")
             if not _want(label):
                 continue
+            rev_rows: list[dict[str, object]] = []
             try:
                 rev_rows = _store.query_relationship_revisions(
                     rid, limit=100, root=data_root)
@@ -2897,7 +2986,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
                 rev_rows = []
             # recorded_at has second precision; the revision sequence in
             # "<relationship_id>:rN" breaks same-second ties.
-            def _seq(row: dict) -> int:
+            def _seq(row: dict[str, object]) -> int:
                 try:
                     return int(str(row.get("revision_id") or "").rsplit(":r", 1)[1])
                 except (ValueError, IndexError):
@@ -2934,7 +3023,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
                         "status": "observed",
                         "accession": row.get("accession"),
                         "document_name": row.get("document_name"),
-                        "source_span": (row.get("text") or "")[:280],
+                        "source_span": str(row.get("text") or "")[:280],
                         "known_at": row.get("known_at")})
             _local_found = len(mentions)
             if exhaustive and _local_found >= _LOCAL_EXHAUSTIVE_GUARD:
@@ -3001,10 +3090,11 @@ def search_sec_relationships(entity: object, relationship_types=None,
         _active = {t for t, s in _states.items() if s == "active"}
         _demoted = {t for t, s in _states.items() if s == "demoted"}
         if _active or _demoted:
-            typed.sort(key=lambda e: -ontology_boost(
-                e.get("relationship_type"), _active, _demoted))
-            workflow.sort(key=lambda e: -ontology_boost(
-                e.get("relationship_type"), _active, _demoted))
+            def _boost_key(entry: dict[str, object]) -> float:
+                return -ontology_boost(
+                    entry.get("relationship_type"), _active, _demoted)
+            typed.sort(key=_boost_key)
+            workflow.sort(key=_boost_key)
     except Exception:
         pass
     _n_typed, _n_wf, _n_m = len(typed), len(workflow), len(mentions)
@@ -3017,10 +3107,10 @@ def search_sec_relationships(entity: object, relationship_types=None,
         warnings.append(f"workflow truncated to limit {limit}")
     if _n_m > limit:
         warnings.append(f"mentions truncated to limit {limit}")
-    groups: dict = {}
+    groups: dict[str, dict[str, list[dict[str, object]]]] = {}
     for entry in typed + workflow + mentions:
-        rtype = entry.get("relationship_type") or "unknown"
-        status = entry.get("status") or "unknown"
+        rtype = str(entry.get("relationship_type") or "unknown")
+        status = str(entry.get("status") or "unknown")
         if not _want(rtype):
             continue
         groups.setdefault(rtype, {}).setdefault(status, []).append(entry)
@@ -3035,7 +3125,7 @@ def search_sec_relationships(entity: object, relationship_types=None,
 
 # --- Phase 9: walk-forward relationship-type evaluation + ontology state ---
 
-def get_type_states(data_root=None) -> dict:
+def get_type_states(data_root: Path | str | None = None) -> dict[str, str]:
     """Latest ontology state per normalized type: active/demoted/unevaluated."""
     from ...domain.evidence.relationships import normalize_label
     from .. import store as _store
@@ -3043,7 +3133,7 @@ def get_type_states(data_root=None) -> dict:
         rows = _store.query_relationship_type_evaluations(limit=5000, root=data_root)
     except Exception:
         return {}
-    latest: dict = {}
+    latest: dict[str, tuple[tuple[str, str, str], str]] = {}
     for row in rows:
         label = normalize_label(row.get("relationship_type"))
         key = (str(row.get("retrieved_at") or ""), str(row.get("window_end") or ""),
@@ -3053,7 +3143,7 @@ def get_type_states(data_root=None) -> dict:
     return {label: state for label, (_, state) in latest.items()}
 
 
-def _evaluation_id(relationship_type: str, window: dict, inputs_hash: str) -> str:
+def _evaluation_id(relationship_type: str, window: Mapping[str, object], inputs_hash: str) -> str:
     import hashlib
     digest = hashlib.sha256(
         f"{relationship_type}|{window['window_start']}|{window['window_end']}|"
@@ -3061,11 +3151,24 @@ def _evaluation_id(relationship_type: str, window: dict, inputs_hash: str) -> st
     return f"te:{digest}"
 
 
+def _observation_float(value: object) -> float:
+    """Market observation to float; exotic numerics normalize via str.
+
+    Garbage raises from float(), never a silent default.
+    """
+    if isinstance(value, (int, float, str)):
+        return float(value)
+    return float(str(value))
+
+
 def evaluate_and_persist_type(
-    relationship_type: str, instances, *, observations=None, benchmark=None,
-    windows, horizons=None, data_root=None, actor: str = "evaluation",
+    relationship_type: str, instances: Iterable[Mapping[str, object]] | None, *,
+    observations: Mapping[tuple[str, str], object] | None = None,
+    benchmark: Mapping[str, object] | None = None,
+    windows: Iterable[tuple[str, str]], horizons: Iterable[int] | None = None,
+    data_root: Path | str | None = None, actor: str = "evaluation",
     known_at: str | None = None, reason: str | None = None,
-) -> dict:
+) -> dict[str, object]:
     """Run the pure walk-forward eval and persist one row per window.
 
     Records the evaluation, inputs hash, per-window/per-horizon metrics,
@@ -3082,9 +3185,16 @@ def evaluate_and_persist_type(
              if "relationship_type" not in it
              or normalize_label(it.get("relationship_type")) == label]
     windows = [(str(s), str(e)) for s, e in windows]
-    kwargs = {} if horizons is None else {"horizons": tuple(horizons)}
+    kwargs: dict[str, tuple[int, ...]] = {} if horizons is None else {"horizons": tuple(horizons)}
+    # Normalize caller mappings to plain float dicts at the evaluation boundary.
+    obs_rows: dict[tuple[str, str], float] | None = (
+        {key: _observation_float(value) for key, value in observations.items()}
+        if observations is not None else None)
+    bench_rows: dict[str, float] | None = (
+        {key: _observation_float(value) for key, value in benchmark.items()}
+        if benchmark is not None else None)
     outcome = _eval.evaluate_type(
-        label, owned, observations, benchmark, windows, **kwargs)
+        label, owned, obs_rows, bench_rows, windows, **kwargs)
     inputs_hash = _eval.hash_inputs({
         "relationship_type": label, "instances": owned,
         "observations": observations, "benchmark": benchmark,
@@ -3122,8 +3232,8 @@ def record_type_decision(
     relationship_type: str, state: str, *, reason: str,
     actor: str = "human", window_start: str | None = None,
     window_end: str | None = None, inputs_hash: str = "",
-    data_root=None, known_at: str | None = None,
-) -> dict:
+    data_root: Path | str | None = None, known_at: str | None = None,
+) -> dict[str, object]:
     """Persist a manual (default human) type-state decision as a revision row.
 
     Later qualifying walk-forward evaluations may supersede it with an
@@ -3137,7 +3247,7 @@ def record_type_decision(
         raise ValueError("human type decisions require a reason")
     label = normalize_label(relationship_type)
     prev_state, _ = _store.latest_type_state(label, root=data_root)
-    row = {
+    row: dict[str, object] = {
         "evaluation_id": f"te:manual:{uuid.uuid4().hex[:12]}",
         "relationship_type": label,
         "window_start": window_start, "window_end": window_end,
@@ -3150,25 +3260,31 @@ def record_type_decision(
     _store.store_relationship_type_evaluation(row, root=data_root)
     return row
 
-def get_sec_search_coverage(*, source=None, form=None, search_id=None,
-                            data_root=None, limit: int = 200) -> dict:
+def get_sec_search_coverage(*, source: str | None = None, form: str | None = None,
+                            search_id: str | None = None,
+                            data_root: Path | str | None = None,
+                            limit: int = 200) -> dict[str, object]:
     """Persisted coverage + backfill jobs only; never infers from rows.
 
     Reads ``sec_ingestion_coverage`` / ``sec_searches`` ledgers and the
     durable job queue. Absent ledgers mean unknown coverage, never complete.
     """
     from .. import store as _store
+    coverage: list[dict[str, object]] = []
+    jobs: list[dict[str, object]] = []
     try:
         coverage = _store.query_coverage(
             source=source, form=form, limit=limit, root=data_root)
     except Exception as exc:
-        coverage, coverage_error = [], str(exc)
+        coverage = []
+        coverage_error = str(exc)
     else:
         coverage_error = None
     try:
         jobs = _store.list_jobs(limit=limit, root=data_root)
     except Exception as exc:
-        jobs, jobs_error = [], str(exc)
+        jobs = []
+        jobs_error = str(exc)
     else:
         jobs_error = None
     search = None

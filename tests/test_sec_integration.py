@@ -33,6 +33,12 @@ _VALID_STATUSES = {"verified", "unverified", "ambiguous", "conflict", "not_found
 _VALID_COVERAGE = {"complete", "complete_within_source_limits", "partial", "failed"}
 
 
+def _as_seq(value: object):
+    """list/tuple from a relationship-search envelope (discovery boundary)."""
+    assert isinstance(value, (list, tuple))
+    return value
+
+
 def test_public_ticker_entity_verifies():
     from app.sec.discovery import find_sec_entities
 
@@ -86,9 +92,9 @@ def test_13d_relationship_search_structural():
     from app.sec.discovery import search_sec_relationships
 
     result = search_sec_relationships("320193")
-    assert list(result["ciks"]) == ["320193"]
-    assert any(a["backend"] == "local-typed" for a in result["attempts"])
-    for entry in result["typed"]:
+    assert list(_as_seq(result["ciks"])) == ["320193"]
+    assert any(a["backend"] == "local-typed" for a in _as_seq(result["attempts"]))
+    for entry in _as_seq(result["typed"]):
         assert entry["accession"]
         assert entry["status"] == "verified"
 
@@ -99,8 +105,8 @@ def test_13f_inverse_relationship_search_structural():
     # Berkshire Hathaway 13F manager CIK: manager -> holdings direction.
     result = search_sec_relationships("1067983",
                                       relationship_types=["holding_manager"])
-    assert list(result["ciks"]) == ["1067983"]
-    assert "holding_manager" in (result["relationship_types"] or ("holding_manager",))
+    assert list(_as_seq(result["ciks"])) == ["1067983"]
+    assert "holding_manager" in _as_seq(result["relationship_types"] or ("holding_manager",))
 
 
 def test_pit_excludes_later_hits():

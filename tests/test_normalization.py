@@ -4,6 +4,9 @@ Fixture payloads mirror the shapes seeded in tests/test_analytics_screens.py;
 no network access.
 """
 
+from pathlib import Path
+from typing import Any
+
 from app.normalization import (
     COMPANY_TICKERS_PARSER_VERSION,
     COMPANY_FACTS_PARSER_VERSION,
@@ -18,18 +21,22 @@ from app.storage import parquet
 RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
 
-def _tickers_payload(cik=1):
+def _tickers_payload(cik: int = 1) -> dict[str, dict[str, str | int]]:
     return {"0": {"cik_str": cik, "ticker": "AAA", "title": "Alpha Corp"}}
 
 
-def _facts_payload(cik=1, facts=None):
+def _facts_payload(cik: int = 1, facts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
         "EntityCommonStockSharesOutstanding": {"units": {"shares": facts or []}},
     }}}
 
-def _eps_payload(cik=1, diluted=None, basic=None):
+def _eps_payload(
+    cik: int = 1,
+    diluted: list[dict[str, Any]] | None = None,
+    basic: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Companyfacts payload with us-gaap EPS concepts (USD/shares units)."""
-    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"us-gaap": {}}}
+    payload: dict[str, Any] = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"us-gaap": {}}}
     if diluted is not None:
         payload["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {"units": {"USD/shares": diluted}}
     if basic is not None:
@@ -37,7 +44,7 @@ def _eps_payload(cik=1, diluted=None, basic=None):
     return payload
 
 
-def _normalize(payload):
+def _normalize(payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return normalize_sec_company_facts(
         payload, retrieved_at=RETRIEVED_AT, content_hash="h1",
         source_url="u", source_record_id="cik0000000001",
@@ -236,7 +243,7 @@ def test_malformed_eps_facts_are_skipped_without_crash():
     assert datasets["financial_facts"] == []
 
 
-def test_eps_rows_dedup_on_rerun(tmp_path):
+def test_eps_rows_dedup_on_rerun(tmp_path: Path):
     datasets = _normalize(_eps_payload(
         diluted=[{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
         basic=[{"end": "2025-07-31", "val": 1.52, "accn": "a2", "filed": "2025-08-28"}],
@@ -302,7 +309,7 @@ def test_multiple_record_dates_emit_undated():
     assert event["payment_date"] is None
 
 
-def test_store_document_text_extracts_filing_text_event(tmp_path):
+def test_store_document_text_extracts_filing_text_event(tmp_path: Path):
     from app.sec import store as sec_store
     from app.storage import duckdb
     parquet.write_rows("sec_filings", [{

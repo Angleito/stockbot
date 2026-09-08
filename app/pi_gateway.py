@@ -61,9 +61,20 @@ PI_MODEL = "pi"
 
 # Single source of truth stays in app/tools.py; this is just the RESEARCH
 # projection of the canonical registry.
+def _schema_name(tool: dict[str, object]) -> str | None:
+    """OpenAI schema function name (TOOLS entries are untyped app-side JSON)."""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
 RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
-    tool["function"]["name"]
+    name
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH}))
+    for name in [_schema_name(tool)]
+    if name is not None
 )
 
 _UNAVAILABLE_HEADER = (
@@ -86,12 +97,12 @@ _BUDGET_EXHAUSTED_RESPONSE = (
 _NON_DATA_LIST_KEYS = frozenset({"source_records", "warnings", "metrics", "trends"})
 
 
-def _is_failed_result(result) -> bool:
+def _is_failed_result(result: object) -> bool:
     """A tool result is a failure when it carries an explicit error."""
     return isinstance(result, dict) and bool(result.get("error"))
 
 
-def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
+def _unavailable_data_response(failed: list[tuple[str, dict[str, object]]]) -> str:
     """Deterministic user-facing response when any tool call failed.
 
     Built from the rendered error context of each failed tool (name,
@@ -109,7 +120,7 @@ def _unavailable_data_response(failed: list[tuple[str, dict]]) -> str:
     return "\n".join(lines)
 
 
-def _tool_result_meta(result) -> ToolResultMeta:
+def _tool_result_meta(result: object) -> ToolResultMeta:
     """Best-effort telemetry envelope for a tool result: row counts,
     truncation, source name, and freshness."""
     if not isinstance(result, dict):
@@ -200,13 +211,13 @@ def _record_security(
         )
 
 
-def _args_json(arguments: dict) -> str:
+def _args_json(arguments: dict[str, object]) -> str:
     return json.dumps(arguments, sort_keys=True)
 
 
 def _override_context(data_root: str | Path | None = None, as_of: str | None = None):
     """LOCAL_CONTEXT with data_root overridden; invalid roots fall back."""
-    def _with_root(root) -> RequestContext:
+    def _with_root(root: Path) -> RequestContext:
         return RequestContext(
             principal_id=LOCAL_CONTEXT.principal_id,
             capabilities=LOCAL_CONTEXT.capabilities,
@@ -230,7 +241,7 @@ def _override_context(data_root: str | Path | None = None, as_of: str | None = N
 
 def execute_pi_tool(
     name: str,
-    arguments: dict,
+    arguments: dict[str, object],
     session: PiSessionContext,
     *,
     tool_call_id: str | None = None,
@@ -238,7 +249,7 @@ def execute_pi_tool(
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
     as_of: str | None = None,
-) -> dict:
+) -> dict[str, object]:
     """Run one Pi-requested tool through all gates. Never raises."""
     try:
         return _execute_pi_tool(
@@ -258,7 +269,7 @@ def execute_pi_tool(
 
 def _execute_pi_tool(
     name: str,
-    arguments: dict,
+    arguments: dict[str, object],
     session: PiSessionContext,
     *,
     tool_call_id: str | None = None,
@@ -266,7 +277,7 @@ def _execute_pi_tool(
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
     as_of: str | None = None,
-) -> dict:
+) -> dict[str, object]:
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
     args_for_hash = (
@@ -368,12 +379,13 @@ def _execute_pi_tool(
     soft = failed and result.get("soft") is True
     denied = failed and "not permitted" in str(result.get("error", ""))
     status = "completed" if not failed else ("denied" if denied else "failed")
-    error_type = None
-    error_message = None
+    error_type: str | None = None
+    error_message: str | None = None
     if failed:
-        error_type = result.get("error_type") or (
+        raw_error_type = result.get("error_type") or (
             "permission_denied" if denied else "tool_error"
         )
+        error_type = raw_error_type if isinstance(raw_error_type, str) else None
         error_message = redact_text(str(result.get("error")))[:2000]
     meta = _tool_result_meta(result)
     if tool_call_id is not None:

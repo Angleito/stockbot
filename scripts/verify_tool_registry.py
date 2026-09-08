@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.security.action_policy import TOOL_DOMAINS  # noqa: E402
@@ -26,8 +26,24 @@ from app.tools import (  # noqa: E402
 INVENTORY_PATH = Path(__file__).resolve().parent.parent / "tests" / "contracts" / "tool_inventory.json"
 
 
+def tool_schema_function(tool: Mapping[str, object]) -> Mapping[str, object]:
+    """Function object of an OpenAI-format schema. TOOLS entries are untyped app-side dicts, so validate at the boundary."""
+    function = tool.get("function")
+    if not isinstance(function, Mapping):
+        raise RuntimeError("tool schema missing function object")
+    return function
+
+
+def tool_schema_name(tool: Mapping[str, object]) -> str:
+    """Schema name, validated at the boundary (never defaulted)."""
+    name = tool_schema_function(tool).get("name")
+    if not isinstance(name, str) or not name:
+        raise RuntimeError("tool schema missing function name")
+    return name
+
+
 def get_registry_sets() -> dict[str, set[str]]:
-    schemas = {t["function"]["name"] for t in TOOLS}
+    schemas = {tool_schema_name(t) for t in TOOLS}
     handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS)
     return {
         "schemas": schemas,

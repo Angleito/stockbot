@@ -2,6 +2,7 @@
 
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import override
 
 DEFAULT_LOG_SERVER_PORT = 8765
 
@@ -19,7 +20,8 @@ class LogServerHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-    def log_message(self, format, *args):  # noqa: A002
+    @override
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass  # suppress default request-line noise
 
 

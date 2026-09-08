@@ -15,7 +15,7 @@ from app.tool_render import (
 )
 
 
-def _briefing_result(total_records: int | None = 12) -> dict:
+def _briefing_result(total_records: int | None = 12):
     return {
         "dataset": "consolidatedShortInterest",
         "group": "otcMarket",
@@ -62,11 +62,11 @@ def _briefing_result(total_records: int | None = 12) -> dict:
             "currentShortPositionQuantity: 12400000 vs prior 10800000 "
             "(+1600000, +14.81%) — up"
         ],
-        "warnings": [],
+        "warnings": list[str](),
         "briefing": {
             "summary": "Short interest rose 14.8%.",
             "key_findings": ["Position up"],
-            "caveats": [],
+            "caveats": list[str](),
             "follow_up_suggestion": "",
         },
         "briefing_source": "analysis_model",
@@ -81,7 +81,7 @@ def _briefing_result(total_records: int | None = 12) -> dict:
     }
 
 
-def _datapoints_result(n_fields: int = 5, n_rows: int = 5, cell: str = "v") -> dict:
+def _datapoints_result(n_fields: int = 5, n_rows: int = 5, cell: str = "v"):
     fields = [f"field{i}" for i in range(n_fields)]
     return {
         "dataset": "consolidatedShortInterest",
@@ -233,7 +233,7 @@ def test_non_dict_results_are_handled():
 # ---------------------------------------------------------------------------
 
 
-def _portfolio_snapshot_result(n_positions: int = 3, omitted: int = 0) -> dict:
+def _portfolio_snapshot_result(n_positions: int = 3, omitted: int = 0):
     positions = []
     for i in range(n_positions):
         positions.append({
@@ -398,7 +398,7 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
     assert len(text.encode("utf-8")) <= MAX_TOOL_MESSAGE_BYTES
 
 
-def _valuation_result(**kwargs) -> dict:
+def _valuation_result(**kwargs: str):
     row = {
         "eps": 5.0,
         "pe": 20.0,
@@ -409,7 +409,7 @@ def _valuation_result(**kwargs) -> dict:
         "obligation_drag_per_share": 0.1,
         "contingent_drag_per_share": 0.1,
     }
-    result = {
+    result: dict[str, object] = {
         "ticker": "AAPL",
         "price": {"last": 100.0},
         "as_of": "2026-09-01",

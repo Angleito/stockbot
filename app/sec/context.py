@@ -6,6 +6,10 @@ deferred; these functions expose what the generic layer can already prove
 explicitly unknown instead of inventing it.
 """
 
+from collections.abc import Mapping
+
+from .models import Filing
+
 INSTITUTIONAL_FORMS = ("13F-HR", "13F-HR/A", "13F-NT", "13F-NT/A")
 
 GOVERNANCE_FORMS = (
@@ -20,9 +24,11 @@ TRANSACTION_FORMS = (
 )
 
 
-def _filing_pointer(filing) -> dict:
-    to_dict = getattr(filing, "to_dict", None)
-    record = to_dict() if callable(to_dict) else dict(filing)
+def _filing_pointer(filing: Filing | Mapping[str, object]) -> dict[str, object]:
+    if isinstance(filing, Mapping):
+        record: Mapping[str, object] = filing
+    else:
+        record = filing.to_dict()
     return {
         "form": record.get("form"),
         "accession_no": record.get("accession_no"),
@@ -33,7 +39,14 @@ def _filing_pointer(filing) -> dict:
     }
 
 
-def _history(ticker_or_cik, forms, *, as_of=None, start_date=None, limit=20) -> list:
+def _history(
+    ticker_or_cik: str | int,
+    forms: tuple[str, ...] | list[str],
+    *,
+    as_of: str | None = None,
+    start_date: str | None = None,
+    limit: int | None = 20,
+) -> list[Filing]:
     from .filings import list_sec_filings
 
     try:
@@ -47,7 +60,12 @@ def _history(ticker_or_cik, forms, *, as_of=None, start_date=None, limit=20) -> 
         return []
 
 
-def get_institutional_ownership(ticker_or_cik, *, as_of=None, limit=10) -> dict:
+def get_institutional_ownership(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 10,
+) -> dict[str, object]:
     """These are the issuer's own 13F-HR/13F-NT filings, not the set of managers holding the issuer; ticker-to-holders position lookup is deferred."""
     filings = _history(ticker_or_cik, INSTITUTIONAL_FORMS, as_of=as_of, limit=limit)
     return {
@@ -60,12 +78,18 @@ def get_institutional_ownership(ticker_or_cik, *, as_of=None, limit=10) -> dict:
     }
 
 
-def get_governance_context(ticker_or_cik, *, since=None, as_of=None, limit=10) -> dict:
+def get_governance_context(
+    ticker_or_cik: str | int,
+    *,
+    since: str | None = None,
+    as_of: str | None = None,
+    limit: int | None = 10,
+) -> dict[str, object]:
     """Proxy filing pointers (structured parsing lands with Step-10 parsers)."""
     filings = _history(
         ticker_or_cik, GOVERNANCE_FORMS, as_of=as_of, start_date=since, limit=limit,
     )
-    contested = [f for f in filings if (f.to_dict() if hasattr(f, "to_dict") else f).get("form") in ("DFAN14A", "DEFC14A", "PREC14A")]
+    contested = [f for f in filings if f.form in ("DFAN14A", "DEFC14A", "PREC14A")]
     return {
         "ticker": str(ticker_or_cik).upper(),
         "since": since,
@@ -78,7 +102,12 @@ def get_governance_context(ticker_or_cik, *, since=None, as_of=None, limit=10) -
     }
 
 
-def get_transaction_context(ticker_or_cik, *, as_of=None, limit=10) -> dict:
+def get_transaction_context(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 10,
+) -> dict[str, object]:
     """M&A filing pointers; deal status unknown until Step-10 parsers."""
     filings = _history(ticker_or_cik, TRANSACTION_FORMS, as_of=as_of, limit=limit)
     return {
@@ -91,21 +120,21 @@ def get_transaction_context(ticker_or_cik, *, as_of=None, limit=10) -> dict:
     }
 
 
-def get_short_pressure_context(ticker) -> dict:
+def get_short_pressure_context(ticker: str) -> dict[str, object]:
     """Short-interest context without manipulation claims (FTD deferred).
 
     Reports FINRA short interest and SEC shares outstanding and their
     deterministic ratio when both are available. Never asserts that short
-    activity caused, or will cause, any price move.
+    activity causes, or will cause, any price move.
     """
-    short = None
+    short: dict[str, object] | None = None
     try:
         from .. import finra_client
 
         short = finra_client.get_short_interest(ticker)
     except Exception:
         short = None
-    shares = None
+    shares: object = None
     try:
         from ..services import sec_facts
 
@@ -113,18 +142,18 @@ def get_short_pressure_context(ticker) -> dict:
         shares = facts.get("shares_outstanding")
     except Exception:
         shares = None
-    short_position = None
+    short_position: int | float | None = None
     if isinstance(short, dict):
         for key in ("short_position", "shortPosition", "short_interest", "current_short_position"):
             value = short.get(key)
             if isinstance(value, (int, float)):
                 short_position = value
                 break
-    ratio = None
+    ratio: float | None = None
     if isinstance(short_position, (int, float)) and isinstance(shares, (int, float)) and shares > 0:
         ratio = round(short_position / shares * 100, 2)
     return {
-        "ticker": str(ticker).upper(),
+        "ticker": ticker.upper(),
         "short_position": short_position if short_position is not None else "not_available",
         "shares_outstanding": shares if shares is not None else "not_available",
         "short_pct_of_outstanding": ratio if ratio is not None else "not_quantifiable",

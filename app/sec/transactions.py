@@ -4,11 +4,16 @@ One Transaction per filing; amendments update/diff the same transaction.
 Missing values are None/'unknown', never fabricated.
 """
 
+from datetime import date, datetime
 import re
-from dataclasses import fields
+from dataclasses import fields, replace
+from pathlib import Path
 
 from .context import TRANSACTION_FORMS
-from .models import Transaction
+from .models import Filing, Transaction
+
+# `object` marks the edgar SDK dynamic boundary (no stubs): attrs are read
+# via getattr/_first and validated before building Transaction objects.
 
 DEAL_TYPE_BY_FORM = {
     "SC TO-T": "tender_offer",
@@ -69,7 +74,7 @@ _STATUS_VOCABULARY = frozenset(
     {"unknown", "accepted", "completed", "withdrawn", "terminated"})
 
 
-def _first(obj, *names):
+def _first(obj: object, *names: str) -> str | None:
     for name in names:
         try:
             value = getattr(obj, name, None)
@@ -86,7 +91,7 @@ def _first(obj, *names):
     return None
 
 
-def _str_or_none(value):
+def _str_or_none(value: object) -> str | None:
     if value is None:
         return None
     try:
@@ -96,7 +101,7 @@ def _str_or_none(value):
     return text or None
 
 
-def resolve_transaction_status(*, text=None, obj=None) -> str:
+def resolve_transaction_status(*, text: str | None = None, obj: object | None = None) -> str:
     """Status from deterministic evidence only; default "unknown".
 
     A structured ``status`` attr wins when it lands in-vocabulary; otherwise
@@ -109,7 +114,7 @@ def resolve_transaction_status(*, text=None, obj=None) -> str:
             if raw is not None and raw.strip().lower() in _STATUS_VOCABULARY:
                 return raw.strip().lower()
         if text:
-            body = str(text)
+            body = text
             for status, pattern in _STATUS_PATTERNS:
                 if pattern.search(body):
                     return status
@@ -118,7 +123,7 @@ def resolve_transaction_status(*, text=None, obj=None) -> str:
     return "unknown"
 
 
-def extract_transaction_parties(obj=None, *, text=None) -> dict:
+def extract_transaction_parties(obj: object | None = None, *, text: str | None = None) -> dict[str, object]:
     """Filer/subject/target/acquirer/offeror/security evidence; never raises.
 
     Structured header/XML attrs first, then exact document spans. The filer
@@ -127,14 +132,14 @@ def extract_transaction_parties(obj=None, *, text=None) -> dict:
     and method for store/service provenance.
     """
     try:
-        parties = {
+        parties: dict[str, object] = {
             "filer_cik": None, "filer_name": None,
             "subject_cik": None, "subject_name": None,
             "target_name": None, "acquirer_cik": None,
             "acquirer_name": None, "offeror": None,
             "security_title": None,
         }
-        spans: list = []
+        spans: list[dict[str, str]] = []
         structured = False
         if obj is not None:
             found = {
@@ -161,7 +166,7 @@ def extract_transaction_parties(obj=None, *, text=None) -> dict:
                     parties[key] = value
                     structured = True
         if text:
-            body = str(text)
+            body = text
             for fact, pattern, group in (
                     ("offeror", _OFFEROR_RE, 1),
                     ("acquirer_name", _ACQUIRE_RE, 1),
@@ -187,13 +192,17 @@ def extract_transaction_parties(obj=None, *, text=None) -> dict:
         return {**parties, "spans": spans, "method": method}
     except Exception:
         return {"spans": [], "method": "form-identity"}
-
-
-def list_sec_filings(*args, **kwargs):
+def list_sec_filings(ticker_or_cik: str | int,
+                     forms: str | list[str] | tuple[str, ...] | None = None,
+                     start_date: str | date | datetime | None = None,
+                     end_date: str | date | datetime | None = None,
+                     as_of: str | date | datetime | None = None,
+                     limit: int | None = 50) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
 def load_transaction_text(accession_no: str) -> str:
@@ -203,14 +212,14 @@ def load_transaction_text(accession_no: str) -> str:
     return documents.get_sec_filing_text(accession_no)
 
 
-def _termination_fee(text) -> "str | None":
+def _termination_fee(text: str | None) -> str | None:
     if not text:
         return None
     fee_spans = [m.span() for m in _TERM_FEE.finditer(text)]
     if not fee_spans:
         return None
-    best = None
-    best_dist = None
+    best: str | None = None
+    best_dist: int | None = None
     for m in _MONEY.finditer(text):
         gaps = [0 if m.start() < e and s < m.end()
                 else (s - m.end() if m.end() <= s else m.start() - e)
@@ -224,13 +233,19 @@ def _termination_fee(text) -> "str | None":
 
 
 def normalize_transaction(accession_no: str, form: str, *, target: str,
-                          buyer=None, announced_at=None, filed_at=None,
-                          text=None, obj=None, filer_cik=None,
-                          filer_name=None, subject_cik=None,
-                          subject_name=None, acquirer_cik=None, acquirer=None,
-                          offeror=None, security_title=None,
-                          document_name=None, known_at=None,
-                          source_url=None) -> Transaction:
+                          buyer: object = None, announced_at: str | None = None,
+                          filed_at: str | None = None, text: str | None = None,
+                          obj: object | None = None,
+                          filer_cik: str | int | None = None,
+                          filer_name: str | None = None,
+                          subject_cik: str | int | None = None,
+                          subject_name: str | None = None,
+                          acquirer_cik: str | int | None = None,
+                          acquirer: object = None, offeror: object = None,
+                          security_title: object = None,
+                          document_name: str | None = None,
+                          known_at: str | None = None,
+                          source_url: str | None = None) -> Transaction:
     parties = extract_transaction_parties(obj, text=text)
     resolved_target = (
         _str_or_none(target)
@@ -242,7 +257,7 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
     # Explicit args win, structured evidence next, spans last; the filer is
     # never copied into subject/target/acquirer.
     acquirer_name = (_str_or_none(acquirer) or _str_or_none(buyer)
-                     or parties.get("acquirer_name"))
+                     or _str_or_none(parties.get("acquirer_name")))
     deal_type = DEAL_TYPE_BY_FORM.get(form, "unknown")
     consideration = None
     if text:
@@ -254,7 +269,7 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
             consideration = money.group(0).strip() if money else None
     exchange = _EXCHANGE.search(text) if text else None
     expiry = _TENDER_EXPIRY.search(text) if text else None
-    method = parties.get("method") or "form-identity"
+    method = _str_or_none(parties.get("method")) or "form-identity"
     if (filer_cik is not None or filer_name is not None
             or subject_cik is not None or subject_name is not None
             or acquirer is not None or buyer is not None):
@@ -262,7 +277,7 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
     return Transaction(
         event_id=f"{resolved_target.upper()}:{deal_type}:{accession_no}",
         target=resolved_target,
-        buyer=buyer,
+        buyer=_str_or_none(buyer),
         deal_type=deal_type,
         announced_at=announced_at or filed_at,
         consideration=consideration,
@@ -279,15 +294,15 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
         status=resolve_transaction_status(text=text, obj=obj),
         accession_no=accession_no,
         source_accessions=(accession_no,),
-        filer_cik=_str_or_none(filer_cik) or parties.get("filer_cik"),
-        filer_name=_str_or_none(filer_name) or parties.get("filer_name"),
-        subject_cik=_str_or_none(subject_cik) or parties.get("subject_cik"),
-        subject_name=_str_or_none(subject_name) or parties.get("subject_name"),
-        acquirer_cik=_str_or_none(acquirer_cik) or parties.get("acquirer_cik"),
+        filer_cik=_str_or_none(filer_cik) or _str_or_none(parties.get("filer_cik")),
+        filer_name=_str_or_none(filer_name) or _str_or_none(parties.get("filer_name")),
+        subject_cik=_str_or_none(subject_cik) or _str_or_none(parties.get("subject_cik")),
+        subject_name=_str_or_none(subject_name) or _str_or_none(parties.get("subject_name")),
+        acquirer_cik=_str_or_none(acquirer_cik) or _str_or_none(parties.get("acquirer_cik")),
         acquirer_name=acquirer_name,
-        offeror=_str_or_none(offeror) or parties.get("offeror"),
+        offeror=_str_or_none(offeror) or _str_or_none(parties.get("offeror")),
         security_title=_str_or_none(security_title)
-        or parties.get("security_title"),
+        or _str_or_none(parties.get("security_title")),
         document_name=_str_or_none(document_name),
         known_at=_str_or_none(known_at) or filed_at,
         source_url=_str_or_none(source_url),
@@ -297,31 +312,30 @@ def normalize_transaction(accession_no: str, form: str, *, target: str,
 
 def update_transaction(previous: Transaction,
                        current: Transaction) -> Transaction:
-    merged = {}
+    updated = replace(previous)
     for f in fields(Transaction):
         name = f.name
-        if name == "event_id":
-            merged[name] = previous.event_id
-        elif name == "target":
-            merged[name] = previous.target
+        if name in ("event_id", "target"):
+            continue
         elif name == "buyer":
-            merged[name] = (current.buyer if current.buyer is not None
-                            else previous.buyer)
+            value = (current.buyer if current.buyer is not None
+                     else previous.buyer)
         elif name == "source_accessions":
-            merged[name] = (tuple(previous.source_accessions)
-                            + tuple(a for a in current.source_accessions
-                                    if a not in previous.source_accessions))
+            value = (tuple(previous.source_accessions)
+                     + tuple(a for a in current.source_accessions
+                             if a not in previous.source_accessions))
         elif name == "accession_no":
-            merged[name] = current.accession_no or previous.accession_no
+            value = current.accession_no or previous.accession_no
         else:
-            value = getattr(current, name)
-            merged[name] = value if value is not None else getattr(
-                previous, name)
-    return Transaction(**merged)
+            current_value = getattr(current, name)
+            value = (current_value if current_value is not None
+                     else getattr(previous, name))
+        object.__setattr__(updated, name, value)
+    return updated
 
 
-def diff_transaction(previous: Transaction, current: Transaction) -> dict:
-    out = {}
+def diff_transaction(previous: Transaction, current: Transaction) -> dict[str, list[object]]:
+    out: dict[str, list[object]] = {}
     for f in fields(Transaction):
         name = f.name
         old, new = getattr(previous, name), getattr(current, name)
@@ -333,11 +347,11 @@ def diff_transaction(previous: Transaction, current: Transaction) -> dict:
     return out
 
 
-def get_transaction_status(ticker_or_cik, *, as_of=None,
-                           limit=10) -> list:
+def get_transaction_status(ticker_or_cik: str | int, *, as_of: str | None = None,
+                           limit: int | None = 10) -> list[Transaction]:
     filings = list_sec_filings(ticker_or_cik, forms=list(TRANSACTION_FORMS),
                                as_of=as_of, limit=limit)
-    out = []
+    out: list[Transaction] = []
     for filing in filings:
         accession = getattr(filing, "accession_no", "")
         form = getattr(filing, "form", "")
@@ -359,7 +373,9 @@ def get_transaction_status(ticker_or_cik, *, as_of=None,
     return out
 
 
-def query_target_transactions(target, *, as_of=None, root=None, limit=200):
+def query_target_transactions(target: str, *, as_of: str | None = None,
+                              root: Path | str | None = None,
+                              limit: int = 200) -> list[dict[str, object]]:
     """Target -> transactions over ``sec_transactions`` (PIT)."""
     from . import store as _store
 
@@ -367,8 +383,9 @@ def query_target_transactions(target, *, as_of=None, root=None, limit=200):
                                      limit=limit)
 
 
-def query_acquirer_transactions(acquirer, *, as_of=None, root=None,
-                                limit=200):
+def query_acquirer_transactions(acquirer: str, *, as_of: str | None = None,
+                                root: Path | str | None = None,
+                                limit: int = 200) -> list[dict[str, object]]:
     """Acquirer -> transactions over ``sec_transactions`` (PIT)."""
     from . import store as _store
 

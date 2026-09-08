@@ -36,7 +36,7 @@ def _db_terminal(db_path: Path) -> bool:
 
 
 def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
-                  data_root, timeout_s: int = 170, as_of: str | None = None) -> None:
+                  data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None) -> None:
     """Launch one bounded normal-Pi run for a pending trigger.
 
     Success is exit 0 plus recorder completion; nonzero exit, timeout, or

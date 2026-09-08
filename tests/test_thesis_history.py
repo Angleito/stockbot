@@ -2,10 +2,12 @@
 
 import shutil
 
+from pathlib import Path
+
 import pytest
 
 from app.thesis.context import build_context
-from app.thesis.models import HistoricalStateUnavailable
+from app.thesis.models import HistoricalStateUnavailable, Thesis, ThesisStateSnapshot
 from app.thesis.repository import ThesisRepository
 
 T0 = "2026-01-01T00:00:00+00:00"
@@ -17,23 +19,28 @@ T5 = "2026-01-06T00:00:00+00:00"
 BEFORE = "2025-12-31T00:00:00+00:00"
 
 
-def _history_count(r, tid):
+def _as_seq(value: object):
+    assert isinstance(value, (list, tuple))
+    return value
+
+
+def _history_count(r: ThesisRepository, tid: str) -> int:
     return len(list((r.dir_for_thesis(tid) / "history").glob("*.yaml")))
 
 
-def _repo(tmp_path) -> ThesisRepository:
+def _repo(tmp_path: Path) -> ThesisRepository:
     return ThesisRepository(tmp_path / "theses")
 
 
-def _make(tmp_path, **kw):
-    kw.setdefault("claims", [{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}])
-    kw.setdefault("expressions", [{"expression_id": "expr:e1", "instrument": "equity",
-                                   "direction": "long", "structure": "equity"}])
+def _make(tmp_path: Path) -> Thesis:
     return _repo(tmp_path).create_thesis("NVDA datacenter demand thesis",
-                                         scope="NVDA", effective_at=T0, **kw)
+                                         scope="NVDA", effective_at=T0,
+                                         claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+                                         expressions=[{"expression_id": "expr:e1", "instrument": "equity",
+                                                       "direction": "long", "structure": "equity"}])
 
 
-def _set_claim_status(r, tid, cid, status, eff):
+def _set_claim_status(r: ThesisRepository, tid: str, cid: str, status: str, eff: str) -> Thesis:
     claims = []
     for c in r.load_thesis(tid).claims:
         d = c.to_dict()
@@ -43,7 +50,7 @@ def _set_claim_status(r, tid, cid, status, eff):
     return r.update_thesis(tid, claims=claims, effective_at=eff)
 
 
-def _set_expression_status(r, tid, eid, status, eff):
+def _set_expression_status(r: ThesisRepository, tid: str, eid: str, status: str, eff: str) -> Thesis:
     exprs = []
     for e in r.load_thesis(tid).expressions:
         d = e.to_dict()
@@ -53,11 +60,11 @@ def _set_expression_status(r, tid, eid, status, eff):
     return r.update_thesis(tid, expressions=exprs, effective_at=eff)
 
 
-def _claim_status(snap, cid):
+def _claim_status(snap: ThesisStateSnapshot, cid: str) -> str:
     return next(c["status"] for c in snap.thesis["claims"] if c["claim_id"] == cid)
 
 
-def test_create_writes_v1(tmp_path):
+def test_create_writes_v1(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA",
                         claims=[{"claim_id": "claim:c1", "statement": "s"}],
@@ -68,7 +75,7 @@ def test_create_writes_v1(tmp_path):
     assert snap.effective_at == t.created_at == T0
 
 
-def test_claim_status_history(tmp_path):
+def test_claim_status_history(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = _make(tmp_path)
     tid = t.thesis_id
@@ -80,7 +87,7 @@ def test_claim_status_history(tmp_path):
     assert _claim_status(r.load_state_as_of(tid, T3), "claim:c1") == "challenged"
 
 
-def test_assessment_and_expression_history(tmp_path):
+def test_assessment_and_expression_history(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     r.apply_research_result(tid, {"state": {"assessment": "strengthening"}},
@@ -90,7 +97,7 @@ def test_assessment_and_expression_history(tmp_path):
                             "run:t3", effective_at=T3)
     _set_expression_status(r, tid, "expr:e1", "flagged", T3)
 
-    def _expr(snap):
+    def _expr(snap: ThesisStateSnapshot) -> str:
         return next(e["status"] for e in snap.thesis["expressions"]
                     if e["expression_id"] == "expr:e1")
 
@@ -104,13 +111,14 @@ def test_assessment_and_expression_history(tmp_path):
     assert s3.state["assessment"] == "weakening" and _expr(s3) == "flagged"
 
 
-def _filing_rule(rid):
+def _filing_rule(rid: str) -> dict[str, object]:
+    no_exprs: list[str] = []
     return {"rule_id": rid, "rule_type": "new_filing", "enabled": True,
             "support_status": "supported", "support_reason": "",
-            "claim_ids": ["claim:c1"], "expression_ids": []}
+            "claim_ids": ["claim:c1"], "expression_ids": no_exprs}
 
 
-def test_questions_watch_history(tmp_path):
+def test_questions_watch_history(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     r.apply_research_result(tid, {
@@ -141,7 +149,7 @@ def test_questions_watch_history(tmp_path):
                r.load_state_as_of(tid, T1).questions["questions"])
 
 
-def test_same_effective_at_higher_version_wins(tmp_path):
+def test_same_effective_at_higher_version_wins(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     r.update_thesis(tid, scope="first", effective_at=T2)
@@ -151,7 +159,7 @@ def test_same_effective_at_higher_version_wins(tmp_path):
     assert snap.thesis["scope"] == "second"
 
 
-def test_legacy_lazy_migration(tmp_path):
+def test_legacy_lazy_migration(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     shutil.rmtree(r.dir_for_thesis(tid) / "history")
@@ -166,7 +174,7 @@ def test_legacy_lazy_migration(tmp_path):
         r.load_state_as_of(tid, T1)
 
 
-def test_build_context_pit_regression(tmp_path):
+def test_build_context_pit_regression(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     r.apply_research_result(tid, {"evidence_refs": [
@@ -189,7 +197,7 @@ def test_build_context_pit_regression(tmp_path):
     with pytest.raises(HistoricalStateUnavailable):
         build_context(r, tid, trig, known_at=BEFORE)
 
-def test_backdated_research_never_moves_live(tmp_path):
+def test_backdated_research_never_moves_live(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     _set_claim_status(r, tid, "claim:c1", "challenged", T4)
@@ -206,7 +214,7 @@ def test_backdated_research_never_moves_live(tmp_path):
     assert _history_count(r, tid) == n + 1
 
 
-def test_backdated_write_on_live_closed_writes_snapshot_only(tmp_path):
+def test_backdated_write_on_live_closed_writes_snapshot_only(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     _set_claim_status(r, tid, "claim:c1", "challenged", T4)
@@ -233,7 +241,7 @@ def test_backdated_write_on_live_closed_writes_snapshot_only(tmp_path):
     assert live_path.read_bytes() == live_bytes
 
 
-def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path):
+def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     n = _history_count(r, tid)
@@ -247,7 +255,7 @@ def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path):
     assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "unvalidated"
 
 
-def test_journal_gate_binds_known_at(tmp_path):
+def test_journal_gate_binds_known_at(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
@@ -266,7 +274,7 @@ def test_journal_gate_binds_known_at(tmp_path):
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2, run_id="run:a") is False
 
 
-def test_historical_memory_stamps_effective_at(tmp_path):
+def test_historical_memory_stamps_effective_at(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     r.apply_research_result(tid, {"memories_add": [{"memory_id": "m1", "text": "Desk note"}]},
@@ -279,7 +287,7 @@ def test_historical_memory_stamps_effective_at(tmp_path):
     assert "m1" not in build_context(r, tid, trig, known_at=T0).included_ids
 
 
-def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path):
+def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
@@ -293,13 +301,13 @@ def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path):
                          data_root=tmp_path, as_of=T1)
     got = tools_mod.execute_tool("thesis_show", {"id": tid}, "test-model", context=ctx)
     assert "error" not in got
-    assert [c["status"] for c in got["claims"] if c["claim_id"] == "claim:c1"] == ["unvalidated"]
+    assert [c["status"] for c in _as_seq(got["claims"]) if c["claim_id"] == "claim:c1"] == ["unvalidated"]
     over = tools_mod.execute_tool("thesis_show", {"id": tid, "as_of": T4},
                                   "test-model", context=ctx)
     assert "error" in over and over.get("error_type") == "invalid_tool_arguments"
 
 
-def test_thesis_create_at_cutoff_stamps_effective_at(tmp_path):
+def test_thesis_create_at_cutoff_stamps_effective_at(tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
@@ -311,11 +319,13 @@ def test_thesis_create_at_cutoff_stamps_effective_at(tmp_path):
                                  "test-model", context=ctx)
     assert "error" not in got
     repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
-    assert repo.load_thesis(got["thesis_id"]).created_at == T1
-    assert repo.load_state_as_of(got["thesis_id"], T1).reason == "thesis_created"
+    new_tid = got["thesis_id"]
+    assert isinstance(new_tid, str)
+    assert repo.load_thesis(new_tid).created_at == T1
+    assert repo.load_state_as_of(new_tid, T1).reason == "thesis_created"
 
 
-def test_historical_thesis_refine_appends_without_touching_live(tmp_path):
+def test_historical_thesis_refine_appends_without_touching_live(tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
@@ -337,14 +347,14 @@ def test_historical_thesis_refine_appends_without_touching_live(tmp_path):
     assert _claim_status(snap, "claim:c1") == "unvalidated"
     t1_ids = {c["claim_id"] for c in snap.thesis["claims"]}
     assert got.get("rules_added") and all(
-        set(r.get("claim_ids", ())) <= t1_ids for r in got["rules_added"])
+        set(r.get("claim_ids", ())) <= t1_ids for r in _as_seq(got["rules_added"]))
     live = repo.load_thesis(tid)
     assert [c.status for c in live.claims if c.claim_id == "claim:c1"] == ["challenged"]
     assert "NVDA networking demand also strong" not in [c.statement for c in live.claims]
     assert not (t1_ids - {"claim:c1"}) & {cid for r in repo.load_watch_rules(tid) for cid in r.claim_ids}
 
 
-def test_historical_watch_list_and_trigger_journal_known_at(tmp_path):
+def test_historical_watch_list_and_trigger_journal_known_at(tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
@@ -374,15 +384,15 @@ def test_historical_watch_list_and_trigger_journal_known_at(tmp_path):
     assert "error" in early
 
 
-def test_pit_day_injection_and_unsafe_tool_guard(tmp_path, monkeypatch):
+def test_pit_day_injection_and_unsafe_tool_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
     ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
                          data_root=tmp_path, as_of=T2)
-    seen = {}
+    seen: dict[str, object] = {}
 
-    def _fake_fundamentals(ticker, metric, as_of=None):
+    def _fake_fundamentals(ticker: str, metric: str, as_of: str | None = None) -> dict[str, object]:
         seen.update(ticker=ticker, metric=metric, as_of=as_of)
         return {"ticker": ticker, "metric": metric, "as_of": as_of}
 
@@ -391,9 +401,9 @@ def test_pit_day_injection_and_unsafe_tool_guard(tmp_path, monkeypatch):
                                  "test-model", context=ctx)
     assert "error" not in got
     assert seen["as_of"] == "2026-01-03"
-    calls = []
+    calls: list[tuple[str, str]] = []
 
-    def _must_not_run(ticker, concept):
+    def _must_not_run(ticker: str, concept: str) -> dict[str, object]:
         calls.append((ticker, concept))
         raise AssertionError("current-only tool must not execute under a cutoff")
 

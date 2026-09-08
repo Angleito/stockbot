@@ -22,14 +22,18 @@ class ContextBudgetExceeded(ValueError):
 def _tokens(text: str) -> int:
     return len(text) // 4
 
+def _journal_mtime(path: Path) -> float:
+    """Sort key: journal file modification time (newest first with reverse=True)."""
+    return path.stat().st_mtime
+
 
 @dataclass
 class ResearchContext:
-    thesis_packet: dict
-    evidence_refs: list = field(default_factory=list)
-    journal_excerpts: list = field(default_factory=list)
-    included_ids: list = field(default_factory=list)
-    omitted_ids: list = field(default_factory=list)
+    thesis_packet: dict[str, Any]
+    evidence_refs: list[dict[str, Any]] = field(default_factory=list)
+    journal_excerpts: list[dict[str, Any]] = field(default_factory=list)
+    included_ids: list[str] = field(default_factory=list)
+    omitted_ids: list[str] = field(default_factory=list)
     estimated_tokens: int = 0
     known_at: str = ""
 
@@ -54,7 +58,7 @@ def _journal_known_at(head: str) -> str | None:
     return None
 
 
-def _trigger_dict(trigger: Any) -> dict:
+def _trigger_dict(trigger: Any) -> dict[str, Any]:
     if hasattr(trigger, "to_dict"):
         return trigger.to_dict()
     if isinstance(trigger, dict):
@@ -96,7 +100,7 @@ def _build_context(
                 for m in raw_mem.get("memories", [])
             ]
         else:
-            memories = []
+            memories: list[dict[str, Any]] = []
         visible_memories = list(memories)
         pit_omitted: list[str] = []
         packet = {
@@ -147,7 +151,7 @@ def _build_context(
     # refs first, then newest-first with stable evidence_id tiebreak. Full dicts.
     from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
     trigger_refs = set(tdict.get("canonical_refs") or [])
-    ordered: list[dict] = []
+    ordered: list[dict[str, Any]] = []
     evidence_dir = thesis_dir / "evidence"
     if evidence_dir.is_dir():
         for f in sorted(evidence_dir.glob("*.yaml")):
@@ -157,7 +161,7 @@ def _build_context(
             if not ref.known_at or not _pit_visible(ref.known_at, data_cutoff):
                 continue  # missing, unparseable, or future-known: never visible
             ordered.append(ref.to_dict())
-    def _ev_key(e: dict) -> tuple[int, float, str]:
+    def _ev_key(e: dict[str, Any]) -> tuple[int, float, str]:
         dt = _as_dt(e.get("known_at") or "")
         ts = dt.timestamp() if dt is not None else float("-inf")
         return (0 if e.get("canonical_ref") in trigger_refs else 1, -ts, e.get("evidence_id") or "")
@@ -165,7 +169,7 @@ def _build_context(
     included: list[str] = []
     omitted: list[str] = list(pit_omitted)
     used = mandatory
-    evidence: list[dict] = []
+    evidence: list[dict[str, Any]] = []
     for e in ordered:
         cost = _tokens(json.dumps(e, sort_keys=True))
         if used + cost > max_tokens:
@@ -175,7 +179,7 @@ def _build_context(
         evidence.append(e)
         included.append(e["evidence_id"])
     evidence_tokens = _tokens(json.dumps(evidence, sort_keys=True))
-    def _packet_tokens(mem_list: list) -> int:
+    def _packet_tokens(mem_list: list[dict[str, Any]]) -> int:
         return _tokens(json.dumps({**packet, "memories": mem_list}, sort_keys=True))
     # Over budget: trim oldest memories first (newest-last on disk).
     kept = list(visible_memories)
@@ -191,10 +195,10 @@ def _build_context(
     if journal_dir.is_dir():
         journal_files = sorted(
             (p for p in journal_dir.glob("*.md") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
+            key=_journal_mtime,
             reverse=True,
         )
-    excerpts: list[dict] = []
+    excerpts: list[dict[str, Any]] = []
     for f in journal_files:
         try:
             head = "".join(f.read_text(encoding="utf-8").splitlines(keepends=True)[:_JOURNAL_HEAD_LINES])

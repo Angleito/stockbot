@@ -45,9 +45,9 @@ class RunOutcome:
     thesis_id: str
     trigger_id: str
     journal_path: str = ""
-    evidence_ids: tuple = ()
+    evidence_ids: tuple[str, ...] = ()
     processed: bool = False
-    tools_used: tuple = field(default_factory=tuple)
+    tools_used: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _utcnow() -> str:

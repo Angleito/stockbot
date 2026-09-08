@@ -11,7 +11,7 @@ from app.security.action_policy import (
 from app.security.context import RunSecurityContext, classify_intent
 
 
-def _run_security(user_turns=("Research AMD news.",)):
+def _run_security(user_turns: tuple[str, ...] = ("Research AMD news.",)) -> RunSecurityContext:
     return RunSecurityContext(
         original_intent=classify_intent(list(user_turns)),
         capabilities=frozenset({"research", "portfolio_read"}),

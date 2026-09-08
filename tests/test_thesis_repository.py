@@ -11,11 +11,15 @@ from app.thesis.repository import ThesisRepository
 from app.thesis.yaml import atomic_write_yaml, load_raw_yaml
 
 
-def _repo(tmp_path) -> ThesisRepository:
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+def _repo(tmp_path: Path) -> ThesisRepository:
     return ThesisRepository(tmp_path / "theses")
 
 
-def test_round_trip_create_load_list_update(tmp_path):
+def test_round_trip_create_load_list_update(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA demand stays strong", scope="NVDA", claims=["demand holds"])
     assert r.load_thesis(t.thesis_id).slug == t.slug
@@ -25,7 +29,7 @@ def test_round_trip_create_load_list_update(tmp_path):
     assert updated.scope == "NVDA datacenter" and updated.thesis_id == t.thesis_id
 
 
-def test_zero_and_multiple_expressions(tmp_path):
+def test_zero_and_multiple_expressions(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t0 = r.create_thesis("undecided thesis", scope="NVDA", claims=["c"])
     assert r.load_thesis(t0.thesis_id).expressions == ()
@@ -42,7 +46,7 @@ def test_zero_and_multiple_expressions(tmp_path):
     assert len(got) == 2 and {e.instrument for e in got} == {"option", "equity"}
 
 
-def test_unknown_open_vocab_structure_retained_verbatim(tmp_path):
+def test_unknown_open_vocab_structure_retained_verbatim(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     weird = "diagonalized quantum butterfly 7:11!!"
     t = r.create_thesis("weird structure", scope="NVDA", claims=["c"],
@@ -50,7 +54,7 @@ def test_unknown_open_vocab_structure_retained_verbatim(tmp_path):
     assert r.load_thesis(t.thesis_id).expressions[0].structure == weird
 
 
-def test_unknown_literals_retained(tmp_path):
+def test_unknown_literals_retained(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("unknown thesis", claims=["c"])
     loaded = r.load_thesis(t.thesis_id)
@@ -58,7 +62,7 @@ def test_unknown_literals_retained(tmp_path):
     assert loaded.expressions == () and loaded.unknowns == ()
 
 
-def test_thesis_vs_expression_assessments_stored_separately(tmp_path):
+def test_thesis_vs_expression_assessments_stored_separately(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     r.apply_research_result(t.thesis_id, {"state": {
@@ -72,7 +76,7 @@ def test_thesis_vs_expression_assessments_stored_separately(tmp_path):
     assert r.load_thesis(t.thesis_id).claims[0].status == "unvalidated"
 
 
-def test_malformed_and_schema_mismatch_yaml_rejected(tmp_path):
+def test_malformed_and_schema_mismatch_yaml_rejected(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     thesis_file = tmp_path / "theses" / t.slug / "thesis.yaml"
@@ -85,19 +89,21 @@ def test_malformed_and_schema_mismatch_yaml_rejected(tmp_path):
         r.load_thesis(t.thesis_id)
 
 
-def test_atomic_write_failure_leaves_old_valid_data(tmp_path, monkeypatch):
+def test_atomic_write_failure_leaves_old_valid_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     thesis_file = tmp_path / "theses" / t.slug / "thesis.yaml"
     before = thesis_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(yaml, "safe_dump", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+    monkeypatch.setattr(yaml, "safe_dump", _boom)
     with pytest.raises(RuntimeError):
         r.update_thesis(t.thesis_id, scope="CHANGED")
     assert thesis_file.read_text(encoding="utf-8") == before
     assert r.load_thesis(t.thesis_id).scope == "NVDA"
 
 
-def test_traversal_and_symlink_escape_rejected(tmp_path):
+def test_traversal_and_symlink_escape_rejected(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     with pytest.raises(ValueError):
@@ -112,7 +118,7 @@ def test_traversal_and_symlink_escape_rejected(tmp_path):
     assert not (outside / "evil.yaml").exists()
 
 
-def test_concurrent_writes_serialized(tmp_path):
+def test_concurrent_writes_serialized(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("concurrent thesis", scope="NVDA", claims=["c"])
     threads = [threading.Thread(target=r.append_journal_entry,
@@ -123,7 +129,7 @@ def test_concurrent_writes_serialized(tmp_path):
     assert len(list((tmp_path / "theses" / t.slug / "journal").glob("*.md"))) == 10
 
 
-def test_duplicate_ids_rejected(tmp_path):
+def test_duplicate_ids_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Thesis.from_dict({"schema_version": 1, "thesis_id": "thesis:x", "slug": "s", "status": "active",
                           "created_at": "", "updated_at": "", "user_thesis": "u", "scope": "unknown",
@@ -142,7 +148,7 @@ def test_duplicate_ids_rejected(tmp_path):
                           "requirements": []}, "<t>")
 
 
-def test_cross_thesis_refs_rejected(tmp_path):
+def test_cross_thesis_refs_rejected(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     with pytest.raises(ValueError):
@@ -153,7 +159,7 @@ def test_cross_thesis_refs_rejected(tmp_path):
             "claim_ids": ["claim:absent"]}]}, "run:x")
 
 
-def test_pause_resume_close_transitions_enforced(tmp_path):
+def test_pause_resume_close_transitions_enforced(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     assert r.pause_thesis(t.thesis_id).status == "paused"
@@ -167,7 +173,7 @@ def test_pause_resume_close_transitions_enforced(tmp_path):
         r.create_trigger(t.thesis_id, canonical_refs=["x"], summary="s")
 
 
-def test_quarantine_lists_corrupt_child_while_healthy_ids_proceed(tmp_path):
+def test_quarantine_lists_corrupt_child_while_healthy_ids_proceed(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     a = r.create_thesis("healthy thesis", scope="NVDA", claims=["c"])
     b = r.create_thesis("doomed thesis", scope="NVDA", claims=["c"])
@@ -188,7 +194,7 @@ def test_quarantine_lists_corrupt_child_while_healthy_ids_proceed(tmp_path):
         r.load_thesis(b.thesis_id)
 
 
-def test_duplicate_thesis_ids_stay_loud(tmp_path):
+def test_duplicate_thesis_ids_stay_loud(tmp_path: Path) -> None:
     import shutil
 
     r = _repo(tmp_path)
@@ -198,7 +204,7 @@ def test_duplicate_thesis_ids_stay_loud(tmp_path):
         r.list_theses()
 
 
-def test_answer_questions_marks_answered(tmp_path):
+def test_answer_questions_marks_answered(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("q thesis", scope="NVDA", claims=["c"])
     r.answer_questions(t.thesis_id, [])  # empty is a no-op
@@ -216,7 +222,7 @@ def test_answer_questions_marks_answered(tmp_path):
         r.answer_questions(t.thesis_id, [{"question_id": "q:absent", "answer": "x"}])
 
 
-def test_normalize_watch_heals_and_load_watch_rules(tmp_path):
+def test_normalize_watch_heals_and_load_watch_rules(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("w thesis", scope="NVDA", claims=["c"])
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
@@ -231,18 +237,20 @@ def test_normalize_watch_heals_and_load_watch_rules(tmp_path):
     assert rule.rule_id == "rule:odd" and rule.enabled is False
     assert rule.support_status == "unsupported" and rule.support_reason
 
-def _evidence_files(repo: ThesisRepository, thesis_id: str) -> dict:
+def _evidence_files(repo: ThesisRepository, thesis_id: str) -> dict[str, object]:
     thesis = repo.load_thesis(thesis_id)
     evdir = repo.dir_for_thesis(thesis.thesis_id) / "evidence"
-    out = {}
+    out: dict[str, object] = {}
     for f in sorted(evdir.glob("*.yaml")):
         raw = load_raw_yaml(f)
         if isinstance(raw, dict) and raw.get("thesis_id") == thesis_id:
-            out[raw.get("evidence_id")] = raw
+            eid = raw.get("evidence_id")
+            assert isinstance(eid, str)
+            out[eid] = raw
     return out
 
 
-def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path):
+def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     cutoff = "2026-01-01T10:00:00+00:00"
@@ -259,13 +267,13 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path):
                                "summary": "forged", "known_at": "2026-01-01T09:30:00+00:00"}],
             "journal_entry": dict(journal)}, "run:x")
     stored = _evidence_files(r, t.thesis_id)
-    assert "ev:forged" not in stored and stored["ev:future"]["canonical_ref"] == "F"
+    assert "ev:forged" not in stored and _as_dict(stored["ev:future"])["canonical_ref"] == "F"
     out = r.apply_research_result(t.thesis_id, {"trigger_id": trig.trigger_id,
         "evidence_refs": [{"evidence_id": "ev:ok", "canonical_ref": "V",
                            "summary": "v2", "known_at": cutoff}],
         "journal_entry": dict(journal, entry_id="journal:hist-ok")}, "run:y")
     assert out["evidence"] == 1
     stored = _evidence_files(r, t.thesis_id)
-    assert stored["ev:ok"]["canonical_ref"] == "V"
+    assert _as_dict(stored["ev:ok"])["canonical_ref"] == "V"
 
 

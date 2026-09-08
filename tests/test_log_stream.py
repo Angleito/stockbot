@@ -18,7 +18,7 @@ def _record(message: str) -> logging.LogRecord:
     return logging.LogRecord("app.test", logging.INFO, __file__, 1, message, (), None)
 
 
-def test_streams_record_to_running_server(capsys):
+def test_streams_record_to_running_server(capsys: pytest.CaptureFixture[str]):
     server = ThreadingHTTPServer(("127.0.0.1", 0), LogServerHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -44,8 +44,8 @@ def test_emit_with_server_down_does_not_raise():
     handler.emit(_record("hello log stream"))  # must not raise
 
 
-def test_cmd_log_server_bind_error_exits(monkeypatch, capsys):
-    def boom(port):
+def test_cmd_log_server_bind_error_exits(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    def boom(port: int) -> None:
         raise OSError("in use")
 
     monkeypatch.setattr(cli, "run_log_server", boom)

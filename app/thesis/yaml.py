@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, Protocol, Self, TypeVar
 
 import yaml
 
@@ -18,7 +18,15 @@ except ImportError:  # pragma: no cover
 
 from app.thesis.models import SCHEMA_VERSION
 
-T = TypeVar("T")
+_M = TypeVar("_M", bound="YamlModel")
+
+
+class YamlModel(Protocol):
+    """Structural thesis-model surface consumed by load_yaml (all models share from_dict)."""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], path: str = ..., /) -> Self:
+        ...
 
 
 def _root_resolved(root: Path | str) -> Path:
@@ -42,7 +50,7 @@ def _resolve_inside(root: Path | str, path: Path | str) -> Path:
     return dest_r
 
 
-def load_yaml(path: Path | str, model_type: type[T]) -> T:
+def load_yaml(path: Path | str, model_type: type[_M]) -> _M:
     """Safe-load a mapping YAML file, require schema v1, validate and return."""
     p = Path(path)
     try:
@@ -62,7 +70,7 @@ def load_yaml(path: Path | str, model_type: type[T]) -> T:
     return model_type.from_dict(data, str(p))
 
 
-def load_raw_yaml(path: Path | str) -> dict:
+def load_raw_yaml(path: Path | str) -> dict[str, Any]:
     """Safe-load + mapping/schema check without model validation."""
     p = Path(path)
     try:
@@ -76,7 +84,7 @@ def load_raw_yaml(path: Path | str) -> dict:
     return data
 
 
-def atomic_write_yaml(path: Path | str, value: dict, root: Path | str) -> Path:
+def atomic_write_yaml(path: Path | str, value: dict[str, Any], root: Path | str) -> Path:
     """Validate-then-replace ``path`` atomically under ``root``.
 
     Writes a same-directory temp file, flushes + fsyncs, loads it back to
@@ -107,7 +115,7 @@ def atomic_write_yaml(path: Path | str, value: dict, root: Path | str) -> Path:
     return dest
 
 
-def atomic_write_json(path: Path | str, value: dict, root: Path | str) -> Path:
+def atomic_write_json(path: Path | str, value: dict[str, Any], root: Path | str) -> Path:
     """Same temp/flush/fsync/atomic-replace discipline as YAML, for JSON intents."""
     if not isinstance(value, dict):
         raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")

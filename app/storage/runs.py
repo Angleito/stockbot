@@ -18,6 +18,7 @@ import threading
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Optional
 
 from ..config import get_data_root
@@ -113,7 +114,7 @@ class RunRecorder:
         as_of: Optional[str],
         model: str,
         provider: str,
-        model_parameters: dict,
+        model_parameters: dict[str, Any],
         agent_version: str,
         prompt_version: str,
         tool_registry_version: str,
@@ -215,7 +216,7 @@ class RunRecorder:
                 self._disable(exc)
             return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
         with self._lock:
             if self._conn is not None:
                 try:
@@ -256,7 +257,7 @@ class RunRecorder:
         success: Optional[bool] = None,
         error_type: Optional[str] = None,
         evidence_ids: Optional[list[str]] = None,
-        metadata: Optional[dict] = None,
+        metadata: Optional[dict[str, Any]] = None,
         started_at: Optional[str] = None,
         completed_at: Optional[str] = None,
         duration_ms: Optional[float] = None,
@@ -270,6 +271,7 @@ class RunRecorder:
             if not self.enabled:
                 return None
             try:
+                assert self._conn is not None
                 self._note_round(round)
                 started = started_at or _now()
                 completed = completed_at or _now()
@@ -341,6 +343,7 @@ class RunRecorder:
             if not self.enabled:
                 return
             try:
+                assert self._conn is not None
                 self._note_round(round)
                 message = redact_text(error_message)[:2000] if error_message is not None else None
                 self._conn.execute(
@@ -389,6 +392,7 @@ class RunRecorder:
                 return
             try:
                 self._note_round(round)
+                assert self._conn is not None
                 self._conn.execute(
                     "INSERT INTO evidence (evidence_id, run_id, tool_call_id, round,"
                     " tool_name, rendered_hash, rendered_bytes, estimated_tokens,"
@@ -424,6 +428,7 @@ class RunRecorder:
                 return None
             try:
                 created = _now()
+                assert self._conn is not None
                 sequence = self._conn.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM security_events"
                     " WHERE run_id = ?",
@@ -460,7 +465,7 @@ class RunRecorder:
         model: str,
         started_at: str,
         completed_at: str,
-        usage: Optional[dict] = None,
+        usage: Optional[dict[str, Any]] = None,
         finish_reason: Optional[str] = None,
         tool_call_count: int = 0,
         provider_request_id: Optional[str] = None,
@@ -475,6 +480,7 @@ class RunRecorder:
             try:
                 self._note_round(round)
                 self.model_calls += 1
+                assert self._conn is not None
                 usage = usage or {}
                 input_tokens = int(usage.get("prompt_tokens", 0))
                 output_tokens = int(usage.get("completion_tokens", 0))
@@ -524,6 +530,7 @@ class RunRecorder:
             try:
                 completed_at = _now()
                 message = redact_text(error_message)[:2000] if error_message is not None else None
+                assert self._conn is not None
                 answer_hash = hashlib.sha256(answer.encode()).hexdigest() if answer else None
                 duration = (
                     _duration_ms(self.started_at, completed_at) if self.started_at else None
@@ -561,7 +568,7 @@ class RunRecorder:
 
     @staticmethod
     def _estimate_cost(
-        model: str, input_tokens: int, output_tokens: int, usage: dict
+        model: str, input_tokens: int, output_tokens: int, usage: dict[str, Any]
     ) -> float:
         """Provider-reported usage.cost wins; else the static list-price table."""
         cost = usage.get("cost")
@@ -658,11 +665,11 @@ def get_current_recorder() -> Optional[RunRecorder]:
     return _current_recorder.get()
 
 
-def set_current_recorder(recorder: RunRecorder) -> Token:
+def set_current_recorder(recorder: RunRecorder) -> Token[Optional[RunRecorder]]:
     return _current_recorder.set(recorder)
 
 
-def reset_current_recorder(token: Token) -> None:
+def reset_current_recorder(token: Token[Optional[RunRecorder]]) -> None:
     _current_recorder.reset(token)
 
 
@@ -677,7 +684,7 @@ def _query_conn() -> Optional[sqlite3.Connection]:
     return conn
 
 
-def list_runs(limit: int = 20) -> list[dict]:
+def list_runs(limit: int = 20) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -693,7 +700,7 @@ def list_runs(limit: int = 20) -> list[dict]:
         return []
 
 
-def get_run(run_id: str) -> Optional[dict]:
+def get_run(run_id: str) -> Optional[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -709,7 +716,7 @@ def get_run(run_id: str) -> Optional[dict]:
         return None
 
 
-def get_events(run_id: str) -> list[dict]:
+def get_events(run_id: str) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -725,7 +732,7 @@ def get_events(run_id: str) -> list[dict]:
         return []
 
 
-def get_tool_calls(run_id: str) -> list[dict]:
+def get_tool_calls(run_id: str) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -741,7 +748,7 @@ def get_tool_calls(run_id: str) -> list[dict]:
         return []
 
 
-def get_model_calls(run_id: str) -> list[dict]:
+def get_model_calls(run_id: str) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -757,7 +764,7 @@ def get_model_calls(run_id: str) -> list[dict]:
         return []
 
 
-def get_security_events(run_id: str) -> list[dict]:
+def get_security_events(run_id: str) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -774,7 +781,7 @@ def get_security_events(run_id: str) -> list[dict]:
         return []
 
 
-def get_security_summary(run_id: str) -> dict:
+def get_security_summary(run_id: str) -> dict[str, int]:
     """Counts of security events grouped by decision."""
     counts: dict[str, int] = {
         "allowed": 0,
@@ -790,7 +797,7 @@ def get_security_summary(run_id: str) -> dict:
     return counts
 
 
-def get_evidence(run_id: str) -> list[dict]:
+def get_evidence(run_id: str) -> list[dict[str, Any]]:
     try:
         conn = _query_conn()
         if conn is None:

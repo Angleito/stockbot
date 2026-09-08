@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,7 +26,7 @@ _REQUIREMENT_STATUSES = frozenset({"open", "answered"})
 _MAX_QUESTIONS = 3
 
 
-def _req_str(d: dict, key: str, where: str) -> str:
+def _req_str(d: dict[str, Any], key: str, where: str) -> str:
     v = d.get(key)
     if not isinstance(v, str) or not v.strip():
         raise ValueError(f"{where}: '{key}' must be a non-empty string")
@@ -40,14 +41,14 @@ def _unknown_str(v: Any, key: str, where: str) -> str:
     raise ValueError(f"{where}: '{key}' must be a string, got {type(v).__name__}")
 
 
-def _str_list(d: dict, key: str, where: str) -> list:
+def _str_list(d: dict[str, Any], key: str, where: str) -> list[str]:
     vals = d.get(key, [])
     if not isinstance(vals, list) or not all(isinstance(i, str) for i in vals):
         raise ValueError(f"{where}: '{key}' must be a list of strings")
     return list(vals)
 
 
-def _as_list(d: dict, key: str, where: str) -> list:
+def _as_list(d: dict[str, Any], key: str, where: str) -> list[Any]:
     vals = d.get(key, [])
     if not isinstance(vals, list):
         raise ValueError(f"{where}: '{key}' must be a list, got {type(vals).__name__}")
@@ -60,7 +61,7 @@ class IntakeQuestion:
     question: str
     question_type: str = UNKNOWN
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "question_id": self.question_id,
             "question": self.question,
@@ -68,7 +69,7 @@ class IntakeQuestion:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, path: str = "<intake>") -> IntakeQuestion:
+    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeQuestion:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: question must be a mapping, got {type(d).__name__}")
         qid = d.get("question_id") or new_question_id()
@@ -79,7 +80,7 @@ class IntakeQuestion:
             question_type=_unknown_str(d.get("question_type", UNKNOWN), "question_type", where),
         )
 
-def _validate_claim(c: Any, path: str) -> dict:
+def _validate_claim(c: Any, path: str) -> dict[str, Any]:
     if not isinstance(c, dict):
         raise ValueError(f"{path}: claim must be a mapping, got {type(c).__name__}")
     cid = c.get("claim_id") or new_claim_id()
@@ -93,7 +94,7 @@ def _validate_claim(c: Any, path: str) -> dict:
     }
 
 
-def _validate_expression(e: Any, path: str) -> dict:
+def _validate_expression(e: Any, path: str) -> dict[str, Any]:
     if not isinstance(e, dict):
         raise ValueError(f"{path}: expression must be a mapping, got {type(e).__name__}")
     eid = new_expression_id()
@@ -110,7 +111,7 @@ def _validate_expression(e: Any, path: str) -> dict:
     status = _unknown_str(e.get("status", "undecided"), "status", where)
     if status not in _EXPRESSION_STATUSES:
         raise ValueError(f"{where}: 'status' must be one of {sorted(_EXPRESSION_STATUSES)}, got {status!r}")
-    out = {
+    out: dict[str, Any] = {
         "expression_id": eid,
         "intent": _unknown_str(e.get("intent", UNKNOWN), "intent", where),
         "instrument": instrument,
@@ -123,7 +124,7 @@ def _validate_expression(e: Any, path: str) -> dict:
         "status": status,
     }
     for k in ("leverage", "parameters"):
-        v = e.get(k, {})
+        v: dict[str, Any] = e.get(k, {})
         if v is None:
             v = {}
         if not isinstance(v, dict):
@@ -131,7 +132,7 @@ def _validate_expression(e: Any, path: str) -> dict:
         out[k] = dict(v)
     return out
 
-def _validate_requirement(r: Any, path: str, expression_ids: set) -> dict:
+def _validate_requirement(r: Any, path: str, expression_ids: set[str]) -> dict[str, Any]:
     if not isinstance(r, dict):
         raise ValueError(f"{path}: requirement must be a mapping, got {type(r).__name__}")
     rid = r.get("requirement_id") or new_requirement_id()
@@ -162,13 +163,13 @@ def _validate_requirement(r: Any, path: str, expression_ids: set) -> dict:
 class IntakeProposal:
     user_thesis: str
     scope: str = UNKNOWN
-    claims: tuple = ()
-    assumptions: tuple = ()
-    invalidators: tuple = ()
-    unknowns: tuple = ()
-    expressions: tuple = ()
-    requirements: tuple = ()
-    questions: tuple = ()
+    claims: tuple[dict[str, Any], ...] = ()
+    assumptions: tuple[str, ...] = ()
+    invalidators: tuple[str, ...] = ()
+    unknowns: tuple[str, ...] = ()
+    expressions: tuple[dict[str, Any], ...] = ()
+    requirements: tuple[dict[str, Any], ...] = ()
+    questions: tuple[IntakeQuestion, ...] = ()
 
     def __post_init__(self) -> None:
         self.validate("<intake>")
@@ -203,7 +204,7 @@ class IntakeProposal:
                     f"{r['expression_id']!r}"
                 )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "user_thesis": self.user_thesis,
             "scope": self.scope,
@@ -217,7 +218,7 @@ class IntakeProposal:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, path: str = "<intake>") -> IntakeProposal:
+    def from_dict(cls, d: dict[str, Any], path: str = "<intake>") -> IntakeProposal:
         if not isinstance(d, dict):
             raise ValueError(f"{path}: proposal must be a mapping, got {type(d).__name__}")
         where = f"{path}: proposal"
@@ -226,7 +227,7 @@ class IntakeProposal:
             scope = UNKNOWN
         if not isinstance(scope, str):
             raise ValueError(f"{where}: 'scope' must be a string, got {type(scope).__name__}")
-        expressions: list[dict] = []
+        expressions: list[dict[str, Any]] = []
         for e in _as_list(d, "expressions", where):
             validated = _validate_expression(e, path)
             expressions.append(validated)
@@ -260,7 +261,7 @@ def _research_only_context(request_context: Any) -> Any:
     return request_context
 
 
-def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict:
+def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict[str, Any]:
     return {
         "expression_id": new_expression_id(),
         "intent": intent,
@@ -286,7 +287,7 @@ def _expression_choice_question() -> IntakeQuestion:
     )
 
 
-def _strategy_expression(combined: str) -> dict | None:
+def _strategy_expression(combined: str) -> dict[str, Any] | None:
     if re.search(r"\bputs?\b", combined):
         return _expr(intent="bearish", instrument="option", direction="long", structure="long puts")
     if re.search(r"\bcalls?\b", combined):
@@ -298,7 +299,7 @@ def _strategy_expression(combined: str) -> dict | None:
     return None
 
 
-def _local_interpret(text: str, answers: dict) -> IntakeProposal:
+def _local_interpret(text: str, answers: dict[str, Any]) -> IntakeProposal:
     blob = " ".join(str(v) for v in answers.values() if isinstance(v, (str, int, float)))
     blob = blob.lower()
     t = text.lower()
@@ -311,9 +312,7 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
         "assumptions": (),
         "invalidators": (),
         "unknowns": (UNKNOWN,),
-        "expressions": (),
         "requirements": (),
-        "questions": (),
     }
     # Showcase: AI-infra repricing + answers wanting puts and post-selloff accumulation.
     if (
@@ -323,9 +322,8 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
         and ("accumulat" in combined or "selloff" in combined or "sell-off" in combined)
     ):
         return IntakeProposal(
-            **{
-                **base,
-                "expressions": (
+            **base,
+            expressions=(
                     _expr(intent="bearish", instrument="option", direction="long", structure="long puts"),
                     _expr(
                         intent="bullish",
@@ -334,14 +332,12 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
                         structure="post-selloff equity accumulation",
                     ),
                 ),
-            }
         )
     # "own it for ten years" maps to obvious long-equity intent, no options questions.
     if re.search(r"\bten years\b|\b10 years\b|\bten-year\b", combined):
         return IntakeProposal(
-            **{
-                **base,
-                "expressions": (
+            **base,
+            expressions=(
                     _expr(
                         intent="bullish",
                         instrument="equity",
@@ -350,21 +346,20 @@ def _local_interpret(text: str, answers: dict) -> IntakeProposal:
                         horizon="long-term",
                     ),
                 ),
-            }
         )
     # "still deciding" persists zero expressions rather than choosing one.
     if "still deciding" in combined:
         return IntakeProposal(**base)
     strat = _strategy_expression(combined)
     if strat is not None:
-        return IntakeProposal(**{**base, "expressions": (strat,)})
+        return IntakeProposal(**base, expressions=(strat,))
     # No strategy stated: one expression-choice question, never a recommendation.
-    return IntakeProposal(**{**base, "questions": (_expression_choice_question(),)})
+    return IntakeProposal(**base, questions=(_expression_choice_question(),))
 
 
 def interpret_idea(
     text: str,
-    answers: dict | None = None,
+    answers: dict[str, Any] | None = None,
     request_context: Any = None,
 ) -> IntakeProposal:
     """Normalize ``text`` (+ optional ``answers``) into a validated IntakeProposal."""
@@ -381,15 +376,15 @@ _SETUP_QUESTION_ID = "setup:scope"
 
 
 def build_initial_watch_rules(
-    scope: str, requirements: Any, *, claim_ids: list = (), expression_ids: list = ()
-) -> list[dict]:
+    scope: str, requirements: Any, *, claim_ids: Sequence[str] = (), expression_ids: Sequence[str] = ()
+) -> list[dict[str, Any]]:
     """Supported semantic rules only: explicit ticker scope -> ``new_filing`` plus
     any requirement whose type already names a supported monitor. No thresholds."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the table
 
     cids = [c for c in (claim_ids or []) if isinstance(c, str) and c]
     eids = [e for e in (expression_ids or []) if isinstance(e, str) and e]
-    rules: list[dict] = []
+    rules: list[dict[str, Any]] = []
     if _SCOPE_RE.fullmatch((scope or "").strip()) and "new_filing" in SUPPORTED_HANDLERS and (cids or eids):
         rules.append({
             "rule_id": new_rule_id(),
@@ -419,7 +414,7 @@ def build_initial_watch_rules(
     return rules
 
 
-def setup_needed_question() -> dict:
+def setup_needed_question() -> dict[str, Any]:
     return {
         "question_id": _SETUP_QUESTION_ID,
         "text": "Which ticker should this thesis monitor? Reply with the single ticker symbol (e.g. NVDA).",
@@ -427,7 +422,7 @@ def setup_needed_question() -> dict:
     }
 
 
-def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict:
+def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
     """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
 
     Unresolvable scope persists a setup question instead of a fake active
@@ -449,8 +444,8 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, ef
         watch_rules=rules,
         effective_at=effective_at,
     )
-    missing: list[dict] = []
-    questions_add: list[dict] = []
+    missing: list[dict[str, Any]] = []
+    questions_add: list[dict[str, Any]] = []
     for q in proposal.questions or ():
         if isinstance(q, dict):
             qid, text = q.get("question_id") or new_question_id(), q.get("question") or q.get("text", "")
@@ -473,7 +468,7 @@ def create_thesis_from_proposal(repository: Any, proposal: IntakeProposal, *, ef
     }
 
 
-def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
+def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict[str, Any]:
     """Pure merge preview: added claims/expressions/requirements plus merged payload."""
     old_claims = {c.statement for c in thesis.claims}
     claims = [c.to_dict() for c in thesis.claims]
@@ -505,7 +500,7 @@ def plan_refinement(thesis: Any, proposal: IntakeProposal) -> dict:
     }
 
 
-def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict:
+def apply_refinement(repository: Any, thesis_id: str, plan: dict[str, Any], proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, Any]:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the handler table
 

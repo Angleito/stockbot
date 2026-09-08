@@ -4,7 +4,9 @@ Offline: app.sec seams are monkeypatched at the tools.sec boundary; no
 network, no edgar import.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -43,14 +45,44 @@ SEC_SUITE = [
 ]
 
 
-def _research_context():
+def _research_context() -> RequestContext:
     return RequestContext("research", frozenset({Capability.RESEARCH}))
 
 
-def _result(**over):
-    base = dict(
+def _tool_names(schemas: object) -> set[str]:
+    """Tool-schema names from untyped TOOLS data (app/tools.py boundary)."""
+    assert isinstance(schemas, list)
+    names: set[str] = set()
+    for entry in schemas:
+        assert isinstance(entry, dict)
+        function = entry.get("function")
+        assert isinstance(function, dict)
+        name = function.get("name")
+        assert isinstance(name, str)
+        names.add(name)
+    return names
+
+
+def _as_seq(value: object):
+    """list/tuple from a tool-result envelope (app/tools.py boundary)."""
+    assert isinstance(value, (list, tuple))
+    return value
+
+
+def _as_dict(value: object):
+    """dict from a tool-result envelope (app/tools.py boundary)."""
+
+    assert isinstance(value, dict)
+    return value
+
+
+
+def _result(entities: tuple[EntityCandidate, ...] = (), text_hits: tuple[SECTextHit, ...] = (), warnings: tuple[str, ...] = ("1 partition queued",), errors: tuple[str, ...] = ()) -> SECSearchResult:
+    return SECSearchResult(
         search_id="s1",
         request=SECSearchRequest(query="Acme Labs"),
+        entities=entities,
+        text_hits=text_hits,
         coverage=SearchCoverage(
             status="partial", sources_attempted=("entity", "efts"),
             sources_completed=("entity",), sources_failed=(),
@@ -62,24 +94,21 @@ def _result(**over):
             query="Acme Labs", status="complete", results_reported=1,
             results_retrieved=1, pages_retrieved=1, pit_basis="known_at",
         ),),
-        warnings=("1 partition queued",), errors=(),
+        warnings=warnings, errors=errors,
         retrieval_order=("entity", "efts"),
         evidence_packet_ids=("entity:1234567",),
     )
-    base.update(over)
-    return SECSearchResult(**base)
 
 
-def test_exact_inventory_registered():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+def test_exact_inventory_registered() -> None:
+    names = _tool_names(tools.TOOLS)
     assert set(SEC_SUITE) <= names
 
 
 def test_every_new_tool_has_handler_capability_domain_envelope():
     from app.security.action_policy import TOOL_DOMAINS
     from app.security.context_gateway import TOOL_ENVELOPES
-
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+    names = _tool_names(tools.TOOLS)
     for name in SEC_SUITE:
         assert name in names
         assert name in tools._DIRECT_HANDLERS
@@ -96,8 +125,7 @@ def test_thesis_domains_split_from_sec_suite():
     assert {tools.TOOL_CAPABILITIES[name] for name in thesis} == {Capability.RESEARCH}
 
 
-def test_get_filing_section_retired():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+    names = _tool_names(tools.TOOLS)
     assert "get_filing_section" not in names
     assert "get_filing_section" not in tools._DIRECT_HANDLERS
     assert "get_filing_section" not in tools.TOOL_CAPABILITIES
@@ -105,8 +133,7 @@ def test_get_filing_section_retired():
     assert "error" in result
 
 
-def test_find_sec_company_retired_no_alias():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+    names = _tool_names(tools.TOOLS)
     assert "find_sec_company" not in names
     assert "find_sec_company" not in tools._DIRECT_HANDLERS
     assert "find_sec_company" not in tools.TOOL_CAPABILITIES
@@ -114,8 +141,7 @@ def test_find_sec_company_retired_no_alias():
     assert "error" in result
 
 
-def test_get_institutional_ownership_retired():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+    names = _tool_names(tools.TOOLS)
     assert "get_institutional_ownership" not in names
     assert "get_institutional_ownership" not in tools._DIRECT_HANDLERS
     assert "get_institutional_ownership" not in tools.TOOL_CAPABILITIES
@@ -127,7 +153,7 @@ def test_search_tools_insider_sale_returns_two_schemas_only():
     result = tools.execute_tool(
         "search_tools", {"query": "insider sale"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in result["schemas"]}
+    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
     assert found == {"get_insider_activity", "get_planned_insider_sales"}
 
 
@@ -135,18 +161,22 @@ def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
         "search_tools", {"domain": "ownership"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in result["schemas"]}
+    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
     assert found == {"search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"}
 
 
-def test_list_sec_filings_dispatch_wraps_records(monkeypatch):
+def test_list_sec_filings_dispatch_wraps_records(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = SimpleNamespace(to_dict=lambda: {"accession_no": "0000000001-26-000001"})
-    monkeypatch.setattr(tools.sec, "list_sec_filings", lambda *a, **k: [fake])
+
+    def _fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return [fake]
+
+    monkeypatch.setattr(tools.sec, "list_sec_filings", _fake_list)
     result = tools.execute_tool(
         "list_sec_filings", {"identifier": "FAKE"}, "test", context=_research_context()
     )
     assert result["count"] == 1
-    assert result["filings"][0]["accession_no"] == "0000000001-26-000001"
+    assert _as_seq(result["filings"])[0]["accession_no"] == "0000000001-26-000001"
     assert result["source"] == "SEC EDGAR"
 
 
@@ -157,27 +187,31 @@ def test_list_sec_filings_rejects_old_ticker_key():
     assert result["error_type"] == "invalid_tool_arguments"
 
 
-def test_find_sec_entities_dispatch_carries_verification(monkeypatch):
+def test_find_sec_entities_dispatch_carries_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     result_obj = _result(entities=(EntityCandidate(
         cik=1234567, name="Acme Labs Inc", tickers=(), exchange=None,
         match_source="cik-lookup", match_score=1.0, match_type="exact_name",
         verification_status="verified", entity_id="sec:cik:1234567",
     ),))
-    monkeypatch.setattr(tools.sec, "find_sec_entities", lambda *a, **k: result_obj)
+
+    def _fake_find(*args: object, **kwargs: object) -> SECSearchResult:
+        return result_obj
+
+    monkeypatch.setattr(tools.sec, "find_sec_entities", _fake_find)
     result = tools.execute_tool(
         "find_sec_entities", {"query": "Acme Labs"}, "test", context=_research_context()
     )
     assert result["search_id"] == "s1"
-    assert result["entities"][0]["verification_status"] == "verified"
-    assert result["coverage"]["status"] == "partial"
+    assert _as_seq(result["entities"])[0]["verification_status"] == "verified"
+    assert _as_dict(result["coverage"])["status"] == "partial"
     assert result["backfill_jobs"] == ["job-1"]
-    assert list(result["evidence_packet_ids"]) == ["entity:1234567"]
+    assert list(_as_seq(result["evidence_packet_ids"])) == ["entity:1234567"]
     assert result["pit_basis"] == "known_at"
-    assert result["attempts"][0]["backend"] == "entity"
+    assert _as_seq(result["attempts"])[0]["backend"] == "entity"
     assert result["source"] == "SEC EDGAR"
 
 
-def test_search_sec_filings_dispatch_full_packet(monkeypatch):
+def test_search_sec_filings_dispatch_full_packet(monkeypatch: pytest.MonkeyPatch) -> None:
     result_obj = _result(text_hits=(SECTextHit(
         search_id="s1", attempt_id="s1-efts-1", query="Acme Labs",
         accession_no="0000000001-26-000001", form="D",
@@ -187,12 +221,12 @@ def test_search_sec_filings_dispatch_full_packet(monkeypatch):
     ),))
 
     class _FakeService:
-        seen = None
+        seen: SECSearchRequest | None = None
 
-        def __init__(self, data_root=None):
+        def __init__(self, data_root: Path | None = None) -> None:
             pass
 
-        def search(self, request):
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
             _FakeService.seen = request
             return result_obj
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
@@ -200,31 +234,33 @@ def test_search_sec_filings_dispatch_full_packet(monkeypatch):
         "search_sec_filings", {"query": "Acme Labs", "forms": ["D", "D/A"]},
         "test", context=_research_context(),
     )
+    assert _FakeService.seen is not None
     assert _FakeService.seen.query == "Acme Labs"
+    assert _FakeService.seen.forms is not None
     assert list(_FakeService.seen.forms) == ["D", "D/A"]
     assert result["count"] == 1
-    hit = result["hits"][0]
+    hit = _as_seq(result["hits"])[0]
     assert hit["filer_cik"] == 1234567
     assert hit["match_role"] == "mention"
     assert hit["matched_document"] == "primary.htm"
     assert hit["accession_no"] == "0000000001-26-000001"
-    assert result["coverage"]["status"] == "partial"
+    assert _as_dict(result["coverage"])["status"] == "partial"
     assert result["backfill_jobs"] == ["job-1"]
-    assert result["counts"]["results_reported"] == 3
-    assert result["counts"]["pages"] == 2
-    assert list(result["evidence_packet_ids"]) == ["entity:1234567"]
-    assert list(result["warnings"]) == ["1 partition queued"]
+    assert _as_dict(result["counts"])["results_reported"] == 3
+    assert _as_dict(result["counts"])["pages"] == 2
+    assert list(_as_seq(result["evidence_packet_ids"])) == ["entity:1234567"]
+    assert list(_as_seq(result["warnings"])) == ["1 partition queued"]
     assert result["source"] == "SEC EDGAR"
 
 
-def test_search_sec_filings_accepts_person_domain_security(monkeypatch):
+def test_search_sec_filings_accepts_person_domain_security(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeService:
-        seen = None
+        seen: SECSearchRequest | None = None
 
-        def __init__(self, data_root=None):
+        def __init__(self, data_root: Path | None = None) -> None:
             pass
 
-        def search(self, request):
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
             _FakeService.seen = request
             return _result()
 
@@ -235,6 +271,7 @@ def test_search_sec_filings_accepts_person_domain_security(monkeypatch):
          "security_identifier": "123456789"},
         "test", context=_research_context(),
     )
+    assert _FakeService.seen is not None
     assert _FakeService.seen.person_name == "Jane Doe"
     assert _FakeService.seen.domain == "example.com"
     assert _FakeService.seen.security_identifier == "123456789"
@@ -246,70 +283,73 @@ def test_search_sec_filings_rejects_empty_selectors():
     assert "error" in result
 
 
-def test_search_sec_filings_default_call_is_bounded(monkeypatch):
+def test_search_sec_filings_default_call_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.config import get_data_root
 
     class _FakeService:
-        seen = None
-        seen_root = None
+        seen: SECSearchRequest | None = None
+        seen_root: Path | None = None
 
-        def __init__(self, data_root=None):
+        def __init__(self, data_root: Path | None = None) -> None:
             _FakeService.seen_root = data_root
 
-        def search(self, request):
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
             _FakeService.seen = request
             return _result(warnings=(), errors=())
 
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
+    assert _FakeService.seen is not None
     assert _FakeService.seen.exhaustive is False
     assert _FakeService.seen.max_results == 20
     assert _FakeService.seen_root == get_data_root()
-    assert "payload truncated to 20 context rows" not in " ".join(result["warnings"] or [])
+    warnings = _as_seq(result["warnings"] or [])
+    assert "payload truncated to 20 context rows" not in " ".join(warnings)
 
-
-def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(monkeypatch):
+def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeService:
-        seen = None
+        seen: SECSearchRequest | None = None
 
-        def __init__(self, data_root=None):
+        def __init__(self, data_root: Path | None = None) -> None:
             pass
 
-        def search(self, request):
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
             _FakeService.seen = request
             return _result(warnings=(), errors=())
 
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     tools.execute_tool("search_sec_filings", {"query": "Acme", "limit": 5}, "test", context=_research_context())
+    assert _FakeService.seen is not None
     assert _FakeService.seen.max_results == 5
     assert _FakeService.seen.exhaustive is False
     tools.execute_tool("search_sec_filings", {"query": "Acme", "exhaustive": True}, "test", context=_research_context())
+    assert _FakeService.seen is not None
     assert _FakeService.seen.max_results is None
     assert _FakeService.seen.exhaustive is True
 
 
-def test_search_sec_filings_cap_warning_passes_through_once(monkeypatch):
+def test_search_sec_filings_cap_warning_passes_through_once(monkeypatch: pytest.MonkeyPatch) -> None:
     warning = "results capped at 20; rerun with a higher limit or exhaustive=true"
     result_obj = _result(warnings=(warning,), errors=())
 
     class _FakeService:
-        def __init__(self, data_root=None):
+        def __init__(self, data_root: Path | None = None) -> None:
             pass
 
-        def search(self, request):
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
             return result_obj
 
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
     result = tools.execute_tool("search_sec_filings", {"query": "Acme"}, "test", context=_research_context())
-    assert list(result["warnings"]).count(warning) == 1
+    assert list(_as_seq(result["warnings"])).count(warning) == 1
 
 
-def test_find_sec_entities_default_call_is_bounded(monkeypatch):
+def test_find_sec_entities_default_call_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.config import get_data_root
 
-    seen = {}
+    seen: dict[str, object] = {}
 
-    def _fake(query, **kwargs):
+    def _fake(query: str, **kwargs: object) -> SECSearchResult:
         seen.update(kwargs)
         seen["query"] = query
         return _result()
@@ -322,10 +362,10 @@ def test_find_sec_entities_default_call_is_bounded(monkeypatch):
     assert seen["data_root"] == get_data_root()
 
 
-def test_find_sec_entities_limit_and_exhaustive_forwarding(monkeypatch):
-    seen = {}
+def test_find_sec_entities_limit_and_exhaustive_forwarding(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
 
-    def _fake(query, **kwargs):
+    def _fake(query: str, **kwargs: object) -> SECSearchResult:
         seen.clear()
         seen.update(kwargs)
         return _result()
@@ -339,8 +379,8 @@ def test_find_sec_entities_limit_and_exhaustive_forwarding(monkeypatch):
 
 
 
-def test_search_sec_relationships_dispatch_groups(monkeypatch):
-    payload = {
+def test_search_sec_relationships_dispatch_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {
         "entity": "1234567", "ciks": ("1234567",),
         "groups": {"beneficial_owner": {"verified": [{"accession": "ACC-1"}]}},
         "typed": [{"relationship_type": "beneficial_owner", "status": "verified",
@@ -349,10 +389,10 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch):
         "attempts": [{"backend": "local-typed", "status": "complete"}],
         "warnings": [], "errors": [],
     }
-    seen = {}
-    def _fake(*a, **k):
-        seen.update(k)
-        seen["args"] = a
+    seen: dict[str, object] = {}
+    def _fake(*args: object, **kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        seen["args"] = args
         return payload
     monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake)
     result = tools.execute_tool(
@@ -360,12 +400,11 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch):
         "test", context=_research_context(),
     )
     assert result["ciks"] == ["1234567"]
-    assert result["groups"]["beneficial_owner"]["verified"][0]["accession"] == "ACC-1"
-    assert result["parties"][0]["relationship_type"] == "beneficial_owner"
-    assert result["coverage"]["status"] == "complete"
+    assert _as_dict(result["groups"])["beneficial_owner"]["verified"][0]["accession"] == "ACC-1"
+    assert _as_seq(result["parties"])[0]["relationship_type"] == "beneficial_owner"
+    assert _as_dict(result["coverage"])["status"] == "complete"
     assert result["counts"] == {"typed": 1, "workflow": 0, "mentions": 1}
-    assert result["attempts"][0]["backend"] == "local-typed"
-    assert result["source"] == "SEC EDGAR"
+    assert _as_seq(result["attempts"])[0]["backend"] == "local-typed"
     assert seen["limit"] == 50
     assert seen["exhaustive"] is True
     seen.clear()
@@ -382,77 +421,92 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch):
     assert seen["exhaustive"] is True
 
 
-def test_search_sec_relationships_partial_on_partial_attempt(monkeypatch):
-    payload = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [],
+def test_search_sec_relationships_partial_on_partial_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [],
                "relationships": [], "mentions": [],
                "attempts": [{"backend": "local-typed", "status": "partial",
                              "reason": "retrieval capped at local exhaustive guard"}],
                "warnings": [], "errors": []}
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    def _fake_result(*args: object, **kwargs: object) -> dict[str, object]:
+        return payload
+
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake_result)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "X"},
         "test", context=_research_context(),
     )
-    assert result["coverage"]["status"] == "partial"
+    assert _as_dict(result["coverage"])["status"] == "partial"
 
 
-def test_search_sec_relationships_partial_on_source_limited_attempt(monkeypatch):
-    payload = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [],
+def test_search_sec_relationships_partial_on_source_limited_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [],
                "relationships": [], "mentions": [],
                "attempts": [{"backend": "local-typed", "status": "source_limited"}],
                "warnings": [], "errors": []}
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    def _fake_result(*args: object, **kwargs: object) -> dict[str, object]:
+        return payload
+
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake_result)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "X"},
         "test", context=_research_context(),
     )
-    assert result["coverage"]["status"] == "partial"
+    assert _as_dict(result["coverage"])["status"] == "partial"
 
 
-def test_search_sec_relationships_partial_on_failed_attempt_with_rows(monkeypatch):
-    payload = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [{"accession": "ACC-1"}],
+def test_search_sec_relationships_partial_on_failed_attempt_with_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {"entity": "X", "ciks": ("1234567",), "groups": {}, "typed": [{"accession": "ACC-1"}],
                "relationships": [], "mentions": [],
                "attempts": [{"backend": "local-typed", "status": "failed"}],
                "warnings": [], "errors": []}
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    def _fake_result(*args: object, **kwargs: object) -> dict[str, object]:
+        return payload
+
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake_result)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "X"},
         "test", context=_research_context(),
     )
-    assert result["coverage"]["status"] == "partial"
+    assert _as_dict(result["coverage"])["status"] == "partial"
 
 
-def test_search_sec_relationships_failed_on_failed_attempt_without_rows(monkeypatch):
-    payload = {"entity": "X", "ciks": (), "groups": {}, "typed": [],
+def test_search_sec_relationships_failed_on_failed_attempt_without_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {"entity": "X", "ciks": (), "groups": {}, "typed": [],
                "relationships": [], "mentions": [],
                "attempts": [{"backend": "local-typed", "status": "failed"}],
                "warnings": [], "errors": []}
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    def _fake_result(*args: object, **kwargs: object) -> dict[str, object]:
+        return payload
+
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake_result)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "X"},
         "test", context=_research_context(),
     )
-    assert result["coverage"]["status"] == "failed"
+    assert _as_dict(result["coverage"])["status"] == "failed"
 
 
-def test_search_sec_relationships_partial_on_errors(monkeypatch):
-    payload = {"entity": "X", "ciks": (), "groups": {}, "typed": [],
+def test_search_sec_relationships_partial_on_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload: dict[str, object] = {"entity": "X", "ciks": (), "groups": {}, "typed": [],
                "relationships": [], "mentions": [],
                "attempts": [{"backend": "local-typed", "status": "failed"}],
                "warnings": [], "errors": ["local-typed failed: boom"]}
-    monkeypatch.setattr(tools.sec, "search_sec_relationships", lambda *a, **k: payload)
+    def _fake_result(*args: object, **kwargs: object) -> dict[str, object]:
+        return payload
+
+    monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake_result)
     result = tools.execute_tool(
         "search_sec_relationships", {"entity": "X"},
         "test", context=_research_context(),
     )
-    assert result["coverage"]["status"] == "failed"
+    assert _as_dict(result["coverage"])["status"] == "failed"
     assert result["errors"] == ["local-typed failed: boom"]
 
 
-def test_get_sec_search_coverage_reads_persisted_only(monkeypatch):
-    seen = {}
+def test_get_sec_search_coverage_reads_persisted_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
 
-    def _fake(**kwargs):
+    def _fake(**kwargs: object) -> dict[str, object]:
         seen.update(kwargs)
         return {"source": kwargs.get("source"), "form": kwargs.get("form"),
                 "search_id": None, "search": None,
@@ -472,13 +526,13 @@ def test_get_sec_search_coverage_reads_persisted_only(monkeypatch):
     assert result["provenance"] == "persisted-ledgers-only"
 
 
-def test_discovery_blank_and_bad_limit_surface_errors(monkeypatch):
+def test_discovery_blank_and_bad_limit_surface_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     missing = tools.execute_tool("find_sec_entities", {}, "test", context=_research_context())
     assert missing["error_type"] == "invalid_tool_arguments"
-    monkeypatch.setattr(
-        tools.sec, "find_sec_entities",
-        lambda *a, **k: (_ for _ in ()).throw(ValueError("invalid query")),
-    )
+    def _raise_invalid(*args: object, **kwargs: object) -> NoReturn:
+        raise ValueError("invalid query")
+
+    monkeypatch.setattr(tools.sec, "find_sec_entities", _raise_invalid)
     blanked = tools.execute_tool(
         "find_sec_entities", {"query": "  "}, "test", context=_research_context()
     )
@@ -487,35 +541,39 @@ def test_discovery_blank_and_bad_limit_surface_errors(monkeypatch):
     assert missing_rel["error_type"] == "invalid_tool_arguments"
 
 
-def test_search_tools_discovery_queries_and_domain_order():
+def test_search_tools_discovery_queries_and_domain_order() -> None:
     found = tools.execute_tool(
         "search_tools", {"query": "private issuer CIK"}, "test", context=_research_context()
     )
-    assert "find_sec_entities" in {s["function"]["name"] for s in found["schemas"]}
-    assert "find_sec_company" not in {s["function"]["name"] for s in found["schemas"]}
+    assert "find_sec_entities" in {s["function"]["name"] for s in _as_seq(found["schemas"])}
+    assert "find_sec_company" not in {s["function"]["name"] for s in _as_seq(found["schemas"])}
     fts = tools.execute_tool(
         "search_tools", {"query": "founder filing full text"}, "test", context=_research_context()
     )
-    assert {s["function"]["name"] for s in fts["schemas"]} == {"search_sec_filings"}
+    assert {s["function"]["name"] for s in _as_seq(fts["schemas"])} == {"search_sec_filings"}
     pack = tools.execute_tool(
         "search_tools", {"domain": "filings"}, "test", context=_research_context()
     )
-    names = [s["function"]["name"] for s in pack["schemas"]]
+    names = [s["function"]["name"] for s in _as_seq(pack["schemas"])]
     assert names[:3] == ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage"]
-    listed = next(s for s in pack["schemas"] if s["function"]["name"] == "list_sec_filings")
-    assert "identifier" in listed["function"]["parameters"]["properties"]
-    assert "Does NOT search company names" in listed["function"]["description"]
+    listed = next(s for s in _as_seq(pack["schemas"]) if s["function"]["name"] == "list_sec_filings")
+    function = _as_dict(listed["function"])
+    parameters = _as_dict(function["parameters"])
+    assert "identifier" in _as_dict(parameters["properties"])
+    description = function["description"]
+    assert isinstance(description, str)
+    assert "Does NOT search company names" in description
     rel = tools.execute_tool(
         "search_tools", {"query": "inverse 13F manager holdings"}, "test", context=_research_context()
     )
-    assert "search_sec_relationships" in {s["function"]["name"] for s in rel["schemas"]}
+    assert "search_sec_relationships" in {s["function"]["name"] for s in _as_seq(rel["schemas"])}
 
 
-def test_get_sec_document_dispatch_passes_through(monkeypatch):
-    monkeypatch.setattr(
-        tools.sec, "get_sec_document",
-        lambda acc, name=None, as_of=None, **_: {"accession_no": acc, "text": "hi"}
-    )
+def test_get_sec_document_dispatch_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_doc(accession_no: str, name: object = None, as_of: object = None, **_: object) -> dict[str, str]:
+        return {"accession_no": accession_no, "text": "hi"}
+
+    monkeypatch.setattr(tools.sec, "get_sec_document", _fake_doc)
     result = tools.execute_tool(
         "get_sec_document", {"accession_no": "0000000001-26-000001"},
         "test", context=_research_context(),
@@ -523,55 +581,60 @@ def test_get_sec_document_dispatch_passes_through(monkeypatch):
     assert result["text"] == "hi"
 
 
-def test_missing_required_argument_is_tool_argument_error():
+def test_missing_required_argument_is_tool_argument_error() -> None:
     result = tools.execute_tool(
         "get_sec_document", {}, "test", context=_research_context()
     )
     assert result["error_type"] == "invalid_tool_arguments"
 
 
-def test_get_material_events_dispatch_carries_accession_citations(monkeypatch):
+def test_get_material_events_dispatch_carries_accession_citations(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = SimpleNamespace(to_dict=lambda: {
         "event_id": "0000000001-26-000001:1.03",
         "event_type": "bankruptcy",
         "known_at": "2026-01-15",
         "source_accessions": ["0000000001-26-000001"],
     })
-    monkeypatch.setattr(tools.sec, "get_material_events", lambda *a, **k: [fake])
+    def _fake_events(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return [fake]
+
+    monkeypatch.setattr(tools.sec, "get_material_events", _fake_events)
     result = tools.execute_tool(
         "get_material_events", {"ticker": "FAKE", "since": "2026-01-01"},
         "test", context=_research_context(),
     )
     assert result["count"] == 1
-    assert result["events"][0]["source_accessions"] == ["0000000001-26-000001"]
+    assert _as_seq(result["events"])[0]["source_accessions"] == ["0000000001-26-000001"]
 
-
-def test_research_projection_includes_suite_excludes_broker():
-    names = {
-        entry["function"]["name"]
-        for entry in tools.tools_for_capabilities(frozenset({Capability.RESEARCH}))
-    }
+def test_research_projection_includes_suite_excludes_broker() -> None:
+    names = _tool_names(tools.tools_for_capabilities(frozenset({Capability.RESEARCH})))
     assert set(SEC_SUITE) <= names
     assert "get_portfolio_snapshot" not in names
 
 
-def test_get_governance_events_dispatch_wraps_structured(monkeypatch):
+def test_get_governance_events_dispatch_wraps_structured(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = SimpleNamespace(to_dict=lambda: {"event_id": "ACC:gov", "contested": True})
-    monkeypatch.setattr(tools.sec, "get_governance_events", lambda *a, **k: [fake])
+    def _fake_events(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return [fake]
+
+    monkeypatch.setattr(tools.sec, "get_governance_events", _fake_events)
     result = tools.execute_tool(
         "get_governance_events", {"ticker": "FAKE"},
         "test", context=_research_context(),
     )
     assert result["count"] == 1
-    assert result["events"][0]["contested"] is True
+    assert _as_seq(result["events"])[0]["contested"] is True
 
 
-def test_get_transaction_status_dispatch_wraps_structured(monkeypatch):
+def test_get_transaction_status_dispatch_wraps_structured(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = SimpleNamespace(to_dict=lambda: {"event_id": "FAKE:merger:ACC", "status": "unknown"})
-    monkeypatch.setattr(tools.sec, "get_transaction_status", lambda *a, **k: [fake])
+    def _fake_status(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return [fake]
+
+    monkeypatch.setattr(tools.sec, "get_transaction_status", _fake_status)
     result = tools.execute_tool(
         "get_transaction_status", {"ticker": "FAKE"},
         "test", context=_research_context(),
     )
     assert result["count"] == 1
-    assert result["transactions"][0]["status"] == "unknown"
+    assert _as_seq(result["transactions"])[0]["status"] == "unknown"

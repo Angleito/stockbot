@@ -92,7 +92,7 @@ _RULE_SPECS: dict[str, tuple[tuple[str, int], ...]] = {
 HARD_CATEGORIES = frozenset({"instruction_override", "secret_extraction", "exfiltration"})
 
 
-def _compile(phrase: str) -> re.Pattern:
+def _compile(phrase: str) -> re.Pattern[str]:
     """Word-boundary, case-insensitive compile.
 
     Colon-terminated labels (SYSTEM:, DEVELOPER:, ASSISTANT:, "new
@@ -105,7 +105,7 @@ def _compile(phrase: str) -> re.Pattern:
     return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", re.IGNORECASE)
 
 
-_RULES: tuple[tuple[str, str, re.Pattern, int], ...] = tuple(
+_RULES: tuple[tuple[str, str, re.Pattern[str], int], ...] = tuple(
     (category, phrase, _compile(phrase), weight)
     for category, specs in _RULE_SPECS.items()
     for phrase, weight in specs

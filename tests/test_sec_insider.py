@@ -1,14 +1,18 @@
 """Offline tests for app/sec/insider.py (no network)."""
 
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import app.sec.insider as insider
 from app.sec.models import InsiderTransaction, ProposedInsiderSale
 
-
 class _Activity:
-    def __init__(self, code=None, shares=None, price=None, date=None,
-                 title=None, ad=None, holdings=None):
+    def __init__(self, code: str | None = None, shares: str | int | None = None,
+                 price: str | float | None = None, date: str | None = None,
+                 title: str | None = None, ad: str | None = None,
+                 holdings: str | int | None = None) -> None:
         self.transaction_code = code
         self.shares = shares
         self.price = price
@@ -19,7 +23,7 @@ class _Activity:
 
 
 class _Obj:
-    def __init__(self, rows, name="Jane Doe", cik="999"):
+    def __init__(self, rows: list[_Activity], name: str = "Jane Doe", cik: str = "999"):
         self.insider_name = name
         self.insider_cik = cik
         self._rows = rows
@@ -59,7 +63,7 @@ def test_code_kinds_and_missing_fields():
 class _FakeDF:
     columns = ["Shares to be sold"]
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> list[str | None]:
         assert key == "Shares to be sold"
         return ["1,000", "500", None]
 
@@ -84,7 +88,7 @@ def test_compare_144_to_form4_date_filter():
     proposed = ProposedInsiderSale("John Smith", "123", "ACME", "2024-05-01",
                                    "t1", shares_proposed=1500)
 
-    def txn(name, date, shares, kind="open_market_sale"):
+    def txn(name: str, date: str, shares: int, kind: str = "open_market_sale") -> InsiderTransaction:
         return InsiderTransaction(name, "123", "ACME", "4", "2024-06-01",
                                   "f1", date, "Common", "S", kind, shares,
                                   10.0, "D", 1000)
@@ -110,17 +114,21 @@ def test_compare_144_unmatched():
     assert result["executed_sale_shares"] == 0
 
 
-def test_get_insider_activity_skips_failed_loads(monkeypatch):
+def test_get_insider_activity_skips_failed_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [
         SimpleNamespace(accession_no="g1", form="4", filed_at="2024-01-15",
                         company="ACME"),
         SimpleNamespace(accession_no="bad", form="4", filed_at="2024-02-15",
                         company="ACME"),
     ]
-    monkeypatch.setattr(insider, "list_sec_filings", lambda *a, **k: filings)
 
-    def fake_load(accession):
-        if accession == "bad":
+    def fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return filings
+
+    monkeypatch.setattr(insider, "list_sec_filings", fake_list)
+
+    def fake_load(accession_no: str) -> _Obj:
+        if accession_no == "bad":
             raise RuntimeError("boom")
         return _Obj([_Activity(code="P", shares=10)])
 
@@ -130,7 +138,7 @@ def test_get_insider_activity_skips_failed_loads(monkeypatch):
     assert txns[0].transaction_kind == "open_market_purchase"
 
 
-def test_store_queries_insider_both_directions(tmp_path):
+def test_store_queries_insider_both_directions(tmp_path: Path) -> None:
     from app.sec.store import query_insider_transactions, store_insider_transaction
 
     assert store_insider_transaction({
@@ -149,7 +157,7 @@ def test_store_queries_insider_both_directions(tmp_path):
     assert by_owner[0]["issuer_name"] != by_owner[0]["owner_name"]
 
 
-def test_13f_provisional_security_id_and_governed_mapping(tmp_path):
+def test_13f_provisional_security_id_and_governed_mapping(tmp_path: Path) -> None:
     from app.sec import insider as _ins
     from app.sec.store import query_13f_holdings_for_issuer, store_13f_holding
     from app.storage import parquet as _pq

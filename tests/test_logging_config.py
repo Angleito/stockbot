@@ -8,6 +8,7 @@ also called at import time by CLI/bridge entry points).
 
 import contextlib
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -54,7 +55,7 @@ def test_stream_url_configures_debug_and_stream_handler():
         assert len(stream_handlers) == 1
 
 
-def test_security_event_logged_at_info(monkeypatch, tmp_path, caplog):
+def test_security_event_logged_at_info(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture):
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     recorder = RunRecorder(
         run_id="run-log-sec-1", request_id="req", question="q", as_of=None,

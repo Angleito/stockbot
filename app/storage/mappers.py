@@ -28,7 +28,7 @@ def ticker_alias_from_row(row: Mapping[str, Any]) -> TickerAlias:
         alias_value=str(row["alias_value"]),
         entity_id=str(row["entity_id"]),
         security_id=row.get("security_id"),
-        source=row.get("source"),
+        source=str(row["source"]),
         valid_from=row.get("valid_from"),
         valid_to=row.get("valid_to"),
         known_at=row.get("known_at"),
@@ -45,6 +45,13 @@ def canonical_decimal(value: Decimal | None) -> Decimal | None:
     if normalized == normalized.to_integral_value():
         return normalized.quantize(Decimal(1))
     return normalized
+
+
+def _required_quantity(value: Decimal | None) -> Decimal:
+    """Fail closed on a persisted position without a quantity (never default money)."""
+    if value is None:
+        raise ValueError("Position row is missing or has a malformed quantity")
+    return value
 
 
 def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Position:
@@ -76,7 +83,7 @@ def position_from_row(row: Mapping[str, Any], retrieved_at: datetime) -> Positio
         security_id=str(row["security_id"]) if row.get("security_id") else None,
         entity_id=str(row["entity_id"]) if row.get("entity_id") else None,
         ticker=str(row["ticker"]),
-        quantity=numeric["quantity"],
+        quantity=_required_quantity(numeric["quantity"]),
         average_cost=numeric["average_cost"],
         market_price=numeric["market_price"],
         market_value=numeric["market_value"],

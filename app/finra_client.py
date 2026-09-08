@@ -10,9 +10,11 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Optional
+from operator import itemgetter
+from typing import Any, Optional, TypeGuard
 
 import requests
 
@@ -230,9 +232,14 @@ _metadata_mem: dict[tuple[str, str], DatasetSpec] = {}
 _partitions_mem: dict[tuple[str, str], list[tuple[str, ...]]] = {}
 
 
+def _dataset_rank(row: dict[str, object]) -> tuple[int, str]:
+    """Newest-match-first ordering for token-ranked catalog entries."""
+    return (-int(str(row.get("match_score", 0))), str(row.get("name", "")))
+
+
 def list_datasets(
     group: Optional[str] = None, search: Optional[str] = None
-) -> dict:
+) -> dict[str, object]:
     """Concise filing-cabinet catalog. Never returns data rows.
 
     search is token-based and ranked: the phrase is normalized (e.g.
@@ -249,7 +256,7 @@ def list_datasets(
     group_filter = (group or "").strip().lower() or None
     tokens = _search_tokens(search)
 
-    datasets = []
+    datasets: list[dict[str, object]] = []
     for entry in entries:
         if group_filter and entry.group.lower() != group_filter:
             continue
@@ -288,8 +295,9 @@ def list_datasets(
             }
         )
 
+
     if tokens:
-        datasets.sort(key=lambda d: (-d["match_score"], d["name"]))
+        datasets.sort(key=_dataset_rank)
         for d in datasets:
             d.pop("match_score", None)
 
@@ -385,7 +393,7 @@ def _search_score(entry: CatalogEntry, tokens: list[str]) -> int:
     return score
 
 
-def describe_dataset(dataset_id: str) -> dict:
+def describe_dataset(dataset_id: str) -> dict[str, object]:
     """Full field metadata for one dataset (filing-cabinet describe step)."""
     try:
         entry = _resolve_dataset(dataset_id)
@@ -418,7 +426,7 @@ def describe_dataset(dataset_id: str) -> dict:
         if f.get("name")
     ]
 
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "dataset": spec.dataset_id,
         "group": spec.group,
         "name": spec.name,
@@ -446,7 +454,7 @@ def describe_dataset(dataset_id: str) -> dict:
     return result
 
 
-def get_short_interest(ticker: str, settlement_date: Optional[str] = None) -> dict:
+def get_short_interest(ticker: str, settlement_date: Optional[str] = None) -> dict[str, object]:
     result = query_dataset(
         "otcMarket/consolidatedShortInterest",
         ticker=ticker,
@@ -458,11 +466,12 @@ def get_short_interest(ticker: str, settlement_date: Optional[str] = None) -> di
         prefer_latest=settlement_date is None,
     )
     if settlement_date is None and result.get("data_freshness") == "stale":
-        return _stale_short_interest_error(ticker, result.get("as_of_date"))
+        as_of_value = result.get("as_of_date")
+        return _stale_short_interest_error(ticker, str(as_of_value) if as_of_value is not None else None)
     return result
 
 
-def get_reg_sho_volume(ticker: str, trade_date: Optional[str] = None) -> dict:
+def get_reg_sho_volume(ticker: str, trade_date: Optional[str] = None) -> dict[str, object]:
     return query_dataset(
         "otcMarket/regShoDaily",
         ticker=ticker,
@@ -474,7 +483,7 @@ def get_reg_sho_volume(ticker: str, trade_date: Optional[str] = None) -> dict:
 
 def get_threshold_securities(
     ticker: Optional[str] = None, trade_date: Optional[str] = None
-) -> dict:
+) -> dict[str, object]:
     return query_dataset(
         "otcMarket/thresholdList",
         ticker=ticker,
@@ -484,6 +493,20 @@ def get_threshold_securities(
     )
 
 
+def _filter_list(filters: object) -> list[dict[str, object]] | None:
+    """Validate raw tool-JSON filters once; None stays None, garbage raises ValueError."""
+    if filters is None:
+        return None
+    if isinstance(filters, list):
+        for index, item in enumerate(filters):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Filter #{index} must be an object with 'field' and 'value'."
+                )
+        return [{str(k): v for k, v in f.items()} for f in filters if isinstance(f, dict)]
+    raise ValueError("filters must be a list of {field, op, value} objects.")
+
+
 def query_dataset(
     dataset: str,
     ticker: Optional[str] = None,
@@ -491,10 +514,10 @@ def query_dataset(
     end_date: Optional[str] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
-    filters: Optional[list[dict]] = None,
+    filters: object = None,
     analysis_goal: Optional[str] = None,
     prefer_latest: bool = False,
-) -> dict:
+) -> dict[str, object]:
     """Query a FINRA dataset and return an analyzed briefing.
 
     The main model receives deterministic metrics, trends, warnings, and
@@ -503,8 +526,9 @@ def query_dataset(
     try:
         entry = _resolve_dataset(dataset)
         spec = _get_dataset_spec(entry)
+        filter_list = _filter_list(filters)
         payload = _build_payload(
-            spec, entry, ticker, start_date, end_date, limit, filters, offset
+            spec, entry, ticker, start_date, end_date, limit, filter_list, offset
         )
         records, headers = _cached_query(spec, payload)
     except ValueError as e:
@@ -522,8 +546,10 @@ def query_dataset(
         what = ticker or dataset
         return {"error": f"No data found for {what}: {spec.name}"}
 
-    effective_limit = int(payload.get("limit", DEFAULT_LIMIT))
-    effective_offset = int(payload.get("offset", 0))
+    raw_limit = payload.get("limit", DEFAULT_LIMIT)
+    raw_offset = payload.get("offset", 0)
+    effective_limit = raw_limit if isinstance(raw_limit, int) else int(str(raw_limit))
+    effective_offset = raw_offset if isinstance(raw_offset, int) else int(str(raw_offset))
     returned_count = len(records)
     pagination = _parse_pagination(headers, effective_offset, effective_limit, returned_count)
 
@@ -535,10 +561,10 @@ def query_dataset(
         and spec.partition_fields
         and not start_date
         and not end_date
-        and not filters
+        and not filter_list
         and effective_offset == 0
     ):
-        selected = [f["name"] for f in spec.fields if f.get("name")]
+        selected = [str(f["name"]) for f in spec.fields if f.get("name")]
         try:
             records, headers, partition_queries, _short_result = _datapoints_via_partitions(
                 spec,
@@ -617,15 +643,15 @@ def query_dataset(
 
 def get_finra_datapoints(
     dataset: str,
-    fields: Optional[list[str]] = None,
+    fields: object = None,
     ticker: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: Optional[int] = None,
-    filters: Optional[list[dict]] = None,
-    sort_fields: Optional[list[str]] = None,
+    filters: object = None,
+    sort_fields: object = None,
     sort_order: Optional[str] = None,
-) -> dict:
+) -> dict[str, object]:
     """Exact requested fields from FINRA source records (explicit data asks).
 
     Requires a non-empty, metadata-validated fields list (at most
@@ -642,19 +668,22 @@ def get_finra_datapoints(
     before returning so 'latest five' style requests are stable regardless of
     source ordering.
     """
-    payload: Optional[dict] = None
+    payload: Optional[dict[str, object]] = None
+    dataset_id = dataset
     try:
         entry = _resolve_dataset(dataset)
         spec = _get_dataset_spec(entry)
+        dataset_id = spec.dataset_id
         selected = _validate_datapoint_fields(spec, fields)
-        _require_datapoint_narrowing(ticker, start_date, end_date, filters)
+        filter_list = _filter_list(filters)
+        _require_datapoint_narrowing(ticker, start_date, end_date, filter_list)
         sort = _validate_sort(spec, sort_fields, sort_order)
         limit = _clamp_limit(limit, default=DATAPOINTS_DEFAULT_LIMIT, maximum=DATAPOINTS_MAX_LIMIT)
 
-        via_partitions = _use_partition_flow(spec, sort, ticker, start_date, end_date, filters)
+        via_partitions = _use_partition_flow(spec, sort, ticker, start_date, end_date, filter_list)
         if via_partitions:
             records, headers, partition_queries, short_result = _datapoints_via_partitions(
-                spec, entry, selected, ticker, start_date, end_date, filters,
+                spec, entry, selected, ticker, start_date, end_date, filter_list,
                 limit, sort,
             )
         else:
@@ -665,7 +694,7 @@ def get_finra_datapoints(
                 start_date,
                 end_date,
                 limit,
-                filters,
+                filter_list,
                 fields=selected,
                 sort_fields=sort,
             )
@@ -679,7 +708,7 @@ def get_finra_datapoints(
             dataset, e,
             request_purpose="exact datapoints request (get_finra_datapoints)",
             payload=payload,
-            dataset_id=spec.dataset_id if "spec" in locals() else dataset,
+            dataset_id=dataset_id,
         )
     except Exception as e:
         logger.exception("FINRA query failed for dataset %s", dataset)
@@ -723,7 +752,7 @@ def get_finra_datapoints(
             f"were found across all relevant FINRA partitions (requested "
             f"{effective_limit})."
         )
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "dataset": spec.name,
         "group": spec.group,
         "dataset_id": spec.dataset_id,
@@ -754,9 +783,9 @@ def _http_error_result(
     dataset: str,
     exc: requests.HTTPError,
     request_purpose: str = "",
-    payload: Optional[dict] = None,
+    payload: Optional[dict[str, object]] = None,
     dataset_id: Optional[str] = None,
-) -> dict:
+) -> dict[str, object]:
     """Structured, credential-free FINRA error result.
 
     Carries the dataset, the request purpose, the HTTP status, and the
@@ -778,7 +807,7 @@ def _http_error_result(
         _sanitize_payload(payload),
         body,
     )
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "dataset": dataset,
         "dataset_id": dataset_id or dataset,
         "request_purpose": request_purpose or "FINRA data request",
@@ -814,7 +843,7 @@ def _use_partition_flow(
     ticker: Optional[str],
     start_date: Optional[str],
     end_date: Optional[str],
-    filters: Optional[list[dict]],
+    filters: Optional[list[dict[str, object]]],
 ) -> bool:
     """Decide how to honor a sort request.
 
@@ -874,7 +903,7 @@ def _partition_fields_with_equal(
     ticker: Optional[str],
     start_date: Optional[str],
     end_date: Optional[str],
-    filters: Optional[list[dict]],
+    filters: Optional[list[dict[str, object]]],
 ) -> set[str]:
     """Partition fields that already carry an EQUAL filter (explicit or implied)."""
     covered: set[str] = set()
@@ -905,10 +934,10 @@ def _datapoints_via_partitions(
     ticker: Optional[str],
     start_date: Optional[str],
     end_date: Optional[str],
-    filters: Optional[list[dict]],
+    filters: Optional[list[dict[str, object]]],
     limit: int,
     sort: list[str],
-) -> tuple[list[dict], dict, int, bool]:
+) -> tuple[list[dict[str, object]], dict[str, object], int, bool]:
     """Resolve a date sort by walking available partitions.
 
     Enumerates the partition tuples FINRA actually published (date
@@ -935,13 +964,13 @@ def _datapoints_via_partitions(
     start = (start_date or "").strip() or None
     end = (end_date or "").strip() or None
     range_field = spec.date_field if (start and end and start != end) else None
-    if range_field and range_field in spec.partition_fields:
+    if range_field and start and end and range_field in spec.partition_fields:
         tuples = [
             t for t in tuples
             if t.get(range_field) and _date_in_range(t[range_field], start, end)
         ]
 
-    accumulated: list[dict] = []
+    accumulated: list[dict[str, object]] = []
     queries = 0
     budget_exhausted = False
     last_error: Optional[requests.HTTPError] = None
@@ -953,7 +982,7 @@ def _datapoints_via_partitions(
             break
         queries += 1
         remaining = limit - len(accumulated)
-        extra = [
+        extra: list[dict[str, object]] = [
             {"field": f, "op": "EQUAL", "value": v}
             for f, v in tuple_values.items()
             if f != range_field
@@ -1004,7 +1033,7 @@ def _pinned_partition_filters(
     ticker: Optional[str],
     start_date: Optional[str],
     end_date: Optional[str],
-    filters: Optional[list[dict]],
+    filters: Optional[list[dict[str, object]]],
 ) -> dict[str, str]:
     """Partition fields with caller-supplied EQUAL values (fixed during walk)."""
     pinned: dict[str, str] = {}
@@ -1043,7 +1072,7 @@ def _environment() -> str:
     return "mock" if finra_use_mock() else "production"
 
 
-def _stale_short_interest_error(subject: str, as_of: Optional[str]) -> dict:
+def _stale_short_interest_error(subject: str, as_of: Optional[str]) -> dict[str, object]:
     dated = f" (newest available date: {as_of})" if as_of else ""
     return {
         "error": (
@@ -1055,7 +1084,7 @@ def _stale_short_interest_error(subject: str, as_of: Optional[str]) -> dict:
 
 
 def _freshness_status(
-    spec: DatasetSpec, records: list[dict]
+    spec: DatasetSpec, records: list[dict[str, object]]
 ) -> tuple[Optional[str], str]:
     """as_of_date from the dataset's authoritative date_field (never derived
     from unrelated fields) plus a current/stale/unknown label."""
@@ -1084,7 +1113,7 @@ def _stale_warning(as_of: Optional[str], freshness: str) -> Optional[str]:
     )
 
 
-def _norm_date(value: Any) -> Optional[str]:
+def _norm_date(value: object) -> Optional[str]:
     if value is None:
         return None
     s = str(value).strip()
@@ -1113,13 +1142,13 @@ def _sanitize_finra_body(text: str) -> str:
     return text.strip()
 
 
-def _sanitize_payload(payload: Optional[dict]) -> str:
+def _sanitize_payload(payload: Optional[dict[str, object]]) -> str:
     if payload is None:
         return "{}"
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-def _validate_datapoint_fields(spec: DatasetSpec, fields: Optional[list[str]]) -> list[str]:
+def _validate_datapoint_fields(spec: DatasetSpec, fields: object) -> list[str]:
     if not fields or not isinstance(fields, list):
         raise ValueError(
             "get_finra_datapoints requires a non-empty 'fields' list. "
@@ -1151,7 +1180,7 @@ def _validate_datapoint_fields(spec: DatasetSpec, fields: Optional[list[str]]) -
 
 def _validate_sort(
     spec: DatasetSpec,
-    sort_fields: Optional[list[str]],
+    sort_fields: object,
     sort_order: Optional[str],
 ) -> list[str]:
     """Normalize FINRA sortFields entries ('+field' / '-field').
@@ -1176,6 +1205,8 @@ def _validate_sort(
         return [("-" if order == "desc" else "+") + spec.date_field]
     if not sort_fields:
         return []
+    if not isinstance(sort_fields, list):
+        raise ValueError("sort_fields must be a list of '+field'/'-field' strings.")
     normalized: list[str] = []
     for index, entry in enumerate(sort_fields):
         if not isinstance(entry, str) or not entry.strip():
@@ -1201,7 +1232,7 @@ def _validate_sort(
     return normalized
 
 
-def _apply_local_sort(rows: list[dict], sort_fields: list[str]) -> list[dict]:
+def _apply_local_sort(rows: list[dict[str, object]], sort_fields: list[str]) -> list[dict[str, object]]:
     """Deterministic local ordering for a single FINRA sort field.
 
     Guarantees 'latest five' style requests return the requested order even
@@ -1213,7 +1244,7 @@ def _apply_local_sort(rows: list[dict], sort_fields: list[str]) -> list[dict]:
     sign, name = sort_fields[0][0], sort_fields[0][1:]
     descending = sign == "-"
 
-    def _sortable(value: Any) -> Any:
+    def _sortable(value: object) -> float | str | None:
         if value is None or value == "":
             return None
         try:
@@ -1221,13 +1252,20 @@ def _apply_local_sort(rows: list[dict], sort_fields: list[str]) -> list[dict]:
         except (TypeError, ValueError):
             return str(value)
 
+    def _present_key(r: dict[str, object]) -> float | str:
+        v = _sortable(r.get(name))
+        return v if v is not None else ""
+
+    def _present_str_key(r: dict[str, object]) -> str:
+        return str(r.get(name))
+
     present = [r for r in rows if _sortable(r.get(name)) is not None]
     missing = [r for r in rows if _sortable(r.get(name)) is None]
     try:
-        present.sort(key=lambda r: _sortable(r.get(name)), reverse=descending)
+        present.sort(key=_present_key, reverse=descending)
     except TypeError:
         # Mixed numeric/string values in one column: fall back to string order.
-        present.sort(key=lambda r: str(r.get(name)), reverse=descending)
+        present.sort(key=_present_str_key, reverse=descending)
     return present + missing
 
 
@@ -1235,7 +1273,7 @@ def _require_datapoint_narrowing(
     ticker: Optional[str],
     start_date: Optional[str],
     end_date: Optional[str],
-    filters: Optional[list[dict]],
+    filters: Optional[list[dict[str, object]]],
 ) -> None:
     has_ticker = bool((ticker or "").strip())
     has_date = bool((start_date or "").strip()) or bool((end_date or "").strip())
@@ -1248,11 +1286,11 @@ def _require_datapoint_narrowing(
         )
 
 
-def _select_fields(row: dict, fields: list[str]) -> dict:
+def _select_fields(row: dict[str, object], fields: list[str]) -> dict[str, object]:
     return {f: row.get(f) for f in fields}
 
 
-def _parse_pagination(headers: dict, offset: int, limit: int, returned_count: int) -> dict:
+def _parse_pagination(headers: dict[str, object], offset: int, limit: int, returned_count: int) -> dict[str, object]:
     """Header-driven pagination; explicit estimate only when FINRA omits
     Record-Total. Self-contained metadata: offset/limit/returned_count are
     included so the analysis layer can prove full-query coverage."""
@@ -1260,10 +1298,17 @@ def _parse_pagination(headers: dict, offset: int, limit: int, returned_count: in
     total: Optional[int] = None
     if total_raw is not None:
         try:
-            total = int(total_raw)
+            if isinstance(total_raw, bool):
+                total = int(total_raw)
+            elif isinstance(total_raw, int):
+                total = total_raw
+            elif isinstance(total_raw, float):
+                total = int(total_raw)
+            else:
+                total = int(str(total_raw).strip())
         except (TypeError, ValueError):
             total = None
-    base = {
+    base: dict[str, object] = {
         "offset": offset,
         "limit": limit,
         "returned_count": returned_count,
@@ -1312,7 +1357,7 @@ def _get_catalog() -> list[CatalogEntry]:
     cache_key = f"finra:v2:{environment}:catalog"
     hit = cache.get(cache_key, ttl=DISCOVERY_TTL_SECONDS)
     if isinstance(hit, list) and hit:
-        entries = [_entry_from_dict(d) for d in hit]
+        entries = [_entry_from_dict(d) for d in hit if isinstance(d, dict)]
         with _discovery_lock:
             _catalog_mem[environment] = entries
         return entries
@@ -1338,7 +1383,7 @@ def _get_catalog() -> list[CatalogEntry]:
     return entries
 
 
-def _fetch_catalog_http() -> list[dict]:
+def _fetch_catalog_http() -> list[dict[str, object]]:
     url = f"{FINRA_API_BASE}/datasets"
     resp = requests.get(
         url,
@@ -1351,15 +1396,16 @@ def _fetch_catalog_http() -> list[dict]:
     resp.raise_for_status()
     data = resp.json()
     if isinstance(data, list):
-        return data
+        return [{str(k): v for k, v in item.items()} for item in data if isinstance(item, dict)]
     if isinstance(data, dict):
         for key in ("datasets", "data", "results"):
-            if isinstance(data.get(key), list):
-                return data[key]
+            nested = data.get(key)
+            if isinstance(nested, list):
+                return [{str(k): v for k, v in item.items()} for item in nested if isinstance(item, dict)]
     raise ValueError("FINRA /datasets response did not contain a dataset list")
 
 
-def _normalize_catalog_item(item: dict) -> Optional[CatalogEntry]:
+def _normalize_catalog_item(item: dict[str, object]) -> Optional[CatalogEntry]:
     if not isinstance(item, dict):
         return None
     group = (
@@ -1384,11 +1430,13 @@ def _normalize_catalog_item(item: dict) -> Optional[CatalogEntry]:
         str(item.get("description") or "").strip()
         or f"{group}/{name}"
     )
-    methods_raw = item.get("supportedMethods") or item.get("methods") or []
+    methods_raw: object = item.get("supportedMethods") or item.get("methods") or list[object]()
     if isinstance(methods_raw, str):
         methods = tuple(m.strip() for m in methods_raw.split(",") if m.strip())
-    else:
+    elif isinstance(methods_raw, (list, tuple)):
         methods = tuple(str(m) for m in methods_raw)
+    else:
+        methods = ()
     supports_query = item.get("supportsQuery")
     if supports_query is None:
         supports_query = (not methods) or ("POST" in {m.upper() for m in methods}) or (
@@ -1409,7 +1457,7 @@ def _normalize_catalog_item(item: dict) -> Optional[CatalogEntry]:
     )
 
 
-def _parse_access(item: dict) -> str:
+def _parse_access(item: dict[str, object]) -> str:
     """Map any FINRA-provided access/credential metadata to a label.
 
     FINRA's /datasets response does not document an access field today, so
@@ -1431,7 +1479,7 @@ def _parse_access(item: dict) -> str:
     return "unknown"
 
 
-def _parse_optional_bool(*values: Any) -> Optional[bool]:
+def _parse_optional_bool(*values: object) -> Optional[bool]:
     for v in values:
         if isinstance(v, bool):
             return v
@@ -1468,7 +1516,7 @@ def _canonical_dataset_name(value: str) -> str:
     return stripped
 
 
-def _entry_to_dict(e: CatalogEntry) -> dict:
+def _entry_to_dict(e: CatalogEntry) -> dict[str, object]:
     return {
         "group": e.group,
         "name": e.name,
@@ -1481,16 +1529,23 @@ def _entry_to_dict(e: CatalogEntry) -> dict:
     }
 
 
-def _entry_from_dict(d: dict) -> CatalogEntry:
+def _entry_from_dict(d: dict[str, object]) -> CatalogEntry:
+    raw_methods = d.get("methods")
+    if isinstance(raw_methods, (list, tuple)):
+        methods = tuple(str(m) for m in raw_methods)
+    else:
+        methods = ()
+    raw_sro = d.get("supports_record_offset")
+    supports_record_offset = raw_sro if isinstance(raw_sro, bool) else None
     return CatalogEntry(
-        group=d["group"],
-        name=d["name"],
-        description=d.get("description") or "",
-        methods=tuple(d.get("methods") or ()),
+        group=str(d["group"]),
+        name=str(d["name"]),
+        description=str(d.get("description") or ""),
+        methods=methods,
         supports_query=bool(d.get("supports_query", True)),
-        status=d.get("status") or "",
-        access=d.get("access") or "unknown",
-        supports_record_offset=d.get("supports_record_offset"),
+        status=str(d.get("status") or ""),
+        access=str(d.get("access") or "unknown"),
+        supports_record_offset=supports_record_offset,
     )
 
 
@@ -1590,7 +1645,7 @@ def _get_dataset_spec(entry: CatalogEntry) -> DatasetSpec:
     return spec
 
 
-def _fetch_metadata_http(group: str, name: str) -> dict:
+def _fetch_metadata_http(group: str, name: str) -> dict[str, object]:
     # Metadata is public; mock-mode data uses a Mock suffix but metadata
     # is fetched for the base dataset name (fields match).
     url = f"{FINRA_API_BASE}/metadata/group/{group}/name/{name}"
@@ -1603,7 +1658,7 @@ def _fetch_metadata_http(group: str, name: str) -> dict:
     data = resp.json()
     if not isinstance(data, dict):
         raise ValueError(f"Unexpected metadata response for {group}/{name}")
-    return data
+    return {str(k): v for k, v in data.items()}
 
 
 def _get_partitions(spec: DatasetSpec) -> list[tuple[str, ...]]:
@@ -1639,7 +1694,7 @@ def _get_partitions(spec: DatasetSpec) -> list[tuple[str, ...]]:
     return parsed
 
 
-def _is_partition_tuple_cache(hit: Any, n_fields: int) -> bool:
+def _is_partition_tuple_cache(hit: object, n_fields: int) -> TypeGuard[list[Sequence[object]]]:
     """Validate a JSON-safe cached partitions payload.
 
     The SQLite cache serializes tuples as JSON lists, so cached entries
@@ -1660,7 +1715,7 @@ def _is_partition_tuple_cache(hit: Any, n_fields: int) -> bool:
     return True
 
 
-def _fetch_partitions_http(group: str, name: str) -> dict:
+def _fetch_partitions_http(group: str, name: str) -> dict[str, object]:
     url = f"{FINRA_API_BASE}/partitions/group/{group}/name/{name}"
     resp = requests.get(
         url,
@@ -1674,11 +1729,11 @@ def _fetch_partitions_http(group: str, name: str) -> dict:
     data = resp.json()
     if not isinstance(data, dict):
         raise ValueError(f"Unexpected partitions response for {group}/{name}")
-    return data
+    return {str(k): v for k, v in data.items()}
 
 
 def _parse_partitions(
-    raw: dict, partition_fields: tuple[str, ...]
+    raw: dict[str, object], partition_fields: tuple[str, ...]
 ) -> list[tuple[str, ...]]:
     """Normalize availablePartitions into ordered partition tuples.
 
@@ -1759,21 +1814,21 @@ def _ordered_partition_tuples(
     if primary_idx is None:
         return []
 
-    def _date_key(entry: tuple[str, ...]) -> tuple:
+    def _date_key(entry: tuple[str, ...]) -> tuple[int, str]:
         value = entry[primary_idx]
         norm = _norm_date(value)
         if norm is None:
             return (1, value)
         return (0, norm)
 
-    filtered: list[tuple[tuple, dict[str, str]]] = []
+    filtered: list[tuple[tuple[int, str], dict[str, str]]] = []
     for entry in partitions:
         values = dict(zip(spec.partition_fields, entry))
         if any(values.get(f) != pinned[f] for f in pinned):
             continue
         filtered.append((_date_key(entry), values))
-    filtered.sort(key=lambda pair: pair[0], reverse=descending)
-    return [values for _key, values in filtered]
+    filtered.sort(key=itemgetter(0), reverse=descending)
+    return [values for _, values in filtered]
 
 
 def reset_partitions_cache() -> None:
@@ -1783,22 +1838,28 @@ def reset_partitions_cache() -> None:
         _partitions_mem = {}
 
 
-def _build_spec_from_metadata(entry: CatalogEntry, raw: dict) -> DatasetSpec:
-    fields_raw = raw.get("fields") or raw.get("datasetFields") or []
-    fields: list[dict[str, Any]] = []
-    for f in fields_raw:
-        if not isinstance(f, dict) or not f.get("name"):
-            continue
-        fields.append(
-            {
-                "name": f["name"],
-                "type": f.get("type") or f.get("dataType") or "",
-                "description": f.get("description") or "",
-                **({"format": f["format"]} if f.get("format") else {}),
-            }
-        )
-    partition_raw = raw.get("partitionFields") or raw.get("partitions") or []
-    partition_fields = tuple(str(p) for p in partition_raw)
+def _build_spec_from_metadata(entry: CatalogEntry, raw: dict[str, object]) -> DatasetSpec:
+    raw_fields: object = raw.get("fields") or raw.get("datasetFields") or list[object]()
+    fields: list[dict[str, object]] = []
+    if isinstance(raw_fields, (list, tuple)):
+        for f in raw_fields:
+            if not isinstance(f, dict):
+                continue
+            if not f.get("name"):
+                continue
+            fields.append(
+                {
+                    "name": str(f.get("name")),
+                    "type": str(f.get("type") or f.get("dataType") or ""),
+                    "description": str(f.get("description") or ""),
+                    **({"format": str(f.get("format"))} if f.get("format") else {}),
+                }
+            )
+    raw_partitions: object = raw.get("partitionFields") or raw.get("partitions") or list[object]()
+    if isinstance(raw_partitions, (list, tuple)):
+        partition_fields = tuple(str(p) for p in raw_partitions)
+    else:
+        partition_fields = ()
 
     description = (
         str(raw.get("description") or "").strip()
@@ -1807,8 +1868,13 @@ def _build_spec_from_metadata(entry: CatalogEntry, raw: dict) -> DatasetSpec:
     )
     methods = entry.methods
     if not methods:
-        sm = raw.get("supportedMethods") or []
-        methods = tuple(str(m) for m in sm)
+        raw_sm: object = raw.get("supportedMethods") or list[object]()
+        if isinstance(raw_sm, (list, tuple)):
+            methods = tuple(str(m) for m in raw_sm)
+        elif isinstance(raw_sm, str):
+            methods = tuple(m.strip() for m in raw_sm.split(",") if m.strip())
+        else:
+            methods = ()
 
     symbol_field = _detect_symbol_field(fields)
     date_field = _detect_date_field(fields, partition_fields)
@@ -1818,18 +1884,29 @@ def _build_spec_from_metadata(entry: CatalogEntry, raw: dict) -> DatasetSpec:
 
     override = _METADATA_OVERRIDES.get((entry.group.lower(), entry.name.lower()), {})
     if "symbol_field" in override:
-        symbol_field = override["symbol_field"]
+        raw_sym = override["symbol_field"]
+        symbol_field = str(raw_sym) if isinstance(raw_sym, str) and raw_sym else None
     if "date_field" in override:
-        date_field = override["date_field"]
+        raw_dt = override["date_field"]
+        date_field = str(raw_dt) if isinstance(raw_dt, str) and raw_dt else None
     if override.get("market_aggregate"):
         market_aggregate = True
         symbol_field = None
     if "default_filters" in override:
-        default_filters = tuple(override["default_filters"])
+        raw_df = override["default_filters"]
+        if isinstance(raw_df, (list, tuple)):
+            df_items: list[tuple[str, str]] = []
+            for pair in raw_df:
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    df_items.append((str(pair[0]), str(pair[1])))
+            default_filters = tuple(df_items)
     if "valid_filter_values" in override:
-        valid_filter_values = {
-            k: tuple(v) for k, v in override["valid_filter_values"].items()
-        }
+        raw_vfv = override["valid_filter_values"]
+        if isinstance(raw_vfv, dict):
+            valid_filter_values = {
+                str(k): tuple(str(x) for x in v) if isinstance(v, (list, tuple)) else ()
+                for k, v in raw_vfv.items()
+            }
 
     # Validate override field names against metadata when present.
     field_names = {f["name"] for f in fields}
@@ -1855,64 +1932,109 @@ def _build_spec_from_metadata(entry: CatalogEntry, raw: dict) -> DatasetSpec:
     )
 
 
-def _spec_from_cached(entry: CatalogEntry, hit: dict) -> DatasetSpec:
-    default_filters = tuple(
-        (pair[0], pair[1]) for pair in (hit.get("default_filters") or [])
-    )
-    valid = {
-        k: tuple(v) for k, v in (hit.get("valid_filter_values") or {}).items()
-    }
+def _spec_from_cached(entry: CatalogEntry, hit: dict[str, object]) -> DatasetSpec:
+    raw_df = hit.get("default_filters")
+    df_items: list[tuple[str, str]] = []
+    if isinstance(raw_df, (list, tuple)):
+        for pair in raw_df:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                df_items.append((str(pair[0]), str(pair[1])))
+    default_filters = tuple(df_items)
+    raw_vfv = hit.get("valid_filter_values")
+    valid: dict[str, tuple[str, ...]] = {}
+    if isinstance(raw_vfv, dict):
+        for k, v in raw_vfv.items():
+            if isinstance(v, (list, tuple)):
+                valid[str(k)] = tuple(str(x) for x in v)
+    raw_desc = hit.get("description")
+    description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else entry.description
+    raw_fields = hit.get("fields")
+    cached_fields: list[dict[str, object]] = []
+    if isinstance(raw_fields, (list, tuple)):
+        for item in raw_fields:
+            if isinstance(item, dict):
+                cached_fields.append({str(k): v for k, v in item.items()})
+    raw_pf = hit.get("partition_fields")
+    if isinstance(raw_pf, (list, tuple)):
+        partition_fields = tuple(str(p) for p in raw_pf)
+    else:
+        partition_fields = ()
+    raw_methods = hit.get("methods")
+    if isinstance(raw_methods, (list, tuple)):
+        methods = tuple(str(m) for m in raw_methods)
+    else:
+        methods = entry.methods
+    raw_sym = hit.get("symbol_field")
+    symbol_field = str(raw_sym) if isinstance(raw_sym, str) and raw_sym else None
+    raw_dt = hit.get("date_field")
+    date_field = str(raw_dt) if isinstance(raw_dt, str) and raw_dt else None
     return DatasetSpec(
         group=entry.group,
         name=entry.name,
-        description=hit.get("description") or entry.description,
-        fields=tuple(hit.get("fields") or ()),
-        partition_fields=tuple(hit.get("partition_fields") or ()),
-        methods=tuple(hit.get("methods") or entry.methods),
-        symbol_field=hit.get("symbol_field"),
-        date_field=hit.get("date_field"),
+        description=description,
+        fields=tuple(cached_fields),
+        partition_fields=partition_fields,
+        methods=methods,
+        symbol_field=symbol_field,
+        date_field=date_field,
         market_aggregate=bool(hit.get("market_aggregate")),
         default_filters=default_filters,
         valid_filter_values=valid,
     )
 
 
-def _detect_symbol_field(fields: list[dict]) -> Optional[str]:
-    names = {f["name"]: f for f in fields if f.get("name")}
+def _detect_symbol_field(fields: list[dict[str, object]]) -> Optional[str]:
+    names: dict[str, dict[str, object]] = {}
+    for f in fields:
+        raw_name = f.get("name")
+        if isinstance(raw_name, str) and raw_name:
+            names[raw_name] = f
     for preferred in _PREFERRED_SYMBOL_FIELDS:
         if preferred in names:
             return preferred
     for f in fields:
-        n = f.get("name") or ""
-        if "symbol" in n.lower() and (f.get("type") or "").lower() in (
-            "string", "text", ""
-        ):
+        raw_n = f.get("name")
+        n = str(raw_n) if isinstance(raw_n, str) else ""
+        if not n:
+            continue
+        raw_t = f.get("type")
+        t = str(raw_t).lower() if isinstance(raw_t, str) else ""
+        if "symbol" in n.lower() and t in ("string", "text", ""):
             return n
     return None
 
 
 def _detect_date_field(
-    fields: list[dict], partition_fields: tuple[str, ...]
+    fields: list[dict[str, object]], partition_fields: tuple[str, ...]
 ) -> Optional[str]:
-    by_name = {f["name"]: f for f in fields if f.get("name")}
+    by_name: dict[str, dict[str, object]] = {}
+    for f in fields:
+        raw = f.get("name")
+        if isinstance(raw, str) and raw:
+            by_name[raw] = f
     for p in partition_fields:
         f = by_name.get(p)
-        if f and _is_date_type(f.get("type")):
+        if f is not None and _is_date_type(f.get("type")):
             return p
         # Partition key may be a date even without type annotation
-        if f and re.search(r"date|datetime|time", p, re.I):
+        if f is not None and re.search(r"date|datetime|time", p, re.I):
             return p
     for f in fields:
         if _is_date_type(f.get("type")):
-            return f["name"]
+            raw_name = f.get("name")
+            if isinstance(raw_name, str) and raw_name:
+                return raw_name
     for f in fields:
-        n = f.get("name") or ""
+        raw_n = f.get("name")
+        n = str(raw_n) if isinstance(raw_n, str) else ""
+        if not n:
+            continue
         if re.search(r"(^|.*)(date|datetime)$", n, re.I) or "Date" in n:
             return n
     return None
 
 
-def _is_date_type(t: Any) -> bool:
+def _is_date_type(t: object) -> bool:
     s = str(t or "").lower()
     return s in ("date", "datetime", "timestamp") or "date" in s
 
@@ -1929,22 +2051,22 @@ def _build_payload(
     start_date: Optional[str],
     end_date: Optional[str],
     limit: Optional[int],
-    filters: Optional[list[dict]],
+    filters: Sequence[Mapping[str, object]] | None,
     offset: Optional[int] = None,
     fields: Optional[list[str]] = None,
     sort_fields: Optional[list[str]] = None,
-) -> dict:
-    payload: dict[str, Any] = {"limit": _clamp_limit(limit)}
+) -> dict[str, object]:
+    payload: dict[str, object] = {"limit": _clamp_limit(limit)}
     if offset is not None:
         payload["offset"] = _validate_offset(entry, offset)
     if fields:
         payload["fields"] = list(fields)
     if sort_fields:
         payload["sortFields"] = list(sort_fields)
-    compare: list[dict] = []
+    compare: list[dict[str, object]] = []
 
     explicit_fields: set[str] = set()
-    normalized_extras: list[dict] = []
+    normalized_extras: list[dict[str, object]] = []
     for index, extra in enumerate(filters or []):
         if not isinstance(extra, dict):
             raise ValueError(
@@ -2055,9 +2177,18 @@ def _clamp_limit(limit: Optional[int], *, default: int = DEFAULT_LIMIT, maximum:
     return max(1, min(n, maximum))
 
 
-def _validate_offset(entry: CatalogEntry, offset: Any) -> int:
+def _validate_offset(entry: CatalogEntry, offset: object) -> int:
     try:
-        n = int(offset)
+        if isinstance(offset, bool):
+            n = int(offset)
+        elif isinstance(offset, int):
+            n = offset
+        elif isinstance(offset, float):
+            n = int(offset)
+        elif isinstance(offset, str):
+            n = int(offset.strip())
+        else:
+            raise ValueError(f"offset must be an integer, got {offset!r}.")
     except (TypeError, ValueError):
         raise ValueError(f"offset must be an integer, got {offset!r}.")
     if n < 0:
@@ -2081,7 +2212,7 @@ def _dataset_path_name(spec: DatasetSpec) -> str:
     return spec.name
 
 
-def _query_cache_key(spec: DatasetSpec, payload: dict) -> str:
+def _query_cache_key(spec: DatasetSpec, payload: dict[str, object]) -> str:
     path_name = _dataset_path_name(spec)
     return (
         f"finra:v2:{_environment()}:query:{spec.group}:{path_name}:"
@@ -2089,22 +2220,28 @@ def _query_cache_key(spec: DatasetSpec, payload: dict) -> str:
     )
 
 
-def _cached_query(spec: DatasetSpec, payload: dict) -> tuple[list, dict]:
+def _cached_query(spec: DatasetSpec, payload: dict[str, object]) -> tuple[list[dict[str, object]], dict[str, object]]:
     cache_key = _query_cache_key(spec, payload)
     hit = cache.get(cache_key, ttl=CACHE_TTL_SECONDS)
     if hit is not None:
         if isinstance(hit, dict) and "records" in hit:
-            return hit["records"], hit.get("headers") or {}
-        # Legacy cached plain list (pre-analysis layer): no headers.
-        return hit, {}
+            raw_records = hit.get("records")
+            raw_headers = hit.get("headers") or {}
+            if isinstance(raw_records, list) and isinstance(raw_headers, dict):
+                records_hit = [{str(k): v for k, v in r.items()} for r in raw_records if isinstance(r, dict)]
+                headers_hit: dict[str, object] = {str(k): v for k, v in raw_headers.items()}
+                return records_hit, headers_hit
+        if isinstance(hit, list):
+            # Legacy cached plain list (pre-analysis layer): no headers.
+            return [{str(k): v for k, v in r.items()} for r in hit if isinstance(r, dict)], {}
     _, records, headers = ingestion_post_query(spec.group, _dataset_path_name(spec), payload)
     cache.set(cache_key, {"records": records, "headers": headers})
     return records, headers
 
 
 def ingestion_post_query(
-    group: str, dataset_name: str, payload: dict
-) -> tuple[bytes, list, dict]:
+    group: str, dataset_name: str, payload: dict[str, object]
+) -> tuple[bytes, list[dict[str, object]], dict[str, object]]:
     """Raw FINRA data-plane POST used by the research data refresh service (app/services/research_data.py).
 
     Returns (response body bytes, parsed records, captured pagination
@@ -2130,7 +2267,7 @@ def ingestion_post_query(
         _sanitize_payload(payload),
     )
     resp.raise_for_status()
-    headers = {
+    headers: dict[str, object] = {
         name.lower(): value
         for name, value in resp.headers.items()
         if name.lower() in _RECORD_HEADERS
@@ -2143,16 +2280,17 @@ def ingestion_post_query(
     return resp.content, _extract_records(data), headers
 
 
-def _extract_records(data: Any) -> list:
+def _extract_records(data: object) -> list[dict[str, object]]:
     if data is None:
         return []
     if isinstance(data, list):
-        return data
+        return [{str(k): v for k, v in item.items()} for item in data if isinstance(item, dict)]
     if isinstance(data, dict):
         for key in ("data", "records", "results"):
-            if isinstance(data.get(key), list):
-                return data[key]
-        return [data]
+            nested = data.get(key)
+            if isinstance(nested, list):
+                return [{str(k): v for k, v in item.items()} for item in nested if isinstance(item, dict)]
+        return [{str(k): v for k, v in data.items()}]
     return []
 
 

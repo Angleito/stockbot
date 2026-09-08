@@ -4,6 +4,7 @@ before it may enter model context. stdlib only."""
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any
 
 from ..redact import _BEARER_RE, _JWT_RE, _SK_OR_V1_RE
 from . import prompt_injection
@@ -129,8 +130,7 @@ _FALLBACK_ENVELOPE = _envelope(
     "unknown", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL
 )
 
-
-def envelope_for_tool(name: str, result: dict) -> ContextEnvelope:
+def envelope_for_tool(name: str, result: dict[str, Any]) -> ContextEnvelope:
     """The labeled envelope for a tool result (conservative fallback for
     unregistered tools)."""
     base = TOOL_ENVELOPES.get(name, _FALLBACK_ENVELOPE)

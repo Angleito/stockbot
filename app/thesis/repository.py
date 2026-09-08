@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -15,6 +16,7 @@ from app.thesis.models import (
     SCHEMA_VERSION,
     Checkpoint,
     EvidenceRef,
+    ExpressionRequirement,
     HistoricalStateUnavailable,
     QuestionStatus,
     Thesis,
@@ -62,9 +64,12 @@ _FORBIDDEN_EVIDENCE_KEYS = frozenset({
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-
 def _safe_name(trigger_or_entry_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", trigger_or_entry_id)
+
+
+def _trigger_created(trigger: Trigger) -> str:
+    return trigger.created_at
 
 
 def _best_effort_thesis_id(thesis_file: Path) -> str | None:
@@ -78,7 +83,7 @@ def _best_effort_thesis_id(thesis_file: Path) -> str | None:
     return None
 
 
-def _journal_front_matter(entry_id: str, thesis_id: str, created: str, d: dict) -> str:
+def _journal_front_matter(entry_id: str, thesis_id: str, created: str, d: dict[str, Any]) -> str:
     """Journal front matter; ``known_at`` persists when the entry carries it (PIT gate)."""
     known = f"known_at: {d.get('known_at')}\n" if d.get("known_at") else ""
     return (
@@ -236,7 +241,7 @@ class ThesisRepository:
                 if not include_processed and t.status == TriggerStatus.PROCESSED.value:
                     continue
                 out.append(t)
-        out.sort(key=lambda t: t.created_at)
+        out.sort(key=_trigger_created)
         return out
 
     def _resolve_id(self, id_or_slug: str) -> str:
@@ -249,7 +254,7 @@ class ThesisRepository:
         self._unknown_thesis(id_or_slug, bad_dirs, bad_ids)
 
     @staticmethod
-    def _check_file_owner(raw: dict, path: str, thesis_id: str) -> None:
+    def _check_file_owner(raw: dict[str, Any], path: str, thesis_id: str) -> None:
         if raw.get("thesis_id") != thesis_id:
             raise ValueError(f"{path}: thesis_id mismatch: file has {raw.get('thesis_id')!r}, expected {thesis_id!r}")
 
@@ -270,7 +275,8 @@ class ThesisRepository:
                 raw = load_raw_yaml(f)
             except Exception:
                 continue
-            dt = _as_dt(raw.get("effective_at")) if isinstance(raw, dict) else None
+            eff_raw = raw.get("effective_at") if isinstance(raw, dict) else None
+            dt = _as_dt(str(eff_raw)) if eff_raw is not None else None
             if dt is None:
                 continue
             pairs.append((dt, version))
@@ -281,7 +287,7 @@ class ThesisRepository:
     def _write_snapshot_from_dicts_locked(
         self, thesis_dir: Path, thesis_id: str, *, effective_at: str, reason: str,
         run_id: str = "", trigger_id: str = "",
-        thesis: dict, state: dict, questions: dict, watch: dict, memory: dict,
+        thesis: dict[str, Any], state: dict[str, Any], questions: dict[str, Any], watch: dict[str, Any], memory: dict[str, Any],
     ) -> ThesisStateSnapshot:
         """Write one versioned snapshot from caller-supplied dicts; caller must hold thesis_lock."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -350,17 +356,17 @@ class ThesisRepository:
         """Latest snapshot with effective_at <= known_at; fail closed before history."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
-        if _as_dt(known_at) is None:
+        cutoff = _as_dt(known_at)
+        if cutoff is None:
             raise ValueError(f"<history>: bad known_at {known_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         hdir = thesis_dir / "history"
-        files = sorted(hdir.glob("*.yaml")) if hdir.is_dir() else []
+        files: list[Path] = sorted(hdir.glob("*.yaml")) if hdir.is_dir() else []
         if not files:
             raise HistoricalStateUnavailable(
                 f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (no history)")
         snaps = [ThesisStateSnapshot.from_dict(load_raw_yaml(f), str(f)) for f in files]
-        cutoff = _as_dt(known_at)
-        eligible = [s for s in snaps if _as_dt(s.effective_at) is not None and _as_dt(s.effective_at) <= cutoff]
+        eligible = [s for s in snaps if (d := _as_dt(s.effective_at)) is not None and d <= cutoff]
         if not eligible:
             earliest = min(s.effective_at for s in snaps)
             raise HistoricalStateUnavailable(
@@ -383,14 +389,15 @@ class ThesisRepository:
         return sorted(out)
 
 
-    def answer_questions(self, thesis_id: str, answered: list[dict], *, effective_at: str | None = None) -> None:
+    def answer_questions(self, thesis_id: str, answered: list[dict[str, Any]], *, effective_at: str | None = None) -> None:
         """Mark questions answered (validate-then-replace questions.yaml, lock-held)."""
         if not answered:
             return
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<answer>: bad effective_at {effective_at!r}")
         thesis_dir = self.dir_for_thesis(thesis_id)
         with thesis_lock(thesis_dir):
@@ -398,7 +405,7 @@ class ThesisRepository:
             raw = load_raw_yaml(thesis_dir / "questions.yaml")
             self._check_file_owner(raw, path, thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 raw = {"schema_version": base.questions.get("schema_version", SCHEMA_VERSION),
                        "thesis_id": thesis_id,
@@ -434,7 +441,8 @@ class ThesisRepository:
         from app.thesis.monitor import SUPPORTED_HANDLERS, _as_dt  # local: monitor owns the handler table + clock
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<watch>: bad effective_at {effective_at!r}")
         thesis_dir = self.dir_for_thesis(thesis_id)
         with thesis_lock(thesis_dir):
@@ -443,7 +451,7 @@ class ThesisRepository:
             raw = load_raw_yaml(path)
             self._check_file_owner(raw, str(path), thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 raw = {"schema_version": base.watch.get("schema_version", SCHEMA_VERSION),
                        "thesis_id": thesis_id,
@@ -505,13 +513,13 @@ class ThesisRepository:
         self,
         user_thesis: str,
         scope: str = "unknown",
-        claims: list = (),
-        assumptions: list = (),
-        invalidators: list = (),
-        unknowns: list = (),
-        expressions: list = (),
-        requirements: list = (),
-        watch_rules: list = (),
+        claims: Sequence[str | dict[str, Any] | ThesisClaim] = (),
+        assumptions: Sequence[str] = (),
+        invalidators: Sequence[str] = (),
+        unknowns: Sequence[str] = (),
+        expressions: Sequence[dict[str, Any] | TradeExpression] = (),
+        requirements: Sequence[dict[str, Any] | ExpressionRequirement] = (),
+        watch_rules: Sequence[dict[str, Any]] = (),
         *,
         effective_at: str | None = None,
     ) -> Thesis:
@@ -624,7 +632,8 @@ class ThesisRepository:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<update>: bad effective_at {effective_at!r}")
         thesis_id = self._resolve_id(id_or_slug)
         thesis_dir = self._dir_for(thesis_id)
@@ -633,14 +642,14 @@ class ThesisRepository:
             if "thesis_id" in patch and patch["thesis_id"] != thesis_id:
                 raise ValueError(f"{thesis_dir}/thesis.yaml: 'thesis_id' is immutable")
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 if isinstance(patch.get("claims"), list):
                     base_claim_ids = {c.get("claim_id") for c in base.thesis.get("claims", []) if isinstance(c, dict)} - {None}
                     patch_claim_ids = {c.get("claim_id") for c in patch["claims"] if isinstance(c, dict)}
                     missing = base_claim_ids - patch_claim_ids
                     if missing:
-                        cid = sorted(missing)[0]
+                        cid = sorted(missing, key=str)[0]
                         raise ValueError(
                             f"{thesis_dir}/thesis.yaml: claim {cid!r} does not belong to thesis {thesis_id!r}")
                 if isinstance(patch.get("expressions"), list):
@@ -648,7 +657,7 @@ class ThesisRepository:
                     patch_expr_ids = {e.get("expression_id") for e in patch["expressions"] if isinstance(e, dict)}
                     missing = base_expr_ids - patch_expr_ids
                     if missing:
-                        eid = sorted(missing)[0]
+                        eid = sorted(missing, key=str)[0]
                         raise ValueError(
                             f"{thesis_dir}/thesis.yaml: expression {eid!r} does not belong to thesis {thesis_id!r}")
                 data = dict(base.thesis)
@@ -674,13 +683,14 @@ class ThesisRepository:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<status>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 if base.thesis.get("status") == models.ThesisStatus.CLOSED.value:
                     raise ValueError(f"{thesis_dir}/thesis.yaml: thesis {thesis_id!r} is closed; cannot change status")
@@ -714,13 +724,14 @@ class ThesisRepository:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<status>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 data = dict(base.thesis)
                 data["status"] = models.ThesisStatus.CLOSED.value
@@ -740,7 +751,7 @@ class ThesisRepository:
             self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="status_changed")
             return candidate
 
-    def append_journal_entry(self, thesis_id: str, entry: dict) -> Path:
+    def append_journal_entry(self, thesis_id: str, entry: dict[str, Any]) -> Path:
         """Idempotent by entry/journal id: retrying with the same id is a no-op."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -801,11 +812,11 @@ class ThesisRepository:
         thesis_id: str,
         trigger_type: str = "new_external_evidence",
         importance: str = "medium",
-        claim_ids: list = (),
-        expression_ids: list = (),
-        canonical_refs: list = (),
+        claim_ids: Sequence[str] = (),
+        expression_ids: Sequence[str] = (),
+        canonical_refs: Sequence[str] = (),
         summary: str = "",
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -839,7 +850,7 @@ class ThesisRepository:
             atomic_write_yaml(dest, {"schema_version": SCHEMA_VERSION, **trigger.to_dict()}, self.root)
             return trigger
 
-    def mark_trigger_processed(self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict | None = None) -> Trigger:
+    def mark_trigger_processed(self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict[str, Any] | None = None) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
@@ -868,7 +879,7 @@ class ThesisRepository:
             atomic_write_yaml(target, {"schema_version": SCHEMA_VERSION, **updated.to_dict()}, self.root)
             return updated
 
-    def _load_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict]:
+    def _load_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, Any]]:
         """Locate one trigger's raw mapping (direct name, else inbox scan)."""
         direct = thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.yaml"
         if direct.is_file():
@@ -906,7 +917,7 @@ class ThesisRepository:
     def _pending_path(self, thesis_dir: Path, trigger_id: str) -> Path:
         return thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.pending.json"
 
-    def read_pending_result(self, thesis_id: str, trigger_id: str) -> dict | None:
+    def read_pending_result(self, thesis_id: str, trigger_id: str) -> dict[str, Any] | None:
         """Durable research-result intent for crash replay (None when absent)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -929,7 +940,7 @@ class ThesisRepository:
                 raise ValueError(f"{p}: foreign or corrupt pending result intent; operator review required")
             return raw
 
-    def write_pending_result(self, thesis_id: str, trigger_id: str, intent: dict) -> Path:
+    def write_pending_result(self, thesis_id: str, trigger_id: str, intent: dict[str, Any]) -> Path:
         """Persist the validated result before mutating (replay skips the model call)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -958,7 +969,7 @@ class ThesisRepository:
             self._check_file_owner(raw, str(thesis_dir / "checkpoint.yaml"), thesis_id)
             return Checkpoint.from_dict(raw, str(thesis_dir / "checkpoint.yaml"))
 
-    def save_checkpoint(self, thesis_id: str, checkpoint: Checkpoint | dict) -> Checkpoint:
+    def save_checkpoint(self, thesis_id: str, checkpoint: Checkpoint | dict[str, Any]) -> Checkpoint:
         """Validate-then-replace checkpoint.yaml (lock-held, atomic)."""
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -971,9 +982,9 @@ class ThesisRepository:
 
 
     def apply_research_result(
-        self, thesis_id: str, result: dict, run_id: str = "", *, allowed_refs: set[str] | None = None,
+        self, thesis_id: str, result: dict[str, Any], run_id: str = "", *, allowed_refs: set[str] | None = None,
         effective_at: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Single replayable research commit; de-dup additions by ID (crash-retry safe).
 
         One lock, fixed order: claim/expression status -> evidence refs -> state
@@ -991,14 +1002,15 @@ class ThesisRepository:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         eff = effective_at or _utcnow()
-        if _as_dt(eff) is None:
+        eff_dt = _as_dt(eff)
+        if eff_dt is None:
             raise ValueError(f"<apply>: bad effective_at {effective_at!r}")
         thesis_dir = self._dir_for(thesis_id)
         outcome: dict[str, Any] = {}
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
             latest = self._latest_effective_locked(thesis_dir)
-            if latest is not None and _as_dt(eff) < latest[0]:
+            if latest is not None and eff_dt < latest[0]:
                 # Backdated commit: patch copies of the as-of snapshot, never live files.
                 base = self.load_state_as_of(thesis_id, eff)
                 if base.thesis.get("status") == models.ThesisStatus.CLOSED.value:
@@ -1238,7 +1250,7 @@ class ThesisRepository:
                 raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
 
             # 0a. claim/expression updates: IDs must belong here, statuses known.
-            claim_patch: dict[str, dict] = {}
+            claim_patch: dict[str, dict[str, Any]] = {}
             for c in result.get("claim_updates", []) or []:
                 if not isinstance(c, dict) or not c.get("claim_id"):
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim update {c!r}")
@@ -1248,7 +1260,7 @@ class ThesisRepository:
                 if c.get("status") is not None and c["status"] not in {e.value for e in models.ClaimStatus}:
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad claim status {c.get('status')!r}")
                 claim_patch[c["claim_id"]] = c
-            expr_patch: dict[str, dict] = {}
+            expr_patch: dict[str, dict[str, Any]] = {}
             for e in result.get("expression_updates", []) or []:
                 if not isinstance(e, dict) or not e.get("expression_id"):
                     raise ValueError(f"{thesis_dir}/thesis.yaml: bad expression update {e!r}")
@@ -1262,7 +1274,7 @@ class ThesisRepository:
 
             # 0b. evidence provenance before any write (foreign/invalid changes nothing).
             tpath: Path | None = None
-            raw_trigger: dict | None = None
+            raw_trigger: dict[str, Any] | None = None
             if result.get("trigger_id"):
                 tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, result["trigger_id"])
                 if allowed_refs is not None:

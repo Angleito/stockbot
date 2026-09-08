@@ -5,9 +5,10 @@ missing values are None/'unknown', never fabricated.
 """
 
 import re
+from datetime import date, datetime
 
 from .context import GOVERNANCE_FORMS
-from .models import GovernanceEvent, ProxyProposal, ShareholderVote
+from .models import Filing, GovernanceEvent, ProxyProposal, ShareholderVote
 
 CONTESTED_FORMS = ("DFAN14A", "DEFC14A", "PREC14A")
 
@@ -24,11 +25,19 @@ _OUTCOME = re.compile(r"(approved|rejected|passed|failed|adopted)",
                       re.IGNORECASE)
 
 
-def list_sec_filings(*args, **kwargs):
+def list_sec_filings(
+    ticker_or_cik: str | int,
+    forms: str | list[str] | tuple[str, ...] | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
+    as_of: str | date | datetime | None = None,
+    limit: int | None = 50,
+) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
 def load_proxy_text(accession_no: str) -> str:
@@ -38,12 +47,23 @@ def load_proxy_text(accession_no: str) -> str:
     return documents.get_sec_filing_text(accession_no)
 
 
-def normalize_proxy(accession_no: str, form: str, *, issuer: str,
-                    filed_at=None, text=None,
-                    meeting_date=None, obj=None, filer_cik=None,
-                    filer_name=None, subject_cik=None, subject_name=None,
-                    document_name=None, known_at=None,
-                    source_url=None) -> GovernanceEvent:
+def normalize_proxy(
+    accession_no: str,
+    form: str,
+    *,
+    issuer: str,
+    filed_at: str | None = None,
+    text: str | None = None,
+    meeting_date: str | None = None,
+    obj: object | None = None,
+    filer_cik: str | int | None = None,
+    filer_name: str | None = None,
+    subject_cik: str | int | None = None,
+    subject_name: str | None = None,
+    document_name: str | None = None,
+    known_at: str | None = None,
+    source_url: str | None = None,
+) -> GovernanceEvent:
     if form in CONTESTED_FORMS:
         event_type = "proxy_contest"
     elif form in ("DEFM14A", "PREM14A"):
@@ -77,10 +97,10 @@ def normalize_proxy(accession_no: str, form: str, *, issuer: str,
         contested=form in CONTESTED_FORMS,
         source=None,
         filer_cik=str(filer_cik).strip() if filer_cik is not None else None,
-        filer_name=str(filer_name).strip() if filer_name is not None else None,
+        filer_name=filer_name.strip() if filer_name is not None else None,
         subject_cik=str(subject_cik).strip()
         if subject_cik is not None else None,
-        subject_name=(str(subject_name).strip()
+        subject_name=(subject_name.strip()
                       if subject_name is not None else structured_subject),
         document_name=document_name,
         known_at=known_at or filed_at,
@@ -89,15 +109,20 @@ def normalize_proxy(accession_no: str, form: str, *, issuer: str,
     )
 
 
-def extract_proposals(text, *, issuer: str,
-                      accession_no: str, document_name=None) -> list:
+def extract_proposals(
+    text: str | None,
+    *,
+    issuer: str,
+    accession_no: str,
+    document_name: str | None = None,
+) -> list[ProxyProposal]:
     if not text:
         return []
-    body = str(text)
+    body = text
     headings = list(_PROPOSAL_SPLIT.finditer(body))
     if not headings:
         return []
-    out = []
+    out: list[ProxyProposal] = []
     for n, match in enumerate(headings, 1):
         end = headings[n].start() if n < len(headings) else len(body)
         window = body[match.start():end][:500]
@@ -116,18 +141,24 @@ def extract_proposals(text, *, issuer: str,
     return out
 
 
-def _num(raw) -> "int | None":
+def _num(raw: str) -> int | None:
     try:
         return int(raw.replace(",", ""))
     except (ValueError, AttributeError):
         return None
 
 
-def extract_votes(text, *, issuer: str, accession_no: str,
-                  meeting_date=None, document_name=None) -> list:
+def extract_votes(
+    text: str | None,
+    *,
+    issuer: str,
+    accession_no: str,
+    meeting_date: str | None = None,
+    document_name: str | None = None,
+) -> list[ShareholderVote]:
     if not text:
         return []
-    body = str(text)
+    body = text
     for_match = _VOTES_FOR.search(body)
     against_match = _VOTES_AGAINST.search(body)
     if not for_match and not against_match:
@@ -152,11 +183,16 @@ def extract_votes(text, *, issuer: str, accession_no: str,
     )]
 
 
-def get_governance_events(ticker_or_cik, *, since=None, as_of=None,
-                          limit=10) -> list:
+def get_governance_events(
+    ticker_or_cik: str | int,
+    *,
+    since: str | None = None,
+    as_of: str | None = None,
+    limit: int | None = 10,
+) -> list[GovernanceEvent]:
     filings = list_sec_filings(ticker_or_cik, forms=list(GOVERNANCE_FORMS),
                                start_date=since, as_of=as_of, limit=limit)
-    out = []
+    out: list[GovernanceEvent] = []
     for filing in filings:
         accession = getattr(filing, "accession_no", "")
         form = getattr(filing, "form", "")

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from app.domain.market.identity import resolve_ticker_aliases
 from app.domain.market.securities import SecurityResolution, TickerAlias
@@ -79,7 +79,7 @@ def warehouse_name_to_ticker(
             "SELECT alias_value, entity_id FROM entity_aliases", data_root=data_root
         )
     except Exception:
-        alias_rows = []
+        alias_rows: list[dict[str, Any]] = []
     for row in alias_rows:
         if isinstance(row.get("alias_value"), str) and row["alias_value"].casefold() == lowered:
             entity_ids.add(str(row["entity_id"]))
@@ -94,7 +94,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            sec_rows = []
+            sec_rows: list[dict[str, Any]] = []
         for row in sec_rows:
             if row.get("ticker"):
                 tickers.add(str(row["ticker"]).strip().upper())
@@ -105,7 +105,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            alias_tickers = []
+            alias_tickers: list[dict[str, Any]] = []
         for row in alias_tickers:
             if row.get("alias_value"):
                 tickers.add(str(row["alias_value"]).strip().upper())

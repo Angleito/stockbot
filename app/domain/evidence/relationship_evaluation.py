@@ -35,6 +35,8 @@ from __future__ import annotations
 import hashlib
 import json
 import statistics
+from collections.abc import Collection
+from typing import Any
 
 #: Horizons (trading days) always reported separately in stored output.
 HORIZONS = (1, 5, 20)
@@ -61,15 +63,14 @@ DEMOTED_BOOST = 0.5
 def _date_part(value: object) -> str:
     return str(value or "")[:10]
 
-
-def is_pit_safe(instance: dict) -> bool:
+def is_pit_safe(instance: dict[str, Any]) -> bool:
     """True only when evidence ``known_at`` strictly precedes the prediction."""
     known = _date_part(instance.get("evidence_known_at"))
     predicted = _date_part(instance.get("prediction_date"))
     return bool(known) and bool(predicted) and known < predicted
 
 
-def _rate(items: list[dict], key: str, default: bool) -> float:
+def _rate(items: list[dict[str, Any]], key: str, default: bool) -> float:
     if not items:
         return 0.0
     return sum(1 for it in items if bool(it.get(key, default))) / len(items)
@@ -95,10 +96,12 @@ def _forward_excess(
     horizon: int,
     calendar: list[str],
     positions: dict[str, int],
-    observations: dict,
-    benchmark: dict,
+    observations: dict[tuple[str, str], float] | None,
+    benchmark: dict[str, float] | None,
 ) -> float | None:
     """Benchmark-adjusted forward return, or None when any price is missing."""
+    if observations is None or benchmark is None:
+        return None
     start = positions.get(day)
     if start is None or start + horizon >= len(calendar):
         return None
@@ -133,20 +136,25 @@ def _max_drawdown(ordered_excess: list[float]) -> float:
     return worst
 
 
+def _instance_key(it: dict[str, Any]) -> tuple[str, str]:
+    """Chronological sort key: prediction date, then instance id."""
+    return (_date_part(it.get("prediction_date")),
+            str(it.get("instance_id") or ""))
+
+
 def evaluate_window(
-    instances: list[dict],
-    observations: dict | None,
-    benchmark: dict | None,
+    instances: list[dict[str, Any]],
+    observations: dict[tuple[str, str], float] | None,
+    benchmark: dict[str, float] | None,
     window_start: str,
     window_end: str,
     horizons: tuple[int, ...] = HORIZONS,
-) -> dict:
+) -> dict[str, Any]:
     """Evaluate one chronological window; never raises on missing data."""
     in_window = sorted(
         (it for it in instances
          if window_start <= _date_part(it.get("prediction_date")) <= window_end),
-        key=lambda it: (_date_part(it.get("prediction_date")),
-                        str(it.get("instance_id") or "")),
+        key=_instance_key,
     )
     safe = [it for it in in_window if is_pit_safe(it)]
     violations = len(in_window) - len(safe)
@@ -162,7 +170,7 @@ def evaluate_window(
 
     identity = _rate(safe, "identity_correct", True)
     baseline_identity = _rate(safe, "baseline_identity_correct", True)
-    result: dict = {
+    result: dict[str, Any] = {
         "window_start": window_start,
         "window_end": window_end,
         "n_instances": len(in_window),
@@ -197,13 +205,12 @@ def evaluate_window(
     calendar = sorted(str(d) for d in benchmark)
     positions = {day: idx for idx, day in enumerate(calendar)}
 
-    def _composite(flag: str) -> tuple[dict, float] | None:
+    def _composite(flag: str) -> tuple[dict[str, Any], float] | None:
         picked = sorted(
             (it for it in safe if it.get(flag)),
-            key=lambda it: (_date_part(it.get("prediction_date")),
-                            str(it.get("instance_id") or "")),
+            key=_instance_key,
         )
-        per_horizon: dict = {}
+        per_horizon: dict[str, dict[str, float]] = {}
         parts: list[float] = []
         for horizon in horizons:
             excess = [
@@ -213,7 +220,7 @@ def evaluate_window(
             ]
             if any(value is None for value in excess):
                 return None  # missing market data is never zero-filled
-            ordered = [float(v) for v in excess]  # type: ignore[misc]
+            ordered = [value for value in excess if value is not None]
             mean = sum(ordered) / len(ordered) if ordered else 0.0
             vol = statistics.pstdev(ordered) if len(ordered) > 1 else 0.0
             drawdown = _max_drawdown(ordered)
@@ -246,12 +253,12 @@ def evaluate_window(
 
 def evaluate_type(
     relationship_type: str,
-    instances: list[dict],
-    observations: dict | None,
-    benchmark: dict | None,
+    instances: list[dict[str, Any]],
+    observations: dict[tuple[str, str], float] | None,
+    benchmark: dict[str, float] | None,
     windows: list[tuple[str, str]],
     horizons: tuple[int, ...] = HORIZONS,
-) -> dict:
+) -> dict[str, Any]:
     """Walk windows chronologically; return per-window metrics plus a decision.
 
     Decisions: ``activate`` (100+ PIT-safe instances and the trailing two
@@ -304,7 +311,7 @@ def hash_inputs(payload: object) -> str:
         json.dumps(_canon(payload), sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
-def ontology_boost(label: object, active_types=(), demoted_types=()) -> float:
+def ontology_boost(label: object, active_types: Collection[str] = (), demoted_types: Collection[str] = ()) -> float:
     """Ranking-only boost for one normalized type label; never filters."""
     from .relationships import normalize_label
     key = normalize_label(label)

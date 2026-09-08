@@ -8,19 +8,21 @@ from typing import Sequence
 from ..domain.portfolio.valuation import ZERO
 
 
+def _position_order(item: tuple[str, Decimal | None]) -> tuple[bool, Decimal, str]:
+    """Market value descending, unpriced last, ticker ascending."""
+    return (
+        item[1] is None,
+        -item[1] if item[1] is not None else ZERO,
+        item[0],
+    )
+
+
 def largest_positions(
     items: Sequence[tuple[str, Decimal | None]],
     limit: int | None = None,
 ) -> list[tuple[str, Decimal | None]]:
     """Rank positions by market value descending, None values last, ticker ascending."""
-    ordered = sorted(
-        items,
-        key=lambda item: (
-            item[1] is None,
-            -item[1] if item[1] is not None else ZERO,
-            item[0],
-        ),
-    )
+    ordered = sorted(items, key=_position_order)
     if limit is None:
         return ordered
     bounded = max(1, min(int(limit), 100))
@@ -38,4 +40,4 @@ def portfolio_concentration(
     present = [weight for weight in weights if weight is not None]
     if not present:
         return None
-    return sum(weight * weight for weight in present)
+    return sum((weight * weight for weight in present), ZERO)

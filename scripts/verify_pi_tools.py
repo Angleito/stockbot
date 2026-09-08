@@ -14,14 +14,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.tools import TOOLS, execute_tool  # noqa: E402
 from app.policy import Capability, RequestContext  # noqa: E402
-from scripts.verify_tool_registry import get_registry_sets, registry_errors  # noqa: E402
+from scripts.verify_tool_registry import get_registry_sets, registry_errors, tool_schema_function, tool_schema_name  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 180
 DEFAULT_REPETITIONS = 3
@@ -39,7 +41,12 @@ def ensure_thesis_fixture(store: Path) -> str:
     return str(out["thesis_id"])
 
 
-VERIFY_CASES: dict[str, dict] = {
+class _VerifyCase(TypedDict):
+    arguments: dict[str, object]
+    natural_question: str
+
+
+VERIFY_CASES: dict[str, _VerifyCase] = {
     "get_fundamentals": {"arguments": {"ticker": "AAPL", "metric": "eps"}, "natural_question": "What is Apple's EPS?"},
     "find_sec_entities": {"arguments": {"query": "Apple"}, "natural_question": "Find SEC entities matching Apple."},
     "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "Full-text search SEC filing documents for Apple risk factor language."},
@@ -85,20 +92,26 @@ VERIFY_CASES: dict[str, dict] = {
     "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_question": "Journal on thesis thesis-placeholder: still watching NVDA datacenter demand."},
 }
 
+def tool_schemas() -> dict[str, dict[str, object]]:
+    schemas: dict[str, dict[str, object]] = {}
+    for raw in TOOLS:
+        function = tool_schema_function(raw)
+        parameters = function.get("parameters", {})
+        schemas[tool_schema_name(raw)] = dict(parameters) if isinstance(parameters, Mapping) else {}
+    return schemas
 
-def tool_schemas() -> dict[str, dict]:
-    return {t["function"]["name"]: t["function"].get("parameters", {}) for t in TOOLS}
 
-
-def resolve_arguments(tool: str, schemas: dict[str, dict] | None = None) -> dict:
+def resolve_arguments(tool: str, schemas: dict[str, dict[str, object]] | None = None) -> dict[str, object]:
     schemas = schemas if schemas is not None else tool_schemas()
     params = schemas.get(tool, {})
-    required = params.get("required") or []
+    required_raw = params.get("required")
+    required: list[object] = list(required_raw) if isinstance(required_raw, list) else []
     case = VERIFY_CASES.get(tool)
     if case is None:
         if required:
             raise LookupError(f"missing verification fixture for tool '{tool}' (required={required})")
-        return {}
+        empty: dict[str, object] = {}
+        return empty
     args = dict(case.get("arguments", {}))
     missing = [k for k in required if k not in args]
     if missing:
@@ -110,7 +123,7 @@ def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]
     return [(t, n) for t in tool_names for n in range(1, repetitions + 1)]
 
 
-def build_explicit_prompt(tool: str, args: dict) -> str:
+def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
     return (
         f"You are verifying Stockbot tool wiring. Call the `{tool}` tool "
         f"with exactly these arguments: {json.dumps(args, sort_keys=True)}. "
@@ -119,9 +132,10 @@ def build_explicit_prompt(tool: str, args: dict) -> str:
     )
 
 
-def build_attempt_prompt(tool: str, args: dict, attempt: int) -> str:
+def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
     if attempt == 2:
-        natural = VERIFY_CASES.get(tool, {}).get("natural_question")
+        case = VERIFY_CASES.get(tool)
+        natural = case["natural_question"] if case is not None else ""
         if natural:
             return natural
         return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
@@ -131,14 +145,17 @@ def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]
 
 
 
-def check_discovery(describe: dict, doctor: dict) -> str | None:
+def check_discovery(describe: Mapping[str, object], doctor: Mapping[str, object]) -> str | None:
     if doctor.get("bridge_ok") is not True:
         return "bridge doctor not ok"
-    d_tools = describe.get("tools") or []
-    d_names = sorted(t["function"]["name"] for t in d_tools)
+    raw_tools = describe.get("tools")
+    d_tools: list[Mapping[str, object]] = [t for t in raw_tools if isinstance(t, Mapping)] if isinstance(raw_tools, list) else []
+    d_names = sorted(tool_schema_name(t) for t in d_tools)
     if doctor.get("tool_count") != len(d_tools):
         return f"doctor/describe count skew: doctor={doctor.get('tool_count')} describe={len(d_tools)}"
-    if sorted(doctor.get("tool_names") or []) != d_names:
+    raw_names = doctor.get("tool_names")
+    doc_names: list[str] = sorted(n for n in raw_names if isinstance(n, str)) if isinstance(raw_names, list) else []
+    if doc_names != d_names:
         return "doctor/describe tool_names mismatch"
     return None
 
@@ -204,7 +221,7 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
         return False, f"DB read failed: {exc}"
 
 
-def discover() -> tuple[dict, dict]:
+def discover() -> tuple[dict[str, object], dict[str, object]]:
     proc = subprocess.Popen(
         [sys.executable, "scripts/pi_bridge.py"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -214,10 +231,11 @@ def discover() -> tuple[dict, dict]:
         proc.stdin.write(json.dumps({"id": "discover-1", "op": "describe"}) + "\n")
         proc.stdin.write(json.dumps({"id": "discover-2", "op": "doctor"}) + "\n")
         proc.stdin.flush()
-        first = json.loads(proc.stdout.readline() or "{}")
-        second = json.loads(proc.stdout.readline() or "{}")
+        first: dict[str, object] = json.loads(proc.stdout.readline() or "{}")
+        second: dict[str, object] = json.loads(proc.stdout.readline() or "{}")
         by_id = {first.get("id"): first, second.get("id"): second}
-        return by_id.get("discover-1", {}), by_id.get("discover-2", {})
+        fallback: dict[str, object] = {}
+        return by_id.get("discover-1", fallback), by_id.get("discover-2", fallback)
     finally:
         try:
             assert proc.stdin is not None
@@ -326,7 +344,8 @@ def main() -> int:
     if err:
         print(f"discovery failed: {err}", file=sys.stderr)
         return 1
-    describe_names = sorted(t["function"]["name"] for t in (describe.get("tools") or []))
+    raw_tools = describe.get("tools")
+    describe_names: list[str] = sorted(tool_schema_name(t) for t in raw_tools if isinstance(t, Mapping)) if isinstance(raw_tools, list) else []
     if debug:
         assert args.tool is not None
         if args.tool not in describe_names:
@@ -365,7 +384,7 @@ def main() -> int:
             args = case_args.get(t, {})
             if args.get("id") == THESIS_ID_PLACEHOLDER:
                 args["id"] = fixture_id
-    results: dict[str, list[dict]] = {}
+    results: dict[str, list[dict[str, object]]] = {}
     total = passed = procs = 0
     failed_tools: list[str] = []
     for tool in tool_names:
@@ -389,7 +408,9 @@ def main() -> int:
         if tool_ok:
             for rec in results[tool]:
                 try:
-                    Path(rec["db"]).unlink(missing_ok=True)
+                    db_value = rec.get("db")
+                    if isinstance(db_value, str):
+                        Path(db_value).unlink(missing_ok=True)
                 except Exception:
                     pass
         else:

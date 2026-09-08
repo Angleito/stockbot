@@ -99,7 +99,7 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _req_str(d: dict, key: str, where: str) -> str:
+def _req_str(d: dict[str, Any], key: str, where: str) -> str:
     v = d.get(key)
     if not isinstance(v, str) or not v:
         raise ValueError(f"{where}: '{key}' must be a non-empty string")
@@ -174,11 +174,11 @@ class ThesisClaim:
     statement: str
     status: str = ClaimStatus.UNVALIDATED.value
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> ThesisClaim:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisClaim:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: claim must be a mapping, got {type(d).__name__}")
         where = f"{_path}: claim {d.get('claim_id', '?')}"
@@ -197,16 +197,16 @@ class TradeExpression:
     direction: str = Direction.UNKNOWN.value
     structure: str = UNKNOWN  # open vocabulary, kept unchanged
     horizon: str = UNKNOWN
-    leverage: dict = field(default_factory=dict)
-    parameters: dict = field(default_factory=dict)
+    leverage: dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     deterministic_support: str = UNKNOWN
     status: str = ExpressionStatus.UNDECIDED.value
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> TradeExpression:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> TradeExpression:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: expression must be a mapping, got {type(d).__name__}")
         where = f"{_path}: expression {d.get('expression_id', '?')}"
@@ -246,11 +246,11 @@ class ExpressionRequirement:
     statement: str
     status: str = QuestionStatus.OPEN.value
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> ExpressionRequirement:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ExpressionRequirement:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: requirement must be a mapping, got {type(d).__name__}")
         where = f"{_path}: requirement {d.get('requirement_id', '?')}"
@@ -273,17 +273,17 @@ class WatchRule:
     enabled: bool = True
     support_status: str = SupportStatus.SUPPORTED.value
     support_reason: str = ""
-    claim_ids: tuple = ()
-    expression_ids: tuple = ()
+    claim_ids: tuple[str, ...] = ()
+    expression_ids: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["claim_ids"] = list(self.claim_ids)
         d["expression_ids"] = list(self.expression_ids)
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> WatchRule:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> WatchRule:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: watch rule must be a mapping, got {type(d).__name__}")
         where = f"{_path}: rule {d.get('rule_id', '?')}"
@@ -324,7 +324,7 @@ def require_watch_targets(rule_like: Any, where: str) -> None:
         if isinstance(rule_like, dict):
             cids, eids = rule_like.get("claim_ids", []), rule_like.get("expression_ids", [])
         else:
-            cids, eids = [], []
+            cids, eids = list[str](), list[str]()
     if not [c for c in (cids or []) if isinstance(c, str) and c]:
         if not [e for e in (eids or []) if isinstance(e, str) and e]:
             raise ValueError(f"{where}: watch rule must name at least one claim_id or expression_id")
@@ -338,15 +338,15 @@ class Trigger:
     status: str = TriggerStatus.PENDING.value
     trigger_type: str = "new_external_evidence"  # semantic, never a tool name
     importance: str = TriggerImportance.MEDIUM.value
-    claim_ids: tuple = ()
-    expression_ids: tuple = ()
-    canonical_refs: tuple = ()
+    claim_ids: tuple[str, ...] = ()
+    expression_ids: tuple[str, ...] = ()
+    canonical_refs: tuple[str, ...] = ()
     summary: str = ""
     processed_at: str | None = None
     run_id: str | None = None
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["claim_ids"] = list(self.claim_ids)
         d["expression_ids"] = list(self.expression_ids)
@@ -354,7 +354,7 @@ class Trigger:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> Trigger:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Trigger:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: trigger must be a mapping, got {type(d).__name__}")
         where = f"{_path}: trigger {d.get('trigger_id', '?')}"
@@ -393,14 +393,13 @@ class Thesis:
     updated_at: str = ""
     user_thesis: str = ""
     scope: str = UNKNOWN
-    claims: tuple = ()
-    assumptions: tuple = ()
-    invalidators: tuple = ()
-    unknowns: tuple = ()
-    expressions: tuple = ()
-    requirements: tuple = ()
-
-    def to_dict(self) -> dict:
+    claims: tuple[ThesisClaim, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    invalidators: tuple[str, ...] = ()
+    unknowns: tuple[str, ...] = ()
+    expressions: tuple[TradeExpression, ...] = ()
+    requirements: tuple[ExpressionRequirement, ...] = ()
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
         d["claims"] = [c.to_dict() if isinstance(c, ThesisClaim) else c for c in self.claims]
@@ -412,7 +411,7 @@ class Thesis:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> Thesis:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Thesis:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: thesis must be a mapping, got {type(d).__name__}")
         where = f"{_path}: thesis {d.get('thesis_id', '?')}"
@@ -468,14 +467,12 @@ class Thesis:
 class ThesisState:
     thesis_id: str
     assessment: str = "unresolved"
-    claim_assessments: dict = field(default_factory=dict)
-    expression_assessments: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
+    claim_assessments: dict[str, Any] = field(default_factory=dict)
+    expression_assessments: dict[str, Any] = field(default_factory=dict)
+    def to_dict(self) -> dict[str, Any]:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
-
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> ThesisState:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisState:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: state must be a mapping")
         where = f"{_path}: state {d.get('thesis_id', '?')}"
@@ -497,11 +494,10 @@ class ThesisQuestion:
     status: str = QuestionStatus.OPEN.value
     answer: str | None = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> ThesisQuestion:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisQuestion:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: question must be a mapping")
         where = f"{_path}: question {d.get('question_id', '?')}"
@@ -519,11 +515,10 @@ class ThesisMemory:
     text: str
     created_at: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> ThesisMemory:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> ThesisMemory:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: memory must be a mapping")
         where = f"{_path}: memory {d.get('memory_id', '?')}"
@@ -542,11 +537,10 @@ class EvidenceRef:
     summary: str = ""
     known_at: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> EvidenceRef:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> EvidenceRef:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: evidence ref must be a mapping")
         where = f"{_path}: evidence {d.get('evidence_id', '?')}"
@@ -562,14 +556,14 @@ class EvidenceRef:
 @dataclass(frozen=True)
 class Checkpoint:
     thesis_id: str
-    sources: dict = field(default_factory=dict)
-    recent_hashes: list = field(default_factory=list)
+    sources: dict[str, Any] = field(default_factory=dict)
+    recent_hashes: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
 
     @classmethod
-    def from_dict(cls, d: dict, _path: str = "<dict>") -> Checkpoint:
+    def from_dict(cls, d: dict[str, Any], _path: str = "<dict>") -> Checkpoint:
         if not isinstance(d, dict):
             raise ValueError(f"{_path}: checkpoint must be a mapping")
         where = f"{_path}: checkpoint {d.get('thesis_id', '?')}"
@@ -595,13 +589,13 @@ class ThesisStateSnapshot:
     reason: str
     run_id: str = ""
     trigger_id: str = ""
-    thesis: dict = field(default_factory=dict)
-    state: dict = field(default_factory=dict)
-    questions: dict = field(default_factory=dict)
-    watch: dict = field(default_factory=dict)
-    memory: dict = field(default_factory=dict)
+    thesis: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
+    questions: dict[str, Any] = field(default_factory=dict)
+    watch: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "thesis_id": self.thesis_id,
@@ -619,7 +613,7 @@ class ThesisStateSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, d: dict, where: str = "<dict>") -> ThesisStateSnapshot:
+    def from_dict(cls, d: dict[str, Any], where: str = "<dict>") -> ThesisStateSnapshot:
         from app.thesis.monitor import _as_dt  # local: avoid import cycle
 
         if not isinstance(d, dict):

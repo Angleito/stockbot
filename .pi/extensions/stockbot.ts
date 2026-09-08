@@ -408,6 +408,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    name: fn.name,
    label: fn.name,
    description: fn.description,
+   parameters: Type.Unsafe(fn.parameters),
    async execute(toolCallId, params) {
     toolCalls++;
     const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));

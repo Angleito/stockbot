@@ -53,12 +53,12 @@ def enrich_portfolio_research(
         if position.entity_id is not None:
             sec_metrics = _sec_metrics(position.entity_id, as_of_str, data_root)
         else:
-            sec_metrics = {}
+            sec_metrics: dict[str, Any] = {}
         ticker = (position.ticker or "").strip()
         if ticker:
             finra_metrics = _finra_metrics(ticker, as_of_str, data_root)
         else:
-            finra_metrics = {}
+            finra_metrics: dict[str, Any] = {}
         results.append(PortfolioResearchPosition(
             position=position,
             latest_sec_metrics=sec_metrics,
@@ -137,7 +137,7 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, Any]:
     if short_position is not None and prev_position is not None:
         change = short_position - prev_position
     change_pct: Decimal | None = None
-    if change is not None and prev_position != 0:
+    if change is not None and prev_position is not None and prev_position != 0:
         change_pct = Decimal(100) * change / prev_position
     return {
         "short_position": short_position,

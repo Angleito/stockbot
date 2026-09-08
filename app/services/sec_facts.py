@@ -16,6 +16,7 @@ alike).  All other payload keys stay byte-identical.
 from __future__ import annotations
 
 import datetime as _dt
+from pathlib import Path
 from typing import Any, Optional
 
 from .. import edgar_client
@@ -62,7 +63,7 @@ def _validated_as_of(as_of: Optional[str]) -> Optional[_dt.date]:
         return None
 
 
-def _resolve_entity(ticker: str, as_of: _dt.date, data_root) -> Optional[str]:
+def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Optional[Path]) -> Optional[str]:
     """Resolve a ticker to its entity id through the alias store.
 
     The alias horizon is end-of-day UTC on the as-of date so an alias
@@ -80,7 +81,7 @@ def _resolve_entity(ticker: str, as_of: _dt.date, data_root) -> Optional[str]:
     return resolution.entity_id
 
 
-def _store_rows(entity_id: str, concepts: tuple[str, ...], as_of: _dt.date, data_root) -> list[dict]:
+def _store_rows(entity_id: str, concepts: tuple[str, ...], as_of: _dt.date, data_root: Optional[Path]) -> list[dict[str, Any]]:
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     placeholders = ",".join("?" for _ in concepts)
     return duckdb.query(
@@ -128,7 +129,7 @@ def _envelope(
 # ---------------------------------------------------------------------------
 
 
-def _duration_days(row: dict) -> Optional[int]:
+def _duration_days(row: dict[str, Any]) -> Optional[int]:
     start, end = row.get("period_start"), row.get("period_end")
     if not start or not end:
         return None
@@ -140,7 +141,37 @@ def _duration_days(row: dict) -> Optional[int]:
     return (end_date - start_date).days
 
 
-def _duration_rows(rows: list[dict], concept: str, day_range: tuple[int, int]) -> list[dict]:
+def _row_period_end(row: dict[str, Any]) -> str:
+    """Sort key: fact period end as text (ISO dates order lexically)."""
+    return str(row["period_end"])
+
+
+def _row_payment_date(row: dict[str, Any]) -> str:
+    """Sort key: dividend payment date as text."""
+    return str(row["payment_date"])
+
+
+def _row_known_at(row: dict[str, Any]) -> str:
+    """Sort key: revision recency as text (missing sorts first)."""
+    return str(row.get("known_at") or "")
+
+
+def _row_filed_accession(row: dict[str, Any]) -> tuple[str, str]:
+    """Sort key: true latest filing first by filed_at, accession tie-break."""
+    return (str(row.get("filed_at") or ""), str(row.get("accession") or ""))
+
+
+def _row_stored_order(row: dict[str, Any]) -> tuple[str, str, str]:
+    """Sort key: newest stored fact by period end, filed_at, accession."""
+    return (str(row["period_end"]), str(row.get("filed_at") or ""), str(row.get("accession") or ""))
+
+
+def _row_revision_order(row: dict[str, Any]) -> tuple[str, str, str]:
+    """Sort key: latest revision by known_at, filed_at, accession."""
+    return (str(row.get("known_at") or ""), str(row.get("filed_at") or ""), str(row.get("accession") or ""))
+
+
+def _duration_rows(rows: list[dict[str, Any]], concept: str, day_range: tuple[int, int]) -> list[dict[str, Any]]:
     """Facts of a given duration for a concept, restatements resolved
     by the true latest filed_at (accession DESC tie-break) — replacing
     edgar_client._dedup_latest's fiscal-year proxy — newest period first."""
@@ -151,7 +182,7 @@ def _duration_rows(rows: list[dict], concept: str, day_range: tuple[int, int]) -
         duration = _duration_days(row)
         if duration is not None and day_range[0] <= duration <= day_range[1]:
             q.append(row)
-    by_end: dict[str, dict] = {}
+    by_end: dict[str, dict[str, Any]] = {}
     for row in q:
         key = str(row["period_end"])
         prev = by_end.get(key)
@@ -159,10 +190,10 @@ def _duration_rows(rows: list[dict], concept: str, day_range: tuple[int, int]) -
             str(prev["filed_at"] or ""), str(prev["accession"] or "")
         ):
             by_end[key] = row
-    return sorted(by_end.values(), key=lambda r: str(r["period_end"]))
+    return sorted(by_end.values(), key=_row_period_end)
 
 
-def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> Optional[dict]:
+def _derive_q4_from_facts(rows: list[dict[str, Any]], concept: str, fy_end: _dt.date) -> Optional[dict[str, Any]]:
     """Q4 = FY_total - YTD_through_Q3 for the fiscal year ending fy_end."""
     fy = []
     for row in rows:
@@ -177,7 +208,7 @@ def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> O
             fy.append(row)
     if not fy:
         return None
-    latest_fy = max(fy, key=lambda r: (str(r.get("filed_at") or ""), str(r.get("accession") or "")))
+    latest_fy = max(fy, key=_row_filed_accession)
     fy_total = float(latest_fy["value"])
     ytd = []
     for row in rows:
@@ -194,7 +225,7 @@ def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> O
             ytd.append(row)
     if not ytd:
         return None
-    ytd_q3 = float(sorted(ytd, key=lambda r: str(r["period_end"]))[-1]["value"])
+    ytd_q3 = float(sorted(ytd, key=_row_period_end)[-1]["value"])
     derived = dict(latest_fy)
     derived["value"] = fy_total - ytd_q3
     derived["period_end"] = fy_end.isoformat()
@@ -202,11 +233,11 @@ def _derive_q4_from_facts(rows: list[dict], concept: str, fy_end: _dt.date) -> O
     return derived
 
 
-def _quarters_with_derived_q4(quarter_rows: list[dict], all_rows: list[dict], concept: str) -> list[dict]:
+def _quarters_with_derived_q4(quarter_rows: list[dict[str, Any]], all_rows: list[dict[str, Any]], concept: str) -> list[dict[str, Any]]:
     """Last 4 quarterly facts, deriving a missing final quarter (NVDA reports
     Q4 diluted EPS only as a full-year fact) — mirrors
     edgar_client._quarters_with_derived_q4."""
-    quarter = sorted(quarter_rows, key=lambda r: str(r["period_end"]))
+    quarter = sorted(quarter_rows, key=_row_period_end)
     if len(quarter) < 2:
         return quarter[-4:]
     ends = [_dt.date.fromisoformat(str(row["period_end"])[:10]) for row in quarter]
@@ -215,11 +246,11 @@ def _quarters_with_derived_q4(quarter_rows: list[dict], all_rows: list[dict], co
         missing_end = ends[-1] - _dt.timedelta(days=_DERIVED_Q4_OFFSET_DAYS)
         derived = _derive_q4_from_facts(all_rows, concept, missing_end)
         if derived is not None:
-            quarter = sorted([*quarter, derived], key=lambda r: str(r["period_end"]))
+            quarter = sorted([*quarter, derived], key=_row_period_end)
     return quarter[-4:]
 
 
-def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
+def _assemble_eps_payload(ticker: str, rows: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """Deterministic store assembly over feed rows (pure; no storage)."""
     recent_diluted = _quarters_with_derived_q4(
         _duration_rows(rows, DILUTED_EPS_CONCEPT, _QUARTER_DAYS), rows, DILUTED_EPS_CONCEPT
@@ -231,7 +262,7 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     if basic_quarters:
         recent_basic = _quarters_with_derived_q4(basic_quarters, rows, BASIC_EPS_CONCEPT)
 
-    quarterly_eps: list[dict] = []
+    quarterly_eps: list[dict[str, Any]] = []
     for r in recent_diluted:
         entry: dict[str, Any] = {
             "fiscal_year": str(r["fiscal_year"]) if r.get("fiscal_year") is not None else "",
@@ -259,7 +290,7 @@ def _assemble_eps_payload(ticker: str, rows: list[dict]) -> Optional[dict]:
     return result
 
 
-def _assemble_dividend_payload(ticker: str, rows: list[dict], as_of: _dt.date) -> Optional[dict]:
+def _assemble_dividend_payload(ticker: str, rows: list[dict[str, Any]], as_of: _dt.date) -> Optional[dict[str, Any]]:
     """Deterministic store assembly over feed rows (pure; no storage)."""
     if not any(r.get("concept") == DIVIDEND_PER_SHARE_CONCEPT for r in rows):
         return None
@@ -286,7 +317,7 @@ def _assemble_dividend_payload(ticker: str, rows: list[dict], as_of: _dt.date) -
 # ---------------------------------------------------------------------------
 
 
-def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root) -> list[dict]:
+def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root: Optional[Path]) -> list[dict[str, Any]]:
     """PIT-gated dividend events, deduped by id keeping max known_at.
 
     Amended filings produce different ids (amount is part of the id) so both
@@ -306,7 +337,7 @@ def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root) -> list[d
         params=[entity_id, param],
         data_root=data_root,
     )
-    by_id: dict[str, dict] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = str(row.get("dividend_event_id"))
         prev = by_id.get(key)
@@ -315,7 +346,7 @@ def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root) -> list[d
     return list(by_id.values())
 
 
-def _classify_dividend_event(row: dict, as_of: _dt.date) -> str:
+def _classify_dividend_event(row: dict[str, Any], as_of: _dt.date) -> str:
     """payment_date < as_of -> paid; >= as_of -> upcoming; null -> unknown."""
     pay = row.get("payment_date")
     if not pay:
@@ -323,14 +354,14 @@ def _classify_dividend_event(row: dict, as_of: _dt.date) -> str:
     return "paid" if str(pay)[:10] < as_of.isoformat() else "upcoming"
 
 
-def _extreme_event(cands: list[dict], *, earliest: bool) -> Optional[dict]:
+def _extreme_event(cands: list[dict[str, Any]], *, earliest: bool) -> Optional[dict[str, Any]]:
     """Edge payment date wins; same-date revisions prefer latest known_at."""
     edge = (min if earliest else max)(str(r["payment_date"]) for r in cands)
     tied = [r for r in cands if str(r["payment_date"]) == edge]
-    return max(tied, key=lambda r: str(r.get("known_at") or ""))
+    return max(tied, key=_row_known_at)
 
 
-def _canonical_dividend_events(events: list[dict]) -> list[dict]:
+def _canonical_dividend_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse amended duplicates; undated rows never merge.
 
     Buckets share (record_date, payment_date). Concrete types cluster exactly
@@ -340,7 +371,7 @@ def _canonical_dividend_events(events: list[dict]) -> list[dict]:
     to the first compatible bucket.
     """
     undated = [r for r in events if not r.get("payment_date")]
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in events:
         if not row.get("payment_date"):
             continue
@@ -348,7 +379,7 @@ def _canonical_dividend_events(events: list[dict]) -> list[dict]:
             (str(row.get("record_date") or ""), str(row.get("payment_date"))), []).append(row)
     canonical = []
     for group in groups.values():
-        clusters: list[list[dict]] = []
+        clusters: list[list[dict[str, Any]]] = []
         for row in group:
             if str(row.get("dividend_type") or "") in ("", "unknown"):
                 continue
@@ -359,7 +390,7 @@ def _canonical_dividend_events(events: list[dict]) -> list[dict]:
                     break
             else:
                 clusters.append([row])
-        stray: list[dict] = []
+        stray: list[dict[str, Any]] = []
         for row in group:
             if str(row.get("dividend_type") or "") not in ("", "unknown"):
                 continue
@@ -378,8 +409,7 @@ def _canonical_dividend_events(events: list[dict]) -> list[dict]:
         if stray:
             clusters.append(stray)
         for bucket in clusters:
-            winner = max(bucket, key=lambda r: (str(r.get("known_at") or ""), str(r.get("filed_at") or ""),
-                                                str(r.get("accession") or "")))
+            winner = max(bucket, key=_row_revision_order)
             out = dict(winner)
             for mate in bucket:
                 if mate is winner:
@@ -397,7 +427,7 @@ def _canonical_dividend_events(events: list[dict]) -> list[dict]:
     return undated + canonical
 
 
-def _dividend_event_source_types(row: dict) -> list[str]:
+def _dividend_event_source_types(row: dict[str, Any]) -> list[str]:
     sts = row.get("source_types")
     if isinstance(sts, (list, tuple, set)) and sts:
         return [str(s) for s in sts if s]
@@ -405,7 +435,7 @@ def _dividend_event_source_types(row: dict) -> list[str]:
     return [str(st)] if st else []
 
 
-def _dividend_event_payload(events: list[dict], as_of: _dt.date, *, growth=None, ttm_dps=None, annual_history=None) -> dict[str, Any]:
+def _dividend_event_payload(events: list[dict[str, Any]], as_of: _dt.date, *, growth: dict[str, Any] | None = None, ttm_dps: float | None = None, annual_history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """last/next/past/coverage over classified events (pure; no storage)."""
     events = _canonical_dividend_events(events)
     upcoming = [
@@ -431,7 +461,7 @@ def _dividend_event_payload(events: list[dict], as_of: _dt.date, *, growth=None,
             "accession": r.get("accession"),
             "source_url": r.get("source_url"),
         }
-        for r in sorted(paid, key=lambda r: str(r["payment_date"]), reverse=True)[:12]
+        for r in sorted(paid, key=_row_payment_date, reverse=True)[:12]
     ]
     has_xbrl = any("structured_xbrl" in _dividend_event_source_types(r) for r in events)
     has_text = any("filing_text" in _dividend_event_source_types(r) for r in events)
@@ -485,7 +515,7 @@ _SAFETY_CONCEPTS = (
 )
 
 
-def _ttm_cash_total(rows: list[dict], concept: str, *, outflow: bool = False) -> Optional[float]:
+def _ttm_cash_total(rows: list[dict[str, Any]], concept: str, *, outflow: bool = False) -> Optional[float]:
     """Trailing-4-quarter total via the shared quarterly + derived-Q4 machinery.
 
     Outflow concepts (CapEx, dividends paid) are cash-flow debits, usually
@@ -500,7 +530,7 @@ def _ttm_cash_total(rows: list[dict], concept: str, *, outflow: bool = False) ->
     return round(sum(values), 2)
 
 
-def _fy_annual_totals(rows: list[dict], concept: str, *, outflow: bool = False) -> dict[int, float]:
+def _fy_annual_totals(rows: list[dict[str, Any]], concept: str, *, outflow: bool = False) -> dict[int, float]:
     """FY-duration facts keyed by calendar year of period_end."""
     annual: dict[int, float] = {}
     for r in _duration_rows(rows, concept, _FY_DAYS):
@@ -513,16 +543,15 @@ def _fy_annual_totals(rows: list[dict], concept: str, *, outflow: bool = False) 
     return annual
 
 
-def _latest_concept_value(rows: list[dict], concept: str) -> Optional[dict]:
+def _latest_concept_value(rows: list[dict[str, Any]], concept: str) -> Optional[dict[str, Any]]:
     """Latest row for a concept by (period_end, filed_at, accession)."""
     cands = [r for r in rows if r.get("concept") == concept and r.get("period_end")]
     if not cands:
         return None
-    return max(cands, key=lambda r: (str(r["period_end"]), str(r.get("filed_at") or ""),
-                                     str(r.get("accession") or "")))
+    return max(cands, key=_row_stored_order)
 
 
-def _debt_up_yoy(rows: list[dict]) -> Optional[bool]:
+def _debt_up_yoy(rows: list[dict[str, Any]]) -> Optional[bool]:
     """Latest LongTermDebt vs the most recent row at least ~10 months older."""
     latest = _latest_concept_value(rows, _DEBT_CONCEPT)
     if latest is None:
@@ -546,8 +575,8 @@ def _debt_up_yoy(rows: list[dict]) -> Optional[bool]:
 
 
 def _assemble_dividend_safety(
-    rows: list[dict],
-    dividend: dict,
+    rows: list[dict[str, Any]],
+    dividend: dict[str, Any],
     *,
     ttm_eps_diluted: Optional[float] = None,
     ttm_yield: Optional[float] = None,
@@ -567,13 +596,11 @@ def _assemble_dividend_safety(
         "ttm_dividends_paid": ttm_div_paid,
         "methodology": _SAFETY_METHODOLOGY,
     }
-
-    def _set(key: str, value: Any, reason: Optional[str] = None) -> None:
+    def _set(key: str, value: float | None, reason: Optional[str] = None) -> None:
         safety[key] = value
         if value is None and reason:
             safety[f"{key}_reason"] = reason
-
-    flags: list[dict] = []
+    flags: list[dict[str, Any]] = []
 
     def _flag(flag: str, status: Optional[bool], basis: str) -> None:
         flags.append({"flag": flag, "status": status, "basis": basis})
@@ -689,7 +716,7 @@ def _assemble_dividend_safety(
 # ---------------------------------------------------------------------------
 
 
-def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> dict:
+def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> dict[str, Any]:
     """Store-first fundamentals with a truthful data_source envelope."""
     explicit_as_of = as_of is not None
     requested = _validated_as_of(as_of)
@@ -711,19 +738,19 @@ def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> d
     return {"error": f"Unknown metric '{metric}'", "error_type": "invalid_tool_arguments"}
 
 
-def _pit_unavailable(ticker: str, metric: str, requested: _dt.date) -> dict:
+def _pit_unavailable(ticker: str, metric: str, requested: _dt.date) -> dict[str, Any]:
     return {
         "error": f"No {metric} data knowable as of {requested.isoformat()} for {ticker}",
         "error_type": "pit_data_unavailable",
     }
 
 
-def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
+def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, Any]:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
-    store_rows = _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, data_root) if entity_id else []
-    payload = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
-    events = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
+    store_rows: list[dict[str, Any]] = _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, data_root) if entity_id else []
+    payload: dict[str, Any] | None = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
+    events: list[dict[str, Any]] = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
     current = (requested == _today()) and not explicit_as_of
     if payload is None and events:
         payload = {"ticker": ticker, "dividend_status": "unknown",
@@ -762,11 +789,11 @@ def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool
     )
 
 
-def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
+def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, Any]:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
-    store_rows = _store_rows(entity_id, _EPS_CONCEPTS, requested, data_root) if entity_id else []
-    payload = _assemble_eps_payload(ticker, store_rows) if store_rows else None
+    store_rows: list[dict[str, Any]] = _store_rows(entity_id, _EPS_CONCEPTS, requested, data_root) if entity_id else []
+    payload: dict[str, Any] | None = _assemble_eps_payload(ticker, store_rows) if store_rows else None
     if payload is not None:
         return _envelope(
             ticker, "eps", payload,
@@ -778,18 +805,20 @@ def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = Fa
     payload = edgar_client.get_fundamentals(ticker, "eps")
     if "error" in payload:
         return payload
+    quarters_raw = payload.get("quarterly_eps")
+    quarters: list[Any] = quarters_raw if isinstance(quarters_raw, list) else []
     return _envelope(
         ticker, "eps", payload,
         data_source="live", as_of_date=_today().isoformat(),
         requested_as_of=requested.isoformat(),
-        row_count=len(payload.get("quarterly_eps") or []),
+        row_count=len(quarters),
     )
 
 
-def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
+def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, Any]:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
-    row: Optional[dict] = None
+    row: Optional[dict[str, Any]] = None
     if entity_id:
         clause, param = duckdb.as_of_clause(requested.isoformat())
         rows = duckdb.query(
@@ -832,7 +861,7 @@ def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_a
     )
 
 
-def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explicit_as_of: bool = False) -> dict:
+def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, Any]:
     """balance_sheet/overview are live-only: explicit as_of never gets current data."""
     if explicit_as_of:
         return _pit_unavailable(ticker, metric, requested)
@@ -852,13 +881,15 @@ def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explic
     )
 
 
-def get_xbrl_facts(ticker: str, concept: str) -> dict:
+def get_xbrl_facts(ticker: str, concept: str) -> dict[str, Any]:
     """Always-live XBRL fact search, enveloped (label key source_label)."""
     payload = edgar_client.get_xbrl_facts(ticker, concept)
     if "error" in payload:
         return payload
-    matching = payload.get("matching_concepts") or []
-    count = payload.get("count") or len(matching)
+    matching_raw = payload.get("matching_concepts")
+    matching: list[Any] = matching_raw if isinstance(matching_raw, list) else []
+    count_raw = payload.get("count")
+    count: int = count_raw if isinstance(count_raw, int) and count_raw else len(matching)
     return _envelope(
         ticker, "concept", payload,
         data_source="live", as_of_date=_today().isoformat(),

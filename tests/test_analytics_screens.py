@@ -11,6 +11,8 @@ The acceptance criteria under test:
 """
 
 import json
+from datetime import tzinfo
+from pathlib import Path
 
 import pytest
 import pyarrow as pa
@@ -29,11 +31,11 @@ from datetime import date, datetime, timezone
 SETTLEMENT = "2026-08-14"
 
 @pytest.fixture
-def data_root(tmp_path):
+def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
-def _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"), retrieved_at="2026-08-10T12:00:00Z", cik_start=1):
+def _seed_tickers(data_root: Path, tickers: tuple[str, ...] = ("AAA", "BBB", "CCC"), retrieved_at: str = "2026-08-10T12:00:00Z", cik_start: int = 1) -> None:
     payload = {
         str(i): {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}
         for i, (ticker, cik) in enumerate(zip(tickers, range(cik_start, cik_start + len(tickers))), start=0)
@@ -45,7 +47,7 @@ def _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"), retrieved_at="2026-0
         parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_facts(data_root, facts_by_cik, retrieved_at="2026-08-10T12:00:00Z"):
+def _seed_facts(data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]], retrieved_at: str = "2026-08-10T12:00:00Z") -> None:
     for cik, facts in facts_by_cik.items():
         payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
             "EntityCommonStockSharesOutstanding": {"units": {"shares": facts}},
@@ -59,7 +61,7 @@ def _seed_facts(data_root, facts_by_cik, retrieved_at="2026-08-10T12:00:00Z"):
             parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_short_interest(data_root, rows, known_at="2026-08-10T12:00:00Z", content_hash="snapshot-hash"):
+def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
     datasets = normalize_finra_short_interest(
         rows, settlement_date=SETTLEMENT, known_at=known_at,
         retrieved_at=known_at, content_hash=content_hash,
@@ -70,7 +72,7 @@ def _seed_short_interest(data_root, rows, known_at="2026-08-10T12:00:00Z", conte
         parquet.write_rows(name, rows_, root=data_root / "parquet")
 
 
-def _default_rows():
+def _default_rows() -> list[dict[str, object]]:
     return [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
@@ -78,7 +80,7 @@ def _default_rows():
     ]
 
 
-def _default_facts():
+def _default_facts() -> dict[int, list[dict[str, object]]]:
     return {
         1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
         2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
@@ -86,7 +88,7 @@ def _default_facts():
     }
 
 
-def _seed_default(data_root):
+def _seed_default(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows())
@@ -97,7 +99,7 @@ def _seed_default(data_root):
 # ---------------------------------------------------------------------------
 
 
-def test_materialize_ranks_complete_snapshot_and_persists(data_root):
+def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> None:
     _seed_default(data_root)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
@@ -121,7 +123,7 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root):
     assert result["entries"][0]["sec_source_url"].endswith("CIK0000000003.json")
 
 
-def test_rerun_is_deterministic_and_creates_no_duplicates(data_root):
+def test_rerun_is_deterministic_and_creates_no_duplicates(data_root: Path) -> None:
     _seed_default(data_root)
     first = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     second = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
@@ -130,14 +132,15 @@ def test_rerun_is_deterministic_and_creates_no_duplicates(data_root):
     assert parquet.count_rows("screen_entries", root=data_root / "parquet") == 3
 
 
-def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root):
+def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Path) -> None:
     """Mid-day targeted enrichment publishes a new screen version instead of
     being deduplicated away; the old version stays immutable."""
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
-    _seed_short_interest(data_root, _default_rows() + [
+    extra_ddd: list[dict[str, object]] = [
         {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
          "currentShortPositionQuantity": 20},
-    ])
+    ]
+    _seed_short_interest(data_root, _default_rows() + extra_ddd)
     _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
     first = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert [e["ticker"] for e in first["entries"]] == ["CCC", "AAA", "BBB"]
@@ -163,25 +166,26 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root):
     assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
 
 
-def test_created_at_has_sub_second_precision(data_root, monkeypatch):
+def test_created_at_has_sub_second_precision(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Same-second publications get distinct created_at values, so the reader
     orders by publication time instead of the run_id hash tie-breaker."""
     class FrozenClock:
         @staticmethod
-        def now(tz=None):
+        def now(tz: tzinfo | None = None) -> datetime:
             return datetime(2026, 8, 14, 12, 0, 0, 250000, tzinfo=timezone.utc)
 
     monkeypatch.setattr(screens, "datetime", FrozenClock)
     assert screens._utc_now() == "2026-08-14T12:00:00.250000+00:00"
 
 
-def test_same_second_versions_ordered_by_publication(data_root, monkeypatch):
+def test_same_second_versions_ordered_by_publication(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The later of two same-second publications wins, regardless of run_id."""
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
-    _seed_short_interest(data_root, _default_rows() + [
+    extra_ddd: list[dict[str, object]] = [
         {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
          "currentShortPositionQuantity": 20},
-    ])
+    ]
+    _seed_short_interest(data_root, _default_rows() + extra_ddd)
     _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
     times = iter([
         "2026-08-14T12:00:00.250000+00:00",  # first version
@@ -195,7 +199,7 @@ def test_same_second_versions_ordered_by_publication(data_root, monkeypatch):
     assert [e["ticker"] for e in latest["entries"]] == ["CCC", "DDD", "AAA", "BBB"]
 
 
-def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root):
+def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) -> None:
     """A pre-stage-counter (11-column) run reads via union-by-name, its
     counters reconstruct from exclusions, and it coexists with a
     counter-bearing run written through the production path."""
@@ -265,7 +269,7 @@ def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root):
     assert new_result["coverage"]["eligible_rows"] == 2
 
 
-def test_read_is_bounded_by_limit(data_root):
+def test_read_is_bounded_by_limit(data_root: Path) -> None:
     _seed_default(data_root)
     screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     result = screens.get_short_interest_leaderboard(limit=2, settlement_date=SETTLEMENT, data_root=data_root)
@@ -275,7 +279,7 @@ def test_read_is_bounded_by_limit(data_root):
     assert len(result["entries"]) <= screens.MAX_LIMIT
 
 
-def test_missing_settlement_date_is_honest_error(data_root):
+def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
     _seed_default(data_root)
     result = screens.get_short_interest_leaderboard(settlement_date="2025-01-15", data_root=data_root)
     assert "error" in result
@@ -287,7 +291,7 @@ def test_missing_settlement_date_is_honest_error(data_root):
 # ---------------------------------------------------------------------------
 
 
-def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root):
+def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, {
         1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
@@ -319,7 +323,7 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
     assert by_ticker["AAA"]["short_interest_percent"] == 5
 
 
-def test_fact_with_period_after_settlement_is_never_used(data_root):
+def test_fact_with_period_after_settlement_is_never_used(data_root: Path) -> None:
     """The shares-outstanding fact must be as of (or before) the settlement
     date; a fact with a later period end is not eligible — even when it is
     already knowable at the as_of."""
@@ -337,7 +341,7 @@ def test_fact_with_period_after_settlement_is_never_used(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
 
 
-def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path):
+def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path: Path) -> None:
     """Fresh data root built from raw fixtures via production normalizers
     only: seeding uses app.normalization + parquet.write_rows, and the
     leaderboard reads the real store — no normalized rows hand-constructed."""
@@ -356,12 +360,13 @@ def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root):
-    rows = _default_rows() + [
+def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) -> None:
+    extra_unmapped: list[dict[str, object]] = [
         {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 10},
         {"symbolCode": "EEE", "issueName": "Epsilon", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 10},
         {"symbolCode": "FFF", "issueName": "Phi", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": None},
     ]
+    rows: list[dict[str, object]] = _default_rows() + extra_unmapped
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "EEE"))
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, rows)
@@ -388,7 +393,7 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]
 
 
-def test_stale_settlement_is_surfaced(data_root):
+def test_stale_settlement_is_surfaced(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     stale_date = "2025-01-15"
@@ -411,7 +416,7 @@ def test_stale_settlement_is_surfaced(data_root):
 # ---------------------------------------------------------------------------
 
 
-def test_snapshot_not_knowable_at_as_of_is_rejected(data_root):
+def test_snapshot_not_knowable_at_as_of_is_rejected(data_root: Path) -> None:
     """A snapshot archived after as_of is invisible to that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
@@ -423,7 +428,7 @@ def test_snapshot_not_knowable_at_as_of_is_rejected(data_root):
     assert "knowable on or before 2026-08-14" in result["error"]
 
 
-def test_ticker_alias_acquired_after_as_of_is_unusable(data_root):
+def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
     """A ticker mapping acquired after as_of cannot be used by an earlier
     screen: CCC is unmapped at 2026-08-14 and mapped at 2026-08-21."""
     _seed_tickers(data_root, tickers=("AAA", "BBB"), retrieved_at="2026-08-10T12:00:00Z")
@@ -440,13 +445,13 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root):
     assert [e["ticker"] for e in later["entries"]] == ["CCC", "AAA", "BBB"]
 
 
-def test_corrected_snapshot_versions_selected_by_as_of(data_root):
+def test_corrected_snapshot_versions_selected_by_as_of(data_root: Path) -> None:
     """A corrected snapshot is a new source version: the earlier as-of uses
     the original values, the later as-of uses the correction."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
-    corrected = [
+    corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
@@ -462,7 +467,7 @@ def test_corrected_snapshot_versions_selected_by_as_of(data_root):
     assert later["coverage"]["finra_rows"] == 3  # one version per symbol, not both
 
 
-def test_security_classification_is_consulted(data_root):
+def test_security_classification_is_consulted(data_root: Path) -> None:
     """Eligibility comes from the securities classification, not a
     fact-presence proxy: reclassifying ETF (unknown type) excludes it even
     though a shares-outstanding fact exists."""
@@ -474,9 +479,10 @@ def test_security_classification_is_consulted(data_root):
         **{cik: facts for cik, facts in _default_facts().items()},
         4: [{"end": "2026-08-01", "val": 50, "accn": "e1", "filed": "2026-08-02"}],
     })
-    rows = _default_rows() + [
+    extra_etf: list[dict[str, object]] = [
         {"symbolCode": "ETF", "issueName": "Index Fund", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
+    rows: list[dict[str, object]] = _default_rows() + extra_etf
     _seed_short_interest(data_root, rows)
     # A later classification row reclassifies the ETF as not common equity.
     reclassified = {
@@ -500,13 +506,13 @@ def test_security_classification_is_consulted(data_root):
     assert "ETF" not in [e["ticker"] for e in later["entries"]]
 
 
-def test_corrected_snapshot_mixed_offsets_newest_wins(data_root):
+def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
     """A mixed-offset revision: the lexically-larger but chronologically
     older 13:00+01:00 version must lose to the 12:30Z correction."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T13:00:00+01:00")
-    corrected = [
+    corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
@@ -518,7 +524,7 @@ def test_corrected_snapshot_mixed_offsets_newest_wins(data_root):
     assert result["entries"][1]["short_shares"] == 25  # the 12:30Z correction wins
 
 
-def test_security_type_map_mixed_offsets_newest_wins(data_root):
+def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
     """A classification revision with mixed offsets: the lexically-larger
     but chronologically older 13:00+01:00 'unknown' row must not beat the
     12:30Z 'equity-common' correction."""
@@ -552,7 +558,7 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "AAA", "BBB"]  # AAA stays classified
 
 
-def test_same_instant_conflicting_versions_exclude_symbol(data_root):
+def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
@@ -565,7 +571,7 @@ def test_same_instant_conflicting_versions_exclude_symbol(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["CCC", "BBB"]
     assert result["coverage"]["exclusions"]["conflicting_versions"] == 1
 
-def test_all_versions_conflicting_reports_ambiguous_error(data_root):
+def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> None:
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
@@ -581,7 +587,7 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root):
     assert "conflict at the same instant" in result["error"]
 
 
-def test_same_instant_conflicting_classifications_exclude_entity(data_root):
+def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -610,7 +616,7 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root):
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(data_root, settlement_date, rows, known_at="2026-08-10T12:00:00Z"):
+def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z") -> None:
     datasets = normalize_finra_short_interest(
         rows, settlement_date=settlement_date, known_at=known_at,
         retrieved_at=known_at, content_hash=f"snapshot-{settlement_date}",
@@ -621,7 +627,7 @@ def _seed_cycle(data_root, settlement_date, rows, known_at="2026-08-10T12:00:00Z
         parquet.write_rows(name, rows_, root=data_root / "parquet")
 
 
-def test_change_slice_computes_changes_with_evidence(data_root):
+def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_cycle(data_root, "2026-08-07", [
@@ -649,7 +655,7 @@ def test_change_slice_computes_changes_with_evidence(data_root):
     assert [e["ticker"] for e in result["entries"]] == ["AAA", "BBB", "CCC"]
 
 
-def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root):
+def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_cycle(data_root, SETTLEMENT, _default_rows())
@@ -663,7 +669,7 @@ def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root):
     assert entry["si_pp_change"] is None
 
 
-def test_change_slice_as_of_regression(data_root):
+def test_change_slice_as_of_regression(data_root: Path) -> None:
     """A later filing cannot alter a slice computed at an earlier as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, {
@@ -698,7 +704,7 @@ def test_change_slice_as_of_regression(data_root):
     assert aaa["shares_change_abs"] == 300.0
 
 
-def test_change_slice_honors_finra_known_at(data_root):
+def test_change_slice_honors_finra_known_at(data_root: Path) -> None:
     """A snapshot archived after as_of is not knowable at that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())

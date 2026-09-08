@@ -40,9 +40,9 @@ CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def normalize_sec_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict]]:
-    entities: list[dict] = []
-    aliases: list[dict] = []
+def normalize_sec_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict[str, Any]]]:
+    entities: list[dict[str, Any]] = []
+    aliases: list[dict[str, Any]] = []
     items = raw.values() if isinstance(raw, dict) else (raw or [])
     for item in items:
         if not isinstance(item, dict):
@@ -83,14 +83,14 @@ def normalize_sec_tickers(raw: Any, *, retrieved_at: str, content_hash: str) -> 
     return {"entities": entities, "entity_aliases": aliases}
 
 
-def _extract_shares_facts(raw: Any) -> list[dict]:
+def _extract_shares_facts(raw: Any) -> list[dict[str, Any]]:
     units = (((raw.get("facts") or {}).get("dei") or {}).get(SHARES_OUTSTANDING_CONCEPT) or {}).get("units") or {}
     facts = units.get("shares") or []
     return [fact for fact in facts if isinstance(fact, dict)]
 
 
-def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
-    entries: list[tuple[str, str, str, dict]] = []
+def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
+    entries: list[tuple[str, str, str, dict[str, Any]]] = []
     namespaces = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
@@ -107,9 +107,9 @@ def _extract_canonical_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
                     entries.append((canonical, f"{namespace}:{tag}", "USD", fact))
     return entries
 
-def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
     """Per-share earnings facts, accepted only under the ``USD/shares`` unit."""
-    entries: list[tuple[str, str, str, dict]] = []
+    entries: list[tuple[str, str, str, dict[str, Any]]] = []
     namespaces = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
@@ -126,9 +126,9 @@ def _extract_eps_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
     return entries
 
 
-def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+def _extract_dividend_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
     """Declared dividend-per-share facts, accepted only under ``USD/shares``."""
-    entries: list[tuple[str, str, str, dict]] = []
+    entries: list[tuple[str, str, str, dict[str, Any]]] = []
     namespaces = raw.get("facts") or {}
     if not isinstance(namespaces, dict):
         return entries
@@ -154,7 +154,7 @@ def _extract_dividend_event_facts(
     source_url: str,
     retrieved_at: str,
     content_hash: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Declared-dividend events from structured XBRL facts; never infers dates."""
     del retrieved_at  # known_at is filed_at, never extraction time.
     namespaces = (raw.get("facts") if isinstance(raw, dict) else None) or {}
@@ -174,7 +174,7 @@ def _extract_dividend_event_facts(
             if not isinstance(units, dict):
                 continue
             if is_amount:
-                unit_facts: list[tuple[str, list]] = [
+                unit_facts: list[tuple[str, list[Any]]] = [
                     (unit, facts) for unit, facts in units.items()
                     if isinstance(facts, list) and facts
                 ]
@@ -185,9 +185,12 @@ def _extract_dividend_event_facts(
                     for fact in units.get(unit) or []:
                         if not isinstance(fact, dict):
                             continue
+                        val_raw = fact.get("val")
                         try:
-                            amount = float(fact.get("val"))
+                            amount = float(val_raw) if val_raw is not None else None
                         except (TypeError, ValueError):
+                            amount = None
+                        if amount is None:
                             continue
                         accession, filed = str(fact.get("accn") or ""), str(fact.get("filed") or "")
                         if not accession or not filed:
@@ -209,7 +212,7 @@ def _extract_dividend_event_facts(
     groups: dict[tuple[str, str], list[tuple[float, str, str]]] = {}
     for accession, filed, amount, unit, source_concept in amounts:
         groups.setdefault((accession, filed), []).append((amount, unit, source_concept))
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     for (accession, filed) in sorted(groups):
         seen: dict[float, tuple[str, str]] = {}
         for amount, unit, source_concept in groups[(accession, filed)]:
@@ -326,9 +329,9 @@ def _extract_dividend_events_from_text(
     filed_at: str,
     source_url: str,
     content_hash: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Proposed dividend events from filing prose; amount mandatory, dates optional."""
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
         sentence = sentence.strip()
         match = _DIVIDEND_DECLARE_RE.search(sentence)
@@ -379,7 +382,7 @@ def _extract_dividend_events_from_text(
     return events
 
 
-def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict]]:
+def _extract_facts(raw: Any) -> list[tuple[str, str, str, dict[str, Any]]]:
     entries = [(SHARES_OUTSTANDING_CONCEPT, _ORIGINAL_CONCEPT, "shares", fact) for fact in _extract_shares_facts(raw)]
     entries.extend(_extract_canonical_facts(raw))
     entries.extend(_extract_eps_facts(raw))
@@ -394,7 +397,7 @@ def normalize_sec_company_facts(
     content_hash: str,
     source_url: str,
     source_record_id: str,
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     try:
         cik = int(raw.get("cik") or 0)
     except (TypeError, ValueError):
@@ -416,21 +419,25 @@ def normalize_sec_company_facts(
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
-    financial_facts: list[dict] = []
+    financial_facts: list[dict[str, Any]] = []
     for concept, original_concept, unit, fact in extracted_facts:
         period_end = str(fact.get("end") or "")
         filed_at = str(fact.get("filed") or "")
         accession = str(fact.get("accn") or "")
+        val_raw = fact.get("val")
         try:
-            value = float(fact.get("val"))
+            value = float(val_raw) if val_raw is not None else None
         except (TypeError, ValueError):
+            value = None
+        if value is None:
             continue
         if not period_end or not filed_at or not accession:
             continue
         start_raw = fact.get("start")
         period_start = str(start_raw) if start_raw else None
+        fy_raw = fact.get("fy")
         try:
-            fiscal_year = int(fact.get("fy"))
+            fiscal_year = int(fy_raw) if fy_raw is not None else None
         except (TypeError, ValueError):
             fiscal_year = None
         fiscal_period = str(fact.get("fp") or "") or None
@@ -491,7 +498,7 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 def normalize_finra_short_interest(
-    rows: list[dict],
+    rows: list[dict[str, Any]],
     *,
     settlement_date: str,
     known_at: str,
@@ -499,8 +506,8 @@ def normalize_finra_short_interest(
     content_hash: str,
     source_url: str,
     source_record_id: str,
-) -> dict[str, list[dict]]:
-    short_interest: list[dict] = []
+) -> dict[str, list[dict[str, Any]]]:
+    short_interest: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue

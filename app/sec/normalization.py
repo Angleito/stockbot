@@ -1,17 +1,29 @@
 """edgartools objects -> domain models. Every optional metadata access is
 best-effort: any failure yields None, never an invented value."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING, TypeVar
+
 from .models import Filing, FilingDocument
 
+if TYPE_CHECKING:
+    # Provider SDK types at the boundary only; never constructed here.
+    from edgar import Attachment as EdgarAttachment
+    from edgar import Filing as EdgarFiling
 
-def _best(fn, default=None):
+_T = TypeVar("_T")
+
+
+def _best(fn: Callable[[], _T], default: _T | None = None) -> _T | None:
     try:
         return fn()
     except Exception:
         return default
 
 
-def _str_or_none(value):
+def _str_or_none(value: object) -> str | None:
     if value is None:
         return None
     try:
@@ -21,21 +33,22 @@ def _str_or_none(value):
     return text or None
 
 
-def _accepted_at(filing):
+def _accepted_at(filing: EdgarFiling) -> str | None:
     for attr in ("acceptance_datetime", "accepted_at"):
-        value = _best(lambda a=attr: getattr(filing, a))
+        value = _best(lambda a=attr: getattr(filing, a, None))
         if value is not None:
             return _str_or_none(value)
-    header = _best(lambda: filing.header)
+    header = _best(lambda: getattr(filing, "header", None))
     if header is not None:
         for attr in ("acceptance_datetime", "accepted_at", "acceptance_time"):
-            value = _best(lambda a=attr: getattr(header, a))
+            value = _best(lambda a=attr: getattr(header, a, None))
             if value is not None:
                 return _str_or_none(value)
-    sgml = _best(lambda: filing.sgml())
+    sgml_method = getattr(filing, "sgml", None)
+    sgml = _best(sgml_method) if callable(sgml_method) else None
     if sgml is not None:
         for attr in ("acceptance_datetime", "accepted_at"):
-            value = _best(lambda a=attr: getattr(sgml, a))
+            value = _best(lambda a=attr: getattr(sgml, a, None))
             if value is not None:
                 return _str_or_none(value)
     return None
@@ -44,7 +57,7 @@ def _accepted_at(filing):
 _ISSUER_SUBJECT_FORMS = frozenset({"10-K", "10-Q", "8-K", "S-1", "S-3", "DEF 14A"})
 
 
-def _subject_of(form: str, filer_cik: int, filer_name: str) -> tuple:
+def _subject_of(form: str, filer_cik: int, filer_name: str) -> tuple[int | None, str | None]:
     """Subject equals filer only for issuer periodic/current/registration/proxy
     forms; third-party filings (13D/G, 3/4/5/144, 13F, tender/merger, …) leave
     subject unknown until a structured parser supplies it."""
@@ -54,7 +67,7 @@ def _subject_of(form: str, filer_cik: int, filer_name: str) -> tuple:
     return None, None
 
 
-def filing_from_edgar(filing) -> Filing:
+def filing_from_edgar(filing: EdgarFiling) -> Filing:
     form = _best(lambda: filing.form, "") or ""
     filed_at = str(_best(lambda: filing.filing_date, "") or "")
     accepted_at = _accepted_at(filing)
@@ -67,10 +80,10 @@ def filing_from_edgar(filing) -> Filing:
     elif doc is None:
         primary_document = None
     else:
-        name = _best(lambda: doc.document)
+        name = _best(lambda: getattr(doc, "document", None))
         primary_document = name if isinstance(name, str) and name else None
-    filer_cik = _best(lambda: int(filing.cik), 0) or 0
-    filer_name = _best(lambda: str(filing.company), "") or ""
+    filer_cik = _best(lambda: filing.cik, 0) or 0
+    filer_name = _best(lambda: filing.company, "") or ""
     subject_cik, subject_name = _subject_of(form, filer_cik, filer_name)
     return Filing(
         accession_no=accession_no,
@@ -84,14 +97,14 @@ def filing_from_edgar(filing) -> Filing:
         primary_document=primary_document,
         is_amendment=form.endswith("/A"),
         amendment_of=None,
-        source=_best(lambda: str(filing.homepage_url), "") or "",
+        source=_best(lambda: filing.homepage_url, "") or "",
         subject_cik=subject_cik,
         subject_name=subject_name,
         accepted_at_missing=accepted_at is None,
     )
 
 
-def document_from_attachment(accession_no: str, attachment) -> FilingDocument:
+def document_from_attachment(accession_no: str, attachment: EdgarAttachment) -> FilingDocument:
     return FilingDocument(
         accession_no=accession_no,
         document_name=_best(lambda: attachment.document),

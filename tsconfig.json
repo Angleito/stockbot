@@ -1,0 +1,1 @@
+{"compilerOptions": {"allowImportingTsExtensions": true, "lib": ["es2024", "dom"], "module": "esnext", "moduleResolution": "bundler", "skipLibCheck": true, "strict": true, "target": "es2022", "types": ["bun-types"]}, "include": [".pi/extensions/stockbot.ts", "tests/pi_extension.test.ts"]}

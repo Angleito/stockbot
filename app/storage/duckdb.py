@@ -62,7 +62,7 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
     for name in parquet.dataset_names():
         directory = parquet_root / name
         empty_dir = directory / "__empty__"
-        files = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
+        files: list[Path] = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
         real_files = [p for p in files if empty_dir not in p.parents]
         if empty_dir.exists():
             import shutil
@@ -91,7 +91,7 @@ def query(
     sql: str,
     params: Sequence[Any] = (),
     data_root: Optional[Path] = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Run a read-only SQL query over the parquet views; returns rows as
     dicts.
 

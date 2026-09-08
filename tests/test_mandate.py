@@ -2,6 +2,7 @@
 
 import json
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -20,11 +21,18 @@ from app.storage import parquet
 
 
 @pytest.fixture
-def data_root(tmp_path):
+def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
-def _position(position_id, ticker, entity_id, weight, *, cash=None):
+def _position(
+    position_id: str,
+    ticker: str,
+    entity_id: str | None,
+    weight: Decimal | None,
+    *,
+    cash: Decimal | None = None,
+) -> Position:
     return Position(
         position_id=position_id,
         account_id="acc-1",
@@ -48,14 +56,23 @@ def _position(position_id, ticker, entity_id, weight, *, cash=None):
 _MISSING = object()
 
 
-def _hand_built_snapshot(weight=_MISSING) -> PortfolioSnapshot:
+def _hand_built_snapshot(weight: Decimal | None | object = _MISSING) -> PortfolioSnapshot:
+    resolved_weight: Decimal | None
+    unresolved_weight: Decimal | None
+    if isinstance(weight, Decimal) or weight is None:
+        resolved_weight = weight
+        unresolved_weight = weight
+    else:
+        assert weight is _MISSING
+        resolved_weight = Decimal("0.75")
+        unresolved_weight = Decimal("0.25")
     resolved = _position(
         "snap-1:acc-1:WING", "WING", "sec:cik:0000320193",
-        weight if weight is not _MISSING else Decimal("0.75"),
+        resolved_weight,
     )
     unresolved = _position(
         "snap-1:acc-1:ZZZZ", "ZZZZ", None,
-        weight if weight is not _MISSING else Decimal("0.25"),
+        unresolved_weight,
     )
     return PortfolioSnapshot(
         snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
@@ -69,17 +86,17 @@ def _hand_built_snapshot(weight=_MISSING) -> PortfolioSnapshot:
     )
 
 
-def _mandate(limits, prohibited=()) -> Mandate:
+def _mandate(limits: Sequence[RiskLimit], prohibited: Sequence[str] = ()) -> Mandate:
     return Mandate(limits=tuple(limits), prohibited_assets=tuple(prohibited))
 
 
-def _limit(metric, operator, threshold, **overrides) -> RiskLimit:
+def _limit(metric: str, operator: str, threshold: str | int | float | Decimal, **overrides: str) -> RiskLimit:
     values = dict(metric=metric, operator=operator, threshold=Decimal(str(threshold)))
     values.update(overrides)
     return RiskLimit(**values)
 
 
-def _write_mandate(path: Path, payload: dict) -> Path:
+def _write_mandate(path: Path, payload: Mapping[str, object]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -90,7 +107,7 @@ def _write_mandate(path: Path, payload: dict) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_load_mandate_file_valid_json_with_defaults(tmp_path):
+def test_load_mandate_file_valid_json_with_defaults(tmp_path: Path):
     path = _write_mandate(tmp_path / "mandate.json", {
         "limits": [
             {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
@@ -111,7 +128,7 @@ def test_load_mandate_file_valid_json_with_defaults(tmp_path):
     assert mandate.prohibited_assets == ("GME", "sec:cik:0000320193")
 
 
-def test_load_mandate_file_missing_file(tmp_path):
+def test_load_mandate_file_missing_file(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_mandate_file(tmp_path / "nope.json")
 
@@ -136,7 +153,7 @@ def test_load_mandate_file_missing_file(tmp_path):
     {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": [""]},
     {"limits": "nope"},
 ])
-def test_parse_mandate_rejects_bad_config(payload):
+def test_parse_mandate_rejects_bad_config(payload: Mapping[str, object]):
     with pytest.raises(ValueError):
         parse_mandate(payload)
 
@@ -203,6 +220,7 @@ def test_minimum_cash_ratio_breach_and_excess():
     assert len(evaluation.breaches) == 1
     breach = evaluation.breaches[0]
     assert breach.metric == "minimum_cash"
+    assert isinstance(breach.actual, Decimal)
     assert breach.actual == Decimal("1234.56") / Decimal("2462.96")
     assert breach.excess == Decimal("0.60") - breach.actual
     assert breach.unit == "ratio"
@@ -432,7 +450,7 @@ def test_empty_mandate_zero_breaches():
 # ---------------------------------------------------------------------------
 
 
-def _sector_row(entity_id, sector, known_at):
+def _sector_row(entity_id: str, sector: str, known_at: str) -> dict[str, str]:
     return {
         "entity_id": entity_id,
         "sector": sector,
@@ -444,7 +462,7 @@ def _sector_row(entity_id, sector, known_at):
     }
 
 
-def test_load_sector_map_newest_wins(data_root):
+def test_load_sector_map_newest_wins(data_root: Path):
     parquet.write_rows(
         "sector_mappings",
         [
@@ -458,7 +476,7 @@ def test_load_sector_map_newest_wins(data_root):
     }
 
 
-def test_load_sector_map_mixed_offsets_newest_wins(data_root):
+def test_load_sector_map_mixed_offsets_newest_wins(data_root: Path):
     parquet.write_rows(
         "sector_mappings",
         [
@@ -475,7 +493,7 @@ def test_load_sector_map_mixed_offsets_newest_wins(data_root):
 
 
 
-def test_load_sector_map_as_of_prefers_older(data_root):
+def test_load_sector_map_as_of_prefers_older(data_root: Path):
     parquet.write_rows(
         "sector_mappings",
         [
@@ -490,11 +508,11 @@ def test_load_sector_map_as_of_prefers_older(data_root):
     }
 
 
-def test_load_sector_map_empty_dataset(data_root):
+def test_load_sector_map_empty_dataset(data_root: Path):
     assert risk_service.load_sector_map(data_root=data_root) == {}
 
 
-def test_load_sector_map_same_instant_conflict_drops_entity(data_root):
+def test_load_sector_map_same_instant_conflict_drops_entity(data_root: Path):
     parquet.write_rows(
         "sector_mappings",
         [
@@ -511,7 +529,7 @@ def test_load_sector_map_same_instant_conflict_drops_entity(data_root):
 # ---------------------------------------------------------------------------
 
 
-def _seed_snapshot_and_mandate(data_root, mandate_payload=None):
+def _seed_snapshot_and_mandate(data_root: Path, mandate_payload: Mapping[str, object] | None = None) -> Path:
     persist_snapshot(_hand_built_snapshot(), data_root=data_root)
     parquet.write_rows(
         "sector_mappings",
@@ -531,9 +549,9 @@ def _seed_snapshot_and_mandate(data_root, mandate_payload=None):
     )
 
 
-def test_cli_evaluate_mandate_reports(capsys, data_root):
+def test_cli_evaluate_mandate_reports(capsys: pytest.CaptureFixture[str], data_root: Path):
     mandate_path = _seed_snapshot_and_mandate(data_root)
-    _cmd_evaluate_mandate(mandate_path, data_root)
+    _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out
     assert f"Mandate: {mandate_path}" in out
     expected_created = f"Snapshot: portfolio:robinhood:2026-08-25T12:00:00+00:00 created {datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()}"
@@ -544,20 +562,20 @@ def test_cli_evaluate_mandate_reports(capsys, data_root):
     assert "No breaches." not in out
 
 
-def test_cli_evaluate_mandate_no_breaches(capsys, data_root):
+def test_cli_evaluate_mandate_no_breaches(capsys: pytest.CaptureFixture[str], data_root: Path):
     mandate_path = _seed_snapshot_and_mandate(
         data_root,
         {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.99}], "prohibited_assets": []},
     )
-    _cmd_evaluate_mandate(mandate_path, data_root)
+    _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out
     assert "No breaches." in out
 
 
-def test_cli_evaluate_mandate_missing_mandate_exits_1(capsys, data_root):
+def test_cli_evaluate_mandate_missing_mandate_exits_1(capsys: pytest.CaptureFixture[str], data_root: Path):
     persist_snapshot(_hand_built_snapshot(), data_root=data_root)
     with pytest.raises(SystemExit) as excinfo:
-        _cmd_evaluate_mandate(data_root / "mandate.json", data_root)
+        _cmd_evaluate_mandate(data_root / "mandate.json", str(data_root))
     assert excinfo.value.code == 1
     assert "error:" in capsys.readouterr().err
 
@@ -567,30 +585,42 @@ def test_cli_evaluate_mandate_missing_mandate_exits_1(capsys, data_root):
 # ---------------------------------------------------------------------------
 
 
-def test_tool_evaluate_mandate_missing_mandate_error(data_root):
+def _as_seq(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, dict)
+    return value
+
+
+def test_tool_evaluate_mandate_missing_mandate_error(data_root: Path):
     result = tools.evaluate_mandate(data_root=data_root, mandate_path=data_root / "mandate.json")
     assert "error" in result
-    assert "mandate" in result["error"].lower() or "no such file" in result["error"].lower()
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "mandate" in error.lower() or "no such file" in error.lower()
 
 
-def test_tool_evaluate_mandate_missing_snapshot_error(data_root):
+def test_tool_evaluate_mandate_missing_snapshot_error(data_root: Path):
     _write_mandate(data_root / "mandate.json", {"limits": [], "prohibited_assets": []})
     result = tools.evaluate_mandate(data_root=data_root, mandate_path=data_root / "mandate.json")
     assert "error" in result
-    assert "snapshot" in result["error"].lower()
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "snapshot" in error.lower()
 
 
-def test_tool_evaluate_mandate_happy_path(data_root):
+def test_tool_evaluate_mandate_happy_path(data_root: Path):
     mandate_path = _seed_snapshot_and_mandate(data_root)
     result = tools.evaluate_mandate(data_root=data_root, mandate_path=mandate_path)
     assert result["result_type"] == "mandate_evaluation"
     assert result["snapshot_id"] == "portfolio:robinhood:2026-08-25T12:00:00+00:00"
     assert result["sector_exposures"] == {"semiconductors": "0.75", "unknown_sector": "0.25"}
-    assert len(result["breaches"]) == 2
-    breach = result["breaches"][0]
+    breaches = _as_seq(result["breaches"])
+    assert len(breaches) == 2
+    breach = breaches[0]
     assert breach["metric"] == "sector_exposure"
     assert breach["actual"] == "0.75"
     assert breach["excess"] == "0.55"
-    assert all(breach["unit"] == "ratio" for breach in result["breaches"])
+    assert all(breach["unit"] == "ratio" for breach in breaches)
     assert result["issues"] == []
     assert result["source"] == "mandate"

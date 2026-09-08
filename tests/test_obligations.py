@@ -3,8 +3,12 @@ note-text + Layer 3 balance sheet). Offline: parsers are tested against
 sanitized fixture markdown (tests/fixtures/obligations/), HTTP is mocked.
 """
 
+from __future__ import annotations
+
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -72,25 +76,25 @@ def test_amount_kind_priority():
 
 
 class FakeCache:
-    def __init__(self):
-        self.store = {}
+    def __init__(self) -> None:
+        self.store: dict[str, Any] = {}
 
-    def get(self, key, ttl=None):
+    def get(self, key: str, ttl: float | None = None) -> Any | None:
         return self.store.get(key)
 
-    def set(self, key, value):
+    def set(self, key: str, value: Any) -> None:
         self.store[key] = value
 
 
 class FakeNotes:
-    def __init__(self, by_title):
-        self._by = by_title
+    def __init__(self, by_title: dict[str, FakeNote]) -> None:
+        self._by: dict[str, FakeNote] = by_title
 
-    def to_markdown(self):
-        return "\n\n".join(self._by.values())
+    def to_markdown(self) -> str:
+        return "\n\n".join(n.to_markdown() for n in self._by.values())
 
-    def search(self, keyword):
-        matches = []
+    def search(self, keyword: str) -> list[FakeNote]:
+        matches: list[FakeNote] = []
         for title, note in self._by.items():
             if keyword.lower() in title.lower():
                 matches.append(note)
@@ -98,7 +102,7 @@ class FakeNotes:
 
 
 class FakeNote:
-    def __init__(self, title, markdown):
+    def __init__(self, title: str, markdown: str) -> None:
         self.title = title
         self._md = markdown
 
@@ -107,7 +111,7 @@ class FakeNote:
 
 
 class FakeDoc:
-    def __init__(self, notes, balance_sheet_md=""):
+    def __init__(self, notes: FakeNotes, balance_sheet_md: str = "") -> None:
         self.notes = notes
         self._bs = balance_sheet_md
 
@@ -124,12 +128,22 @@ class FakeDoc:
         return _FS()
 
 class FakeFiling:
-    def __init__(self, date="2026-02-25"):
-        self.filing_date = date
-        self.accession_no = "0001"
+    _doc: FakeDoc
+    obj: Callable[[], FakeDoc]
+
+    def __init__(self, date: str = "2026-02-25") -> None:
+        self.filing_date: str = date
+        self.accession_no: str = "0001"
 
 
-def _install(monkeypatch, notes_md: dict, bs_md: str = ""):
+def _bind_doc(doc: FakeDoc) -> Callable[[], FakeDoc]:
+    def _get() -> FakeDoc:
+        return doc
+
+    return _get
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, notes_md: dict[str, str], bs_md: str = "") -> FakeFiling:
     notes = FakeNotes(
         {t: FakeNote(t, md) for t, md in notes_md.items()}
     )
@@ -137,13 +151,13 @@ def _install(monkeypatch, notes_md: dict, bs_md: str = ""):
     filing = FakeFiling()
 
     class FakeCompany:
-        def __init__(self, ticker):
+        def __init__(self, ticker: str) -> None:
             pass
 
-        def get_filings(self, form=None):
+        def get_filings(self, form: list[str] | None = None) -> list[FakeFiling]:
             return [filing]
 
-        def get_facts(self):
+        def get_facts(self) -> Any:
             raise RuntimeError("no facts in fixture")
 
     # The edgar seam lives in edgar_client (get_company/get_latest_report);
@@ -155,7 +169,7 @@ def _install(monkeypatch, notes_md: dict, bs_md: str = ""):
     return filing
 
 
-def test_get_obligations_nvda_full(monkeypatch):
+def test_get_obligations_nvda_full(monkeypatch: pytest.MonkeyPatch):
     data = json.loads((FIXTURES / "NVDA_10K_notes.json").read_text())
     _install(monkeypatch, data["notes"])
     result = obligations.get_obligations("NVDA")
@@ -173,7 +187,7 @@ def test_get_obligations_nvda_full(monkeypatch):
         assert row.get("parser_version") == obligations.PARSER_VERSION
 
 
-def test_get_obligations_requires_quantified_data(monkeypatch):
+def test_get_obligations_requires_quantified_data(monkeypatch: pytest.MonkeyPatch):
     _install(monkeypatch, {"Notes": "no dollar figures here"})
     result = obligations.get_obligations("NVDA")
     assert "error" in result or not result.get("obligations")
@@ -184,14 +198,18 @@ def test_get_obligations_empty_ticker():
     assert "error" in result
 
 
-def test_get_obligations_persist_is_explicit(monkeypatch):
+def test_get_obligations_persist_is_explicit(monkeypatch: pytest.MonkeyPatch):
     data = json.loads((FIXTURES / "NVDA_10K_notes.json").read_text())
     _install(monkeypatch, data["notes"])
-    calls = []
-    monkeypatch.setattr(
-        obligations, "persist_obligation_events",
-        lambda rows, data_root=None, **kw: calls.append((rows, kw)) or {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0},
-    )
+    calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    def _fake_persist(
+        rows: list[dict[str, Any]], data_root: str | None = None, **kw: Any
+    ) -> dict[str, int]:
+        calls.append((rows, kw))
+        return {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
+
+    monkeypatch.setattr(obligations, "persist_obligation_events", _fake_persist)
     obligations.get_obligations("NVDA")
     assert calls == []
     obligations.get_obligations("NVDA", persist=True)
@@ -219,7 +237,7 @@ def test_balance_sheet_lines():
     assert rows or True
 
 
-def _obligation_row(**overrides):
+def _obligation_row(**overrides: Any) -> dict[str, Any]:
     row = {
         "type": "purchase_commitments",
         "amount_billions": 119.0,
@@ -242,7 +260,7 @@ def _obligation_row(**overrides):
     return row
 
 
-def test_persist_obligation_events_roundtrip(tmp_path):
+def test_persist_obligation_events_roundtrip(tmp_path: Path):
     """Events/evidence rows land with known_at == filing date (never the
     wall clock / extraction time), anchored to the archived report text."""
     from app.storage import parquet, raw_archive
@@ -295,7 +313,7 @@ def test_persist_obligation_events_roundtrip(tmp_path):
     assert parquet.read_table("evidence", root=tmp_path / "parquet").num_rows == 1
 
 
-def test_persist_obligation_events_spans_and_skips(tmp_path):
+def test_persist_obligation_events_spans_and_skips(tmp_path: Path):
     """Non-verbatim excerpts get NULL spans; XBRL rows carry no archive;
     rows without any filing date are skipped, never written with a wrong
     known_at."""
@@ -353,7 +371,7 @@ def test_persist_obligation_events_spans_and_skips(tmp_path):
     assert missing["span_end"] is None
 
 
-def test_persist_uses_historical_ticker_owner(tmp_path):
+def test_persist_uses_historical_ticker_owner(tmp_path: Path):
     """A 2024 filing for a reused ticker resolves to the 2024 owner, not the 2026 one."""
     from app.domain.market.ids import sec_entity_id
     from app.normalization import normalize_sec_tickers
@@ -377,7 +395,7 @@ def test_persist_uses_historical_ticker_owner(tmp_path):
     assert events[0]["entity_id"] == sec_entity_id(111)
 
 
-def test_persist_evidence_ids_distinct_across_tickers(tmp_path):
+def test_persist_evidence_ids_distinct_across_tickers(tmp_path: Path):
     """Same content_hash under two tickers yields two events and two distinct evidence_ids."""
     from app.storage import parquet
 
@@ -413,10 +431,12 @@ def test_prose_schedule_reconciles_to_own_amount():
         "years 2027 and 2028, respectively."
     )
     sched = obligations._parse_prose_schedule(md, 8.0)
+    assert sched is not None
     assert [(y["fiscal_year"], y["amount_billions"]) for y in sched] == [
         ("2027", 4.0), ("2028", 3.0), ("2029", 1.0),
     ]
     other = obligations._parse_prose_schedule(md, 27.0)
+    assert other is not None
     assert [(y["fiscal_year"], y["amount_billions"]) for y in other] == [
         ("2027", 14.0), ("2028", 13.0),
     ]
@@ -443,7 +463,7 @@ def test_collect_note_rows_supply_schedule_no_bleed():
         "| 2026 | $4,752 |\n| 2027 | $3,708 |\n| 2028 | $1,981 |\n"
         "| 2029 | $1,306 |\n| 2030 | $788 |\n| Thereafter | $773 |"
     )
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
     (headline,) = [r for r in rows if r["type"] == "supply" and r["amount_billions"] == 13.3]
     assert [y["fiscal_year"] for y in headline["schedule"]] == [
@@ -454,7 +474,7 @@ def test_collect_note_rows_supply_schedule_no_bleed():
 
 def test_collect_note_rows_unreconciled_supply_keeps_horizon():
     md = _note_md("NVDA", "Commitments")
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
     supply = [r for r in rows if r["type"] == "supply"]
     assert supply and all(r["schedule"] is None for r in supply)
@@ -464,7 +484,7 @@ def test_collect_note_rows_unreconciled_supply_keeps_horizon():
     )
 
 
-def test_persist_obligation_events_schedule_json(tmp_path):
+def test_persist_obligation_events_schedule_json(tmp_path: Path):
     """Per-year schedules persist per event; rows without one store NULL."""
     from app.storage import parquet
 
@@ -488,12 +508,12 @@ def test_persist_obligation_events_schedule_json(tmp_path):
     assert events["sec:event:NVDA:flat1"]["schedule_json"] is None
 
 
-def _install_layered(monkeypatch, notes_by_form):
+def _install_layered(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, tuple[dict[str, str], str]]) -> None:
     """Form-aware mocked EDGAR: {form: ({title: md}, filing_date)}; 8-K -> none."""
-    def fake_get_company(ticker):
+    def fake_get_company(ticker: str) -> Any:
         class _C:
-            def get_filings(self, form=None):
-                out = []
+            def get_filings(self, form: list[str] | None = None) -> list[FakeFiling]:
+                out: list[FakeFiling] = []
                 for name in (form or []):
                     if name in notes_by_form:
                         notes_md, date = notes_by_form[name]
@@ -501,11 +521,11 @@ def _install_layered(monkeypatch, notes_by_form):
                         doc = FakeDoc(notes, "")
                         filing = FakeFiling(date=date)
                         filing.accession_no = f"acc-{name}"
-                        filing.obj = (lambda d: lambda: d)(doc)
+                        filing.obj = _bind_doc(doc)
                         out.append(filing)
                 return out
 
-            def get_facts(self):
+            def get_facts(self) -> Any:
                 raise RuntimeError("no facts in fixture")
 
         return _C()
@@ -514,7 +534,7 @@ def _install_layered(monkeypatch, notes_by_form):
     monkeypatch.setattr(obligations, "cache", FakeCache())
 
 
-def test_snapshot_supersedes_older_filing(monkeypatch):
+def test_snapshot_supersedes_older_filing(monkeypatch: pytest.MonkeyPatch):
     """10-K $20B superseded by 10-Q $13B: ledger keeps both, snapshot $13B."""
     _install_layered(monkeypatch, {
         "10-Q": ({"Commitments and Contingencies":
@@ -533,7 +553,7 @@ def test_snapshot_supersedes_older_filing(monkeypatch):
     assert {"2026-04-01", "2026-02-01"} <= set(result["filings_examined"])
 
 
-def test_unquantified_only_returns_buckets_not_error(monkeypatch):
+def test_unquantified_only_returns_buckets_not_error(monkeypatch: pytest.MonkeyPatch):
     _install_layered(monkeypatch, {
         "10-K": ({"Commitments and Contingencies":
                   "The company may indemnify its officers against certain claims."}, "2026-02-01"),
@@ -574,7 +594,7 @@ def test_buybacks_and_dividends_are_capital_not_exposures():
     assert [c["type"] for c in caps] == ["dividends"]
 
 
-def test_zero_finding_filing_appears_in_scan_manifest(monkeypatch):
+def test_zero_finding_filing_appears_in_scan_manifest(monkeypatch: pytest.MonkeyPatch):
     _install_layered(monkeypatch, {
         "10-K": ({"Commitments and Contingencies":
                   "The company may indemnify its officers against certain claims."}, "2026-02-01"),
@@ -606,7 +626,7 @@ def test_schedule_change_changes_content_hash():
     assert obligations._content_hash(base) != obligations._content_hash(nosched)
 
 
-def test_persist_unquantified_exposures(tmp_path):
+def test_persist_unquantified_exposures(tmp_path: Path):
     """Unquantified exposures persist as amount-None contingent events."""
     from app.storage import parquet
 
@@ -632,33 +652,33 @@ def test_persist_unquantified_exposures(tmp_path):
     assert evidence["excerpt"] == exp["excerpt"]
 
 
-def _install_with_8k(monkeypatch, notes_by_form, filings_8k):
+def _install_with_8k(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, tuple[dict[str, str], str]], filings_8k: list[tuple[str, list[str], str, str]]) -> None:
     """Form-aware mocked EDGAR plus a canned 8-K stream.
 
     ``filings_8k``: [(filing_date, items, text, accession)].
     """
     class Fake8KObj:
-        def __init__(self, items, document):
-            self.items = items
-            self.document = document
+        def __init__(self, items: list[str], document: str) -> None:
+            self.items: list[str] = items
+            self.document: str = document
 
     class Fake8KFiling:
-        def __init__(self, date, items, text, accession):
+        def __init__(self, date: str, items: list[str], text: str, accession: str) -> None:
             self.filing_date = date
             self.accession_no = accession
             self._obj = Fake8KObj(items, text)
 
-        def obj(self):
+        def obj(self) -> Fake8KObj:
             return self._obj
 
     made_8k = [Fake8KFiling(*spec) for spec in filings_8k]
 
-    def fake_get_company(ticker):
+    def fake_get_company(ticker: str) -> Any:
         class _C:
-            def get_filings(self, form=None):
+            def get_filings(self, form: list[str] | None = None) -> list[Any]:
                 if form == ["8-K"]:
                     return list(made_8k)
-                out = []
+                out: list[FakeFiling] = []
                 for name in (form or []):
                     if name in notes_by_form:
                         notes_md, date = notes_by_form[name]
@@ -666,11 +686,11 @@ def _install_with_8k(monkeypatch, notes_by_form, filings_8k):
                         doc = FakeDoc(notes, "")
                         filing = FakeFiling(date=date)
                         filing.accession_no = f"acc-{name}"
-                        filing.obj = (lambda d: lambda: d)(doc)
+                        filing.obj = _bind_doc(doc)
                         out.append(filing)
                 return out
 
-            def get_facts(self):
+            def get_facts(self) -> Any:
                 raise RuntimeError("no facts in fixture")
 
         return _C()
@@ -679,7 +699,7 @@ def _install_with_8k(monkeypatch, notes_by_form, filings_8k):
     monkeypatch.setattr(obligations, "cache", FakeCache())
 
 
-def test_schedule_table_reconciles_to_headline(monkeypatch):
+def test_schedule_table_reconciles_to_headline(monkeypatch: pytest.MonkeyPatch):
     """$13.3B headline + $13.308B table expose ~$13.3B, never ~$26.6B."""
     md = (
         "Supply commitments were $13.3 billion as of September 27, 2025. "
@@ -704,7 +724,7 @@ def test_schedule_table_reconciles_to_headline(monkeypatch):
     assert snap_total == pytest.approx(13.3, abs=0.05)
 
 
-def test_schedule_components_roundtrip_flag_and_replay(monkeypatch, tmp_path):
+def test_schedule_components_roundtrip_flag_and_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Component flags survive persist -> replay; snapshot stays ~$13.3B."""
     from app.storage import parquet
 
@@ -759,7 +779,7 @@ def test_schedule_components_roundtrip_flag_and_replay(monkeypatch, tmp_path):
     ]
 
 
-def test_schedule_components_legacy_null_flags_replay(tmp_path):
+def test_schedule_components_legacy_null_flags_replay(tmp_path: Path):
     """Events stored without flags replay to the same ~$13.3B snapshot."""
     from app.domain.events import sec_event_id
     from app.storage import parquet
@@ -803,7 +823,7 @@ def test_schedule_components_legacy_null_flags_replay(tmp_path):
     assert all(c["headline_type"] == "supply" for c in comps)
     assert sum(r["amount_billions"] for r in replayed["current_snapshot"]) == pytest.approx(13.3, abs=0.05)
 
-def test_schedule_components_legacy_mixed_notes_replay(tmp_path):
+def test_schedule_components_legacy_mixed_notes_replay(tmp_path: Path):
     """Same filing, two notes: supply table replays flagged, lease table stays independent."""
     from app.domain.events import sec_event_id
     from app.storage import parquet
@@ -876,7 +896,7 @@ def test_reconciliation_ambiguity_attaches_closest_and_warns():
         "$9.5 billion. Future payments (in millions):\n"
         "| 2027 | $6,000 |\n| 2028 | $4,000 |"
     )
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     obligations._collect_note_rows(rows, "Commitments and Contingencies", md, FakeFiling())
     comps = [r for r in rows if r.get("schedule_component")]
     assert len(comps) == 2
@@ -885,15 +905,18 @@ def test_reconciliation_ambiguity_attaches_closest_and_warns():
     assert len(warnings) == 1 and "ambiguous" in warnings[0]
 
 
-def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch):
+def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch: pytest.MonkeyPatch):
     """An August-filed fact is stamped August, never the February 10-K proxy."""
-    monkeypatch.setattr(obligations, "_xbrl_store_facts", lambda ticker: [{
-        "concept": "PurchaseObligations", "value": 5e9,
-        "period_start": "2026-02-01", "period_end": "2026-05-02",
-        "fiscal_year": 2026, "fiscal_period": "Q1",
-        "filed_at": "2026-08-26", "accession": "000123-26-000001",
-        "known_at": "2026-08-27T00:00:00Z", "source_url": "",
-    }])
+    def _fake_store_facts(ticker: str) -> list[dict[str, Any]]:
+        return [{
+            "concept": "PurchaseObligations", "value": 5e9,
+            "period_start": "2026-02-01", "period_end": "2026-05-02",
+            "fiscal_year": 2026, "fiscal_period": "Q1",
+            "filed_at": "2026-08-26", "accession": "000123-26-000001",
+            "known_at": "2026-08-27T00:00:00Z", "source_url": "",
+        }]
+
+    monkeypatch.setattr(obligations, "_xbrl_store_facts", _fake_store_facts)
 
     class NoFacts:
         def to_dataframe(self):
@@ -903,7 +926,10 @@ def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch):
         def get_facts(self):
             return NoFacts()
 
-    monkeypatch.setattr(obligations.edgar_client, "get_company", lambda ticker: _C())
+    def _fake_get_company(ticker: str) -> Any:
+        return _C()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", _fake_get_company)
     rows = obligations._xbrl_obligations("SYN")
     (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
     assert row["filed"] == "2026-08-26"
@@ -914,11 +940,14 @@ def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch):
     assert "_coverage_warning" not in row
 
 
-def test_xbrl_live_fallback_warns_proxied(monkeypatch):
+def test_xbrl_live_fallback_warns_proxied(monkeypatch: pytest.MonkeyPatch):
     """Empty store + live facts: latest-10-K proxy date plus a warning."""
     import pandas as pd
 
-    monkeypatch.setattr(obligations, "_xbrl_store_facts", lambda ticker: [])
+    def _fake_empty_facts(ticker: str) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(obligations, "_xbrl_store_facts", _fake_empty_facts)
 
     class _Facts:
         def to_dataframe(self):
@@ -930,11 +959,14 @@ def test_xbrl_live_fallback_warns_proxied(monkeypatch):
         def get_facts(self):
             return _Facts()
 
-    monkeypatch.setattr(obligations.edgar_client, "get_company", lambda ticker: _C())
-    monkeypatch.setattr(
-        obligations, "_latest_report",
-        lambda ticker, form: (FakeFiling(date="2026-02-25"), None),
-    )
+    def _fake_get_company(ticker: str) -> Any:
+        return _C()
+
+    monkeypatch.setattr(obligations.edgar_client, "get_company", _fake_get_company)
+    def _fake_latest_report(ticker: str, form: str) -> tuple[FakeFiling, None]:
+        return (FakeFiling(date="2026-02-25"), None)
+
+    monkeypatch.setattr(obligations, "_latest_report", _fake_latest_report)
     rows = obligations._xbrl_obligations("SYN")
     (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
     assert row["filed"] == "2026-02-25"
@@ -942,7 +974,7 @@ def test_xbrl_live_fallback_warns_proxied(monkeypatch):
     assert "PurchaseObligations" in row["_coverage_warning"]
 
 
-def test_three_indemnities_yield_three_rows(monkeypatch):
+def test_three_indemnities_yield_three_rows(monkeypatch: pytest.MonkeyPatch):
     """Three distinct indemnity excerpts in one filing: three rows, three hashes."""
     md = (
         "The company may indemnify its officers against certain claims. "
@@ -959,7 +991,7 @@ def test_three_indemnities_yield_three_rows(monkeypatch):
     assert len({e["content_hash"] for e in result["unquantified_exposures"]}) == 3
 
 
-def test_8k_lifecycle_chain_sums_zero(monkeypatch):
+def test_8k_lifecycle_chain_sums_zero(monkeypatch: pytest.MonkeyPatch):
     """Jan $10B + Mar $6B amendment + May (Item 1.02) termination, same
     agreement identity: 3 ledger rows, $0 current exposure — never $16B."""
     _install_with_8k(monkeypatch, {}, [
@@ -985,7 +1017,7 @@ def test_8k_lifecycle_chain_sums_zero(monkeypatch):
     assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
 
 
-def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch):
+def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch: pytest.MonkeyPatch):
     """Two guarantees with distinct agreement identities stay additive."""
     _install_with_8k(monkeypatch, {}, [
         ("2026-01-15", ["Item 1.01"],
@@ -1003,7 +1035,7 @@ def test_coexisting_8k_guarantees_warn_without_resolution(monkeypatch):
     assert any("2 unresolved 8-K guarantees" in w for w in result["coverage"]["warnings"])
 
 
-def test_8k_amendment_does_not_kill_unrelated_guarantee(monkeypatch):
+def test_8k_amendment_does_not_kill_unrelated_guarantee(monkeypatch: pytest.MonkeyPatch):
     """Jan A $10B + Feb B $3B + Mar amend-A-to-$6B: snapshot is $6B A + $3B
     B = $9B — never $6B (B killed by A's amendment)."""
     _install_with_8k(monkeypatch, {}, [
@@ -1031,7 +1063,7 @@ def test_8k_amendment_does_not_kill_unrelated_guarantee(monkeypatch):
     assert sum(r["amount_billions"] for r in snap_8k) == 9.0
 
 
-def test_8k_bare_guarantees_stay_additive(monkeypatch):
+def test_8k_bare_guarantees_stay_additive(monkeypatch: pytest.MonkeyPatch):
     """Jan $10B + Feb $3B + Mar amend-to-$6B with no counterparty/label:
     3 ledger rows, none marked, snapshot $19B — never $6B."""
     _install_with_8k(monkeypatch, {}, [
@@ -1058,7 +1090,7 @@ def test_8k_bare_guarantees_stay_additive(monkeypatch):
     assert any("3 unresolved 8-K guarantees" in w for w in result["coverage"]["warnings"])
 
 
-def test_8k_amountless_termination_zeroes_exposure(monkeypatch):
+def test_8k_amountless_termination_zeroes_exposure(monkeypatch: pytest.MonkeyPatch):
     """Jan Alpha $10B + May Item 1.02 termination with no dollar figure:
     2 ledger rows (May amount-None terminated), $0 current exposure."""
     _install_with_8k(monkeypatch, {}, [
@@ -1081,7 +1113,7 @@ def test_8k_amountless_termination_zeroes_exposure(monkeypatch):
     assert [r for r in result["current_snapshot"] if r["type"] == "8k_guarantees"] == []
 
 
-def test_8k_amountless_amendment_retains_last_quantified(monkeypatch):
+def test_8k_amountless_amendment_retains_last_quantified(monkeypatch: pytest.MonkeyPatch):
     """Jan Alpha $10B + Mar amount-less amendment: Jan stays `amended`,
     snapshot retains $10B — never $0."""
     _install_with_8k(monkeypatch, {}, [
@@ -1107,7 +1139,7 @@ def test_8k_amountless_amendment_retains_last_quantified(monkeypatch):
     assert any("did not disclose a replacement amount" in w for w in result["coverage"]["warnings"])
 
 
-def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch):
+def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch: pytest.MonkeyPatch):
     """Jan $10B + Mar amount-less amendment + May amount-less termination:
     $0 snapshot with an unknown-canceled-amount notice."""
     _install_with_8k(monkeypatch, {}, [
@@ -1133,7 +1165,7 @@ def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch):
     assert any("canceled amount unknown" in w for w in result["coverage"]["warnings"])
 
 
-def test_8k_lifecycle_staggered_ingestion(monkeypatch, tmp_path):
+def test_8k_lifecycle_staggered_ingestion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Jan persists status-less; Mar amendment dedups Jan, never mutates it."""
     from app.storage import parquet
 
@@ -1178,7 +1210,7 @@ def test_8k_lifecycle_staggered_ingestion(monkeypatch, tmp_path):
     assert by_filed["2026-01-15"].get("lifecycle_status") == "amended"
 
 
-def test_obligations_as_of_before_amendment(monkeypatch, tmp_path):
+def test_obligations_as_of_before_amendment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Jan-only store replayed in Feb: $10B unamended, no retained warning."""
     from app.storage import parquet  # noqa: F401
 
@@ -1197,7 +1229,7 @@ def test_obligations_as_of_before_amendment(monkeypatch, tmp_path):
     assert not any("did not disclose a replacement amount" in w for w in replay["coverage"]["warnings"])
 
 
-def test_obligations_as_of_retains_amended(monkeypatch, tmp_path):
+def test_obligations_as_of_retains_amended(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Jan+Mar store replayed in Apr: Jan amended $10B with retained warning."""
     from app.storage import parquet  # noqa: F401
 
@@ -1219,7 +1251,7 @@ def test_obligations_as_of_retains_amended(monkeypatch, tmp_path):
     assert any("did not disclose a replacement amount" in w for w in replay["coverage"]["warnings"])
 
 
-def test_obligations_as_of_empty(monkeypatch, tmp_path):
+def test_obligations_as_of_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Pre-history replay returns the _no_data error shape."""
     _install_with_8k(monkeypatch, {}, [(
         "2026-01-15", ["Item 1.01"],
@@ -1233,7 +1265,7 @@ def test_obligations_as_of_empty(monkeypatch, tmp_path):
     assert "error" in replay and "2025-01-01" in replay["error"]
 
 
-def test_capital_persist_replay_roundtrip(monkeypatch, tmp_path):
+def test_capital_persist_replay_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Dollar-less buyback persists to capital_events and replays as capital only."""
     _install_layered(monkeypatch, {
         "10-K": ({"Stock Compensation": "The board authorized a share repurchase program."}, "2026-02-01"),
@@ -1248,7 +1280,7 @@ def test_capital_persist_replay_roundtrip(monkeypatch, tmp_path):
     assert replay["obligations"] == [] and replay["current_snapshot"] == []
 
 
-def test_payment_timing_roundtrip_and_retune(tmp_path):
+def test_payment_timing_roundtrip_and_retune(tmp_path: Path):
     """A 95/24 front-loaded horizon round-trips as JSON; correcting it to
     90/29 retunes identity; reruns write zero rows."""
     from app.storage import parquet
