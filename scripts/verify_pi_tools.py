@@ -2,6 +2,7 @@
 """Live Pi tool verification: every describe-visible tool invoked 3/3 by Pi's configured default model.
 
 Fail-closed at every step. Verdict comes only from per-attempt recorder DBs.
+Pi configuration is authoritative for which model runs; Stockbot asserts only that non-empty model telemetry exists.
 """
 
 from __future__ import annotations
@@ -43,6 +44,13 @@ def ensure_thesis_fixture(store: Path) -> str:
 
 
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
+
+def setup_isolated_store(root: Path) -> tuple[Path, Path]:
+    """Batch store override; captures durable source first, then replaces env for Pi children."""
+    store = root / "store"
+    durable = Path(os.environ.get("STOCKBOT_DATA_DIR", "data"))
+    os.environ["STOCKBOT_DATA_DIR"] = str(store.resolve())
+    return store, durable
 
 
 def seed_finra_fixture(store: Path, durable: Path) -> None:
@@ -169,9 +177,6 @@ def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) ->
             return natural
         return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
     return build_explicit_prompt(tool, args)
-def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]]:
-    return [(t, n) for t in tool_names for n in range(1, repetitions + 1)]
-
 
 
 def check_discovery(describe: Mapping[str, object], doctor: Mapping[str, object]) -> str | None:
@@ -237,6 +242,7 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
                 return False, "no TOOL_COMPLETED for required tool"
             if failed > 0:
                 return False, "TOOL_FAILED present for required tool"
+            # Pi configuration is authoritative for which model runs; assert presence only, never an exact ID.
             models = conn.execute("SELECT model FROM model_calls").fetchall()
             if not any((r[0] or "").strip() for r in models):
                 return False, "no model telemetry: model_calls has no non-empty model ID"
@@ -401,10 +407,9 @@ def main() -> int:
     cwd = Path.cwd()
     # Contain live side effects (e.g. thesis_create) in the batch dir; never
     # the operator's durable store. run_pi children inherit this env.
-    store = root / "store"
-    durable = Path(os.environ.get("STOCKBOT_DATA_DIR", "data"))
-    os.environ.setdefault("STOCKBOT_DATA_DIR", str(store.resolve()))
-    seed_finra_fixture(store, durable)
+    store, durable = setup_isolated_store(root)
+    if "get_short_interest_leaderboard" in tool_names:
+        seed_finra_fixture(store, durable)
     if any(t in THESIS_ID_TOOLS for t in tool_names):
         try:
             fixture_id = ensure_thesis_fixture(store.resolve())

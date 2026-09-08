@@ -1,6 +1,7 @@
 """Offline unit tests for scripts/verify_pi_tools.py (fakes only, no Pi/network)."""
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -171,3 +172,15 @@ def test_completed_override_still_needs_db_evidence(tmp_path: Path):
 def test_db_terminal(tmp_path: Path):
     assert v.db_terminal(_ok(tmp_path))
     assert not v.db_terminal(tmp_path / "missing.sqlite")
+
+
+def test_isolated_store_overrides_preset_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(durable))
+    root = tmp_path / "batch"
+    store, captured = v.setup_isolated_store(root)
+    assert store == root / "store"
+    assert captured == durable
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
+    assert Path(os.environ["STOCKBOT_DATA_DIR"]) != durable.resolve()
