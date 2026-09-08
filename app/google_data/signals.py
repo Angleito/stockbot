@@ -472,10 +472,6 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
         known = str(record.get("known_at", ""))
         if cutoff is not None and known > cutoff:
             continue
-        if query is not None and str(query).lower() not in str(record.get("term", "")).lower():
-            continue
-        if geo is not None and str(record.get("geo")) != str(geo):
-            continue
         metrics = record.get("metrics") or {}
         key = (str(metrics.get("refresh_date") or ""), known,
                str(record.get("_source_hash") or ""), str(row.get("source_record_id") or ""))
@@ -542,7 +538,7 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
                 expected = _trends.expected_inputs_hash(
                     scope, str(record.get("term") or ""),
                     str(record.get("table") or ""),
-                    str(record.get("list_kind") or ""), basis, candidates)
+                    str(record.get("list_kind") or ""), basis, str(record.get("geo") or ""), candidates)
                 if str(frow.get("inputs_hash") or "") != str(expected):
                     continue
                 by_scope.setdefault(str(frow.get("feature_scope_hash") or ""), []).append(frow)
@@ -588,6 +584,10 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
         record["available_feature_scopes"] = available
     rows = sorted(latest.values(),
                   key=lambda d: (str(d.get("known_at", "")), str(d.get("signal_id"))))
+    if query is not None:
+        rows = [r for r in rows if str(query).lower() in str(r.get("term", "")).lower()]
+    if geo is not None:
+        rows = [r for r in rows if str(r.get("geo")) == str(geo)]
     if limit is not None:
         try:
             rows = rows[:max(0, int(limit))]

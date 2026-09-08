@@ -245,11 +245,6 @@ def _feature_scope_hash(scope: dict) -> str:
         json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _feature_inputs_hash(pairs: list) -> str:
-    return hashlib.sha256(
-        json.dumps(sorted(pairs), separators=(",", ":")).encode()).hexdigest()
-
-
 def _series_basis(staged_row: dict) -> str:
     metrics = staged_row.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -265,7 +260,7 @@ def _series_basis(staged_row: dict) -> str:
 
 
 def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
-                          basis: str, candidates: list) -> str:
+                          basis: str, geo: str, candidates: list) -> str:
     """Scope-complete input identity shared by writes, replay gating, and PIT reads."""
     geos = scope.get("geos") or []
     week_start = str(scope.get("week_start") or "")
@@ -285,14 +280,45 @@ def expected_inputs_hash(scope: dict, term: str, table: str, list_kind: str,
         period = str(cand.get("period") or cand.get("week") or "")
         if not period or period < week_start or period > week_end:
             continue
-        geo = str(cand.get("geo") or "")
-        if geo.split(":")[0] not in geos:
+        cgeo = str(cand.get("geo") or "")
+        if cgeo.split(":")[0] not in geos:
             continue
         if _series_basis(cand) != str(basis or ""):
             continue
         pairs.append([str(cand.get("observation_id") or ""),
                       str(cand.get("content_hash") or "")])
-    return _feature_inputs_hash(sorted(pairs))
+    target_table = str(table or "")
+    target_kind = str(list_kind or "")
+    target_geo = str(geo or "")
+    target_basis = str(basis or "")
+    periods: set = set()
+    if target_geo.split(":")[0] in geos or (not geos and not target_geo):
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            if str(cand.get("table") or "") != target_table:
+                continue
+            if str(cand.get("list_kind") or "") != target_kind:
+                continue
+            if str(cand.get("geo") or "") != target_geo:
+                continue
+            if _series_basis(cand) != target_basis:
+                continue
+            period = str(cand.get("period") or cand.get("week") or "")
+            if not period or period < week_start or period > week_end:
+                continue
+            periods.add(period)
+    periods_covered = sorted(periods)
+    if target_geo in geos:
+        geos_covered = sorted(geos)
+    elif target_geo:
+        geos_covered = [target_geo]
+    else:
+        geos_covered = []
+    payload = {"source_pairs": sorted(pairs), "periods_covered": periods_covered,
+               "geos_covered": geos_covered}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _completed_refreshes(data_root, templates: list) -> set:
@@ -784,7 +810,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                     scope, str(_c.get("term") or ""),
                                     str(_c.get("table") or table),
                                     str(_c.get("list_kind") or ""),
-                                    _series_basis(_cand), _gate_cands)
+                                    _series_basis(_cand), str(_c.get("geo") or ""), _gate_cands)
                                 if _features_for(data_root, _oid, scope_hash,
                                                   expected_inputs_hash=_expected) is not None:
                                     gated.append(_c)
@@ -1032,7 +1058,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         "list_kind": str(_obs.get("list_kind") or ""),
                         "metrics": _obs.get("metrics") or {},
                     } for _obs, _oid, _ch, _, _, _, _ in infos]
-                    _empty_hash = expected_inputs_hash({}, "", "", "", "", [])
+                    _empty_hash = expected_inputs_hash({}, "", "", "", "", "", [])
                     try:
                         _existing = _parquet.read_table(
                             "google_signal_features", proot).to_pylist()
@@ -1054,7 +1080,7 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                         _expected = expected_inputs_hash(
                             _scope, str(_obs.get("term") or ""),
                             str(_obs.get("table") or ""),
-                            str(_obs.get("list_kind") or ""), _basis, _candidates)
+                            str(_obs.get("list_kind") or ""), _basis, str(_obs.get("geo") or ""), _candidates)
                         if _expected == _empty_hash:
                             continue
                         _k = (_oid, _shash, _signals.CALC_VERSION, _expected)

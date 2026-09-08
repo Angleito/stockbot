@@ -1629,6 +1629,74 @@ def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch, tmp_path):
     assert latest[w4]["feature_calculated_at"] is None
 
 
+def test_inputs_hash_includes_shared_period_coverage(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    from app.storage import parquet as _pq
+    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        refresh = params["start_date"]
+        if refresh == "2026-09-02":
+            out = [_dma_row("New York", term="alpha", week=w4, refresh="2026-09-02",
+                            rank=1, score=50)]
+            out.extend(_dma_row("New York", term="beta", week=w, refresh="2026-09-02",
+                                rank=r, score=s)
+                       for w, r, s in zip([w2, w3, w4], [3, 2, 1], [20, 30, 50]))
+            return out
+        out = [_dma_row("New York", term="alpha", week=w4, refresh="2026-09-02",
+                        rank=1, score=50)]
+        out.extend(_dma_row("New York", term="beta", week=w, refresh="2026-09-03",
+                            rank=r, score=s)
+                   for w, r, s in zip([w1, w2, w3, w4], [4, 3, 2, 1], [10, 20, 30, 50]))
+        return out
+
+    def _collect(refresh):
+        return trends.collect_trends(
+            start_date=refresh, end_date=refresh, geos=["New York"],
+            limit=20, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+            executor=_scoped_trend_executor(refreshes=[refresh], rows_for=_rows, seen=[]))
+
+    assert _collect("2026-09-02")["status"] == "ok"
+    assert _collect("2026-09-03")["status"] == "ok"
+    table = trends._template_table("trends_us_top")
+    stored = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
+    obs_rows = [r for r in stored
+                if r.get("table") == table and r.get("geo") == "New York"
+                and r.get("term") == "alpha" and r.get("period") == w4]
+    assert len(obs_rows) == 1
+    target_oid = obs_rows[0]["observation_id"]
+    assert len({r["content_hash"] for r in obs_rows}) == 1
+    kuts = sorted({r.get("known_at") for r in stored})
+    assert len(kuts) == 2 and kuts[0] < kuts[1]
+    feat_rows = [r for r in _pq.read_table(
+        "google_signal_features", tmp_path / "parquet").to_pylist()
+        if str(r.get("observation_id") or "") == str(target_oid)]
+    assert len(feat_rows) == 2
+    assert len({r.get("feature_scope_hash") for r in feat_rows}) == 1
+    assert len({r.get("inputs_hash") for r in feat_rows}) == 2
+    by_hash = {r.get("inputs_hash"): json.loads(r.get("features_json") or "{}")
+               for r in feat_rows}
+    narrow = [v for v in by_hash.values()
+              if v.get("coverage", {}).get("periods_covered") == [w2, w3, w4]]
+    expanded = [v for v in by_hash.values()
+                if v.get("coverage", {}).get("periods_covered") == [w1, w2, w3, w4]]
+    assert len(narrow) == 1 and len(expanded) == 1
+    assert narrow[0]["persistence"] == 1 / 3
+    assert expanded[0]["persistence"] == 1 / 4
+
+    def _alpha(as_of):
+        rows = [s for s in signals.query_signals(data_root=tmp_path, as_of=as_of)
+                if s.get("term") == "alpha" and s.get("geo") == "New York" and s.get("period") == w4]
+        assert len(rows) == 1
+        return rows[0]
+    old, new = _alpha(kuts[0]), _alpha(kuts[1])
+    assert old["features"] == narrow[0]
+    assert new["features"] == expanded[0]
+    assert _alpha(None)["features"] == expanded[0]
+
+
 def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
     _enable(monkeypatch)
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
@@ -1681,3 +1749,16 @@ def test_unscoped_reads_are_order_independent(monkeypatch, tmp_path):
     assert [e["feature_scope_hash"] for e in multi["available_feature_scopes"]] == sorted(
         e["feature_scope_hash"] for e in multi["available_feature_scopes"])
     assert by_key[("alpha", "Los Angeles", w4)]["features"] is not None
+    for root in (tmp_path / "a", tmp_path / "b"):
+        unfiltered = {(s["term"], s["geo"], s["period"]): s
+                      for s in signals.query_signals(data_root=root)}
+        filtered = signals.query_signals(data_root=root, geo="New York")
+        assert filtered and all(s.get("geo") == "New York" for s in filtered)
+        ny_unfiltered = unfiltered[("alpha", "New York", w4)]
+        ny_filtered = {(s["term"], s["geo"], s["period"]): s for s in filtered}[("alpha", "New York", w4)]
+        assert ny_filtered["features"] is None
+        assert ny_unfiltered["features"] is None
+        assert ny_filtered["available_feature_scopes"] == ny_unfiltered["available_feature_scopes"]
+        assert len(ny_filtered["available_feature_scopes"]) == 2
+        assert {tuple(sorted(e["feature_scope"]["geos"])) for e in ny_filtered["available_feature_scopes"]} == {
+            ("New York",), ("Los Angeles", "New York")}
