@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.thesis.models import EvidenceRef, ThesisMemory, ThesisQuestion, WatchRule
-from app.thesis.yaml import load_yaml
+from app.thesis.yaml import load_raw_yaml, load_yaml
 
 # ponytail: token estimate is len(text)//4, no tokenizer dependency (pi_gateway uses same).
 
@@ -70,49 +70,70 @@ def _pit_visible(value: str, cutoff: str) -> bool:
         return False
     return _le(value, cutoff)
 
-def build_context(
+def _build_context(
     repository: Any,
     thesis_id: str,
     trigger: Any,
     *,
-    known_at: str,
+    data_cutoff: str,
     max_tokens: int = 8_000,
+    live: bool,
 ) -> ResearchContext:
-    """Assemble the PIT-bounded packet Pi may see for one trigger run."""
-    if not isinstance(known_at, str) or not known_at:
-        raise ValueError("<context>: 'known_at' must be a non-empty ISO string")
     tid, thesis_dir = _thesis_dir(repository, thesis_id)
-    snapshot = repository.load_state_as_of(tid, known_at)
     tdict = _trigger_dict(trigger)
     if tdict.get("thesis_id", tid) != tid:
         raise ValueError(f"<context>: trigger belongs to {tdict.get('thesis_id')!r}, not {tid!r}")
-
-    state = dict(snapshot.state)
-    questions = [dict(q) for q in snapshot.questions.get("questions", [])]
-    for q in questions:
-        ThesisQuestion.from_dict(q, str(thesis_dir / "questions.yaml"))
-    rules = [WatchRule.from_dict(r, str(thesis_dir / "watch.yaml")).to_dict() for r in snapshot.watch.get("rules", [])]
-    memories = [
-        ThesisMemory.from_dict(m, str(thesis_dir / "memory.yaml")).to_dict()
-        for m in snapshot.memory.get("memories", [])
-    ]
-    # Memories: PIT-visible by created_at only; undated/unparseable fail closed.
-    visible_memories: list[dict] = []
-    pit_omitted: list[str] = []
-    for m in memories:
-        if (m.get("created_at") or "") and _pit_visible(m["created_at"], known_at):
-            visible_memories.append(m)
+    if live:
+        thesis_dict = repository.load_thesis(tid).to_dict()
+        state = dict(repository.load_state(tid).to_dict())
+        questions = [q.to_dict() for q in repository.load_questions(tid)]
+        rules = [r.to_dict() for r in repository.load_watch_rules(tid)]
+        mem_path = thesis_dir / "memory.yaml"
+        if mem_path.is_file():
+            raw_mem = load_raw_yaml(mem_path)
+            memories = [
+                ThesisMemory.from_dict(m, str(mem_path)).to_dict()
+                for m in raw_mem.get("memories", [])
+            ]
         else:
-            pit_omitted.append(m["memory_id"])
-
-    # Irreducible packet: thesis+trigger+state+watch+questions only.
-    packet = {
-        "thesis": dict(snapshot.thesis),
-        "state": state,
-        "watch": {"thesis_id": tid, "rules": rules},
-        "questions": questions,
-        "trigger": tdict,
-    }
+            memories = []
+        visible_memories = list(memories)
+        pit_omitted: list[str] = []
+        packet = {
+            "thesis": dict(thesis_dict),
+            "state": state,
+            "watch": {"thesis_id": tid, "rules": rules},
+            "questions": questions,
+            "trigger": tdict,
+            "checkpoint": dict(repository.load_checkpoint(tid).to_dict()),
+        }
+    else:
+        snapshot = repository.load_state_as_of(tid, data_cutoff)
+        state = dict(snapshot.state)
+        questions = [dict(q) for q in snapshot.questions.get("questions", [])]
+        for q in questions:
+            ThesisQuestion.from_dict(q, str(thesis_dir / "questions.yaml"))
+        rules = [WatchRule.from_dict(r, str(thesis_dir / "watch.yaml")).to_dict() for r in snapshot.watch.get("rules", [])]
+        memories = [
+            ThesisMemory.from_dict(m, str(thesis_dir / "memory.yaml")).to_dict()
+            for m in snapshot.memory.get("memories", [])
+        ]
+        # Memories: PIT-visible by created_at only; undated/unparseable fail closed.
+        visible_memories = []
+        pit_omitted = []
+        for m in memories:
+            if (m.get("created_at") or "") and _pit_visible(m["created_at"], data_cutoff):
+                visible_memories.append(m)
+            else:
+                pit_omitted.append(m["memory_id"])
+        # Irreducible packet: thesis+trigger+state+watch+questions only.
+        packet = {
+            "thesis": dict(snapshot.thesis),
+            "state": state,
+            "watch": {"thesis_id": tid, "rules": rules},
+            "questions": questions,
+            "trigger": tdict,
+        }
     mandatory = _tokens(json.dumps(packet, sort_keys=True))
     if mandatory > max_tokens:
         breakdown = ", ".join(
@@ -122,11 +143,9 @@ def build_context(
             f"<context>: mandatory packet ~{mandatory} tokens exceeds budget of {max_tokens}"
             f" ({breakdown})"
         )
-
     # Evidence: PIT-visible refs only (chronological, fail-closed), pending-trigger
     # refs first, then newest-first with stable evidence_id tiebreak. Full dicts.
     from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
-
     trigger_refs = set(tdict.get("canonical_refs") or [])
     ordered: list[dict] = []
     evidence_dir = thesis_dir / "evidence"
@@ -135,17 +154,14 @@ def build_context(
             ref = load_yaml(f, EvidenceRef)
             if ref.thesis_id != tid:
                 raise ValueError(f"{f}: evidence belongs to {ref.thesis_id!r}, not {tid!r}")
-            if not ref.known_at or not _pit_visible(ref.known_at, known_at):
+            if not ref.known_at or not _pit_visible(ref.known_at, data_cutoff):
                 continue  # missing, unparseable, or future-known: never visible
             ordered.append(ref.to_dict())
-
     def _ev_key(e: dict) -> tuple[int, float, str]:
         dt = _as_dt(e.get("known_at") or "")
         ts = dt.timestamp() if dt is not None else float("-inf")
         return (0 if e.get("canonical_ref") in trigger_refs else 1, -ts, e.get("evidence_id") or "")
-
     ordered.sort(key=_ev_key)
-
     included: list[str] = []
     omitted: list[str] = list(pit_omitted)
     used = mandatory
@@ -159,10 +175,8 @@ def build_context(
         evidence.append(e)
         included.append(e["evidence_id"])
     evidence_tokens = _tokens(json.dumps(evidence, sort_keys=True))
-
     def _packet_tokens(mem_list: list) -> int:
         return _tokens(json.dumps({**packet, "memories": mem_list}, sort_keys=True))
-
     # Over budget: trim oldest memories first (newest-last on disk).
     kept = list(visible_memories)
     while kept and _packet_tokens(kept) + evidence_tokens > max_tokens:
@@ -171,7 +185,6 @@ def build_context(
         included.append(m["memory_id"])
     packet["memories"] = kept
     used = _packet_tokens(kept) + evidence_tokens
-
     # Journals: newest-first excerpts, only while budget remains.
     journal_dir = thesis_dir / "journal"
     journal_files: list[Path] = []
@@ -188,10 +201,11 @@ def build_context(
         except OSError:
             omitted.append(f.stem)
             continue
-        fm_known_at = _journal_known_at(head)
-        if not fm_known_at or not _pit_visible(fm_known_at, known_at):
-            omitted.append(f.stem)  # missing, unparseable, or future-known: never visible
-            continue
+        if not live:
+            fm_known_at = _journal_known_at(head)
+            if not fm_known_at or not _pit_visible(fm_known_at, data_cutoff):
+                omitted.append(f.stem)  # missing, unparseable, or future-known: never visible
+                continue
         cost = _tokens(head)
         if used + cost > max_tokens:
             omitted.append(f.stem)
@@ -199,7 +213,6 @@ def build_context(
         used += cost
         excerpts.append({"journal": f.stem, "excerpt": head})
         included.append(f"journal:{f.stem}")
-
     packet["omitted_counts"] = {
         "evidence": len(ordered) - len(evidence),
         "memories": len(memories) - len(kept),
@@ -215,5 +228,36 @@ def build_context(
         included_ids=included,
         omitted_ids=omitted,
         estimated_tokens=total,
-        known_at=known_at,
+        known_at=data_cutoff,
     )
+
+
+def build_context(
+    repository: Any,
+    thesis_id: str,
+    trigger: Any,
+    *,
+    known_at: str,
+    max_tokens: int = 8_000,
+) -> ResearchContext:
+    """Assemble the PIT-bounded packet Pi may see for one trigger run."""
+    if not isinstance(known_at, str) or not known_at:
+        raise ValueError("<context>: 'known_at' must be a non-empty ISO string")
+    return _build_context(repository, thesis_id, trigger, data_cutoff=known_at, max_tokens=max_tokens, live=False)
+
+
+def build_live_context(
+    repository: Any,
+    thesis_id: str,
+    trigger: Any,
+    *,
+    data_cutoff: str,
+    max_tokens: int = 8_000,
+) -> ResearchContext:
+    """Assemble the live current-state packet with cutoff-bounded evidence."""
+    if not isinstance(data_cutoff, str) or not data_cutoff:
+        raise ValueError("<context>: 'data_cutoff' must be a non-empty ISO string")
+    from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
+    if _as_dt(data_cutoff) is None:
+        raise ValueError(f"<context>: bad data_cutoff {data_cutoff!r}")
+    return _build_context(repository, thesis_id, trigger, data_cutoff=data_cutoff, max_tokens=max_tokens, live=True)

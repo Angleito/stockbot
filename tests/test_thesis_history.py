@@ -255,6 +255,15 @@ def test_journal_gate_binds_known_at(tmp_path):
                                  "body": "Processed.", "known_at": T3})
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2) is False
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T3) is True
+    r.append_journal_entry(tid, {"entry_id": "j-run-a", "trigger_id": trig.trigger_id,
+                                 "title": "a", "body": "a", "run_id": "run:a", "known_at": T3})
+    r.append_journal_entry(tid, {"entry_id": "j-run-b", "trigger_id": trig.trigger_id,
+                                 "title": "b", "body": "b", "run_id": "run:b", "known_at": T3})
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:a") is True
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:b") is True
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:other") is False
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T3, run_id="run:a") is True
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2, run_id="run:a") is False
 
 
 def test_historical_memory_stamps_effective_at(tmp_path):

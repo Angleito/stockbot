@@ -1059,6 +1059,7 @@ TOOLS = [
                     "title": {"type": "string"},
                     "body": {"type": "string", "description": "Note body (Markdown)."},
                     "trigger_id": {"type": "string", "description": "Trigger this entry completes (omit for ordinary notes)."},
+                    "run_id": {"type": "string", "description": "Live run this entry completes (trigger-linked only)."},
                     "known_at": {"type": "string", "description": "PIT cutoff this entry is known at (ISO-8601)."},
                 },
                 "required": ["id", "body"],
@@ -2297,21 +2298,30 @@ def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
         if not any(t.trigger_id == trigger_id for t in repo.load_triggers(thesis.thesis_id)):
             raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis.thesis_id!r}")
         entry["trigger_id"] = trigger_id
+    run_id = arguments.get("run_id")
+    if run_id is not None:
+        if trigger_id is None:
+            raise ValueError("thesis_journal: 'run_id' requires 'trigger_id'")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("thesis_journal: 'run_id' must be a non-empty string")
+        entry["run_id"] = run_id
     known_at = arguments.get("known_at")
     if trigger_id is not None:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-
-        if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
-            raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
         cutoff = _effective_at(context)
         if cutoff:
+            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+                raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
             known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
             if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
                 raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
-        entry["known_at"] = known_at
+            entry["known_at"] = known_at
+        elif known_at is not None:
+            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+                raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
+            entry["known_at"] = known_at
     elif known_at is not None:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-
         if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
             raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
         entry["known_at"] = known_at

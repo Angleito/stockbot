@@ -14,19 +14,20 @@ from app.thesis.yaml import atomic_write_yaml, load_raw_yaml
 T0 = "2026-01-01T00:00:00+00:00"
 T1 = "2026-01-02T00:00:00+00:00"
 T2 = "2026-01-03T00:00:00+00:00"
+T4 = "2026-01-05T00:00:00+00:00"
 
 
 class _Src:
     name = "sec_filings"
-
     def __init__(self, events=(), fail=False, key="sec_filings"):
         self.events = list(events)
         self.fail = fail
         self.key = key
         self.calls = 0
-
+        self.cutoffs = []
     def query_since(self, checkpoint, *, known_at):
         self.calls += 1
+        self.cutoffs.append(known_at)
         if self.fail:
             raise RuntimeError("source boom")
         return [e for e in self.events if e.known_at <= known_at]
@@ -34,22 +35,26 @@ class _Src:
 
 class _Pi:
     """Fake run_thesis_pi: counts launches; ok-runs apply repo writes like Pi's tool calls."""
-
     def __init__(self, fail=False, write=None):
         self.fail = fail
         self.write = write
         self.calls = 0
         self.prompts = []
-
+        self.run_ids = []
     def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170, as_of=None):
+        import re as _re
         self.calls += 1
         self.prompts.append(prompt)
         self.last_as_of = as_of
+        m = _re.search(r"^run_id:\s*(.+)$", prompt, _re.M)
+        rid = m.group(1).strip() if m else ""
+        self.run_ids.append(rid)
+        self.last_run_id = rid
         if self.fail:
             raise RuntimeError("pi boom")
         if self.write is not None:
             try:
-                self.write(thesis_id, trigger_id, as_of)
+                self.write(thesis_id, trigger_id, rid)
             except TypeError:
                 self.write(thesis_id, trigger_id)
 
@@ -98,7 +103,7 @@ def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path, monkeyp
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             expression_ids=[eid], canonical_refs=["ev:m"], summary="s")
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "expression_updates": [{"expression_id": eid, "status": "flagged"}],
@@ -107,7 +112,7 @@ def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path, monkeyp
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "timing mismatch: 30-day puts vs 2-year thesis; "
                                       "near-term filing cuts against puts timing",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     fake = _pi(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -125,8 +130,8 @@ def test_bullish_equity_asks_no_options_questions(tmp_path, monkeypatch):
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             canonical_refs=["ev:e"], summary="s")
-    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
+    fake = _pi(monkeypatch, write=lambda tid, trig_id, run_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     questions = r.load_questions(t.thesis_id)
@@ -141,14 +146,14 @@ def test_covered_call_without_portfolio_leaves_ownership_unresolved(tmp_path, mo
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             canonical_refs=["ev:c"], summary="s")
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "evidence_refs": [{"canonical_ref": "ev:c", "summary": "call overlay noted",
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "ownership unresolved without portfolio read",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     fake = _pi(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -164,7 +169,7 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path, mon
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             canonical_refs=["ev:p"], summary="s")
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "evidence_refs": [{"canonical_ref": "ev:p",
@@ -172,7 +177,7 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path, mon
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "not evaluable without market read; no quotes fetched",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     _pi(monkeypatch, write=_write)
     run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -187,8 +192,8 @@ def test_unknown_and_processed_triggers_raise(tmp_path, monkeypatch):
     with pytest.raises(KeyError):
         run_trigger(r, t.thesis_id, "trigger:nope", known_at=T2)
     trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
-    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
+    fake = _pi(monkeypatch, write=lambda tid, trig_id, run_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     with pytest.raises(ValueError):
@@ -209,13 +214,13 @@ def test_irrelevant_event_produces_zero_pi_calls(tmp_path, monkeypatch):
 def test_duplicate_event_produces_zero_second_pi_call(tmp_path, monkeypatch):
     r, t = _make(tmp_path)
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "evidence_refs": [{"canonical_ref": "ev:d", "summary": "NVDA files",
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "ok",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     fake = _pi(monkeypatch, write=_write)
     src = _Src([_ev("ev:d")])
@@ -250,14 +255,14 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
                                    source="sec_filings", known_at=T1, entity="NVDA",
                                    summary="NVDA files 10-K")]
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "evidence_refs": [{"canonical_ref": "edgar:NVDA:10-K:f1",
                                "summary": "10-K notes steady demand", "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "reviewed filing; risk factors mention cyclicality",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     fake = _pi(monkeypatch, write=_write)
     res = tick(r, t.thesis_id, {"sec_filings": FilingSrc()}, known_at=T2)
@@ -267,8 +272,8 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
 
 def test_simultaneous_meaningful_events_produce_bounded_calls(tmp_path, monkeypatch):
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
+    fake = _pi(monkeypatch, write=lambda tid, trig_id, run_id: r.append_journal_entry(
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id}))
     src = _Src([_ev("ev:a", summary="NVDA files 10-K"), _ev("ev:b", summary="NVDA 8-K event")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert len(res.triggers_created) == 2 and fake.calls == 2
@@ -323,13 +328,13 @@ def test_restart_processes_pending_once_without_dupes(tmp_path, monkeypatch):
     assert bad.calls == 1
     journals_before = _journal_count(tmp_path, t.slug)
 
-    def _write(tid, trig_id):
+    def _write(tid, trig_id, run_id):
         r.apply_research_result(tid, {
             "trigger_id": trig_id,
             "evidence_refs": [{"canonical_ref": "ev:1", "summary": "NVDA files",
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "recovered",
-                              "known_at": T2}}, "run:t1")
+                              "known_at": T2}}, run_id)
 
     monkeypatch.setattr(runner_mod, "run_thesis_pi", _Pi(write=_write))
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
@@ -501,15 +506,15 @@ def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path, m
     monkeypatch.setattr(tools_mod.exa_client, "search",
                         lambda *a, **k: (calls.append((a, k)), {"results": []})[1])
 
-    def _write(tid, trig_id, as_of=None):
+    def _write(tid, trig_id, run_id):
         ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                             data_root=tmp_path, as_of=as_of)
+                             data_root=tmp_path, as_of=None)
         got = tools_mod.execute_tool("search_web", {"query": "NVDA news"},
                                      "test-model", context=ctx)
         assert got.get("error_type") != "pit_unsafe_tool"
         assert calls != []
         r.append_journal_entry(tid, {"title": "t", "body": "ok",
-                                     "trigger_id": trig_id, "known_at": T2})
+                                     "trigger_id": trig_id, "run_id": run_id})
 
     fake = _pi(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -522,3 +527,59 @@ def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path, m
                                      "test-model", context=hist)
     assert blocked.get("error_type") == "pit_unsafe_tool"
     assert len(calls) == n
+
+
+def test_live_tick_uses_current_state_with_cutoff_bounded_evidence(tmp_path, monkeypatch):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+    r = ThesisRepository(tmp_path / "thesis")
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
+    tid = t.thesis_id
+    cid = r.load_thesis(tid).claims[0].claim_id
+    r.apply_research_result(tid, {"watch_add": [{"rule_id": "rule:1", "rule_type": "new_filing", "enabled": True,
+                         "support_status": "supported", "support_reason": "",
+                         "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
+    r.apply_research_result(tid, {"evidence_refs": [{"canonical_ref": "ev:seed:T1",
+                               "summary": "NVDA 10-K notes steady demand", "known_at": T1}]},
+                            "run:seed", effective_at=T1)
+    r.apply_research_result(tid, {"claim_updates": [{"claim_id": cid, "status": "challenged"}]},
+                            "run:challenge", effective_at=T4)
+    r.apply_research_result(tid, {"watch_add": [{"rule_id": "rule:current", "rule_type": "new_filing",
+                         "enabled": True, "support_status": "supported", "support_reason": "",
+                         "claim_ids": [cid], "expression_ids": []}]}, "run:watch", effective_at=T4)
+    src = _Src([_ev("ev:live", known_at=T1)])
+    web_calls = []
+    monkeypatch.setattr(tools_mod.exa_client, "search",
+                        lambda *a, **k: (web_calls.append((a, k)), {"results": []})[1])
+    def _write(live_tid, live_trig, run_id):
+        live_ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                                  data_root=tmp_path, as_of=None)
+        got = tools_mod.execute_tool("search_web", {"query": "NVDA news"},
+                                     "test-model", context=live_ctx)
+        assert got.get("error_type") != "pit_unsafe_tool"
+        res = tools_mod.execute_tool("thesis_journal",
+                                     {"id": live_tid, "body": "live review notes challenged claim",
+                                      "trigger_id": live_trig, "run_id": run_id},
+                                     "test-model", context=live_ctx)
+        assert "error" not in res
+    fake = _pi(monkeypatch, write=_write)
+    res = tick(r, tid, {"sec_filings": src}, known_at=T1)
+    assert fake.calls == 1 and len(res.triggers_created) == 1
+    assert T1 in src.cutoffs
+    prompt = fake.prompts[0]
+    assert "challenged" in prompt and "rule:current" in prompt
+    assert "CURRENT THESIS STATE" in prompt
+    assert f"TRIGGER DATA CUTOFF: {T1}" in prompt
+    assert "THESIS STATE AS OF" not in prompt
+    assert "All sections above are point-in-time as of known_at" not in prompt
+    assert fake.last_as_of is None
+    assert web_calls != []
+    trig = next(t for t in r.load_triggers(tid) if t.trigger_id == res.triggers_created[0])
+    assert (trig.metadata or {}).get("event_known_at", T1) <= T1
+    run_id = res.runs[0].run_id
+    assert run_id and run_id in prompt
+    jdir = r.dir_for_thesis(tid) / "journal"
+    texts = [p.read_text(encoding="utf-8") for p in sorted(jdir.glob("*.md"))]
+    assert texts != [] and any(run_id in b for b in texts)
+    assert any("created_at:" in b for b in texts)
+    assert not any(f"known_at: {T1}" in b for b in texts)

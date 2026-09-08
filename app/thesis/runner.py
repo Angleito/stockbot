@@ -20,7 +20,7 @@ from typing import Any
 from app.config import get_data_root
 from app.policy import Capability
 from app.storage.ids import run_id as new_run_id
-from app.thesis.context import build_context
+from app.thesis.context import build_live_context
 from app.thesis.pi_runner import run_thesis_pi
 
 _GRANTS: dict[str, Capability] = {
@@ -54,26 +54,30 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _build_prompt(*, thesis_id: str, trigger: Any, known_at: str, ctx: Any) -> str:
+def _build_prompt(*, thesis_id: str, trigger: Any, data_cutoff: str, ctx: Any, run_id: str) -> str:
     refs = ", ".join(trigger.canonical_refs) or "(none)"
+    packet = dict(ctx.thesis_packet)
+    trig = packet.pop("trigger", {})
     return "\n".join(
         [
             f"thesis_id: {thesis_id}",
             f"trigger_id: {trigger.trigger_id}",
-            f"known_at: {known_at}",
+            f"run_id: {run_id}",
+            f"TRIGGER DATA CUTOFF: {data_cutoff}",
             f"trigger summary: {(trigger.summary or '')[:500]}",
             f"trigger canonical refs: {refs[:500]}",
-            "Only use evidence known at or before known_at.",
-            f"THESIS STATE AS OF {known_at}:",
-            json.dumps(ctx.thesis_packet, sort_keys=True),
-            f"KNOWN EVIDENCE AS OF {known_at}:",
-            json.dumps(ctx.evidence_refs, sort_keys=True),
-            f"PRIOR JOURNAL CONTEXT AS OF {known_at}:",
+            "Only use evidence known at or before the trigger data cutoff.",
+            "CURRENT THESIS STATE:",
+            json.dumps(packet, sort_keys=True),
+            "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
+            json.dumps({"trigger": trig, "evidence": ctx.evidence_refs}, sort_keys=True),
+            "CURRENT PRIOR JOURNAL CONTEXT:",
             json.dumps(ctx.journal_excerpts, sort_keys=True),
-            "All sections above are point-in-time as of known_at; unknown values stay unknown.",
+            "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, checkpoint, and prior journals are current.",
             "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
-            "Before completing, write a material thesis_journal entry using",
-            f"trigger_id {trigger.trigger_id!r} and known_at {known_at!r}.",
+            "Before completing, write a material thesis_journal entry using"
+            f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'.",
+            "Do not copy the trigger data cutoff into journal known_at; omit known_at unless it independently represents when the journal information became known.",
         ]
     )
 
@@ -112,20 +116,20 @@ def run_trigger(
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
     # PIT/budget gate: raises before any Pi call when context is over budget.
-    ctx = build_context(repository, tid, trigger, known_at=known_at)
+    ctx = build_live_context(repository, tid, trigger, data_cutoff=known_at)
     root = getattr(repository, "root", None)
     data_root = root.parent if root is not None else get_data_root()
-    prompt = _build_prompt(thesis_id=tid, trigger=trigger, known_at=known_at, ctx=ctx)
     rid = new_run_id()
+    prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
                        prompt=prompt, data_root=data_root)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
-        if not repository.has_journal_for_trigger(tid, trigger.trigger_id, known_at=known_at):
+        if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(
                 f"<runner>: no durable journal for trigger {trigger.trigger_id!r} (thesis {tid!r});"
                 f" Pi must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
-                f" and known_at {known_at!r} before the trigger can be acknowledged;"
+                f" and run_id {rid!r} before the trigger can be acknowledged;"
                 " leaving pending for retry"
             )
         repository.mark_trigger_processed(tid, trigger.trigger_id, rid)

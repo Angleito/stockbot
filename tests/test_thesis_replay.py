@@ -37,8 +37,11 @@ class _ReplayPi:
         self.calls = 0
 
     def __call__(self, *, thesis_id, trigger_id, prompt, data_root, timeout_s=170, as_of=None):
+        import re as _re
         self.calls += 1
         n = self.calls
+        m = _re.search(r"^run_id:\s*(.+)$", prompt, _re.M)
+        rid = m.group(1).strip() if m else f"run:fallback-{n}"
         if n == 1:  # T3 relevant filing
             self.repository.apply_research_result(thesis_id, {
                 "trigger_id": trigger_id,
@@ -47,7 +50,7 @@ class _ReplayPi:
                                    "known_at": T3}],
                 "questions_add": [{"question_id": "q:t3", "text": "Does demand persist?"}],
                 "journal_entry": {"entry_id": "journal:t3", "title": "t",
-                                  "body": "T3 filing reviewed", "known_at": T3}}, "run:t3",
+                                  "body": "T3 filing reviewed", "known_at": T3, "run_id": rid}}, rid,
                 effective_at=as_of or T3)
         elif n == 2:  # T4 contradictory
             self.repository.apply_research_result(thesis_id, {
@@ -59,7 +62,7 @@ class _ReplayPi:
                 "journal_entry": {"entry_id": "journal:t4", "title": "t",
                                   "body": "T4 counterevidence recorded: pushout note "
                                           "contradicts steady-demand claim",
-                                  "known_at": T4}}, "run:t4",
+                                  "known_at": T4, "run_id": rid}}, rid,
                 effective_at=as_of or T4)
         else:  # T5 major change
             self.repository.apply_research_result(thesis_id, {
@@ -71,7 +74,7 @@ class _ReplayPi:
                 "journal_entry": {"entry_id": "journal:t5", "title": "t",
                                   "body": "T5 major change reviewed: guidance cut "
                                           "challenges accumulation timing",
-                                  "known_at": T5}}, "run:t5",
+                                  "known_at": T5, "run_id": rid}}, rid,
                 effective_at=as_of or T5)
 
 

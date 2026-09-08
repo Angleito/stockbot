@@ -767,11 +767,10 @@ class ThesisRepository:
             return dest
 
     def has_journal_for_trigger(
-        self, thesis_id: str, trigger_id: str, *, known_at: str | None = None
+        self, thesis_id: str, trigger_id: str, *, known_at: str | None = None, run_id: str | None = None
     ) -> bool:
         """True when a durable journal entry names this thesis and trigger."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-
         want = _as_dt(known_at) if known_at is not None else None
         thesis_dir = self._dir_for(thesis_id)
         journal_dir = thesis_dir / "journal"
@@ -786,13 +785,15 @@ class ThesisRepository:
             lines = {ln.split(":", 1)[0].strip(): ln.split(":", 1)[1].strip()
                      for ln in fm.splitlines() if ":" in ln}
             if lines.get("thesis_id") == thesis_id and lines.get("trigger_id") == trigger_id:
-                if known_at is None:
-                    return True
-                if want is None:
+                if known_at is not None:
+                    if want is None:
+                        continue
+                    got = _as_dt(lines.get("known_at", "")) if lines.get("known_at") else None
+                    if got is None or got != want:
+                        continue
+                if run_id is not None and lines.get("run_id", "") != run_id:
                     continue
-                got = _as_dt(lines.get("known_at", "")) if lines.get("known_at") else None
-                if got is not None and got == want:
-                    return True
+                return True
         return False
 
     def create_trigger(
