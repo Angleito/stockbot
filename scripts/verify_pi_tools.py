@@ -24,6 +24,7 @@ from typing import TypedDict
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.tools import TOOLS, execute_tool  # noqa: E402
+from app.config import get_data_root  # noqa: E402
 from app.policy import Capability, RequestContext  # noqa: E402
 from scripts.verify_tool_registry import get_registry_sets, registry_errors, tool_schema_function, tool_schema_name  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
@@ -48,7 +49,7 @@ FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financ
 def setup_isolated_store(root: Path) -> tuple[Path, Path]:
     """Batch store override; captures durable source first, then replaces env for Pi children."""
     store = root / "store"
-    durable = Path(os.environ.get("STOCKBOT_DATA_DIR", "data"))
+    durable = get_data_root()
     os.environ["STOCKBOT_DATA_DIR"] = str(store.resolve())
     return store, durable
 
