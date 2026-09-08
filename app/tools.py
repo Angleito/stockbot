@@ -1783,15 +1783,8 @@ def _get_trend_evidence(args: dict, model: str) -> dict:
             geos=list(geos), limit=args.get("limit", 100),
             data_root=get_data_root(),
             week_start=args.get("week_start"), week_end=args.get("week_end"),
+            term=args.get("term"),
         ))
-        term = args.get("term")
-        if term and isinstance(result, dict) and result.get("status") == "ok":
-            rows = [o for o in result.get("observations", [])
-                    if str(term).lower() in str(o.get("term", "")).lower()]
-            result = dict(result)
-            result["observations"] = rows
-            result["rows"] = rows
-            result["count"] = len(rows)
         return result
     except Exception as exc:
         logger.exception("get_trend_evidence failed")

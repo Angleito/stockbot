@@ -592,6 +592,45 @@ def test_limit_truncates_response_not_warehouse(monkeypatch, tmp_path):
     assert sorted(s["term"] for s in retained) == ["alpha", "beta", "gamma"]
 
 
+def test_term_filter_applies_before_limit_slice(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+    dmas = ["Chicago", "Los Angeles", "New York"]
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        fillers = [_dma_row(dmas[i % 3], term=f"filler-{i:03d}", rank=i + 1,
+                            score=90, refresh="2026-09-02")
+                   for i in range(100)]
+        return fillers + [_dma_row("New York", term="Stanley Cup target", rank=101,
+                                   score=90, refresh="2026-09-02")]
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02",
+        geos=["Chicago", "Los Angeles", "New York"],
+        limit=10, term="Stanley", data_root=tmp_path,
+        week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    assert result["count"] == 1 and len(result["observations"]) == 1
+    assert "Stanley" in result["observations"][0]["term"]
+    assert result["continuation"] is False
+    retained = signals.query_signals(data_root=tmp_path)
+    assert len(retained) == 101
+    assert any("Stanley" in s["term"] for s in retained)
+
+    unfiltered = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02",
+        geos=["Chicago", "Los Angeles", "New York"],
+        limit=10, data_root=tmp_path,
+        week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]))
+    assert unfiltered["count"] == 10
+    assert unfiltered["continuation"] is True
+
+
 def test_partial_write_does_not_checkpoint(monkeypatch, tmp_path):
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
@@ -1440,6 +1479,27 @@ def test_handler_disabled_passthrough_makes_no_network_call():
                       "geos": ["US"], "limit": 5}, "test-model")
     assert isinstance(result, dict)
     assert result["status"] == "disabled"
+
+
+def test_trend_evidence_term_passed_to_collect(monkeypatch, tmp_path):
+    from app import tools as tools_mod
+    from app.google_data import trends as trends_mod
+
+    payload = {"status": "ok", "observations": [{"term": "Stanley Cup"}],
+               "rows": [{"term": "Stanley Cup"}], "count": 1}
+    seen = {}
+
+    def _fake_collect(**kwargs):
+        seen.update(kwargs)
+        return payload
+
+    monkeypatch.setattr(trends_mod, "collect_trends", _fake_collect)
+    handler = tools_mod._DIRECT_HANDLERS["get_trend_evidence"]
+    result = handler({"start_date": "2026-09-01", "end_date": "2026-09-02",
+                      "geos": ["US"], "limit": 10, "term": "Stanley"}, "test-model")
+    assert seen.get("term") == "Stanley"
+    assert seen.get("limit") == 10
+    assert result == payload
 
 
 def test_investigate_returns_evidence_and_gaps():

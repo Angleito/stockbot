@@ -591,7 +591,7 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor, d
 
 def collect_trends(*, start_date, end_date, geos, limit=100,
                    data_root=None, executor=None, week_start=None,
-                   week_end=None, interval="daily") -> dict:
+                   week_end=None, interval="daily", term=None) -> dict:
     """Collect top/rising lists; each row becomes an idempotent candidate."""
     if isinstance(geos, str):
         geos = [geos]
@@ -919,7 +919,6 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
         if id(row) in winner_ids:
             effective_observations.append(_norm)
 
-    continuation = len(observations) > limit
     if data_root is not None and (observations or fetched):
         try:
             expected = _store_observations(data_root, observations, retrieved_at)
@@ -1018,7 +1017,12 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                 "error_type": "source_unavailable"})
     weeks = sorted({str(o["period"]) for o in observations})
     geos_covered = sorted({str(o["geo"]) for o in observations})
-    returned_observations = observations[:limit] if continuation else observations
+    matched = observations
+    if isinstance(term, str) and term.strip():
+        needle = term.strip().lower()
+        matched = [o for o in observations if needle in str(o.get("term", "")).lower()]
+    continuation = len(matched) > limit
+    returned_observations = matched[:limit] if continuation else matched
     return {"status": "ok", "source": SOURCE, "observations": returned_observations,
             "rows": returned_observations, "count": len(returned_observations),
             "coverage": {"periods_covered": weeks, "geos_covered": geos_covered,
