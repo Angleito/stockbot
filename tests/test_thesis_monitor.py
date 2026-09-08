@@ -487,3 +487,38 @@ def test_refinement_covers_only_new_targets_and_ignores_disabled(tmp_path):
     assert {new_cid, newest_cid} <= set(out3["rules_added"][0]["claim_ids"])
     disabled = [x for x in r.load_watch_rules(t.thesis_id) if x.rule_id == added_id][0]
     assert disabled.enabled is False and set(disabled.claim_ids) == {new_cid}
+
+
+def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path, monkeypatch):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    r, t = _make(tmp_path)
+    full = r.load_thesis(t.thesis_id)
+    trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
+                            canonical_refs=["ev:m"], summary="s")
+    calls = []
+    monkeypatch.setattr(tools_mod.exa_client, "search",
+                        lambda *a, **k: (calls.append((a, k)), {"results": []})[1])
+
+    def _write(tid, trig_id, as_of=None):
+        ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                             data_root=tmp_path, as_of=as_of)
+        got = tools_mod.execute_tool("search_web", {"query": "NVDA news"},
+                                     "test-model", context=ctx)
+        assert got.get("error_type") != "pit_unsafe_tool"
+        assert calls != []
+        r.append_journal_entry(tid, {"title": "t", "body": "ok",
+                                     "trigger_id": trig_id, "known_at": T2})
+
+    fake = _pi(monkeypatch, write=_write)
+    out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
+    assert out.processed and fake.calls == 1
+    assert fake.last_as_of is None
+    n = len(calls)
+    hist = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                          data_root=tmp_path, as_of=T2)
+    blocked = tools_mod.execute_tool("search_web", {"query": "NVDA news"},
+                                     "test-model", context=hist)
+    assert blocked.get("error_type") == "pit_unsafe_tool"
+    assert len(calls) == n

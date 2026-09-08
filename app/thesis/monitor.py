@@ -416,7 +416,12 @@ _STATE_KEY = {
 
 def tick(repository: Any, thesis_id: str, source_services: Any = None, *,
          known_at: str | None = None) -> TickResult:
-    """Run one deterministic monitor tick; see module docstring for the order."""
+    """Run one live monitor tick with a PIT data cutoff.
+
+    known_at bounds source, event, evidence, and trigger queries only; it never
+    selects historical thesis, watch, claim, expression, checkpoint, or
+    trigger-timestamp state, which are always read live.
+    """
     known_at = known_at or _utcnow()
     services = dict(source_services or {})
 

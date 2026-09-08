@@ -206,6 +206,33 @@ def test_backdated_research_never_moves_live(tmp_path):
     assert _history_count(r, tid) == n + 1
 
 
+def test_backdated_write_on_live_closed_writes_snapshot_only(tmp_path):
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    _set_claim_status(r, tid, "claim:c1", "challenged", T4)
+    r.close_thesis(tid)
+    n = _history_count(r, tid)
+    live_path = r.dir_for_thesis(tid) / "thesis.yaml"
+    live_bytes = live_path.read_bytes()
+    r.apply_research_result(tid, {
+        "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
+        "state": {"assessment": "strengthening"},
+    }, "run:backdate-closed", effective_at=T1)
+    assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "supported"
+    assert _claim_status(r.load_state_as_of(tid, T5), "claim:c1") == "challenged"
+    assert r.load_thesis(tid).status == "closed"
+    assert next(c.status for c in r.load_thesis(tid).claims if c.claim_id == "claim:c1") == "challenged"
+    assert live_path.read_bytes() == live_bytes
+    assert _history_count(r, tid) == n + 1
+    r.pause_thesis(tid, effective_at=T2)
+    assert r.load_state_as_of(tid, T2).thesis["status"] == "paused"
+    assert r.load_thesis(tid).status == "closed"
+    assert live_path.read_bytes() == live_bytes
+    r.resume_thesis(tid, effective_at=T2)
+    assert r.load_thesis(tid).status == "closed"
+    assert live_path.read_bytes() == live_bytes
+
+
 def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path):
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id

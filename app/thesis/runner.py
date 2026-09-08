@@ -119,7 +119,7 @@ def run_trigger(
     rid = new_run_id()
     try:
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
-                       prompt=prompt, data_root=data_root, as_of=known_at)
+                       prompt=prompt, data_root=data_root)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, known_at=known_at):
             raise RuntimeError(

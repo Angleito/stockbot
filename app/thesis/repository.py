@@ -679,8 +679,6 @@ class ThesisRepository:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
-            if thesis.status == models.ThesisStatus.CLOSED.value:
-                raise ValueError(f"{thesis_dir}/thesis.yaml: thesis {thesis_id!r} is closed; cannot change status")
             latest = self._latest_effective_locked(thesis_dir)
             if latest is not None and _as_dt(eff) < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
@@ -696,6 +694,8 @@ class ThesisRepository:
                     thesis=candidate.to_dict(), state=dict(base.state),
                     questions=dict(base.questions), watch=dict(base.watch), memory=dict(base.memory))
                 return candidate
+            if thesis.status == models.ThesisStatus.CLOSED.value:
+                raise ValueError(f"{thesis_dir}/thesis.yaml: thesis {thesis_id!r} is closed; cannot change status")
             data = thesis.to_dict()
             data["status"] = status
             data["updated_at"] = _utcnow()
@@ -996,8 +996,6 @@ class ThesisRepository:
         outcome: dict[str, Any] = {}
         with thesis_lock(thesis_dir):
             thesis = self._check_owner(thesis_dir, thesis_id)
-            if thesis.status == models.ThesisStatus.CLOSED.value:
-                raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
             latest = self._latest_effective_locked(thesis_dir)
             if latest is not None and _as_dt(eff) < latest[0]:
                 # Backdated commit: patch copies of the as-of snapshot, never live files.
@@ -1235,6 +1233,8 @@ class ThesisRepository:
                         thesis=thesis_d, state=state_d, questions=questions_raw,
                         watch=watch_raw, memory=memory_raw)
                 return outcome
+            if thesis.status == models.ThesisStatus.CLOSED.value:
+                raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
 
             # 0a. claim/expression updates: IDs must belong here, statuses known.
             claim_patch: dict[str, dict] = {}
