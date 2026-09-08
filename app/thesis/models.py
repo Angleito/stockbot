@@ -8,6 +8,7 @@ Unknown/unavailable optional values serialize as the literal ``"unknown"``.
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from collections.abc import Mapping
@@ -20,7 +21,9 @@ type JSONValue = JSONScalar | list[JSONValue] | dict[str, JSONValue]
 
 
 def validate_json_value(value: object, where: str = "<dict>") -> JSONValue:
-    """Recursively prove an untrusted payload is a true JSON value (deep copy)."""
+    """Recursively normalize an object into a valid JSONValue (deep copy). Tuples normalize to lists; non-finite floats are rejected."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{where}: non-finite float not allowed, got {value!r}")
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, (list, tuple)):
