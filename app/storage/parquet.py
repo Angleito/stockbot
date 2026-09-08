@@ -509,6 +509,18 @@ DATASETS["google_observations"] = Dataset(
     partition_field="known_at",
 )
 
+DATASETS["google_signal_features"] = Dataset(
+    name="google_signal_features",
+    schema=pa.schema(_fields(
+        ("observation_id", TEXT), ("feature_scope_hash", TEXT),
+        ("feature_scope_json", TEXT), ("features_json", TEXT),
+        ("calc_version", TEXT), ("calculated_at", TEXT),
+        ("inputs_hash", TEXT),
+    )),
+    unique_keys=("observation_id", "feature_scope_hash", "calc_version"),
+    partition_field="calculated_at",
+)
+
 
 def dataset(name: str) -> Dataset:
     try:

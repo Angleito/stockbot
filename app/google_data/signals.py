@@ -309,8 +309,21 @@ def migrate_jsonl_once(data_root=None) -> int:
     store = root / STORE_NAME
     marker = root / _MIGRATED_MARKER
     if marker.exists() or not store.exists() or _parquet is None:
+        try:
+            from . import trends as _trends
+        except ImportError:
+            try:
+                from app.google_data import trends as _trends  # type: ignore
+            except ImportError:
+                _trends = None  # type: ignore
+        if _trends is not None:
+            try:
+                _trends.backfill_legacy_feature_rows(data_root)
+            except Exception:
+                pass
         return 0
     rows = []
+    feature_rows = []
     for line in store.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -331,26 +344,38 @@ def migrate_jsonl_once(data_root=None) -> int:
         list_kind = record.get("list_kind") or "top"
         source = record.get("source") or "trends"
         content_hash = hashlib.sha256(json.dumps(
-            {"metrics": metrics, "features": features, "evidence": evidence,
-             "calc_version": "1"},
+            {"metrics": metrics, "evidence": evidence, "collector_version": "1"},
             sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        observation_id = hashlib.sha256(
+            f"{source}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+        known_at = record.get("known_at") or record.get("retrieved_at") or _now_iso()
+        retrieved_at = record.get("retrieved_at") or record.get("known_at") or _now_iso()
         rows.append({
-            "observation_id": hashlib.sha256(
-                f"{source}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest(),
+            "observation_id": observation_id,
             "source": source, "table": table, "term": term, "geo": geo,
             "list_kind": list_kind, "period": period,
             "observed_at": record.get("observed_at") or period,
-            "known_at": record.get("known_at") or record.get("retrieved_at") or _now_iso(),
-            "retrieved_at": record.get("retrieved_at") or record.get("known_at") or _now_iso(),
+            "known_at": known_at,
+            "retrieved_at": retrieved_at,
             "source_record_id": record.get("source_record_id") or "",
             "content_hash": content_hash, "collector_version": "1",
             "calc_version": "1",
             "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
-            "features_json": (json.dumps(features, sort_keys=True, default=str)
-                              if isinstance(features, dict) else None),
+            "features_json": None,
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{table}",
         })
+        if isinstance(features, dict):
+            feature_rows.append({
+                "observation_id": observation_id,
+                "feature_scope_hash": "legacy-unknown",
+                "feature_scope_json": json.dumps(
+                    {"legacy": True, "reason": "pre-scope-backfill"}),
+                "features_json": json.dumps(features, sort_keys=True, default=str),
+                "calc_version": "1",
+                "calculated_at": known_at,
+                "inputs_hash": "",
+            })
     written = 0
     if rows:
         try:
@@ -358,6 +383,25 @@ def migrate_jsonl_once(data_root=None) -> int:
                 "google_observations", rows, root=_resolve_root(data_root) / "parquet")
         except Exception:
             return 0
+    if feature_rows:
+        try:
+            _parquet.write_rows(
+                "google_signal_features", feature_rows,
+                root=_resolve_root(data_root) / "parquet")
+        except Exception:
+            pass
+    try:
+        from . import trends as _trends
+    except ImportError:
+        try:
+            from app.google_data import trends as _trends  # type: ignore
+        except ImportError:
+            _trends = None  # type: ignore
+    if _trends is not None:
+        try:
+            _trends.backfill_legacy_feature_rows(data_root)
+        except Exception:
+            pass
     try:
         root.mkdir(parents=True, exist_ok=True)
         marker.write_text("migrated\n")
@@ -379,36 +423,40 @@ def _record_to_signal(row: dict) -> dict:
         evidence = json.loads(row.get("evidence_json") or "[]")
     except ValueError:
         evidence = []
-    raw_features = row.get("features_json")
-    if raw_features is None or raw_features == "":
-        features = None
-    else:
-        try:
-            decoded = json.loads(raw_features)
-        except ValueError:
-            decoded = None
-        features = decoded if isinstance(decoded, dict) else None
+    collector_version = str(row.get("collector_version") or "1")
+    try:
+        source_hash = hashlib.sha256(json.dumps(
+            {"metrics": metrics, "evidence": evidence,
+             "collector_version": collector_version},
+            sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    except (TypeError, ValueError):
+        source_hash = ""
     return {
         "signal_id": _signal_id_for(table, period, geo, term, list_kind),
         "status": "candidate", "signal_type": "trend",
         "source": row.get("source") or "trends",
         "source_record_id": row.get("source_record_id") or "",
+        "observation_id": row.get("observation_id") or "",
         "observed_at": row.get("observed_at") or period,
         "known_at": row.get("known_at") or "",
         "retrieved_at": row.get("retrieved_at") or "",
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
         "metrics": metrics, "entities": [],
-        "evidence": evidence, "features": features,
+        "evidence": evidence, "features": None,
+        "collector_version": collector_version, "_source_hash": source_hash,
     }
 
 
-def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None) -> list:
+def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None,
+                  feature_scope_hash=None) -> list:
     """Latest known version per signal_id, excluding anything known after as_of.
 
     Reads the ``google_observations`` warehouse (migrating legacy JSONL once);
     optional substring match on term (``query``), exact match on ``geo``,
     and a row ``limit`` cap.
+    Features are scope-transparent derived data: default latest-derived-revision
+    at current CALC_VERSION within PIT, with winning scope returned transparently.
     """
     migrate_jsonl_once(data_root)
     cutoff = _as_key(as_of)
@@ -427,11 +475,58 @@ def query_signals(query=None, geo=None, as_of=None, limit=None, data_root=None) 
             continue
         metrics = record.get("metrics") or {}
         key = (str(metrics.get("refresh_date") or ""), known,
-               str(row.get("content_hash") or ""), str(row.get("source_record_id") or ""))
+               str(record.get("_source_hash") or ""), str(row.get("source_record_id") or ""))
         sid = record.get("signal_id")
         if sid not in latest or key > keys[sid]:
             latest[sid] = record
             keys[sid] = key
+    feature_rows: list = []
+    if _parquet is not None:
+        try:
+            feature_rows = _parquet.read_table(
+                "google_signal_features",
+                _resolve_root(data_root) / "parquet").to_pylist()
+        except Exception:
+            feature_rows = []
+    for record in latest.values():
+        oid = str(record.get("observation_id") or "")
+        best = None
+        best_at = ""
+        best_scope = None
+        for frow in feature_rows:
+            if not isinstance(frow, dict):
+                continue
+            if str(frow.get("observation_id") or "") != oid:
+                continue
+            if str(frow.get("calc_version") or "") != str(CALC_VERSION):
+                continue
+            if feature_scope_hash is not None:
+                if str(frow.get("feature_scope_hash") or "") != str(feature_scope_hash):
+                    continue
+            cat = str(frow.get("calculated_at") or "")
+            if cutoff is not None and cat > cutoff:
+                continue
+            if best is None or cat > best_at:
+                best = frow
+                best_at = cat
+        if best is not None:
+            try:
+                decoded = json.loads(best.get("features_json") or "")
+            except ValueError:
+                decoded = None
+            record["features"] = decoded if isinstance(decoded, dict) else None
+            try:
+                scope_decoded = json.loads(best.get("feature_scope_json") or "")
+            except ValueError:
+                scope_decoded = None
+            record["feature_scope"] = scope_decoded
+            record["feature_scope_hash"] = best.get("feature_scope_hash")
+            record["feature_calculated_at"] = best.get("calculated_at")
+        else:
+            record["features"] = None
+            record["feature_scope"] = None
+            record["feature_scope_hash"] = None
+            record["feature_calculated_at"] = None
     rows = sorted(latest.values(),
                   key=lambda d: (str(d.get("known_at", "")), str(d.get("signal_id"))))
     if limit is not None:

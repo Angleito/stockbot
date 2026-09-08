@@ -223,16 +223,31 @@ def _checkpoint_key(template: str, refresh: str, params: dict) -> str:
 
 
 def _observation_identity(table: str, period: str, geo: str, term: str,
-                          list_kind: str, metrics: dict, evidence: list,
-                          features: dict | None = None, calc_version: str = "1") -> tuple:
+                          list_kind: str, metrics: dict, evidence: list) -> tuple:
     """Durable (observation_id, content_hash) identity shared by store and verify."""
     content_hash = hashlib.sha256(
-        json.dumps({"metrics": metrics, "features": features, "evidence": evidence,
-                    "calc_version": calc_version},
+        json.dumps({"metrics": metrics, "evidence": evidence,
+                    "collector_version": _COLLECTOR_VERSION},
                    sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     observation_id = hashlib.sha256(
         f"{SOURCE}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
     return observation_id, content_hash
+
+
+def _feature_scope_json(*, week_start: str, week_end: str, geos: list,
+                        table: str, list_kind: str) -> dict:
+    return {"week_start": week_start, "week_end": week_end, "geos": sorted(geos),
+            "table": table, "list_kind": list_kind}
+
+
+def _feature_scope_hash(scope: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _feature_inputs_hash(pairs: list) -> str:
+    return hashlib.sha256(
+        json.dumps(sorted(pairs), separators=(",", ":")).encode()).hexdigest()
 
 
 def _completed_refreshes(data_root, templates: list) -> set:
@@ -274,7 +289,7 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
     except Exception:
         return []
     prefix = f"{table}|{refresh}|"
-    out = []
+    collapsed: dict = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -285,16 +300,22 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
             evidence = json.loads(row.get("evidence_json") or "[]")
         except ValueError:
             continue
-        raw_features = row.get("features_json")
-        if raw_features is None or raw_features == "":
-            features = None
-        else:
-            try:
-                decoded = json.loads(raw_features)
-            except ValueError:
-                decoded = None
-            features = decoded if isinstance(decoded, dict) else None
-        out.append({
+        try:
+            metrics_canon = json.dumps(metrics, sort_keys=True, separators=(",", ":"),
+                                       default=str)
+            evidence_canon = json.dumps(evidence, sort_keys=True, separators=(",", ":"),
+                                        default=str)
+        except (TypeError, ValueError):
+            continue
+        key = (str(row.get("table") or table), str(row.get("period") or ""),
+               str(row.get("geo") or ""), str(row.get("term") or ""),
+               str(row.get("list_kind") or ""), str(row.get("source_record_id") or ""),
+               metrics_canon, evidence_canon)
+        known = str(row.get("known_at") or "")
+        prev = collapsed.get(key)
+        if prev is not None and str(prev.get("known_at") or "") <= known:
+            continue
+        collapsed[key] = {
             "table": row.get("table") or table,
             "period": row.get("period"), "week": row.get("period"),
             "geo": row.get("geo"), "term": row.get("term"),
@@ -303,9 +324,117 @@ def _warehouse_rows(data_root, table: str, refresh: str) -> list:
             "observed_at": row.get("observed_at"),
             "known_at": row.get("known_at"), "retrieved_at": row.get("retrieved_at"),
             "metrics": metrics, "evidence": evidence,
-            "features": features, "calc_version": row.get("calc_version") or "1",
+            "features": None, "calc_version": row.get("calc_version") or "1",
+        }
+    return list(collapsed.values())
+
+
+def _features_for(data_root, observation_id: str, scope_hash: str,
+                  calc_version: str | None = None):
+    proot = _parquet_root(data_root)
+    if proot is None or _parquet is None:
+        return None
+    if calc_version is None:
+        calc_version = _signals.CALC_VERSION
+    try:
+        rows = _parquet.read_table("google_signal_features", proot).to_pylist()
+    except Exception:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("observation_id") or "") != str(observation_id):
+            continue
+        if str(row.get("feature_scope_hash") or "") != str(scope_hash):
+            continue
+        if str(row.get("calc_version") or "") != str(calc_version):
+            continue
+        raw = row.get("features_json")
+        if raw is None or raw == "":
+            return None
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            return None
+        return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _scope_geos_from_params(params: dict) -> list:
+    if params.get("national"):
+        if "country_code" not in params:
+            return ["US"]
+        return [str(params.get("country_code") or "")]
+    if "all_dmas" in params:
+        if params.get("all_dmas"):
+            return ["US"]
+        return sorted(params.get("dmas") or [])
+    if "country_code" in params:
+        return [str(params.get("country_code") or "")]
+    return []
+
+
+def _requested_scope_hash(template: str, params: dict) -> str:
+    table = _template_table(template)
+    scope = _feature_scope_json(
+        week_start=str(params.get("week_start") or ""),
+        week_end=str(params.get("week_end") or ""),
+        geos=_scope_geos_from_params(params),
+        table=table, list_kind=_TEMPLATE_LIST_KIND.get(template, "top"))
+    return _feature_scope_hash(scope)
+
+
+def backfill_legacy_feature_rows(data_root) -> int:
+    if data_root is None or _parquet is None:
+        return 0
+    proot = _parquet_root(data_root)
+    if proot is None:
+        return 0
+    marker = Path(data_root) / "google_data" / ".signal_features_backfilled"
+    try:
+        if marker.exists():
+            return 0
+    except OSError:
+        pass
+    try:
+        rows = _parquet.read_table("google_observations", proot).to_pylist()
+    except Exception:
+        rows = []
+    feature_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("features_json")
+        if raw is None or raw == "":
+            continue
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        feature_rows.append({
+            "observation_id": str(row.get("observation_id") or ""),
+            "feature_scope_hash": "legacy-unknown",
+            "feature_scope_json": json.dumps(
+                {"legacy": True, "reason": "pre-scope-backfill"}),
+            "features_json": json.dumps(decoded, sort_keys=True, default=str),
+            "calc_version": str(row.get("calc_version") or "1"),
+            "calculated_at": str(row.get("known_at") or ""),
+            "inputs_hash": "",
         })
-    return out
+    written = 0
+    if feature_rows:
+        try:
+            written = _parquet.write_rows("google_signal_features", feature_rows, root=proot)
+        except Exception:
+            return 0
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("backfilled\n")
+    except OSError:
+        pass
+    return written
 
 
 def _cache_in_scope(cached: dict, params: dict) -> bool:
@@ -334,6 +463,10 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
     if proot is None:
         return {}
     try:
+        backfill_legacy_feature_rows(data_root)
+    except Exception:
+        pass
+    try:
         stored = _parquet.read_table("google_observations", proot).to_pylist()
     except Exception:
         stored = []
@@ -350,12 +483,9 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
     for obs in observations:
         metrics = dict(obs.get("metrics") or {})
         evidence = list(obs.get("evidence") or [])
-        raw_features = obs.get("features")
-        features = dict(raw_features) if isinstance(raw_features, dict) else None
-        calc_version = _signals.CALC_VERSION
         observation_id, content_hash = _observation_identity(
             obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"],
-            metrics, evidence, features, calc_version)
+            metrics, evidence)
         refresh_date = str(metrics.get("refresh_date") or "")
         if not refresh_date:
             parts = str(obs.get("source_record_id") or "").split("|")
@@ -371,10 +501,9 @@ def _store_observations(data_root, observations: list, retrieved_at: str) -> dic
             "known_at": known_at, "retrieved_at": retrieved_at,
             "source_record_id": obs.get("source_record_id") or observation_id,
             "content_hash": content_hash, "collector_version": _COLLECTOR_VERSION,
-            "calc_version": calc_version,
+            "calc_version": _COLLECTOR_VERSION,
             "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
-            "features_json": (json.dumps(features, sort_keys=True, default=str)
-                              if isinstance(features, dict) else None),
+            "features_json": None,
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{obs['table']}",
         })
@@ -567,21 +696,38 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
                                      reverse=True)
                     cached_rows = cached_rows[:_MAX_LIMIT]
                     if cached_rows:
-                        for cached in cached_rows:
-                            crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
-                            if not crefresh:
-                                parts = str(cached.get("source_record_id") or "").split("|")
-                                if len(parts) >= 2 and parts[0] == cached.get("table"):
-                                    crefresh = parts[1]
-                            if not crefresh:
-                                crefresh = str(cached.get("week") or cached.get("period") or refresh)
-                            key = (cached["table"], crefresh,
-                                   str(cached.get("week") or cached.get("period")),
-                                   str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
-                            merged.setdefault(key, cached)
-                        if template not in used_templates:
-                            used_templates.append(template)
-                        continue
+                        scope_hash = _requested_scope_hash(template, params)
+                        gated = []
+                        for _c in cached_rows:
+                            try:
+                                _oid, _ = _observation_identity(
+                                    _c.get("table") or table,
+                                    str(_c.get("period") or _c.get("week") or ""),
+                                    str(_c.get("geo") or ""), str(_c.get("term") or ""),
+                                    str(_c.get("list_kind") or ""),
+                                    _c.get("metrics") or {}, _c.get("evidence") or [])
+                            except Exception:
+                                continue
+                            if _features_for(data_root, _oid, scope_hash) is not None:
+                                gated.append(_c)
+                        if len(gated) != len(cached_rows):
+                            pass
+                        else:
+                            for cached in gated:
+                                crefresh = str((cached.get("metrics") or {}).get("refresh_date") or "")
+                                if not crefresh:
+                                    parts = str(cached.get("source_record_id") or "").split("|")
+                                    if len(parts) >= 2 and parts[0] == cached.get("table"):
+                                        crefresh = parts[1]
+                                if not crefresh:
+                                    crefresh = str(cached.get("week") or cached.get("period") or refresh)
+                                key = (cached["table"], crefresh,
+                                       str(cached.get("week") or cached.get("period")),
+                                       str(cached["geo"]), str(cached["term"]), str(cached["list_kind"]))
+                                merged.setdefault(key, cached)
+                            if template not in used_templates:
+                                used_templates.append(template)
+                            continue
                     # Checkpointed but warehouse empty/out of scope: fall through to a fresh fetch.
                 result = _submit(template, params, executor, data_root)
                 if not isinstance(result, dict) or "error" in result:
@@ -786,21 +932,81 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
     if data_root is not None and (observations or fetched):
         try:
             expected = _store_observations(data_root, observations, retrieved_at)
+            proot = _parquet_root(data_root)
+            if proot is not None and _parquet is not None:
+                infos = []
+                for _obs in observations:
+                    _feats = _obs.get("features")
+                    if not isinstance(_feats, dict):
+                        continue
+                    _metrics = dict(_obs.get("metrics") or {})
+                    _evidence = list(_obs.get("evidence") or [])
+                    _oid, _ch = _observation_identity(
+                        _obs["table"], _obs["period"], _obs["geo"], _obs["term"],
+                        _obs["list_kind"], _metrics, _evidence)
+                    _geo = str(_obs.get("geo") or "")
+                    if _geo == "US":
+                        _geos = ["US"]
+                    elif _geo in dma_set:
+                        _geos = sorted(dma_set)
+                    else:
+                        _geos = [_geo.split(":")[0]]
+                    _scope = _feature_scope_json(
+                        week_start=str(week_start or ""), week_end=str(week_end or ""),
+                        geos=_geos, table=str(_obs.get("table") or ""),
+                        list_kind=str(_obs.get("list_kind") or ""))
+                    _shash = _feature_scope_hash(_scope)
+                    _skey = (_obs.get("term"), _obs.get("table"), _obs.get("list_kind"),
+                             _geo, _series_basis(_obs))
+                    infos.append((_obs, _oid, _ch, _skey, _scope, _shash, _feats))
+                if infos:
+                    _pairs_by_series: dict = {}
+                    for _, _oid, _ch, _skey, _, _, _ in infos:
+                        _pairs_by_series.setdefault(_skey, []).append([_oid, _ch])
+                    _inputs_by_series = {k: _feature_inputs_hash(v)
+                                         for k, v in _pairs_by_series.items()}
+                    try:
+                        _existing = _parquet.read_table(
+                            "google_signal_features", proot).to_pylist()
+                    except Exception:
+                        _existing = []
+                    _first_calc: dict = {}
+                    for _row in _existing:
+                        if not isinstance(_row, dict):
+                            continue
+                        _k = (str(_row.get("observation_id") or ""),
+                              str(_row.get("feature_scope_hash") or ""),
+                              str(_row.get("calc_version") or ""))
+                        _c = str(_row.get("calculated_at") or "")
+                        if _k not in _first_calc or _c < _first_calc[_k]:
+                            _first_calc[_k] = _c
+                    _feature_rows = []
+                    for _, _oid, _, _skey, _scope, _shash, _feats in infos:
+                        _k = (_oid, _shash, _signals.CALC_VERSION)
+                        _calc_at = _first_calc.get(_k, retrieved_at)
+                        if _calc_at > retrieved_at:
+                            _calc_at = retrieved_at
+                        _feature_rows.append({
+                            "observation_id": _oid,
+                            "feature_scope_hash": _shash,
+                            "feature_scope_json": json.dumps(_scope, sort_keys=True),
+                            "features_json": json.dumps(_feats, sort_keys=True, default=str),
+                            "calc_version": _signals.CALC_VERSION,
+                            "calculated_at": _calc_at,
+                            "inputs_hash": _inputs_by_series.get(_skey, ""),
+                        })
+                    _parquet.write_rows("google_signal_features", _feature_rows, root=proot)
             for _key, _template, _refresh, _hash, _count, _tables in fetched:
                 for _table in _tables:
                     actual = set()
                     for _cached in _warehouse_rows(data_root, _table, _refresh):
                         _metrics = _cached.get("metrics") or {}
                         _evidence = _cached.get("evidence") or []
-                        _raw = _cached.get("features")
-                        _features = dict(_raw) if isinstance(_raw, dict) else None
-                        _calc = str(_cached.get("calc_version") or "1")
                         actual.add(_observation_identity(
                             _cached.get("table") or _table,
                             str(_cached.get("period") or _cached.get("week") or ""),
                             str(_cached.get("geo") or ""), str(_cached.get("term") or ""),
-                            str(_cached.get("list_kind") or ""), _metrics, _evidence,
-                            _features, _calc))
+                            str(_cached.get("list_kind") or ""), _metrics, _evidence))
                     if not expected.get((_table, _refresh), set()) <= actual:
                         raise RuntimeError(f"warehouse verify failed for {_table}|{_refresh}")
             for _key, _template, _refresh, _hash, _count, _tables in fetched:
