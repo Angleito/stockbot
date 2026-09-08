@@ -13,6 +13,7 @@ actionable error instead of inventing observations.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -194,13 +195,12 @@ def _is_country_code(value: str) -> bool:
 
 def _plan_groups(geos: list) -> list:
     """Split geos into a US group (national or DMA names) plus per-country groups."""
-    national = geos == ["US"]
     dmas = [g for g in geos if g != "US" and not _is_country_code(g)]
     countries = [g for g in geos if g != "US" and _is_country_code(g)]
     groups = []
-    if national:
+    if "US" in geos:
         groups.append({"kind": "us", "national": True, "dmas": []})
-    elif dmas:
+    if dmas:
         groups.append({"kind": "us", "national": False, "dmas": dmas})
     for country in countries:
         groups.append({"kind": "intl", "country": country})
@@ -688,9 +688,15 @@ def collect_trends(*, start_date, end_date, geos, limit=100,
 
     observations = []
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    for row in national_rows + dma_rows + intl_rows:
-        observations.append(_normalize_row(row, retrieved_at, data_root,
-                                           features=term_features.get(row.get("term"))))
+    for row, is_national in ([(r, True) for r in national_rows]
+                             + [(r, False) for r in dma_rows + intl_rows]):
+        features = term_features.get(row.get("term"))
+        if is_national and isinstance(features, dict):
+            features = copy.deepcopy(features)
+            features["diffusion"] = None
+            features["rules"]["diffusion"]["value"] = None
+            features["coverage"]["missing"]["diffusion"] = "subregion rows aggregated"
+        observations.append(_normalize_row(row, retrieved_at, data_root, features=features))
 
     continuation = len(observations) > limit
     if data_root is not None and (observations or fetched):
@@ -753,6 +759,8 @@ def _normalize_row(row: dict, retrieved_at: str, data_root, features=None) -> di
             metrics["dma_count"] = row["dma_count"]
         if row.get("region_count") is not None:
             metrics["region_count"] = row["region_count"]
+        if row.get("dma_count") is not None or row.get("region_count") is not None:
+            metrics["score_basis"] = "mean_list_score_where_listed"
         evidence = [{"table": table, "row": {k: v for k, v in row.items() if not k.startswith("_")},
                      "job_id": row.get("job_id"), "template": row.get("_template")}]
     return _signals.normalize_candidate(

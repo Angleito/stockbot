@@ -54,9 +54,7 @@ last ~30 Trends `refresh_date` partitions are queryable (TTL); each carries
 rolling 5-year `week` backfill. Scores/ranks compare only within one
 refresh/week/geo/granularity. Omitted `week_start`/`week_end` default to the
 trailing 14-day week window ending at `end_date`; deeper history needs
-explicit `week_start`/`week_end`. `US`/country rows are grouped
-cross-subregion `AVG(score)` with `dma_count`/`region_count` and carry no
-Google national rank. YouTube titles/counts are never persisted
+explicit `week_start`/`week_end`. `US`/country rows are grouped cross-subregion `AVG(score)` with `dma_count`/`region_count` and carry no Google national rank; `score` with `score_basis=mean_list_score_where_listed` is the mean source score among subregions where the term appears in the published list (non-listed subregions contribute no row and are excluded), not a Google-provided nationwide score. YouTube titles/counts are never persisted
 (RAM-only panel); only quota counters touch disk.
 
 ## Error codes

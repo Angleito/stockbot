@@ -345,6 +345,21 @@ def _intl_national_row(term="alpha", week="2026-08-24", refresh="2026-09-02",
             "country_code": country, "region_count": region_count,
             "score": score, "list_kind": kind}
 
+def test_plan_groups_keeps_national_us_with_other_geos():
+    assert trends._plan_groups(["US", "GB"]) == [
+        {"kind": "us", "national": True, "dmas": []},
+        {"kind": "intl", "country": "GB"},
+    ]
+    assert trends._plan_groups(["US", "New York"]) == [
+        {"kind": "us", "national": True, "dmas": []},
+        {"kind": "us", "national": False, "dmas": ["New York"]},
+    ]
+    assert trends._plan_groups(["US", "GB", "New York"]) == [
+        {"kind": "us", "national": True, "dmas": []},
+        {"kind": "us", "national": False, "dmas": ["New York"]},
+        {"kind": "intl", "country": "GB"},
+    ]
+
 
 
 def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
@@ -382,12 +397,62 @@ def test_national_rollup_emits_every_refresh(monkeypatch, tmp_path):
         assert by_term["beta"]["metrics"]["dma_count"] == 3
         assert by_term["beta"]["metrics"]["score"] == pytest.approx(70.0)
         assert all(refresh in o["source_record_id"] for o in obs_list)
+        for obs in obs_list:
+            assert obs["metrics"]["score_basis"] == "mean_list_score_where_listed"
+            assert obs["features"]["diffusion"] is None
+            assert obs["features"]["coverage"]["missing"]["diffusion"] == "subregion rows aggregated"
+            assert obs["features"]["rules"]["diffusion"]["value"] is None
     table = trends._template_table("trends_us_top_national")
     for refresh in refreshes:
         durable = trends._warehouse_rows(tmp_path, table, refresh)
         assert durable, f"expected durable rows for {refresh}"
         assert {str((r.get("metrics") or {}).get("refresh_date")) for r in durable} == {refresh}
         assert {(r.get("metrics") or {}).get("dma_count") for r in durable} == {2, 3}
+
+def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_intl_top_national":
+            return []
+        return [_intl_national_row("alpha", refresh="2026-09-02",
+                                   country="GB", region_count=5, score=80.0)]
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["GB"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    assert result["observations"]
+    for obs in result["observations"]:
+        assert obs["metrics"]["region_count"] == 5
+        assert obs["metrics"]["score_basis"] == "mean_list_score_where_listed"
+        assert obs["features"]["diffusion"] is None
+        assert obs["features"]["coverage"]["missing"]["diffusion"] == "subregion rows aggregated"
+        assert obs["features"]["rules"]["diffusion"]["value"] is None
+
+
+def test_explicit_dma_keeps_numeric_diffusion(monkeypatch, tmp_path):
+    _enable(monkeypatch)
+    refreshes = ["2026-09-02"]
+    seen = []
+
+    def _rows(template, params):
+        if template != "trends_us_top":
+            return []
+        return [_dma_row("New York", refresh=params["start_date"], rank=1)]
+
+    result = trends.collect_trends(
+        start_date="2026-09-02", end_date="2026-09-02", geos=["New York"],
+        limit=10, data_root=tmp_path, week_start="2026-08-01", week_end="2026-08-31",
+        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
+    assert result["status"] == "ok"
+    assert result["observations"]
+    for obs in result["observations"]:
+        assert obs["features"]["diffusion"] == pytest.approx(1.0)
+        assert "score_basis" not in (obs.get("metrics") or {})
 
 
 def test_national_default_scope_is_bounded(monkeypatch, tmp_path):
