@@ -2089,6 +2089,32 @@ def _effective_at(context: RequestContext) -> str | None:
     return as_of if isinstance(as_of, str) and as_of else None
 
 
+def _thesis_for_context(repo, id_or_slug, context):
+    """Thesis as seen at the run cutoff; live when the run has none."""
+    cutoff = _effective_at(context)
+    if not cutoff:
+        return repo.load_thesis(id_or_slug)
+    from app.thesis.models import Thesis  # local: avoids a module cycle
+
+    current = repo.load_thesis(id_or_slug)
+    snap = repo.load_state_as_of(current.thesis_id, cutoff)
+    return Thesis.from_dict(dict(snap.thesis), "<as_of>")
+
+
+_PIT_INSTANT_TOOLS = frozenset({"thesis_show"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"})
+
+
+def _pit_day(cutoff: str) -> str | None:
+    from datetime import timezone  # local: keep module import surface minimal
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    dt = _as_dt(cutoff)
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).date().isoformat()
+
+
 def _apply_pit_cutoff(name: str, arguments: Any, context: RequestContext) -> tuple[dict, dict | None]:
     """Default `as_of` to the run cutoff; reject a model value beyond it."""
     cutoff = _effective_at(context)
@@ -2100,7 +2126,12 @@ def _apply_pit_cutoff(name: str, arguments: Any, context: RequestContext) -> tup
         return arguments, None
     supplied = arguments.get("as_of")
     if supplied is None or (isinstance(supplied, str) and not supplied):
-        return {**arguments, "as_of": cutoff}, None
+        if name in _PIT_INSTANT_TOOLS:
+            return {**arguments, "as_of": cutoff}, None
+        day = _pit_day(cutoff)
+        if day is None:
+            return arguments, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+        return {**arguments, "as_of": day}, None
     if not isinstance(supplied, str):
         return arguments, None  # handler validation owns the message
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -2134,7 +2165,7 @@ def _thesis_create(arguments: dict, context: RequestContext) -> dict:
 
 def _thesis_show(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)
-    thesis = repo.load_thesis(arguments["id"])
+    thesis = _thesis_for_context(repo, arguments["id"], context)
     tid = thesis.thesis_id
     model_as_of = arguments.get("as_of")
     cutoff = _effective_at(context)
@@ -2187,7 +2218,7 @@ def _thesis_refine(arguments: dict, context: RequestContext) -> dict:
     thesis_id = arguments.get("id")
     if not isinstance(thesis_id, str) or not thesis_id.strip():
         raise ValueError("thesis_refine: 'id' must be a non-empty string")
-    thesis = repo.load_thesis(thesis_id)
+    thesis = _thesis_for_context(repo, thesis_id, context)
     clarification = arguments.get("clarification")
     if not isinstance(clarification, str) or not clarification.strip():
         raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
@@ -2207,9 +2238,15 @@ def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
     from app.thesis.monitor import SUPPORTED_HANDLERS
 
     repo = _thesis_repo_for(context)
-    thesis = repo.load_thesis(arguments["id"])
+    thesis = _thesis_for_context(repo, arguments["id"], context)
     tid = thesis.thesis_id
     if arguments.get("rule_type") is None:
+        cutoff = _effective_at(context)
+        if cutoff:
+            snap = repo.load_state_as_of(tid, cutoff)
+            rules = list(snap.watch.get("rules", []))
+            live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+            return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
         rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
         live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
         return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
@@ -2240,7 +2277,7 @@ def _thesis_watch(arguments: dict, context: RequestContext) -> dict:
 
 def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)
-    thesis = repo.load_thesis(arguments["id"])
+    thesis = _thesis_for_context(repo, arguments["id"], context)
     if thesis.status != "active":
         raise ValueError(f"thesis {thesis.thesis_id!r} is {thesis.status}; refusing journal append")
     body = arguments["body"]
@@ -2269,8 +2306,8 @@ def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
         cutoff = _effective_at(context)
         if cutoff:
             known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
-            if known_dt is not None and cutoff_dt is not None and known_dt > cutoff_dt:
-                raise ValueError(f"thesis_journal: 'known_at' {known_at!r} is beyond the run cutoff {cutoff!r}")
+            if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
+                raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
         entry["known_at"] = known_at
     elif known_at is not None:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -2311,6 +2348,11 @@ def execute_tool(
         arguments, pit_error = _apply_pit_cutoff(name, arguments, context)
         if pit_error is not None:
             return pit_error
+        if _effective_at(context) and name not in _PIT_GOVERNED_MUTATORS:
+            _pit_tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
+            _pit_params = (_pit_tool["function"].get("parameters") or {}) if _pit_tool else {}
+            if "as_of" not in (_pit_params.get("properties") or {}):
+                return {"error": f"Tool '{name}' is not point-in-time safe under this historical run.", "error_type": "pit_unsafe_tool", "soft": True}
         invalid = _validate_tool_arguments(name, arguments)
         if invalid is not None:
             return {"error": invalid, "error_type": "invalid_tool_arguments"}
@@ -2327,7 +2369,7 @@ def execute_tool(
         if _effective_at(context) and isinstance(result, dict):
             tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
             parameters = (tool["function"].get("parameters") or {}) if tool else {}
-            if "as_of" not in (parameters.get("properties") or {}):
+            if "as_of" not in (parameters.get("properties") or {}) and name not in _PIT_GOVERNED_MUTATORS:
                 result.setdefault("pit_safe", False)
         return result
     except KeyError as e:

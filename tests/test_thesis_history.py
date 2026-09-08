@@ -261,3 +261,108 @@ def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path):
     over = tools_mod.execute_tool("thesis_show", {"id": tid, "as_of": T4},
                                   "test-model", context=ctx)
     assert "error" in over and over.get("error_type") == "invalid_tool_arguments"
+
+
+def test_thesis_create_at_cutoff_stamps_effective_at(tmp_path):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                         data_root=tmp_path, as_of=T1)
+    got = tools_mod.execute_tool("thesis_create", {"user_thesis": "NVDA datacenter demand thesis",
+                                                   "scope": "NVDA",
+                                                   "claims": [{"statement": "NVDA demand stays strong"}]},
+                                 "test-model", context=ctx)
+    assert "error" not in got
+    repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
+    assert repo.load_thesis(got["thesis_id"]).created_at == T1
+    assert repo.load_state_as_of(got["thesis_id"], T1).reason == "thesis_created"
+
+
+def test_historical_thesis_refine_appends_without_touching_live(tmp_path):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
+    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
+                             claims=[{"claim_id": "claim:c1",
+                                      "statement": "NVDA demand stays strong"}],
+                             effective_at=T0).thesis_id
+    _set_claim_status(repo, tid, "claim:c1", "challenged", T4)
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                         data_root=tmp_path, as_of=T1)
+    got = tools_mod.execute_tool("thesis_refine", {"id": tid,
+                                                   "clarification": "Networking demand also stays strong",
+                                                   "claims": [{"statement": "NVDA networking demand also strong"}]},
+                                 "test-model", context=ctx)
+    assert "error" not in got and got.get("applied") is True
+    snap = repo.load_state_as_of(tid, T1)
+    assert "NVDA networking demand also strong" in [c["statement"] for c in snap.thesis["claims"]]
+    assert _claim_status(snap, "claim:c1") == "unvalidated"
+    t1_ids = {c["claim_id"] for c in snap.thesis["claims"]}
+    assert got.get("rules_added") and all(
+        set(r.get("claim_ids", ())) <= t1_ids for r in got["rules_added"])
+    live = repo.load_thesis(tid)
+    assert [c.status for c in live.claims if c.claim_id == "claim:c1"] == ["challenged"]
+    assert "NVDA networking demand also strong" not in [c.statement for c in live.claims]
+    assert not (t1_ids - {"claim:c1"}) & {cid for r in repo.load_watch_rules(tid) for cid in r.claim_ids}
+
+
+def test_historical_watch_list_and_trigger_journal_known_at(tmp_path):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
+    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
+                             claims=[{"claim_id": "claim:c1",
+                                      "statement": "NVDA demand stays strong"}],
+                             effective_at=T0).thesis_id
+    repo.apply_research_result(tid, {"watch_add": [_filing_rule("rule:r1")]}, "", effective_at=T1)
+    trig = repo.create_trigger(tid, claim_ids=["claim:c1"])
+    repo.close_thesis(tid)
+    assert repo.load_thesis(tid).status == "closed"
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                         data_root=tmp_path, as_of=T1)
+    listed = tools_mod.execute_tool("thesis_watch", {"id": tid}, "test-model", context=ctx)
+    assert "error" not in listed
+    assert listed["rules"] == repo.load_state_as_of(tid, T1).watch["rules"]
+    ctx2 = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                          data_root=tmp_path, as_of=T2)
+    ok = tools_mod.execute_tool("thesis_journal", {"id": tid, "body": "trigger review",
+                                                   "trigger_id": trig.trigger_id, "known_at": T2},
+                                "test-model", context=ctx2)
+    assert "error" not in ok and ok["thesis_id"] == tid
+    early = tools_mod.execute_tool("thesis_journal", {"id": tid, "body": "trigger review",
+                                                      "trigger_id": trig.trigger_id, "known_at": T1},
+                                   "test-model", context=ctx2)
+    assert "error" in early
+
+
+def test_pit_day_injection_and_unsafe_tool_guard(tmp_path, monkeypatch):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                         data_root=tmp_path, as_of=T2)
+    seen = {}
+
+    def _fake_fundamentals(ticker, metric, as_of=None):
+        seen.update(ticker=ticker, metric=metric, as_of=as_of)
+        return {"ticker": ticker, "metric": metric, "as_of": as_of}
+
+    monkeypatch.setattr(tools_mod.sec_facts, "get_fundamentals", _fake_fundamentals)
+    got = tools_mod.execute_tool("get_fundamentals", {"ticker": "NVDA", "metric": "eps"},
+                                 "test-model", context=ctx)
+    assert "error" not in got
+    assert seen["as_of"] == "2026-01-03"
+    calls = []
+
+    def _must_not_run(ticker, concept):
+        calls.append((ticker, concept))
+        raise AssertionError("current-only tool must not execute under a cutoff")
+
+    monkeypatch.setattr(tools_mod.sec_facts, "get_xbrl_facts", _must_not_run)
+    unsafe = tools_mod.execute_tool("get_xbrl_facts", {"ticker": "NVDA", "concept": "Revenue"},
+                                    "test-model", context=ctx)
+    assert unsafe.get("error_type") == "pit_unsafe_tool"
+    assert calls == []

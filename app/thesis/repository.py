@@ -636,19 +636,21 @@ class ThesisRepository:
             if latest is not None and _as_dt(eff) < latest[0]:
                 base = self.load_state_as_of(thesis_id, eff)
                 if isinstance(patch.get("claims"), list):
-                    base_claims = {c.get("claim_id") for c in base.thesis.get("claims", []) if isinstance(c, dict)}
-                    for c in patch["claims"]:
-                        cid = c.get("claim_id") if isinstance(c, dict) else None
-                        if cid is not None and cid not in base_claims:
-                            raise ValueError(
-                                f"{thesis_dir}/thesis.yaml: claim {cid!r} does not belong to thesis {thesis_id!r}")
+                    base_claim_ids = {c.get("claim_id") for c in base.thesis.get("claims", []) if isinstance(c, dict)} - {None}
+                    patch_claim_ids = {c.get("claim_id") for c in patch["claims"] if isinstance(c, dict)}
+                    missing = base_claim_ids - patch_claim_ids
+                    if missing:
+                        cid = sorted(missing)[0]
+                        raise ValueError(
+                            f"{thesis_dir}/thesis.yaml: claim {cid!r} does not belong to thesis {thesis_id!r}")
                 if isinstance(patch.get("expressions"), list):
-                    base_exprs = {e.get("expression_id") for e in base.thesis.get("expressions", []) if isinstance(e, dict)}
-                    for e in patch["expressions"]:
-                        eid = e.get("expression_id") if isinstance(e, dict) else None
-                        if eid is not None and eid not in base_exprs:
-                            raise ValueError(
-                                f"{thesis_dir}/thesis.yaml: expression {eid!r} does not belong to thesis {thesis_id!r}")
+                    base_expr_ids = {e.get("expression_id") for e in base.thesis.get("expressions", []) if isinstance(e, dict)} - {None}
+                    patch_expr_ids = {e.get("expression_id") for e in patch["expressions"] if isinstance(e, dict)}
+                    missing = base_expr_ids - patch_expr_ids
+                    if missing:
+                        eid = sorted(missing)[0]
+                        raise ValueError(
+                            f"{thesis_dir}/thesis.yaml: expression {eid!r} does not belong to thesis {thesis_id!r}")
                 data = dict(base.thesis)
                 data.update(patch)
                 data["thesis_id"] = thesis_id

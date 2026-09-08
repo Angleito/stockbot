@@ -511,22 +511,41 @@ def apply_refinement(repository: Any, thesis_id: str, plan: dict, proposal: Inta
 
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
-    if thesis.status != "active":
-        raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
+    if effective_at is None:
+        if thesis.status != "active":
+            raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing refinement")
+    else:
+        snap_status = repository.load_state_as_of(tid, effective_at).thesis["status"]
+        if snap_status != "active":
+            raise ValueError(f"thesis {tid!r} is {snap_status}; refusing refinement")
     updated = repository.update_thesis(tid, effective_at=effective_at, **plan["merged"])
-    fresh = repository.load_thesis(tid)
     covered_claims: dict[str, set[str]] = {}
     covered_exprs: dict[str, set[str]] = {}
-    for r in repository.load_watch_rules(tid):
-        if not r.enabled or r.support_status != "supported" or r.rule_type not in SUPPORTED_HANDLERS:
-            continue
-        covered_claims.setdefault(r.rule_type, set()).update(r.claim_ids)
-        covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
+    if effective_at is None:
+        fresh = repository.load_thesis(tid)
+        fresh_scope = fresh.scope
+        fresh_claim_ids = [c.claim_id for c in fresh.claims]
+        fresh_expr_ids = [e.expression_id for e in fresh.expressions]
+        for r in repository.load_watch_rules(tid):
+            if not r.enabled or r.support_status != "supported" or r.rule_type not in SUPPORTED_HANDLERS:
+                continue
+            covered_claims.setdefault(r.rule_type, set()).update(r.claim_ids)
+            covered_exprs.setdefault(r.rule_type, set()).update(r.expression_ids)
+    else:
+        snap = repository.load_state_as_of(tid, effective_at)
+        fresh_scope = snap.thesis["scope"]
+        fresh_claim_ids = [c["claim_id"] for c in snap.thesis.get("claims", [])]
+        fresh_expr_ids = [e["expression_id"] for e in snap.thesis.get("expressions", [])]
+        for r in snap.watch["rules"]:
+            if not r.get("enabled") or r.get("support_status") != "supported" or r.get("rule_type") not in SUPPORTED_HANDLERS:
+                continue
+            covered_claims.setdefault(r["rule_type"], set()).update(r.get("claim_ids", ()))
+            covered_exprs.setdefault(r["rule_type"], set()).update(r.get("expression_ids", ()))
     new_rules = []
     for cand in build_initial_watch_rules(
-            fresh.scope, proposal.requirements,
-            claim_ids=[c.claim_id for c in fresh.claims],
-            expression_ids=[e.expression_id for e in fresh.expressions]):
+            fresh_scope, proposal.requirements,
+            claim_ids=fresh_claim_ids,
+            expression_ids=fresh_expr_ids):
         rt = cand["rule_type"]
         known_c = covered_claims.setdefault(rt, set())
         known_e = covered_exprs.setdefault(rt, set())
