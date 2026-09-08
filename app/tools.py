@@ -2089,6 +2089,28 @@ def _effective_at(context: RequestContext) -> str | None:
     return as_of if isinstance(as_of, str) and as_of else None
 
 
+def _apply_pit_cutoff(name: str, arguments: Any, context: RequestContext) -> tuple[dict, dict | None]:
+    """Default `as_of` to the run cutoff; reject a model value beyond it."""
+    cutoff = _effective_at(context)
+    if not cutoff or not isinstance(arguments, dict):
+        return arguments, None
+    tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
+    parameters = (tool["function"].get("parameters") or {}) if tool else {}
+    if "as_of" not in (parameters.get("properties") or {}):
+        return arguments, None
+    supplied = arguments.get("as_of")
+    if supplied is None or (isinstance(supplied, str) and not supplied):
+        return {**arguments, "as_of": cutoff}, None
+    if not isinstance(supplied, str):
+        return arguments, None  # handler validation owns the message
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
+    if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
+        return arguments, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+    return arguments, None
+
+
 def _thesis_proposal(arguments: dict, user_thesis: str, path: str):
     """Structured tool args -> validated IntakeProposal (raises ValueError)."""
     from app.thesis import intake as thesis_intake
@@ -2114,7 +2136,15 @@ def _thesis_show(arguments: dict, context: RequestContext) -> dict:
     repo = _thesis_repo_for(context)
     thesis = repo.load_thesis(arguments["id"])
     tid = thesis.thesis_id
-    as_of = arguments.get("as_of")
+    model_as_of = arguments.get("as_of")
+    cutoff = _effective_at(context)
+    if isinstance(model_as_of, str) and model_as_of and cutoff:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        model_dt, cutoff_dt = _as_dt(model_as_of), _as_dt(cutoff)
+        if model_dt is not None and cutoff_dt is not None and model_dt > cutoff_dt:
+            raise ValueError(f"thesis_show: as_of {model_as_of!r} is beyond the run cutoff {cutoff!r}")
+    as_of = model_as_of if isinstance(model_as_of, str) and model_as_of else cutoff
     if isinstance(as_of, str) and as_of:
         snap = repo.load_state_as_of(tid, as_of)
         t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
@@ -2231,7 +2261,18 @@ def _thesis_journal(arguments: dict, context: RequestContext) -> dict:
             raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis.thesis_id!r}")
         entry["trigger_id"] = trigger_id
     known_at = arguments.get("known_at")
-    if known_at is not None:
+    if trigger_id is not None:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+            raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
+        cutoff = _effective_at(context)
+        if cutoff:
+            known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
+            if known_dt is not None and cutoff_dt is not None and known_dt > cutoff_dt:
+                raise ValueError(f"thesis_journal: 'known_at' {known_at!r} is beyond the run cutoff {cutoff!r}")
+        entry["known_at"] = known_at
+    elif known_at is not None:
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
@@ -2267,6 +2308,9 @@ def execute_tool(
     try:
         if not tool_is_permitted(name, context):
             return {"error": f"Tool is not permitted: {name}"}
+        arguments, pit_error = _apply_pit_cutoff(name, arguments, context)
+        if pit_error is not None:
+            return pit_error
         invalid = _validate_tool_arguments(name, arguments)
         if invalid is not None:
             return {"error": invalid, "error_type": "invalid_tool_arguments"}
@@ -2279,7 +2323,13 @@ def execute_tool(
             return {"error": f"Unknown tool '{name}'"}
         if name in _CONTEXT_CALL_HANDLERS:
             return handler(arguments, context)
-        return handler(arguments, model)
+        result = handler(arguments, model)
+        if _effective_at(context) and isinstance(result, dict):
+            tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
+            parameters = (tool["function"].get("parameters") or {}) if tool else {}
+            if "as_of" not in (parameters.get("properties") or {}):
+                result.setdefault("pit_safe", False)
+        return result
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
     except RobinhoodAuthRequired:

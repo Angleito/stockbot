@@ -107,7 +107,7 @@ def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path, monkeyp
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "timing mismatch: 30-day puts vs 2-year thesis; "
                                       "near-term filing cuts against puts timing",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     fake = _pi(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -126,7 +126,7 @@ def test_bullish_equity_asks_no_options_questions(tmp_path, monkeypatch):
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
                             canonical_refs=["ev:e"], summary="s")
     fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     questions = r.load_questions(t.thesis_id)
@@ -148,7 +148,7 @@ def test_covered_call_without_portfolio_leaves_ownership_unresolved(tmp_path, mo
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "ownership unresolved without portfolio read",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     fake = _pi(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -172,7 +172,7 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path, mon
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "not evaluable without market read; no quotes fetched",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     _pi(monkeypatch, write=_write)
     run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
@@ -188,7 +188,7 @@ def test_unknown_and_processed_triggers_raise(tmp_path, monkeypatch):
         run_trigger(r, t.thesis_id, "trigger:nope", known_at=T2)
     trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
     fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     with pytest.raises(ValueError):
@@ -215,7 +215,7 @@ def test_duplicate_event_produces_zero_second_pi_call(tmp_path, monkeypatch):
             "evidence_refs": [{"canonical_ref": "ev:d", "summary": "NVDA files",
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "ok",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     fake = _pi(monkeypatch, write=_write)
     src = _Src([_ev("ev:d")])
@@ -257,7 +257,7 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
                                "summary": "10-K notes steady demand", "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t",
                               "body": "reviewed filing; risk factors mention cyclicality",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     fake = _pi(monkeypatch, write=_write)
     res = tick(r, t.thesis_id, {"sec_filings": FilingSrc()}, known_at=T2)
@@ -268,7 +268,7 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path, monkeypatch):
 def test_simultaneous_meaningful_events_produce_bounded_calls(tmp_path, monkeypatch):
     r, t = _make(tmp_path)
     fake = _pi(monkeypatch, write=lambda tid, trig_id: r.append_journal_entry(
-        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T1}))
+        tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "known_at": T2}))
     src = _Src([_ev("ev:a", summary="NVDA files 10-K"), _ev("ev:b", summary="NVDA 8-K event")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert len(res.triggers_created) == 2 and fake.calls == 2
@@ -329,7 +329,7 @@ def test_restart_processes_pending_once_without_dupes(tmp_path, monkeypatch):
             "evidence_refs": [{"canonical_ref": "ev:1", "summary": "NVDA files",
                                "known_at": T1}],
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "recovered",
-                              "known_at": T1}}, "run:t1")
+                              "known_at": T2}}, "run:t1")
 
     monkeypatch.setattr(runner_mod, "run_thesis_pi", _Pi(write=_write))
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)

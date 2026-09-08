@@ -13,7 +13,12 @@ T1 = "2026-01-02T00:00:00+00:00"
 T2 = "2026-01-03T00:00:00+00:00"
 T3 = "2026-01-04T00:00:00+00:00"
 T4 = "2026-01-05T00:00:00+00:00"
+T5 = "2026-01-06T00:00:00+00:00"
 BEFORE = "2025-12-31T00:00:00+00:00"
+
+
+def _history_count(r, tid):
+    return len(list((r.dir_for_thesis(tid) / "history").glob("*.yaml")))
 
 
 def _repo(tmp_path) -> ThesisRepository:
@@ -183,3 +188,76 @@ def test_build_context_pit_regression(tmp_path):
 
     with pytest.raises(HistoricalStateUnavailable):
         build_context(r, tid, trig, known_at=BEFORE)
+
+def test_backdated_research_never_moves_live(tmp_path):
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    _set_claim_status(r, tid, "claim:c1", "challenged", T4)
+    n = _history_count(r, tid)
+    r.apply_research_result(tid, {
+        "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
+        "evidence_refs": [],
+        "journal_entry": {"title": "Backdated note", "body": "Seen at T1.", "known_at": T1},
+    }, "run:backdate", effective_at=T1)
+    assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "supported"
+    assert _claim_status(r.load_state_as_of(tid, T5), "claim:c1") == "challenged"
+    live = next(c.status for c in r.load_thesis(tid).claims if c.claim_id == "claim:c1")
+    assert live == "challenged"
+    assert _history_count(r, tid) == n + 1
+
+
+def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path):
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    n = _history_count(r, tid)
+    v0 = r.load_state_as_of(tid, T1).version
+    r.apply_research_result(tid, {
+        "evidence_refs": [{"canonical_ref": "ev:A", "summary": "10-K steady", "known_at": T1}],
+        "journal_entry": {"title": "Note", "body": "No state change.", "known_at": T1},
+    }, "run:sidecar", effective_at=T1)
+    assert _history_count(r, tid) == n
+    assert r.load_state_as_of(tid, T1).version == v0
+    assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "unvalidated"
+
+
+def test_journal_gate_binds_known_at(tmp_path):
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
+    r.append_journal_entry(tid, {"trigger_id": trig.trigger_id, "title": "Run note",
+                                 "body": "Processed.", "known_at": T3})
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2) is False
+    assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T3) is True
+
+
+def test_historical_memory_stamps_effective_at(tmp_path):
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    r.apply_research_result(tid, {"memories_add": [{"memory_id": "m1", "text": "Desk note"}]},
+                            "run:mem", effective_at=T1)
+    mems = r.load_state_as_of(tid, T1).memory["memories"]
+    assert next(m for m in mems if m["memory_id"] == "m1")["created_at"] == T1
+    trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
+    assert "m1" in build_context(r, tid, trig, known_at=T1).included_ids
+    # T0 predates the memory (BEFORE raises: no snapshot exists yet, covered above).
+    assert "m1" not in build_context(r, tid, trig, known_at=T0).included_ids
+
+
+def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path):
+    from app import tools as tools_mod
+    from app.policy import Capability, RequestContext
+
+    repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
+    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
+                             claims=[{"claim_id": "claim:c1",
+                                      "statement": "NVDA demand stays strong"}],
+                             effective_at=T0).thesis_id
+    _set_claim_status(repo, tid, "claim:c1", "challenged", T4)
+    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
+                         data_root=tmp_path, as_of=T1)
+    got = tools_mod.execute_tool("thesis_show", {"id": tid}, "test-model", context=ctx)
+    assert "error" not in got
+    assert [c["status"] for c in got["claims"] if c["claim_id"] == "claim:c1"] == ["unvalidated"]
+    over = tools_mod.execute_tool("thesis_show", {"id": tid, "as_of": T4},
+                                  "test-model", context=ctx)
+    assert "error" in over and over.get("error_type") == "invalid_tool_arguments"

@@ -121,7 +121,7 @@ def run_trigger(
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
                        prompt=prompt, data_root=data_root, as_of=known_at)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
-        if not repository.has_journal_for_trigger(tid, trigger.trigger_id):
+        if not repository.has_journal_for_trigger(tid, trigger.trigger_id, known_at=known_at):
             raise RuntimeError(
                 f"<runner>: no durable journal for trigger {trigger.trigger_id!r} (thesis {tid!r});"
                 f" Pi must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
