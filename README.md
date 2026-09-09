@@ -104,4 +104,4 @@ Stockbot is for research and informational purposes only. It is not investment, 
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0-only](LICENSE)
