@@ -252,9 +252,9 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
     snapshot_hash = hashlib.sha256(
         json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    known_at = retrieved_at = _utc_now()
+    retrieved_at = _utc_now()
     datasets = normalize_finra_short_interest(
-        all_rows, settlement_date=settlement_date, known_at=known_at, retrieved_at=retrieved_at,
+        all_rows, settlement_date=settlement_date, retrieved_at=retrieved_at,
         content_hash=snapshot_hash, source_url=url,
         source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
     )
@@ -323,3 +323,35 @@ def prepare_short_interest_data(
         "unresolved_tickers": unresolved,
         "failed_enrichments": failed_enrichments,
     }
+
+
+def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, object]:
+    """Rewrite fetch-stamped FINRA ``known_at`` to the settlement date.
+
+    Rows written before the global-date cutover carry ``known_at`` = fetch
+    time, which outranks corrected rows in newest-wins ordering. Only rows
+    with ``known_at[:10] > settlement_date`` are rewritten; reruns return 0.
+    """
+    root = Path(data_root) if data_root else get_data_root()
+    table = parquet.read_table("short_interest", root=root / "parquet")
+    rows = table.to_pylist()
+    fixed: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        settlement = str(row.get("settlement_date") or "")
+        known = str(row.get("known_at") or "")
+        if settlement and known and known[:10] > settlement:
+            row = dict(row)
+            row["known_at"] = settlement
+            fixed.append(row)
+    if not fixed:
+        return {"rewritten": 0}
+    dataset_dir = root / "parquet" / "short_interest"
+    for path in sorted(dataset_dir.rglob("*.parquet")):
+        path.unlink()
+    by_id = {str(r.get("row_id")): r for r in rows if isinstance(r, dict)}
+    for row in fixed:
+        by_id[str(row.get("row_id"))] = row
+    parquet.write_rows("short_interest", list(by_id.values()), root=root / "parquet")
+    return {"rewritten": len(fixed)}

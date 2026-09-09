@@ -163,7 +163,7 @@ def test_short_interest_normalization():
         "currentShortPositionQuantity": "-5", "settlementDate": "2026-08-14",
     }]
     datasets = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="h1", source_url="u", source_record_id="r",
     )
     (row,) = datasets["short_interest"]
@@ -173,16 +173,18 @@ def test_short_interest_normalization():
     assert row["days_to_cover"] is None   # missing -> None
     assert row["parser_version"] == SHORT_INTEREST_PARSER_VERSION
     assert row["row_id"] == "finra:row:2026-08-14:AAA:h1"
+    assert row["known_at"] == "2026-08-14"  # global public date, not fetch time
+    assert row["retrieved_at"] == RETRIEVED_AT
 
 
 def test_short_interest_corrected_snapshot_is_new_version():
     rows: list[dict[str, object]] = [{"symbolCode": "AAA", "currentShortPositionQuantity": 20, "settlementDate": "2026-08-14"}]
     v1 = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="v1-hash", source_url="u", source_record_id="r",
     )
     v2 = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="v2-hash", source_url="u", source_record_id="r",
     )
     assert v1["short_interest"][0]["row_id"] != v2["short_interest"][0]["row_id"]

@@ -114,9 +114,9 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object
     clause, param = duckdb.as_of_clause(as_of)
     rows = duckdb.query(
         "SELECT settlement_date, short_position, prev_position, "
-        "avg_daily_volume, days_to_cover, known_at FROM ("
+        "avg_daily_volume, days_to_cover, known_at, retrieved_at FROM ("
         "SELECT settlement_date, short_position, prev_position, "
-        "avg_daily_volume, days_to_cover, known_at, "
+        "avg_daily_volume, days_to_cover, known_at, retrieved_at, "
         "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(settlement_date AS DATE) DESC, CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
         "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(settlement_date AS DATE), CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
         "FROM short_interest "
@@ -147,6 +147,7 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object
         "settlement_date": str(row.get("settlement_date") or ""),
         "avg_daily_volume": _decimal(row.get("avg_daily_volume")),
         "known_at": str(row.get("known_at") or ""),
+        "retrieved_at": str(row.get("retrieved_at") or ""),
     }
 
 
@@ -162,7 +163,7 @@ def _freshness(as_of: str, sec_metrics: dict[str, object], finra_metrics: dict[s
         "as_of": as_of,
         "sec_latest_filed_at": max(filed_dates, default=None),
         "finra_settlement_date": _parse_date(finra_metrics.get("settlement_date")),
-        "finra_known_at": finra_metrics.get("known_at") or None,
+        "finra_retrieved_at": finra_metrics.get("retrieved_at") or None,
     }
 
 

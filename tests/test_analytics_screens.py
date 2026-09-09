@@ -61,10 +61,10 @@ def _seed_facts(data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]
             parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
+def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=SETTLEMENT, known_at=known_at,
-        retrieved_at=known_at, content_hash=content_hash,
+        rows, settlement_date=SETTLEMENT,
+        retrieved_at=retrieved_at, content_hash=content_hash,
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
     )
@@ -443,7 +443,7 @@ def test_stale_settlement_is_surfaced(data_root: Path) -> None:
     _seed_facts(data_root, _default_facts())
     stale_date = "2025-01-15"
     datasets = normalize_finra_short_interest(
-        _default_rows(), settlement_date=stale_date, known_at="2025-01-20T12:00:00Z",
+        _default_rows(), settlement_date=stale_date,
         retrieved_at="2025-01-20T12:00:00Z", content_hash="snapshot-hash-2",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{stale_date}",
@@ -461,18 +461,34 @@ def test_stale_settlement_is_surfaced(data_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_snapshot_not_knowable_at_as_of_is_rejected(data_root: Path) -> None:
-    """A snapshot archived after as_of is invisible to that as_of."""
+def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+    """A settlement after as_of is invisible to that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-30T12:00:00Z")
+    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
-    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    result = screens.materialize_short_interest_screen("2026-08-29", as_of="2026-08-14", data_root=data_root)
 
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
     assert "knowable on or before 2026-08-14" in error
+
+
+def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+    """Fetched late but public early: settlement 08-14 retrieved 08-30 is
+    visible at as_of 08-20, still gated before settlement day."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+
+    visible = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    entries = visible["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-10", data_root=data_root)
+    assert "error" in early
 
 
 def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
@@ -500,24 +516,24 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
     assert [e["ticker"] for e in later_entries] == ["CCC", "AAA", "BBB"]
 
 
-def test_corrected_snapshot_versions_selected_by_as_of(data_root: Path) -> None:
-    """A corrected snapshot is a new source version: the earlier as-of uses
-    the original values, the later as-of uses the correction."""
+def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path) -> None:
+    """Same public date, two source versions: newest retrieved_at wins at
+    every as_of >= settlement (PIT cannot version same-day revisions)."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
     corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
-    _seed_short_interest(data_root, corrected, known_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
+    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
-    assert early_entries[1]["short_shares"] == 20  # original version
+    assert early_entries[1]["short_shares"] == 25  # correction wins everywhere
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     later_entries = later["entries"]
@@ -578,13 +594,13 @@ def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
     older 13:00+01:00 version must lose to the 12:30Z correction."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T13:00:00+01:00")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T13:00:00+01:00")
     corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
-    _seed_short_interest(data_root, corrected, known_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
+    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -632,11 +648,11 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
 def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -650,12 +666,12 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> No
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
-        known_at="2026-08-10T12:00:00Z",
+        retrieved_at="2026-08-10T12:00:00Z",
     )
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert "error" in result
@@ -697,10 +713,10 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z") -> None:
+def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z") -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=settlement_date, known_at=known_at,
-        retrieved_at=known_at, content_hash=f"snapshot-{settlement_date}",
+        rows, settlement_date=settlement_date,
+        retrieved_at=retrieved_at, content_hash=f"snapshot-{settlement_date}",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
     )
@@ -766,8 +782,8 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
-    ], known_at="2026-08-10T12:00:00Z")
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    ], retrieved_at="2026-08-10T12:00:00Z")
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
     early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     early_entries = early["entries"]
@@ -793,17 +809,33 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     assert aaa["shares_change_abs"] == 300.0
 
 
-def test_change_slice_honors_finra_known_at(data_root: Path) -> None:
-    """A snapshot archived after as_of is not knowable at that as_of."""
+def test_change_slice_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+    """A settlement after as_of is not knowable at that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-30T12:00:00Z")
+    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
     result = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
     assert "knowable" in error
+
+
+def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+    """Fetched late but public early: the change slice sees a 08-14 cycle
+    retrieved 08-30 once as_of passes settlement day."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_cycle(data_root, "2026-08-07", [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
+    ])
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+
+    result = screens.short_interest_change_screen("2026-08-20", data_root=data_root)
+    assert result["settlement_current"] == SETTLEMENT
 
 # ---------------------------------------------------------------------------
 # Fetch-on-empty: live screens fetch from FINRA, historical screens never do

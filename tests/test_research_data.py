@@ -422,3 +422,46 @@ def test_replay_sec_facts_isolates_corrupt_payloads(tmp_path: Path):
     written_rows = summary["written_rows"]
     assert isinstance(written_rows, (int, float))
     assert written_rows > 0  # the valid payload still processed
+
+
+def test_backfill_finra_known_at_rewrites_only_fetch_stamped(tmp_path: Path):
+    """Pre-cutover rows (known_at=fetch) collapse to settlement_date;
+    rerun is a no-op; a later correction shares known_at and wins on retrieved_at."""
+    from app.normalization import normalize_finra_short_interest
+    from app.services.research_data import backfill_finra_known_at
+
+    parquet.write_rows("short_interest", [{
+        "row_id": "finra:row:2026-08-14:AAA:oldhash1234", "entity_id": None, "security_id": None,
+        "symbol_code": "AAA", "issue_name": "Alpha", "settlement_date": "2026-08-14",
+        "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+        "source_url": "u", "source_record_id": "r",
+        "known_at": "2026-08-30T12:00:00Z", "retrieved_at": "2026-08-30T12:00:00Z",
+        "content_hash": "old", "parser_version": "t",
+    }], root=tmp_path / "parquet")
+    datasets = normalize_finra_short_interest(
+        [{"symbolCode": "BBB", "currentShortPositionQuantity": 5}],
+        settlement_date="2026-08-14", retrieved_at="2026-08-30T12:00:00Z",
+        content_hash="newhash", source_url="u", source_record_id="r")
+    for name, rows in datasets.items():
+        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 1}
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+
+    rows = {r["symbol_code"]: r for r in parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()}
+    assert rows["AAA"]["known_at"] == "2026-08-14"
+    assert rows["AAA"]["retrieved_at"] == "2026-08-30T12:00:00Z"
+    assert rows["BBB"]["known_at"] == "2026-08-14"
+
+    correction = normalize_finra_short_interest(
+        [{"symbolCode": "AAA", "issueName": "Alpha", "currentShortPositionQuantity": 25}],
+        settlement_date="2026-08-14", retrieved_at="2026-09-03T12:00:00Z",
+        content_hash="correction-hash", source_url="u", source_record_id="r")
+    for name, rows_ in correction.items():
+        parquet.write_rows(name, rows_, root=tmp_path / "parquet")
+    all_rows: list[dict[str, object]] = parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()
+    def _retrieved(row: dict[str, object]) -> str:
+        return str(row.get("retrieved_at"))
+    versions = sorted([r for r in all_rows if r["symbol_code"] == "AAA"], key=_retrieved)
+    assert [str(r["known_at"]) for r in versions] == ["2026-08-14", "2026-08-14"]
+    assert versions[-1]["short_position"] == 25.0  # late-fetched correction wins newest-wins

@@ -456,6 +456,8 @@ def normalize_sec_company_facts(
     entity_id = ids.sec_entity_id(cik)
     security_id = ids.sec_security_id(cik)
     extracted_facts = _extract_facts(raw)
+    filed_dates = sorted(str(fact.get("filed") or "") for _, _, _, fact in extracted_facts if str(fact.get("filed") or ""))
+    envelope_known = filed_dates[-1] if filed_dates else retrieved_at
     documents: list[dict[str, object]] = [{
         "doc_id": ids.sec_doc_id("companyfacts", source_record_id, content_hash),
         "source": "sec",
@@ -466,7 +468,7 @@ def normalize_sec_company_facts(
         "sha256": content_hash,
         "retrieved_at": retrieved_at,
         "published_at": None,
-        "known_at": retrieved_at,
+        "known_at": envelope_known,
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
@@ -537,7 +539,7 @@ def normalize_sec_company_facts(
         "ticker": None,
         "exchange": None,
         "source": "sec:companyfacts",
-        "known_at": retrieved_at,
+        "known_at": envelope_known,
         "retrieved_at": retrieved_at,
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
@@ -575,7 +577,6 @@ def normalize_finra_short_interest(
     rows: list[dict[str, object]],
     *,
     settlement_date: str,
-    known_at: str,
     retrieved_at: str,
     content_hash: str,
     source_url: str,
@@ -593,7 +594,7 @@ def normalize_finra_short_interest(
             short_position = None
         entity_id = ids.finra_entity_id(symbol)
         # The row ID includes the snapshot content hash so a corrected source
-        # payload becomes a NEW source version (new known_at) instead of
+        # payload becomes a NEW source version (new retrieved_at) instead of
         # colliding with the original row in the dedupe.
         short_interest.append({
             "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
@@ -608,7 +609,7 @@ def normalize_finra_short_interest(
             "days_to_cover": _to_float(row.get("daysToCoverQuantity")),
             "source_url": source_url,
             "source_record_id": source_record_id,
-            "known_at": known_at,
+            "known_at": settlement_date,
             "retrieved_at": retrieved_at,
             "content_hash": content_hash,
             "parser_version": SHORT_INTEREST_PARSER_VERSION,

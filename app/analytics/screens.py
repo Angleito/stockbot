@@ -473,24 +473,30 @@ _FETCH_DISCOVERY_CYCLES = 6
 def _candidate_settlement_dates(today: date, count: int = _FETCH_DISCOVERY_CYCLES) -> list[str]:
     """Newest-first FINRA settlement calendar dates on/before ``today``.
 
-    FINRA publishes mid-month (15th) and month-end cycles, each moved back
-    to Friday when it falls on a weekend.  Probing this calendar (instead
-    of the local store) finds the newest published cycle to full-fetch.
+    FINRA publishes mid-month (15th) and month-end cycles, shifted to a
+    business day when the calendar date hits a weekend or holiday. The
+    shift is resolved by the 1-row probe in
+    ``_discover_latest_published_settlement_date``, not by weekday
+    arithmetic here: each raw date is emitted with up to 3 preceding
+    weekdays (covers weekend + single-holiday shifts), newest-first
+    deduped, and the first candidate with published rows wins.
     """
     candidates: list[str] = []
     year, month = today.year, today.month
     while len(candidates) < count:
         last_day = monthrange(year, month)[1]
         for day in (last_day, 15):
-            candidate = date(year, month, day)
-            if candidate.weekday() == 5:  # Saturday -> Friday
-                candidate -= timedelta(days=1)
-            elif candidate.weekday() == 6:  # Sunday -> Friday
-                candidate -= timedelta(days=2)
-            if candidate <= today and str(candidate) not in candidates:
-                candidates.append(str(candidate))
-                if len(candidates) >= count:
-                    break
+            raw = date(year, month, day)
+            for offset in range(4):
+                candidate = raw - timedelta(days=offset)
+                if offset and candidate.weekday() >= 5:
+                    continue
+                if candidate <= today and str(candidate) not in candidates:
+                    candidates.append(str(candidate))
+                    if len(candidates) >= count:
+                        break
+            if len(candidates) >= count:
+                break
         month -= 1
         if month == 0:
             month, year = 12, year - 1
@@ -558,8 +564,9 @@ def get_short_interest_leaderboard(
     usable cycle: with no ``settlement_date`` it discovers the newest
     published cycle and fetches it; with an explicit ``settlement_date``
     missing from the store it fetches exactly that date.  A historical
-    screen (explicit ``as_of``) never fetches: fetched rows would carry
-    known_at=now and could never satisfy a past horizon.  Fetch failures
+    screen (explicit ``as_of``) never fetches. Fetched rows carry the public
+    settlement date as ``known_at``, so a later ``as_of >=`` the public date
+    sees them; a past ``as_of`` still sees nothing new. Fetch failures
     surface as ``{"error": ...}``, never raise.
     """
     live = not as_of
@@ -569,6 +576,18 @@ def get_short_interest_leaderboard(
         if settlement_date is None:
             try:
                 target = latest_settlement_date(resolved, root)
+                if live:
+                    try:
+                        published = _discover_latest_published_settlement_date(date.fromisoformat(resolved))
+                    except Exception:
+                        published = None
+                    if published is not None and published > target:
+                        try:
+                            _fetch_live_cycle(published, root)
+                        except Exception:
+                            pass
+                        else:
+                            target = published
             except ValueError:
                 if not live:
                     raise

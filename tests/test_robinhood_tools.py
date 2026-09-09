@@ -263,7 +263,7 @@ def _hand_built_research(snapshot: PortfolioSnapshot) -> list[PortfolioResearchP
                 "as_of": "2026-08-25",
                 "sec_latest_filed_at": "2026-08-20",
                 "finra_settlement_date": "2026-08-14",
-                "finra_known_at": "2026-08-17T12:00:00Z",
+                "finra_retrieved_at": "2026-08-17T12:00:00Z",
             },
         ),
         PortfolioResearchPosition(

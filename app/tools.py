@@ -1370,7 +1370,7 @@ def _freshness_key(item: dict[str, object]) -> tuple[str, str, str]:
     return (
         str(item.get("sec_latest_filed_at") or "0000-00-00"),
         str(item.get("finra_settlement_date") or "0000-00-00"),
-        str(item.get("finra_known_at") or ""),
+        str(item.get("finra_retrieved_at") or ""),
     )
 
 
