@@ -505,7 +505,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
- let runId = crypto.randomUUID();
+ let runId: string = crypto.randomUUID();
  let pendingQuestion = "";
  const dataRoots = new Map<string, string>();
  const doneFiles = new Map<string, string>();
@@ -544,7 +544,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {
-  runId = crypto.randomUUID();
+  const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+  runId = trustedRunId ? trustedRunId : crypto.randomUUID();
   seq = 0;
   toolStartedAt.clear();
   // Routing/completion bind from process environment only. Prompt text

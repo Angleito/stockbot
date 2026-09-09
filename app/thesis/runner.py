@@ -67,14 +67,14 @@ def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: Re
             f"TRIGGER DATA CUTOFF: {data_cutoff}",
             f"trigger summary: {(trigger.summary or '')[:500]}",
             f"trigger canonical refs: {refs[:500]}",
-            "Only use evidence known at or before the trigger data cutoff.",
+            "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
             "CURRENT THESIS STATE:",
             json.dumps(packet, sort_keys=True),
             "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
             json.dumps({"trigger": trig, "evidence": ctx.evidence_refs}, sort_keys=True),
             "CURRENT PRIOR JOURNAL CONTEXT:",
             json.dumps(ctx.journal_excerpts, sort_keys=True),
-            "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, checkpoint, and prior journals are current.",
+            "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
             "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
             "Before completing, write a material thesis_journal entry using"
             f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'.",
@@ -124,7 +124,7 @@ def run_trigger(
     prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
         run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
-                       prompt=prompt, data_root=data_root)
+                       prompt=prompt, data_root=data_root, run_id=rid)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import app.thesis.runner as runner_mod
-from app.thesis.context import ContextBudgetExceeded, build_context
+from app.thesis.context import ContextBudgetExceeded, build_context, build_live_context
 from app.thesis.models import Thesis
 from app.thesis.monitor import CanonicalEvent, tick
 from app.thesis.repository import ThesisRepository
@@ -46,13 +46,13 @@ class _Pi:
         self.run_ids: list[str] = []
         self.last_as_of: str | None = None
         self.last_run_id: str = ""
-    def __call__(self, *, thesis_id: str, trigger_id: str, prompt: str, data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None) -> None:
+    def __call__(self, *, thesis_id: str, trigger_id: str, prompt: str, data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None, run_id: str | None = None) -> None:
         import re as _re
         self.calls += 1
         self.prompts.append(prompt)
         self.last_as_of = as_of
         m = _re.search(r"^run_id:\s*(.+)$", prompt, _re.M)
-        rid = m.group(1).strip() if m else ""
+        rid = run_id or (m.group(1).strip() if m else "")
         self.run_ids.append(rid)
         self.last_run_id = rid
         if self.fail:
@@ -392,6 +392,15 @@ def test_tight_budget_fails_explicitly(tmp_path: Path) -> None:
         build_context(r, t.thesis_id, trig, known_at=T2, max_tokens=5)
     ok = build_context(r, t.thesis_id, trig, known_at=T2)
     assert ok.known_at == T2 and isinstance(ok.omitted_ids, list)
+
+def test_large_monitor_checkpoint_not_in_pi_context(tmp_path: Path) -> None:
+    r, t = _make(tmp_path)
+    r.save_checkpoint(t.thesis_id, {"thesis_id": t.thesis_id, "sources": {},
+                                    "recent_hashes": ["a" * 64 for _ in range(1000)]})
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    ctx = build_live_context(r, t.thesis_id, trig, data_cutoff=T2)
+    assert "checkpoint" not in ctx.thesis_packet
+    assert ctx.estimated_tokens < 8000
 
 
 def test_evidence_refs_stay_compact_and_reject_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

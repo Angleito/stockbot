@@ -113,7 +113,6 @@ def _build_context(
             "watch": {"thesis_id": tid, "rules": list[JSONValue](rules)},
             "questions": list[JSONValue](questions),
             "trigger": tdict,
-            "checkpoint": dict(repository.load_checkpoint(tid).to_dict()),
         }
     else:
         snapshot = repository.load_state_as_of(tid, data_cutoff)

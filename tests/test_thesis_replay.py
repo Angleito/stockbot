@@ -43,12 +43,12 @@ class _ReplayPi:
         self.repository = repository
         self.calls = 0
 
-    def __call__(self, *, thesis_id: str, trigger_id: str, prompt: str, data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None) -> None:
+    def __call__(self, *, thesis_id: str, trigger_id: str, prompt: str, data_root: Path | str | None, timeout_s: int = 170, as_of: str | None = None, run_id: str | None = None) -> None:
         import re as _re
         self.calls += 1
         n = self.calls
         m = _re.search(r"^run_id:\s*(.+)$", prompt, _re.M)
-        rid = m.group(1).strip() if m else f"run:fallback-{n}"
+        rid = run_id or (m.group(1).strip() if m else f"run:fallback-{n}")
         if n == 1:  # T3 relevant filing
             self.repository.apply_research_result(thesis_id, {
                 "trigger_id": trigger_id,
