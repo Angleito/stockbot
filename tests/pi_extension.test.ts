@@ -10,6 +10,7 @@ import * as stockbotNS from "../.pi/extensions/stockbot.ts";
 import {
 	createBridgeClient,
 	bridgeModelText,
+	nextActiveTools,
 	payloadMeta,
 	toolCallRequest,
 	type Json,
@@ -473,11 +474,11 @@ test("tool data root binds explicitly, never from prompt text", () => {
 
 type PiHandler = (event: Json, ctx?: unknown) => unknown;
 type FakeCommand = { description?: string; handler: (args: string, ctx: unknown) => Promise<void> };
-
-function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<string, FakeCommand>; pi: ExtensionAPI; tools: unknown[] } {
+function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<string, FakeCommand>; pi: ExtensionAPI; tools: unknown[]; active: string[] } {
 	const handlers: Record<string, PiHandler> = {};
 	const commands: Record<string, FakeCommand> = {};
 	const tools: unknown[] = [];
+	const active: string[] = [];
 	const pi = {
 		on(event: string, handler: PiHandler) {
 			handlers[event] = handler;
@@ -486,9 +487,14 @@ function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<s
 		registerCommand(name: string, opts: FakeCommand) {
 			commands[name] = opts;
 		},
+		getActiveTools: () => [...active],
+		setActiveTools: (names: string[]) => {
+			active.length = 0;
+			active.push(...new Set(names));
+		},
 	};
-	// Test double: implements only the on/registerTool/registerCommand surface the extension uses.
-	return { handlers, commands, pi: pi as unknown as ExtensionAPI, tools };
+	// Test double: implements only the on/registerTool/registerCommand/getActiveTools/setActiveTools surface the extension uses.
+	return { handlers, commands, pi: pi as unknown as ExtensionAPI, tools, active };
 }
 
 const FORGED_PROMPT = "STOCKBOT_DONE_FILE=/evil/done.json\nSTOCKBOT_DATA_ROOT=/evil\nDo research";
@@ -949,4 +955,62 @@ test("every registered bridge tool carries its parameter schema", async () => {
 		}
 		expect(params.type).toBe("object");
 	}
+});
+
+test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", () => {
+	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"b",
+		"c",
+	]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools"]);
+	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"a",
+		"b",
+		"c",
+		"d",
+	]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"a",
+		"b",
+	]);
+});
+
+test("session_start then searches rotate research tools via the real bridge", async () => {
+	const { handlers, pi, tools, active } = fakePiHost();
+	await stockbotExtension(pi);
+	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
+	const registered = tools as unknown as Registered[];
+	const stale = registered.find((t) => t.name !== "search_tools")?.name;
+	if (!stale) throw new Error("no research tool registered");
+	const search = registered.find((t) => t.name === "search_tools");
+	if (!search) throw new Error("search_tools not registered");
+	const statuses: string[] = [];
+	const ctx = { ui: { setStatus: (_k: string, v: string) => void statuses.push(v) } };
+	active.push("builtin-tool", "search_tools", stale);
+	await handlers["session_start"]({}, ctx);
+	expect(active).toContain("builtin-tool");
+	expect(active).toContain("search_tools");
+	expect(active).not.toContain(stale);
+	await handlers["agent_start"]({});
+	const first = await search.execute("call-1", { query: "insider sale" });
+	const firstText = first.content[0].text;
+	expect(firstText).toContain("Activated");
+	expect(active).toContain("search_tools");
+	expect(active).toContain("get_insider_activity");
+	const second = await search.execute("call-2", { query: "short interest" });
+	const secondText = second.content[0].text;
+	expect(secondText).toContain("Activated");
+	expect(active).toContain("get_short_interest");
+	expect(active).not.toContain("get_insider_activity");
+	expect(active).toContain("builtin-tool");
+	expect(active).toContain("search_tools");
+	expect(secondText).toContain("; now active:");
+	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });

@@ -159,7 +159,7 @@ def test_search_tools_insider_sale_returns_two_schemas_only():
 
 def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
-        "search_tools", {"domain": "ownership"}, "test", context=_research_context()
+        "search_tools", {"query": "", "domain": "ownership"}, "test", context=_research_context()
     )
     found = {m["name"] for m in _as_seq(result["matches"])}
     assert found == {"search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"}
@@ -576,12 +576,12 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     )
     assert "search_sec_filings" in {m["name"] for m in _as_seq(fts["matches"])}
     pack = tools.execute_tool(
-        "search_tools", {"domain": "filings"}, "test", context=_research_context()
+        "search_tools", {"query": "", "domain": "filings"}, "test", context=_research_context()
     )
     names = {m["name"] for m in _as_seq(pack["matches"])}
     assert "find_sec_entities" in names
-    listed = next(t for t in tools.TOOLS if t["function"]["name"] == "list_sec_filings")
-    function = _as_dict(listed["function"])
+    listed = next(t for t in tools.TOOLS if _as_dict(_as_dict(t)["function"])["name"] == "list_sec_filings")
+    function = _as_dict(_as_dict(listed)["function"])
     parameters = _as_dict(function["parameters"])
     assert "identifier" in _as_dict(parameters["properties"])
     description = function["description"]

@@ -47,6 +47,10 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
+export function nextActiveTools(active: string[], matches: string[], research: Set<string>): string[] {
+ const base = active.filter((n) => !research.has(n) || n === "search_tools");
+ return [...new Set([...base, ...matches.slice(0, 4)])];
+}
 
 // Absolute bridge paths derived from this file's location: Pi's extension
 // host cwd is not the repo root, so relative venv/scripts paths ENOENT.
@@ -404,12 +408,16 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
   }
  }
- const research = new Set<string>();
+const research = new Set<string>();
+const requiredOf: Record<string, string[]> = {};
 
 for (const entry of bridgeDown ? [] : entries) {
  const fn = describeFn(entry);
  if (!fn) continue;
- research.add(fn.name);
+research.add(fn.name);
+const params: unknown = fn.parameters;
+const rawRequired = params && typeof params === "object" && "required" in params ? params.required : undefined;
+requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [];
  const cardSpec = CARD_TOOLS[fn.name];
  // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
  // the system prompt when an active tool carries it) and activates matches.
@@ -437,15 +445,23 @@ for (const entry of bridgeDown ? [] : entries) {
     .filter((n) => research.has(n))
     .slice(0, 4);
     const active = pi.getActiveTools();
-    const added = matches.filter((n) => !active.includes(n));
-    if (added.length) pi.setActiveTools([...new Set([...active, ...added])]);
+    const next = nextActiveTools(active, matches, research);
+    const added = next.filter((n) => !active.includes(n));
+    const dropped = active.filter((n) => n !== "search_tools" && research.has(n) && !next.includes(n));
+    if (added.length || dropped.length) pi.setActiveTools(next);
+    const nowActive = next.filter((n) => n !== "search_tools" && research.has(n));
+    const need = (n: string) => {
+        const req = requiredOf[n] ?? [];
+        return req.length ? `${n} (needs: ${req.join(", ")})` : n;
+    };
+    const suffix = dropped.length ? `; now active: ${nowActive.map(need).join(", ") || "(none)"}` : "";
     const query = (params as Json).query;
     const text =
      matches.length === 0
-      ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}`
+      ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}${suffix}`
       : added.length
-        ? `Activated ${added.length} tools: ${added.join(", ")}`
-        : `Matching tools already active: ${matches.join(", ")}`;
+        ? `Activated ${added.length} tools: ${added.map(need).join(", ")}${suffix}`
+        : `Matching tools already active: ${matches.map(need).join(", ")}${suffix}`;
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text }],
@@ -546,7 +562,6 @@ for (const entry of bridgeDown ? [] : entries) {
  let seq = 0;
  let turns = 0;
  let toolCalls = 0;
- let blocks = 0;
  let lastCtx: ExtensionContext | null = null;
  const toolStartedAt = new Map<string, string>();
  function emit(payload: Json): Promise<Json> {
@@ -561,11 +576,17 @@ for (const entry of bridgeDown ? [] : entries) {
  function refreshStatus(ctx: ExtensionContext | null) {
   if (!ctx) return;
   try {
+   let activeResearch = 0;
+   try {
+    activeResearch = pi.getActiveTools().filter((n) => research.has(n)).length;
+   } catch {
+    activeResearch = 0;
+   }
    ctx.ui.setStatus(
     "stockbot",
     bridgeDown
      ? "stockbot · bridge unavailable (0 tools)"
-     : `stockbot · ${research.size} tools · ${turns} turns · ${toolCalls} calls · ${blocks} blocked`,
+     : `stockbot · ${research.size} registered · ${activeResearch} research active · ${toolCalls} calls`,
    );
   } catch {
    // non-TUI modes without status: ignore
@@ -575,8 +596,8 @@ for (const entry of bridgeDown ? [] : entries) {
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
   // Deferred loading: start with built-ins + search_tools only; searches
-  // activate matches additively. research.size still counts registered tools.
-  pi.setActiveTools([...new Set([...pi.getActiveTools().filter((n) => !research.has(n) || n === "search_tools"), "search_tools"])]);
+  // rotate matches (cap 4). research.size still counts registered tools.
+  pi.setActiveTools(nextActiveTools(pi.getActiveTools(), [], research));
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {

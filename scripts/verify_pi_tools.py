@@ -30,7 +30,14 @@ from app.config import get_data_root  # noqa: E402
 from app.policy import Capability, RequestContext  # noqa: E402
 from scripts.verify_tool_registry import get_registry_sets, registry_errors, tool_schema_function, tool_schema_name  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
-TIMEOUT_S = 180
+# Duration evidence (2026-09-09 matrix): every recorded tool handler completes
+# in seconds (slowest singles: search_sec_filings 39s, search_sec_relationships
+# 25s; SEC per-filing sweeps ~0.6s each warm). The 180s kills all landed
+# mid-run with clean target calls and no failed events (e.g.
+# get_ownership_changes attempt-2: 9 fast calls, run still open) — time goes
+# to small-model rounds (~5-10s each), not tools. 300s fits ~30 rounds; the
+# 120s per-tool-call cliff still bounds any single hung handler.
+TIMEOUT_S = 300
 DEFAULT_REPETITIONS = 3
 DEFAULT_CONCURRENCY = 6
 POLL_S = 2
@@ -265,11 +272,14 @@ def _tool_success(conn: sqlite3.Connection, name: str) -> str | None:
     ).fetchone()[0]
     if completed < 1:
         return "no completed event"
+    # Failed executions only: in-harness rejections (e.g. schema validation of
+    # an empty probe call) never dispatch, record no tool_calls row, and must
+    # not poison an otherwise clean run.
     failed = conn.execute(
-        "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_failed' AND tool_name = ?", (name,)
+        "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)
     ).fetchone()[0]
     if failed > 0:
-        return "failed event present"
+        return "failed execution present"
     return None
 
 

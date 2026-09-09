@@ -305,7 +305,10 @@ def test_read_is_bounded_by_limit(data_root: Path) -> None:
 
 def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
     _seed_default(data_root)
-    result = screens.get_short_interest_leaderboard(settlement_date="2025-01-15", data_root=data_root)
+    # Historical reproduction never fetches: a missing cycle stays an error.
+    result = screens.get_short_interest_leaderboard(
+        settlement_date="2025-01-15", as_of="2026-08-14", data_root=data_root
+    )
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
@@ -801,3 +804,146 @@ def test_change_slice_honors_finra_known_at(data_root: Path) -> None:
     error = result["error"]
     assert isinstance(error, str)
     assert "knowable" in error
+
+# ---------------------------------------------------------------------------
+# Fetch-on-empty: live screens fetch from FINRA, historical screens never do
+# ---------------------------------------------------------------------------
+
+
+def _install_finra_fetch_fake(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, object]]) -> None:
+    """Serve discovery probes (limit 1) and full snapshots from one fake.
+
+    The first probe reports no published rows so discovery must skip it;
+    later probes report rows.  Full fetches return AAA/BBB/CCC rows for the
+    requested settlement date.
+    """
+    probed = {"count": 0}
+
+    def fake(
+        group: str, dataset_name: str, payload: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        calls.append(payload)
+        raw_filters = payload.get("compareFilters", [])
+        assert isinstance(raw_filters, list)
+        filters = {
+            f.get("fieldName"): f.get("fieldValue")
+            for f in raw_filters
+            if isinstance(f, dict)
+        }
+        settlement = str(filters.get("settlementDate"))
+        if payload.get("limit") == 1:  # discovery probe: existence only
+            probed["count"] += 1
+            total = 3 if probed["count"] > 1 else 0
+            return b"[]", [], {"record-total": str(total)}
+        rows: list[dict[str, object]] = [
+            {"symbolCode": symbol, "issueName": symbol, "settlementDate": settlement,
+             "currentShortPositionQuantity": position}
+            for symbol, position in (("AAA", 20), ("BBB", 20), ("CCC", 5))
+        ]
+        return (
+            json.dumps(rows).encode(), rows,
+            {"record-total": str(len(rows))},
+        )
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", fake)
+
+
+def test_live_leaderboard_empty_store_discovers_and_fetches_once(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(data_root=data_root)
+
+    assert "error" not in result
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    probes = [c for c in calls if c.get("limit") == 1]
+    full = [c for c in calls if c.get("limit") != 1]
+    assert len(probes) == 2  # newest candidate empty, next one hits
+    assert len(full) == 1  # exactly one full fetch
+    full_filters = full[0]["compareFilters"]
+    assert isinstance(full_filters, list) and full_filters
+    full_first = full_filters[0]
+    assert isinstance(full_first, dict)
+    probe_filters = probes[1]["compareFilters"]
+    assert isinstance(probe_filters, list) and probe_filters
+    probe_first = probe_filters[0]
+    assert isinstance(probe_first, dict)
+    assert full_first["fieldValue"] == probe_first["fieldValue"]
+    assert result["settlement_date"] == full_first["fieldValue"]
+
+
+def test_live_leaderboard_explicit_date_fetches_exactly_that_date(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+
+    assert "error" not in result
+    assert result["settlement_date"] == SETTLEMENT
+    assert len(calls) == 1  # no discovery probes, one exact-date fetch
+    filters = calls[0]["compareFilters"]
+    assert isinstance(filters, list) and filters
+    first = filters[0]
+    assert isinstance(first, dict)
+    assert first["fieldValue"] == SETTLEMENT
+
+
+def test_historical_leaderboard_empty_store_never_fetches(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(as_of="2026-08-14", data_root=data_root)
+
+    assert calls == []
+    assert "error" in result
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "knowable on or before 2026-08-14" in error
+
+
+def test_discovery_probe_uses_mock_dataset_in_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FINRA_USE_MOCK", "1")
+    names: list[str] = []
+
+    def fake(
+        group: str, dataset_name: str, payload: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        names.append(dataset_name)
+        return b"[]", [], {"record-total": "0"}
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", fake)
+
+    assert screens._discover_latest_published_settlement_date(date(2026, 9, 9)) is None
+    assert len(names) == screens._FETCH_DISCOVERY_CYCLES
+    assert all(name == "consolidatedShortInterestMock" for name in names)
+
+
+def test_live_fetch_failure_returns_error_not_raise(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", boom)
+
+    result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+
+    assert "error" in result
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "network down" in error

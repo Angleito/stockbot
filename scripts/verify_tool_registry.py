@@ -49,7 +49,7 @@ def get_registry_sets() -> dict[str, set[str]]:
     schemas = {tool_schema_name(t) for t in TOOLS}
     handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS)
     research = {
-        str(t.get("function", {}).get("name"))
+        tool_schema_name(t)
         for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))
     } - {"search_tools"}
     return {

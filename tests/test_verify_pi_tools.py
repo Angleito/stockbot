@@ -29,12 +29,21 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1',?,?,?)",
         (name, now, tool_error),
     )
-    if event in ("completed", "both"):
+    if event in ("completed", "both", "harness-rejected"):
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
             (now, tool if other_tool is None else other_tool if False else tool if event == 'both' else name),
         )
     if event == "both":
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
+            (now, tool),
+        )
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1',?,'2026-01-01T00:00:00+00:00','tool_error')",
+            (tool,),
+        )
+    if event == "harness-rejected":
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
             (now, tool),
@@ -150,6 +159,11 @@ def test_empty_model_telemetry_fails(tmp_path: Path):
 def test_tool_failed_event_fails(tmp_path: Path):
     ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False)
     assert not ok
+
+
+def test_harness_rejection_without_execution_passes(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False)
+    assert ok
 
 
 def test_two_of_three_is_not_pass():

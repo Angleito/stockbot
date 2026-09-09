@@ -394,7 +394,7 @@ TOOLS: list[dict[str, object]] = [
                     "domain": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 4},
                 },
-                "required": list[str]()
+                "required": ["query"]
             }
         }
     },
@@ -455,7 +455,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_xbrl_facts",
             "description": "Returns XBRL financial metrics (Revenue, Net Income, "
-                "Cash, Debt, Equity, etc.) for any company.",
+                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\").",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -473,7 +473,10 @@ TOOLS: list[dict[str, object]] = [
             "description": "Returns FINRA consolidated short interest for a ticker "
                 "(current/previous short position, days to cover, average daily "
                 "volume, percent change). Call for short interest, short float, "
-                "or days-to-cover questions.",
+                "or days-to-cover questions. For change-over-time or trend "
+                "questions, prefer query_finra. When the user asks to show "
+                "figures or values, or names exact fields, prefer "
+                "get_finra_datapoints.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -682,11 +685,12 @@ TOOLS: list[dict[str, object]] = [
             "name": "get_finra_datapoints",
             "description": "Returns exact source values from a FINRA dataset "
                 "for explicit data requests ONLY (e.g. 'show the last five "
-                "settlement-date values'). Requires a 'fields' list and at "
-                "least one narrowing condition (ticker, date/date range, or "
-                "filters). IMPORTANT: when the user requests named datapoints "
-                "with friendly labels (e.g. 'days to cover', 'average daily "
-                "volume'), call describe_finra_dataset FIRST and use the "
+                "settlement-date values' or 'show recent position figures'). "
+                "Requires a 'fields' list and at least one narrowing "
+                "condition (ticker, date/date range, or filters). IMPORTANT: "
+                "when the user requests named datapoints with friendly "
+                "labels (e.g. 'days to cover', 'average daily volume'), "
+                "call describe_finra_dataset FIRST and use the "
                 "metadata's exact field names (e.g. daysToCoverQuantity, "
                 "averageDailyVolumeQuantity) in the fields list — never "
                 "friendly labels. For 'latest five' / 'last five' / 'most "
@@ -695,11 +699,14 @@ TOOLS: list[dict[str, object]] = [
                 "client resolves the sort against the dataset's partitions "
                 "automatically. Do NOT use for ordinary analysis — query_finra "
                 "and the specific helper tools return analyzed briefings "
-                "instead. Returns at most 25 rows containing only the "
-                "requested fields. Exact source values are guaranteed for "
-                "normal scalar data; oversized text fields are rendered as "
-                "a marked excerpt (table cells are capped at 200 characters "
-                "to keep the tool message compact).",
+                "instead. If exact field names are unknown, call "
+                "describe_finra_dataset first, then retry here with its field "
+                "names — ticker plus dataset is enough to begin. Returns at "
+                "most 25 rows containing only the requested fields. Exact "
+                "source values are guaranteed for normal scalar data; "
+                "oversized text fields are rendered as a marked excerpt "
+                "(table cells are capped at 200 characters to keep the tool "
+                "message compact).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1991,7 +1998,7 @@ def _wrap_list(identifier: object, records: object, key: str) -> dict[str, objec
 TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     "get_fundamentals": {
         "domain": "fundamentals",
-        "aliases": ["eps", "earnings per share", "revenue metric", "balance sheet item", "shares outstanding", "dividend", "declared dividend", "net income metric", "ttm eps"],
+        "aliases": ["eps", "earnings per share", "balance sheet item", "shares outstanding", "dividend", "declared dividend", "ttm eps"],
     },
     "find_sec_entities": {
         "domain": "filings",
@@ -1999,7 +2006,7 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "search_sec_filings": {
         "domain": "filings",
-        "aliases": ["filing full text", "founder filings", "full text search", "efts search", "mention search", "filer search", "accession discovery", "exhaustive filing search", "8k filing search"],
+        "aliases": ["filing full text", "founder filings", "full text search", "efts search", "mention search", "filer search", "accession discovery", "exhaustive filing search", "8k filing search", "risk factor language", "filing documents", "sec filing documents", "language in filings"],
     },
     "search_sec_relationships": {
         "domain": "ownership",
@@ -2027,7 +2034,7 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "diff_sec_filings": {
         "domain": "filings",
-        "aliases": ["amendment diff", "compare versions", "risk factor changes", "redline amendment"],
+        "aliases": ["amendment diff", "compare versions", "risk factor changes", "redline amendment", "changed between", "compare annual reports", "most recent reports", "annual report compare", "prior year version"],
     },
     "get_material_events": {
         "domain": "events",
@@ -2083,7 +2090,7 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "get_xbrl_facts": {
         "domain": "fundamentals",
-        "aliases": ["xbrl fact", "revenue xbrl", "net income", "total debt", "shareholder equity", "tagged financial data"],
+        "aliases": ["xbrl fact", "revenue", "revenue xbrl", "net income", "cash", "debt", "total debt", "equity", "shareholder equity", "tagged financial data", "bring in", "brought in", "how much money", "money brought in", "annual revenue"],
     },
     "get_short_interest": {
         "domain": "finra",
@@ -2131,11 +2138,11 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "investigate_social_arbitrage_candidate": {
         "domain": "alternative",
-        "aliases": ["social arbitrage", "youtube corroboration", "entity exposure gap", "candidate enrichment", "viral price gap"],
+        "aliases": ["social arbitrage", "youtube corroboration", "entity exposure gap", "candidate enrichment", "viral price gap", "online buzz", "real demand"],
     },
     "get_macro_context": {
         "domain": "macro",
-        "aliases": ["census data", "macro variables", "datacommons observations", "geography facet", "statistical series", "unemployment rate", "inflation data"],
+        "aliases": ["census data", "macro variables", "datacommons observations", "geography facet", "statistical series", "unemployment rate", "inflation data", "economic backdrop", "california economy", "gdp", "economic indicators", "macro backdrop"],
     },
     "search_company_patents": {
         "domain": "patents",
@@ -2147,15 +2154,15 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "describe_finra_dataset": {
         "domain": "finra",
-        "aliases": ["dataset fields", "finra schema", "field definitions", "filter values", "dataset metadata"],
+        "aliases": ["dataset fields", "finra schema", "field definitions", "filter values", "dataset metadata", "bets against stocks", "fields and update schedule", "update schedule"],
     },
     "get_finra_datapoints": {
         "domain": "finra",
-        "aliases": ["exact datapoints", "settlement date values", "last five values", "field values", "source values"],
+        "aliases": ["exact datapoints", "settlement date values", "last five values", "field values", "source values", "short position figures", "recent figures"],
     },
     "query_finra": {
         "domain": "finra",
-        "aliases": ["finra query", "dataset briefing", "trend briefing", "coverage metrics", "min max median"],
+        "aliases": ["finra query", "dataset briefing", "trend briefing", "coverage metrics", "min max median", "changed week to week", "week to week", "weekly summary", "records"],
     },
     "thesis_create": {
         "domain": "thesis",
@@ -2239,6 +2246,8 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
         if query_norm and query_norm == " ".join(_normalize_discovery_text(name)):
             score += 100
         if query_norm and query_norm in alias_norms:
+            score += 70
+        elif query_norm and any(p and p in query_norm for p in alias_norms):
             score += 50
         if domain and domain == entry_domain:
             score += 30
@@ -2257,8 +2266,14 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
         hit = next((a for a, p in zip(aliases, alias_norms) if query_tokens & set(p.split())), None)
         if query_norm in alias_norms:
             hit = aliases[alias_norms.index(query_norm)]
+        else:
+            contained = [a for a, p in zip(aliases, alias_norms) if p and p in query_norm]
+            if contained:
+                hit = max(contained, key=len)
         reasons[name] = hit or " ".join(descriptions.get(name, "").split()[:12])
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    def _rank_key(hit: tuple[float, str]) -> tuple[float, str]:
+        return (-hit[0], hit[1])
+    scored.sort(key=_rank_key)
     ranked: list[dict[str, object]] = [
         {"name": name, "domain": str(TOOL_DISCOVERY[name].get("domain")), "reason": reasons[name]}
         for _, name in scored[:limit]

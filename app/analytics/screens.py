@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from calendar import monthrange
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
 from .. import finra_client
-from ..config import get_data_root
+from ..config import finra_use_mock, get_data_root
 from ..storage import duckdb, parquet
 
 DEFAULT_DATA_ROOT = get_data_root()
@@ -466,6 +467,81 @@ def read_short_interest_screen(
     }
 
 
+_FETCH_DISCOVERY_CYCLES = 6
+
+
+def _candidate_settlement_dates(today: date, count: int = _FETCH_DISCOVERY_CYCLES) -> list[str]:
+    """Newest-first FINRA settlement calendar dates on/before ``today``.
+
+    FINRA publishes mid-month (15th) and month-end cycles, each moved back
+    to Friday when it falls on a weekend.  Probing this calendar (instead
+    of the local store) finds the newest published cycle to full-fetch.
+    """
+    candidates: list[str] = []
+    year, month = today.year, today.month
+    while len(candidates) < count:
+        last_day = monthrange(year, month)[1]
+        for day in (last_day, 15):
+            candidate = date(year, month, day)
+            if candidate.weekday() == 5:  # Saturday -> Friday
+                candidate -= timedelta(days=1)
+            elif candidate.weekday() == 6:  # Sunday -> Friday
+                candidate -= timedelta(days=2)
+            if candidate <= today and str(candidate) not in candidates:
+                candidates.append(str(candidate))
+                if len(candidates) >= count:
+                    break
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+    return candidates
+
+
+def _probe_published_rows(candidate: str) -> int:
+    """1-row FINRA probe: Record-Total tells whether ``candidate`` published."""
+    name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
+    _, _, headers = finra_client.ingestion_post_query(
+        "otcMarket",
+        name,
+        {
+            "limit": 1,
+            "offset": 0,
+            "fields": ["settlementDate"],
+            "compareFilters": [{
+                "compareType": "EQUAL",
+                "fieldName": "settlementDate",
+                "fieldValue": candidate,
+            }],
+        },
+    )
+    try:
+        return int(str(headers.get("record-total", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _discover_latest_published_settlement_date(today: date) -> Optional[str]:
+    """Newest FINRA-published settlement date, newest candidate first.
+
+    Probes are best-effort: a failed probe skips that candidate.  Returns
+    None when no candidate has published rows.
+    """
+    for candidate in _candidate_settlement_dates(today):
+        try:
+            if _probe_published_rows(candidate) > 0:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_live_cycle(settlement_date: str, data_root: Path) -> None:
+    """Full-fetch one settlement cycle into the store (live screens only)."""
+    from ..services import research_data
+
+    research_data.refresh_finra_short_interest(settlement_date, data_root=data_root)
+
+
 def get_short_interest_leaderboard(
     limit: Optional[int] = None,
     settlement_date: Optional[str] = None,
@@ -477,13 +553,39 @@ def get_short_interest_leaderboard(
 
     ``as_of`` defaults to today; pass an explicit as_of for a historical
     screen (only data knowable on/before as_of is used).
+
+    A live screen (no ``as_of``) fetches from FINRA when the store has no
+    usable cycle: with no ``settlement_date`` it discovers the newest
+    published cycle and fetches it; with an explicit ``settlement_date``
+    missing from the store it fetches exactly that date.  A historical
+    screen (explicit ``as_of``) never fetches: fetched rows would carry
+    known_at=now and could never satisfy a past horizon.  Fetch failures
+    surface as ``{"error": ...}``, never raise.
     """
+    live = not as_of
     try:
-        as_of = _resolve_as_of(as_of)
-        target = settlement_date or latest_settlement_date(as_of, data_root)
-        result = materialize_short_interest_screen(target, as_of, data_root=data_root)
+        resolved = _resolve_as_of(as_of)
+        root = Path(data_root) if data_root else get_data_root()
+        if settlement_date is None:
+            try:
+                target = latest_settlement_date(resolved, root)
+            except ValueError:
+                if not live:
+                    raise
+                discovered = _discover_latest_published_settlement_date(date.fromisoformat(resolved))
+                if discovered is None:
+                    raise
+                _fetch_live_cycle(discovered, root)
+                target = discovered
+        else:
+            target = settlement_date
+            if live:
+                rows, conflicting = _snapshot_rows(target, resolved, root)
+                if not rows and not conflicting:
+                    _fetch_live_cycle(target, root)
+        result = materialize_short_interest_screen(target, resolved, data_root=root)
         if "error" not in result:
-            result = read_short_interest_screen(target, as_of, limit, data_root=data_root)
+            result = read_short_interest_screen(target, resolved, limit, data_root=root)
         return result
     except Exception as exc:
         return {"error": f"Short-interest leaderboard is unavailable: {exc}"}

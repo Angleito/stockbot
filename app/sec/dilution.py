@@ -27,11 +27,12 @@ def get_offering_history(
     as_of: str | None = None,
     limit: int | None = 50,
     forms: tuple[str, ...] | list[str] = OFFERING_FORMS,
+    terms_forms: tuple[str, ...] | list[str] | frozenset[str] | set[str] | None = None,
 ) -> list[Offering]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .offerings import get_offering_history as _real
 
-    return _real(ticker_or_cik, as_of=as_of, limit=limit, forms=forms)
+    return _real(ticker_or_cik, as_of=as_of, limit=limit, forms=forms, terms_forms=terms_forms)
 
 
 def get_fundamentals(
@@ -114,7 +115,10 @@ def get_dilution_profile(
     as_of: str | None = None,
 ) -> dict[str, object]:
     try:
-        history: list[Offering] = get_offering_history(ticker_or_cik, as_of=as_of) or []
+        # Shares are only ever read off 424B rows; registration rows need
+        # accessions alone, so skip their live term fetches.
+        history: list[Offering] = get_offering_history(
+            ticker_or_cik, as_of=as_of, terms_forms=_OFFERING_424B_FORMS) or []
     except Exception:
         history = []
     try:
