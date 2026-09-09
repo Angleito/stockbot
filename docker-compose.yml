@@ -1,14 +1,14 @@
-# Stockbot thesis monitor: one parameterized service reusing the stock image.
+# Stockbot thesis monitor: one parameterized service built from the repo Dockerfile.
 # Second thesis: `THESIS_ID=<other-id> docker compose run -e THESIS_ID thesis-monitor`
 # (or copy this service block with a distinct THESIS_ID under `services:`).
 services:
   thesis-monitor:
-    image: python:3.14-slim
+    build: .
+    image: stockbot-thesis-monitor
     working_dir: /app
     volumes:
       - .:/app
       - ${STOCKBOT_DATA_DIR:-./data}:/data
-      - ${THESIS_ROOT:-./thesis}:/thesis
     environment:
       THESIS_ID: ${THESIS_ID:?THESIS_ID required}
       STOCKBOT_DATA_DIR: /data

@@ -16,6 +16,8 @@ from app.config import get_data_root
 
 _EXTENSION = ".pi/extensions/stockbot.ts"
 
+_RECORDER_GRACE_S = 15.0
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -69,7 +71,7 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     out_p = tmp / "out.log"
     err_p = tmp / "err.log"
     done_p = tmp / "done.json"
-    cmd = ["pi", "-p", "--no-session", "--extension", _EXTENSION, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", _EXTENSION, "--", prompt]
     env = dict(os.environ)
     if data_root is not None and str(data_root):
         env["STOCKBOT_DATA_DIR"] = str(data_root)
@@ -95,13 +97,20 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     finally:
         out_f.close()
         err_f.close()
-    # pi -p lingers after answering: completion comes from the recorder DB
-    # (agent_end), never from process exit alone.
+    # pi -p lingers after answering: the recorder DB (agent_end) is the sole
+    # success verdict. done.json is liveness only: a completed done.json
+    # without a completed recorder row fails closed after a short grace.
     deadline = time.monotonic() + timeout_s
+    done_seen_at: float | None = None
     while time.monotonic() < deadline:
-        if _done_complete(done_p) or _run_complete(db_p, run_id):
+        if _run_complete(db_p, run_id):
             break
-        if proc.poll() is not None:
+        if _done_complete(done_p):
+            if done_seen_at is None:
+                done_seen_at = time.monotonic()
+            if time.monotonic() - done_seen_at >= _RECORDER_GRACE_S:
+                break
+        elif proc.poll() is not None:
             break
         time.sleep(min(2.0, max(0.05, deadline - time.monotonic())))
     if proc.poll() is None:
@@ -116,10 +125,14 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     rc = proc.poll()
     # Recorder completion is the verdict; the SIGKILL above is linger cleanup
     # (pi -p stays alive after answering), never failure.
-    if _done_complete(done_p) or _run_complete(db_p, run_id):
+    if _run_complete(db_p, run_id):
         shutil.rmtree(tmp, ignore_errors=True)
         return None
     tail = err_p.read_text()[-2000:] if err_p.is_file() else ""
+    if _done_complete(done_p):
+        raise RuntimeError(
+            f"pi launcher: done.json completed without recorder completion on trigger {trigger_id!r}"
+            f" (thesis {thesis_id!r}); durable run record missing; failing closed (logs: {tmp})")
     if rc is not None and rc != 0:
         raise RuntimeError(
             f"pi launcher: exit {rc} on trigger {trigger_id!r}"

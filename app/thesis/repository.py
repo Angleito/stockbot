@@ -382,8 +382,10 @@ class ThesisRepository:
             earliest = min(s.effective_at for s in snaps)
             raise HistoricalStateUnavailable(
                 f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})")
-        def _snapshot_order(snap: ThesisStateSnapshot) -> tuple[str, int]:
-            return (snap.effective_at, snap.version)
+        def _snapshot_order(snap: ThesisStateSnapshot) -> tuple[datetime, int]:
+            d = _as_dt(snap.effective_at)
+            assert d is not None
+            return (d, snap.version)
         eligible.sort(key=_snapshot_order)
         return eligible[-1]
 

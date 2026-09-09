@@ -181,6 +181,17 @@ def test_same_effective_at_higher_version_wins(tmp_path: Path) -> None:
     assert snap.thesis["scope"] == "second"
 
 
+def test_mixed_offset_snapshot_orders_by_absolute_time(tmp_path: Path) -> None:
+    # "2026-01-02T01:00:00+02:00" (23:00Z Jan 1) sorts lexically after
+    # "2026-01-02T00:30:00+00:00" (00:30Z Jan 2) but is chronologically earlier.
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    r.update_thesis(tid, scope="utc", effective_at="2026-01-02T00:30:00+00:00")
+    r.update_thesis(tid, scope="plus-two", effective_at="2026-01-02T01:00:00+02:00")
+    snap = r.load_state_as_of(tid, T2)
+    assert snap.thesis["scope"] == "utc"
+
+
 def test_legacy_lazy_migration(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
