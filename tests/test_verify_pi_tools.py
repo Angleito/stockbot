@@ -208,7 +208,13 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
             return 0
 
     def _fake_popen(*args: object, **kwargs: object) -> _FakeProc:
-        captured_cmds.append(list(args[0]))  # type: ignore[arg-type]
+        first = args[0]
+        assert isinstance(first, (list, tuple))
+        cmd: list[str] = []
+        for c in first:
+            assert isinstance(c, str)
+            cmd.append(c)
+        captured_cmds.append(cmd)
         env = kwargs.get("env")
         assert isinstance(env, dict)
         captured_envs.append(dict(env))

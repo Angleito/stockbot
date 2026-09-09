@@ -11,6 +11,7 @@ The resolution rules under test:
 - ``provider_instrument_id`` is accepted but does not change the result.
 """
 
+from collections.abc import Callable
 from datetime import date, datetime, timezone, timedelta
 
 from pathlib import Path
@@ -196,7 +197,8 @@ def test_naive_as_of_rejected(data_root: Path) -> None:
 def test_date_as_of_rejected(data_root: Path) -> None:
     _seed_amd(data_root)
     with pytest.raises(TypeError):
-        resolve_security("AMD", as_of=date(2026, 8, 25), data_root=data_root)  # type: ignore[bad-argument-type]  # runtime TypeError guard: date is not a valid as_of
+        _resolve: Callable[..., object] = resolve_security
+        _resolve("AMD", as_of=date(2026, 8, 25), data_root=data_root)  # runtime TypeError guard: date is not a valid as_of
 
 
 def test_newest_alias_wins_chronologically_not_lexically(data_root: Path) -> None:
@@ -390,7 +392,8 @@ def test_pure_naive_as_of_rejected() -> None:
 
 def test_pure_date_as_of_rejected() -> None:
     with pytest.raises(TypeError):
-        resolve_ticker_aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=date(2026, 8, 25))  # type: ignore[bad-argument-type]  # runtime TypeError guard: date is not a valid as_of
+        _aliases: Callable[..., object] = resolve_ticker_aliases
+        _aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=date(2026, 8, 25))  # runtime TypeError guard: date is not a valid as_of
 
 
 def test_pure_aware_non_utc_as_of_compares_chronologically() -> None:

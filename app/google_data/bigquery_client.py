@@ -11,17 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable
 import contextlib
 import hashlib
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows has no flock
-    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TypedDict, cast
+from typing import Optional, TypedDict
 
 import requests  # already a direct dependency (requests==2.34.2)
 
@@ -33,12 +29,8 @@ from ..config import (
     google_source_enabled,
 )
 
-try:
-    from ..config import get_data_root as _get_data_root
-except Exception:  # pragma: no cover - config import never fails in practice
-    _get_data_root = None
-
 SOURCE = "bigquery"
+
 
 # Verified public datasets (Trends daily, patents, ACS wide vintages,
 # Stack Overflow questions; NOAA GSOD year shards via prefix). Column
@@ -280,8 +272,100 @@ TEMPLATES["trends_top"] = TEMPLATES["trends_us_top"]
 TEMPLATES["trends_rising"] = TEMPLATES["trends_us_rising"]
 
 
+_STR_KEYS = ("template", "month", "day", "status", "source", "dataset", "table", "executed_at")
+_INT_KEYS = ("max_bytes", "actual_bytes", "bytes_processed")
+_BOOL_KEYS = ("cache_hit", "success")
+
+
+def _parse_job_entry(value: object, path: Path) -> _JobEntry:
+    if not isinstance(value, dict):
+        raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+    entry: _JobEntry = {}
+    for fk, fv in value.items():
+        if not isinstance(fk, str):
+            raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+        if fk in _STR_KEYS:
+            if not isinstance(fv, str):
+                raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+            if fk == "template":
+                entry["template"] = fv
+            elif fk == "month":
+                entry["month"] = fv
+            elif fk == "day":
+                entry["day"] = fv
+            elif fk == "status":
+                entry["status"] = fv
+            elif fk == "source":
+                entry["source"] = fv
+            elif fk == "dataset":
+                entry["dataset"] = fv
+            elif fk == "table":
+                entry["table"] = fv
+            elif fk == "executed_at":
+                entry["executed_at"] = fv
+        elif fk in _INT_KEYS:
+            if fk == "max_bytes":
+                if not isinstance(fv, int) or isinstance(fv, bool):
+                    raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+                entry["max_bytes"] = fv
+            elif fk == "actual_bytes":
+                if fv is None:
+                    entry["actual_bytes"] = None
+                elif isinstance(fv, int) and not isinstance(fv, bool):
+                    entry["actual_bytes"] = fv
+                else:
+                    raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+            elif fk == "bytes_processed":
+                if fv is None:
+                    entry["bytes_processed"] = None
+                elif isinstance(fv, int) and not isinstance(fv, bool):
+                    entry["bytes_processed"] = fv
+                else:
+                    raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+        elif fk in _BOOL_KEYS:
+            if not isinstance(fv, bool):
+                raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+            if fk == "cache_hit":
+                entry["cache_hit"] = fv
+            elif fk == "success":
+                entry["success"] = fv
+        else:
+            continue
+    return entry
+
+
+def _parse_ledger(data: object, path: Path) -> _Ledger:
+    if not isinstance(data, dict):
+        raise LedgerCorrupt(f"malformed ledger {path}: expected object")
+    jobs_raw = data.get("jobs")
+    months_raw = data.get("months")
+    days_raw = data.get("days", {})
+    if not isinstance(jobs_raw, dict) or not isinstance(months_raw, dict) or not isinstance(days_raw, dict):
+        raise LedgerCorrupt(f"malformed ledger {path}: expected {{jobs, months, days}} dicts")
+    jobs: dict[str, _JobEntry] = {}
+    for k, v in jobs_raw.items():
+        if not isinstance(k, str):
+            raise LedgerCorrupt(f"malformed ledger {path}: bad job entry")
+        jobs[k] = _parse_job_entry(v, path)
+    months: dict[str, int] = {}
+    for k, v in months_raw.items():
+        if not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool):
+            raise LedgerCorrupt(f"malformed ledger {path}: bad month entry")
+        months[k] = v
+    days: dict[str, int] = {}
+    for k, v in days_raw.items():
+        if not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool):
+            raise LedgerCorrupt(f"malformed ledger {path}: bad day entry")
+        days[k] = v
+    return {"jobs": jobs, "months": months, "days": days}
+
+
 def _ledger_path(data_root: Path | str | None = None) -> Path:
-    base = Path(data_root) if data_root else (_get_data_root() if _get_data_root else Path("data"))
+    if data_root:
+        base = Path(data_root)
+    else:
+        from ._lazy_config import get_data_root_or_cwd
+        base = get_data_root_or_cwd()
     return base / "google_data" / "bq_ledger.json"
 
 
@@ -294,18 +378,7 @@ def _load_ledger(path: Path) -> _Ledger:
         data = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise LedgerCorrupt(f"unreadable ledger {path}: {e}") from e
-    if (
-        not isinstance(data, dict)
-        or not isinstance(data.get("jobs"), dict)
-        or not isinstance(data.get("months"), dict)
-    ):
-        raise LedgerCorrupt(f"malformed ledger {path}: expected {{jobs, months}}")
-    if "days" not in data:
-        empty_days: dict[str, int] = {}
-        data["days"] = empty_days
-    if not isinstance(data["days"], dict):
-        raise LedgerCorrupt(f"malformed ledger {path}: expected days dict")
-    return cast(_Ledger, data)
+    return _parse_ledger(data, path)
 
 
 class _LedgerBusy(Exception):
@@ -315,20 +388,22 @@ class _LedgerBusy(Exception):
 @contextlib.contextmanager
 def _ledger_locked(data_root: Path | str | None = None):
     """Serialize ledger load/save/reconcile with flock on <ledger>.lock."""
-    if fcntl is None:  # pragma: no cover - no flock platform: never proceed unlocked
-        raise _LedgerBusy("ledger locking unavailable on this platform")
+    try:
+        import fcntl as _fcntl
+    except ImportError:  # pragma: no cover - no flock platform: never proceed unlocked
+        raise _LedgerBusy("ledger locking unavailable on this platform") from None
     path = _ledger_path(data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path.parent / "bq_ledger.lock", "a+b")  # noqa: PTH123, SIM115
     try:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         except BlockingIOError:
             raise _LedgerBusy("bigquery ledger busy; refusing without reservation") from None
         try:
             yield path
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
     finally:
         fh.close()
 

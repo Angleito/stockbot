@@ -10,20 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from operator import itemgetter
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 
-try:
-    from ..storage import parquet as _parquet
-except ImportError:  # pragma: no cover
-    try:
-        from app.storage import parquet as _parquet  # type: ignore
-    except ImportError:
-        _parquet = None  # type: ignore
+from ._guards import as_dict, as_int, as_list, as_str_list, json_from_text
+from ._lazy_config import get_data_root_or_cwd
 
 STORE_NAME = "signals.jsonl"
 _MIGRATED_MARKER = ".signals_jsonl_migrated"
@@ -53,15 +47,7 @@ def _now_iso() -> str:
 def _resolve_root(data_root: Optional[Path | str] = None) -> Path:
     if data_root:
         return Path(data_root)
-    try:
-        from .. import config as _config  # type: ignore
-        return Path(_config.get_data_root())
-    except Exception:
-        try:
-            from app import config as _config2  # type: ignore
-            return Path(_config2.get_data_root())
-        except Exception:
-            return Path(os.getenv("STOCKBOT_DATA_DIR", "data"))
+    return get_data_root_or_cwd()
 
 
 def _pick(item: dict[str, object], keys: Sequence[str], default: object = None) -> object:
@@ -91,7 +77,7 @@ def _rank_improvement(present: list[dict[str, object]]) -> Optional[int]:
         if rank is None or period is None:
             continue
         try:
-            rank = int(cast("str | int", rank))
+            rank = as_int(rank, what="rank")
         except (TypeError, ValueError):
             continue
         key = (item.get("table") or item.get("source_table"),
@@ -144,18 +130,25 @@ def compute_candidate_features(
     if isinstance(observations, dict):
         blob = observations
         if periods_covered is None:
-            periods_covered = cast("Optional[Sequence[str]]",
-                                   blob.get("periods_covered") or blob.get("covered_periods"))
+            _pc = blob.get("periods_covered") or blob.get("covered_periods")
+            if _pc is not None:
+                periods_covered = as_str_list(_pc, what="periods_covered")
         if geos_covered is None:
-            geos_covered = cast("Optional[Sequence[str]]",
-                                blob.get("geos_covered") or blob.get("covered_geos"))
-        observations = cast("Optional[list[dict[str, object]]]", blob.get("observations", []))
-    rows = [o for o in (observations or []) if isinstance(o, dict)]
+            _gc = blob.get("geos_covered") or blob.get("covered_geos")
+            if _gc is not None:
+                geos_covered = as_str_list(_gc, what="geos_covered")
+        _obs_list = as_list(blob.get("observations", []), what="observations")
+        _filtered: list[dict[str, object]] = []
+        for _o in _obs_list:
+            if isinstance(_o, dict):
+                _filtered.append(as_dict(_o, what="observations"))
+        observations = _filtered
+    rows: list[dict[str, object]] = [o for o in (observations or []) if isinstance(o, dict)]
     for row in rows:
         if periods_covered is None and isinstance(row.get("periods_covered"), list):
-            periods_covered = cast("Sequence[str]", row["periods_covered"])
+            periods_covered = as_str_list(row.get("periods_covered"), what="periods_covered")
         if geos_covered is None and isinstance(row.get("geos_covered"), list):
-            geos_covered = cast("Sequence[str]", row["geos_covered"])
+            geos_covered = as_str_list(row.get("geos_covered"), what="geos_covered")
     covered_periods = (list(periods_covered) if periods_covered
                        else sorted({str(_pick(o, _PERIOD_KEYS)) for o in rows if _pick(o, _PERIOD_KEYS) is not None}))
     covered_geos = (list(geos_covered) if geos_covered
@@ -251,8 +244,7 @@ def normalize_candidate(record: Optional[dict[str, object]] = None, *, table: ob
     signal_id = hashlib.sha256(
         f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
     now = _now_iso()
-    merged_metrics: dict[str, object] = dict(cast("dict[str, object]",
-                                                  record.get("metrics", None) or metrics or {}))
+    merged_metrics: dict[str, object] = dict(as_dict(record.get("metrics", None) or metrics or {}, what="metrics"))
     if rank is not None and "rank" not in merged_metrics:
         merged_metrics["rank"] = rank
     candidate = {
@@ -266,8 +258,8 @@ def normalize_candidate(record: Optional[dict[str, object]] = None, *, table: ob
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
         "metrics": merged_metrics,
-        "entities": record.get("entities", None) if record.get("entities") is not None else cast("list[object]", entities or []),
-        "evidence": record.get("evidence", None) if record.get("evidence") is not None else cast("list[object]", evidence or []),
+        "entities": as_list(record.get("entities", None) if record.get("entities") is not None else entities or [], what="entities"),
+        "evidence": as_list(record.get("evidence", None) if record.get("evidence") is not None else evidence or [], what="evidence"),
         "features": record.get("features", None) if record.get("features") is not None else features,
     }
     if persist:
@@ -320,7 +312,9 @@ def _signal_id_for(table: object, period: object, geo: object, term: object,
 
 
 def _warehouse_records(data_root: Optional[Path | str] = None) -> list[dict[str, object]]:
-    if _parquet is None:
+    try:
+        from ..storage import parquet as _parquet
+    except ImportError:
         return []
     root = _resolve_root(data_root) / "parquet"
     try:
@@ -338,19 +332,27 @@ def migrate_jsonl_once(data_root: Optional[Path | str] = None) -> int:
     root = _resolve_root(data_root) / "google_data"
     store = root / STORE_NAME
     marker = root / _MIGRATED_MARKER
-    if marker.exists() or not store.exists() or _parquet is None:
+    try:
+        from ..storage import parquet as _parquet
+    except ImportError:
         try:
             from . import trends as _trends
         except ImportError:
-            try:
-                from app.google_data import trends as _trends  # type: ignore
-            except ImportError:
-                _trends = None  # type: ignore
-        if _trends is not None:
-            try:
-                _trends.backfill_legacy_feature_rows(data_root)
-            except Exception:
-                pass
+            return 0
+        try:
+            _trends.backfill_legacy_feature_rows(data_root)
+        except Exception:
+            pass
+        return 0
+    if marker.exists() or not store.exists():
+        try:
+            from . import trends as _trends2
+        except ImportError:
+            return 0
+        try:
+            _trends2.backfill_legacy_feature_rows(data_root)
+        except Exception:
+            pass
         return 0
     rows: list[dict[str, object]] = []
     feature_rows: list[dict[str, object]] = []
@@ -421,15 +423,12 @@ def migrate_jsonl_once(data_root: Optional[Path | str] = None) -> int:
         except Exception:
             pass
     try:
-        from . import trends as _trends
+        from . import trends as _trends3
     except ImportError:
+        _trends3 = None
+    if _trends3 is not None:
         try:
-            from app.google_data import trends as _trends  # type: ignore
-        except ImportError:
-            _trends = None  # type: ignore
-    if _trends is not None:
-        try:
-            _trends.backfill_legacy_feature_rows(data_root)
+            _trends3.backfill_legacy_feature_rows(data_root)
         except Exception:
             pass
     try:
@@ -445,14 +444,8 @@ def _record_to_signal(row: dict[str, object]) -> dict[str, object]:
     period = row.get("period") or ""
     geo, term = row.get("geo") or "", row.get("term") or ""
     list_kind = row.get("list_kind") or "top"
-    try:
-        metrics: dict[str, object] = json.loads(cast("str", row.get("metrics_json") or "{}"))
-    except ValueError:
-        metrics = {}
-    try:
-        evidence: list[object] = json.loads(cast("str", row.get("evidence_json") or "[]"))
-    except ValueError:
-        evidence = []
+    metrics: dict[str, object] = as_dict(json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
+    evidence: list[object] = as_list(json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
     collector_version = str(row.get("collector_version") or "1")
     try:
         source_hash = hashlib.sha256(json.dumps(
@@ -472,7 +465,7 @@ def _record_to_signal(row: dict[str, object]) -> dict[str, object]:
         "retrieved_at": row.get("retrieved_at") or "",
         "term": term, "geo": geo, "table": table,
         "list_kind": list_kind, "period": period,
-        "metrics": metrics, "entities": cast("list[object]", []),
+        "metrics": metrics, "entities": [],
         "evidence": evidence, "features": None,
         "collector_version": collector_version, "_source_hash": source_hash,
     }
@@ -513,20 +506,21 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
             latest[sid] = record
             keys[sid] = key
     feature_rows: list[dict[str, object]] = []
-    if _parquet is not None:
+    try:
+        from ..storage import parquet as _parquet_q
+    except ImportError:
+        _parquet_q = None
+    if _parquet_q is not None:
         try:
-            feature_rows = _parquet.read_table(
+            feature_rows = _parquet_q.read_table(
                 "google_signal_features",
                 _resolve_root(data_root) / "parquet").to_pylist()
         except Exception:
             feature_rows = []
     try:
-        from . import trends as _trends
+        from . import trends as _trends_q
     except ImportError:
-        try:
-            from app.google_data import trends as _trends  # type: ignore
-        except ImportError:
-            _trends = None  # type: ignore
+        _trends_q = None
     shaped: dict[str, dict[str, object]] = {}
     for _sid, _rec in latest.items():
         _metrics = _rec.get("metrics")
@@ -548,8 +542,8 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
     for _sid, record in latest.items():
         oid = str(record.get("observation_id") or "")
         by_scope: dict[str, list[dict[str, object]]] = {}
-        if _trends is not None:
-            basis = _trends._series_basis(shaped[_sid])
+        if _trends_q is not None:
+            basis = _trends_q._series_basis(shaped[_sid])
             for frow in feature_rows:
                 if not isinstance(frow, dict):
                     continue
@@ -562,13 +556,10 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
                         continue
                 if cutoff is not None and str(frow.get("calculated_at") or "") > cutoff:
                     continue
-                try:
-                    scope = json.loads(cast("str", frow.get("feature_scope_json") or ""))
-                except ValueError:
-                    continue
+                scope = json_from_text(frow.get("feature_scope_json"), what="feature_scope_json")
                 if not isinstance(scope, dict):
                     continue
-                expected = _trends.expected_inputs_hash(
+                expected = _trends_q.expected_inputs_hash(
                     scope, str(record.get("term") or ""),
                     str(record.get("table") or ""),
                     str(record.get("list_kind") or ""), basis, str(record.get("geo") or ""), candidates)
@@ -582,10 +573,7 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
         available: list[dict[str, object]] = []
         for _hash in sorted(by_scope):
             rep = _pick(by_scope[_hash])
-            try:
-                _scope = json.loads(cast("str", rep.get("feature_scope_json") or ""))
-            except ValueError:
-                continue
+            _scope = json_from_text(rep.get("feature_scope_json"), what="feature_scope_json")
             if not isinstance(_scope, dict):
                 continue
             available.append({
@@ -596,15 +584,9 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
                 "inputs_hash": str(rep.get("inputs_hash") or ""),
             })
         if best is not None:
-            try:
-                decoded = json.loads(cast("str", best.get("features_json") or ""))
-            except ValueError:
-                decoded = None
+            decoded = json_from_text(best.get("features_json"), what="features_json")
             record["features"] = decoded if isinstance(decoded, dict) else None
-            try:
-                scope_decoded = json.loads(cast("str", best.get("feature_scope_json") or ""))
-            except ValueError:
-                scope_decoded = None
+            scope_decoded = json_from_text(best.get("feature_scope_json"), what="feature_scope_json")
             record["feature_scope"] = scope_decoded
             record["feature_scope_hash"] = best.get("feature_scope_hash")
             record["feature_calculated_at"] = best.get("calculated_at")

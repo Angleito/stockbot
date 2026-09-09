@@ -13,18 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 import os
 from datetime import date, datetime, timezone
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
+from ._guards import result_rows
+from ._lazy_config import google_data_enabled
 
 SOURCE = "stackoverflow"
 _TEMPLATE = "stackoverflow_tags"
@@ -41,36 +36,14 @@ _Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
 
 
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
-
-
-def _setting(fn_name: str, env_name: str, default: object = None) -> object:
-    fn = getattr(_config, fn_name, None)
-    if callable(fn):
-        try:
-            value = fn()
-            if value is not None:
-                return value
-        except Exception:
-            pass
-    value = (os.getenv(env_name) or "").strip()
-    return value or default
+    return google_data_enabled()
 
 
 def _submit(template: str, params: dict[str, object], executor: _Executor | None,
             data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
-            try:
-                from . import bigquery_client as _bq
-            except ImportError:
-                from app.google_data import bigquery_client as _bq  # type: ignore
+            from . import bigquery_client as _bq
         except ImportError:
             return {"error": "bigquery client unavailable",
                     "error_type": "source_unavailable", "source": "bigquery"}
@@ -113,8 +86,22 @@ def get_tag_activity(tags: list[str] | str | None, *, start_date: str | None = N
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
-    if not _data_enabled() or not _setting("get_google_cloud_project",
-                                           "GOOGLE_CLOUD_PROJECT"):
+    if not _data_enabled():
+        return {"status": "disabled", "source": SOURCE,
+                "reason": "google data disabled or no BigQuery project"}
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        _cfg = None
+    _project: str | None = None
+    if _cfg is not None:
+        try:
+            _project = _cfg.get_google_cloud_project()
+        except Exception:
+            _project = None
+    if _project is None:
+        _project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+    if not _project:
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     end_date = end_date or datetime.now(timezone.utc).date().isoformat()
@@ -133,7 +120,7 @@ def get_tag_activity(tags: list[str] | str | None, *, start_date: str | None = N
         out["source"] = SOURCE
         return out
     activity: list[dict[str, object]] = []
-    rows = cast(list[object], result.get("rows", []) or [])
+    rows = result_rows(result)
     for row in rows[:limit]:
         if not isinstance(row, dict):
             continue
