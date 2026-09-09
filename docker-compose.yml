@@ -7,10 +7,9 @@ services:
     image: stockbot-thesis-monitor
     working_dir: /app
     volumes:
-      - .:/app
       - ${STOCKBOT_DATA_DIR:-./data}:/data
     environment:
       THESIS_ID: ${THESIS_ID:?THESIS_ID required}
       STOCKBOT_DATA_DIR: /data
-    command: python cli.py thesis monitor ${THESIS_ID:?THESIS_ID required} --interval-seconds ${INTERVAL_SECONDS:-900}
+    command: /app/venv/bin/python cli.py thesis monitor ${THESIS_ID:?THESIS_ID required} --interval-seconds ${INTERVAL_SECONDS:-900}
     restart: unless-stopped
