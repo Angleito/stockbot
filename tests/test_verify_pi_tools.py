@@ -221,6 +221,7 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     durable.mkdir()
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(durable))
     captured_envs: list[dict[str, str]] = []
+    captured_cmds: list[list[str]] = []
 
     class _FakeProc:
         pid = 999999
@@ -230,6 +231,7 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
             return 0
 
     def _fake_popen(*args: object, **kwargs: object) -> _FakeProc:
+        captured_cmds.append(list(args[0]))  # type: ignore[arg-type]
         env = kwargs.get("env")
         assert isinstance(env, dict)
         captured_envs.append(dict(env))
@@ -246,6 +248,14 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     assert captured_envs[1]["STOCKBOT_DATA_DIR"] == str(store2.resolve())
     assert captured_envs[0]["STOCKBOT_DATA_DIR"] != captured_envs[1]["STOCKBOT_DATA_DIR"]
     assert os.environ.get("STOCKBOT_DATA_DIR") == str(durable)
+    assert len(captured_cmds) == 2
+    for cmd in captured_cmds:
+        assert "--exclude-tools" in cmd
+        assert cmd[cmd.index("--exclude-tools") + 1] == "bash,edit,write,powershell"
+        assert cmd.index("--exclude-tools") < cmd.index("--")
+        assert cmd[-1] == "prompt"
+        assert cmd[-2] == "--"
+        assert cmd[:5] == ["pi", "-p", "--no-session", "--extension", v.EXTENSION]
 
 
 def test_get_concurrency_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -386,7 +386,7 @@ def run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = 
     env = dict(os.environ, RUNS_DB_PATH=str(db_path))
     if stockbot_store is not None:
         env["STOCKBOT_DATA_DIR"] = str(stockbot_store.resolve())
-    cmd = ["pi", "-p", "--no-session", "--extension", EXTENSION, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--extension", EXTENSION, "--exclude-tools", "bash,edit,write,powershell", "--", prompt]
     with open(out_log, "w") as out_f, open(err_log, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env, start_new_session=True)
         deadline = time.monotonic() + TIMEOUT_S
