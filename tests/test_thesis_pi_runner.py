@@ -94,14 +94,16 @@ def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str
     return _as_dict(fake.captured)
 
 
-def test_builds_canonical_command_without_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_builds_canonical_command_with_read_only_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cap = _run(monkeypatch, tmp_path, "Do research")
     cmd = _as_list(cap["cmd"])
-    assert cmd[:6] == ["pi", "-p", "--no-session", "--extension",
-                       ".pi/extensions/stockbot.ts", "--"]
-    assert cmd[6] == "Do research"
+    assert cmd[:5] == ["pi", "-p", "--no-session", "--extension",
+                       ".pi/extensions/stockbot.ts"]
+    assert "--exclude-tools" in cmd
+    assert cmd[cmd.index("--exclude-tools") + 1] == "bash,edit,write,powershell"
     assert "--tools" not in cmd
-    assert "--no-builtin-tools" not in cmd
+    assert cmd[-2] == "--"
+    assert cmd[-1] == "Do research"
     assert cap["cwd"] == str(pi_runner._repo_root())
 
 
