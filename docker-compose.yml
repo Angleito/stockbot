@@ -6,6 +6,8 @@ services:
     build: .
     image: stockbot-thesis-monitor
     working_dir: /app
+    env_file:
+      - .env
     volumes:
       - ${STOCKBOT_DATA_DIR:-./data}:/data
     environment:
