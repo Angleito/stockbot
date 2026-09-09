@@ -16,7 +16,9 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -30,9 +32,29 @@ from scripts.verify_tool_registry import get_registry_sets, registry_errors, too
 EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 180
 DEFAULT_REPETITIONS = 3
+DEFAULT_CONCURRENCY = 6
 POLL_S = 2
 THESIS_ID_PLACEHOLDER = "thesis-placeholder"
 THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
+FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
+
+
+def get_concurrency() -> int:
+    """Live Pi parallelism; PI_VERIFY_CONCURRENCY override, fail-closed on bad values."""
+    raw = os.getenv("PI_VERIFY_CONCURRENCY", str(DEFAULT_CONCURRENCY))
+    try:
+        value = int(raw or "")
+    except (ValueError, TypeError):
+        raise ValueError("PI_VERIFY_CONCURRENCY must be an integer >= 1")
+    if value < 1:
+        raise ValueError("PI_VERIFY_CONCURRENCY must be an integer >= 1")
+    return value
+
+
+def attempt_dirs(batch_root: Path, tool: str, attempt: int) -> tuple[Path, Path]:
+    """Per-attempt recorder DB and Stockbot store; keeps attempts mutually isolated."""
+    attempt_dir = batch_root / tool / f"attempt-{attempt}"
+    return attempt_dir / "runs.sqlite", attempt_dir / "store"
 
 
 def ensure_thesis_fixture(store: Path) -> str:
@@ -46,12 +68,6 @@ def ensure_thesis_fixture(store: Path) -> str:
 
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
 
-def setup_isolated_store(root: Path) -> tuple[Path, Path]:
-    """Batch store override; captures durable source first, then replaces env for Pi children."""
-    store = root / "store"
-    durable = get_data_root()
-    os.environ["STOCKBOT_DATA_DIR"] = str(store.resolve())
-    return store, durable
 
 
 def seed_finra_fixture(store: Path, durable: Path) -> None:
@@ -318,7 +334,7 @@ def db_terminal(db_path: Path) -> bool:
         return False
 
 
-def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, bool]:
+def run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
     """Run one Pi attempt. Pi 0.85.0 -p lingers after answering, so outputs go
     to files (never pipes) and completion is detected via the recorder DB;
     the process group is then killed. Returns (exit, timed_out, out, err, saw_complete)."""
@@ -327,6 +343,8 @@ def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, 
     out_log = attempt_dir / f"{attempt_dir.name}.pi.log"
     err_log = attempt_dir / f"{attempt_dir.name}.stderr.log"
     env = dict(os.environ, RUNS_DB_PATH=str(db_path))
+    if stockbot_store is not None:
+        env["STOCKBOT_DATA_DIR"] = str(stockbot_store.resolve())
     cmd = ["pi", "-p", "--no-session", "--extension", EXTENSION, "--", prompt]
     with open(out_log, "w") as out_f, open(err_log, "w") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env, start_new_session=True)
@@ -360,6 +378,65 @@ def run_pi(prompt: str, db_path: Path, cwd: Path) -> tuple[int, bool, str, str, 
     return (code if code is not None else 124), timed_out, out_text, err_text, saw_complete
 
 
+@dataclass
+class AttemptResult:
+    tool: str
+    attempt: int
+    ok: bool
+    reason: str
+    exit: int
+    db: str
+    duration_seconds: float
+    model_config_failed: bool = False
+
+
+def run_matrix(jobs: list[tuple[str, int]], worker: Callable[[str, int], AttemptResult], concurrency: int) -> list[AttemptResult]:
+    """Run every (tool, attempt) through the worker with bounded parallelism."""
+    futures: dict[Future[AttemptResult], tuple[str, int]] = {}
+    results: list[AttemptResult] = []
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        for tool, attempt in jobs:
+            futures[pool.submit(worker, tool, attempt)] = (tool, attempt)
+        for fut in as_completed(futures):
+            tool, attempt = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as exc:
+                results.append(AttemptResult(tool, attempt, False, f"attempt error: {exc}", 124, "", 0.0))
+    def _key(r: AttemptResult) -> tuple[str, int]:
+        return (r.tool, r.attempt)
+    results.sort(key=_key)
+    return results
+
+
+def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, object], batch_root: Path, cwd: Path, durable: Path, repetitions: int) -> AttemptResult:
+    """Own one Pi attempt end to end: isolated store/DB/fixture, then evaluate."""
+    start = time.monotonic()
+    try:
+        db_path, store_dir = attempt_dirs(batch_root, tool, attempt)
+        store_dir.mkdir(parents=True, exist_ok=True)
+        args = dict(base_args)
+        if tool in FINRA_SEED_TOOLS:
+            seed_finra_fixture(store_dir, durable)
+        if tool in THESIS_ID_TOOLS:
+            fixture_id = ensure_thesis_fixture(store_dir.resolve())
+            if args.get("id") == THESIS_ID_PLACEHOLDER:
+                args["id"] = fixture_id
+        prompt = build_attempt_prompt(tool, args, attempt)
+        code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
+        model_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
+        ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete)
+        duration_seconds = time.monotonic() - start
+        return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
+    except Exception as exc:
+        elapsed = time.monotonic() - start
+        try:
+            fallback = str(attempt_dirs(batch_root, tool, attempt)[0])
+        except Exception:
+            fallback = ""
+        return AttemptResult(tool, attempt, False, f"attempt error: {exc}", 124, fallback, elapsed)
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -371,6 +448,11 @@ def main() -> int:
     repetitions = int(os.getenv("PI_VERIFY_REPETITIONS", str(DEFAULT_REPETITIONS))) if debug else DEFAULT_REPETITIONS
     if repetitions < 1:
         print("PI_VERIFY_REPETITIONS must be >= 1", file=sys.stderr)
+        return 1
+    try:
+        concurrency = get_concurrency()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
     sha = git_sha()
@@ -408,47 +490,38 @@ def main() -> int:
         print(f"{exc}", file=sys.stderr)
         return 1
 
+    print(f"Pi verification concurrency: {concurrency}")
+    print(f"Tools: {len(tool_names)}")
+    print(f"Attempts per tool: {repetitions}")
+    print(f"Total Pi attempts: {len(tool_names) * repetitions}")
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     root = Path("data/verify") / batch
     cwd = Path.cwd()
-    # Contain live side effects (e.g. thesis_create) in the batch dir; never
-    # the operator's durable store. run_pi children inherit this env.
-    store, durable = setup_isolated_store(root)
-    if "get_short_interest_leaderboard" in tool_names:
-        seed_finra_fixture(store, durable)
-    if any(t in THESIS_ID_TOOLS for t in tool_names):
-        try:
-            fixture_id = ensure_thesis_fixture(store.resolve())
-        except Exception as exc:
-            print(f"thesis fixture setup failed: {exc}", file=sys.stderr)
-            return 1
-        for t in tool_names:
-            args = case_args.get(t, {})
-            if args.get("id") == THESIS_ID_PLACEHOLDER:
-                args["id"] = fixture_id
-    results: dict[str, list[dict[str, object]]] = {}
-    total = passed = procs = 0
+    # Contain live side effects (e.g. thesis_create) in per-attempt dirs; never
+    # the operator's durable store. Workers set STOCKBOT_DATA_DIR per attempt.
+    durable = get_data_root()
+    jobs = expand_jobs(tool_names, repetitions)
+    verify_start = time.monotonic()
+    def _worker(t: str, n: int) -> AttemptResult:
+        return run_verification_attempt(t, n, case_args[t], root, cwd, durable, repetitions)
+    ordered = run_matrix(jobs, _worker, concurrency)
+    results: dict[str, list[dict[str, object]]] = {t: [] for t in tool_names}
+    total = 0
+    passed = 0
+    for r in ordered:
+        total += 1
+        if r.ok:
+            passed += 1
+        results[r.tool].append({"attempt": r.attempt, "ok": r.ok, "reason": r.reason, "exit": r.exit, "db": r.db, "duration_seconds": r.duration_seconds})
+        print(f"{r.tool} attempt {r.attempt}/{repetitions}: {'PASS' if r.ok else 'FAIL'} ({r.reason}) [{r.duration_seconds:.1f}s]")
+        if r.model_config_failed:
+            print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
+    procs = len(ordered)
     failed_tools: list[str] = []
     for tool in tool_names:
-        results[tool] = []
-        tool_ok = True
-        for n in range(1, repetitions + 1):
-            total += 1
-            procs += 1
-            prompt = build_attempt_prompt(tool, case_args[tool], n)
-            db_path = root / tool / f"attempt-{n}" / "runs.sqlite"
-            code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd)
-            if code != 0 and not saw_complete and "model" in err_text.lower():
-                print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
-            ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete)
-            if ok:
-                passed += 1
-            else:
-                tool_ok = False
-            results[tool].append({"attempt": n, "ok": ok, "reason": reason, "exit": code, "db": str(db_path)})
-            print(f"{tool} attempt {n}/{repetitions}: {'PASS' if ok else 'FAIL'} ({reason})")
-        if tool_ok:
-            for rec in results[tool]:
+        tool_recs = results[tool]
+        if all(rec.get("ok") is True for rec in tool_recs):
+            for rec in tool_recs:
                 try:
                     db_value = rec.get("db")
                     if isinstance(db_value, str):
@@ -458,13 +531,16 @@ def main() -> int:
         else:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
-    coverage = f"{len([t for t in tool_names if all(r['ok'] for r in results[t])])}/{len(tool_names)} tools"
+    passed_tools = len([t for t in tool_names if all(r.get("ok") is True for r in results[t])])
+    coverage = f"{passed_tools}/{len(tool_names)} tools"
+    wall = time.monotonic() - verify_start
     print(f"git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
     print(f"Coverage: {coverage} | processes: {procs} | passed: {passed}/{total}")
+    print(f"Concurrency: {concurrency} | Wall time: {wall:.1f}s")
     print(f"RESULT: {'PASS' if not failed_tools else 'FAIL'}")
     if failed_tools:
         print(f"failed tools: {failed_tools}")
-    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results}
+    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "concurrency": concurrency, "wall_seconds": wall}
     (root / "summary.json").parent.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     return 0 if not failed_tools else 1

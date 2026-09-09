@@ -3,6 +3,8 @@
 import json
 import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -175,31 +177,206 @@ def test_db_terminal(tmp_path: Path):
     assert not v.db_terminal(tmp_path / "missing.sqlite")
 
 
-def test_isolated_store_overrides_preset_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_durable_capture_pure_preset_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     durable = tmp_path / "durable"
     durable.mkdir()
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(durable))
-    root = tmp_path / "batch"
-    store, captured = v.setup_isolated_store(root)
-    assert store == root / "store"
+    before = os.environ.get("STOCKBOT_DATA_DIR")
+    captured = get_data_root()
     assert captured == durable
-    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
-    assert Path(os.environ["STOCKBOT_DATA_DIR"]) != durable.resolve()
+    assert os.environ.get("STOCKBOT_DATA_DIR") == before
+    assert not hasattr(v, "setup_isolated_store")
 
 
-def test_isolated_store_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_durable_capture_expands_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STOCKBOT_DATA_DIR", "~/.stockbot-data")
-    root = tmp_path / "batch"
-    store, captured = v.setup_isolated_store(root)
-    assert captured == Path.home() / ".stockbot-data"
-    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
+    assert get_data_root() == Path.home() / ".stockbot-data"
 
 
-def test_isolated_store_empty_value_falls_back_to_repo_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STOCKBOT_DATA_DIR", "")
-    expected = get_data_root()
-    root = tmp_path / "batch"
-    store, captured = v.setup_isolated_store(root)
-    assert captured == expected
-    assert captured != Path(".")
-    assert Path(os.environ["STOCKBOT_DATA_DIR"]) == store.resolve()
+def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(durable))
+    captured_envs: list[dict[str, str]] = []
+
+    class _FakeProc:
+        pid = 999999
+        def poll(self) -> int | None:
+            return 0
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _fake_popen(*args: object, **kwargs: object) -> _FakeProc:
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        captured_envs.append(dict(env))
+        return _FakeProc()
+
+    monkeypatch.setattr(v.subprocess, "Popen", _fake_popen)
+    batch = tmp_path / "batch"
+    db1, store1 = v.attempt_dirs(batch, "get_fundamentals", 1)
+    db2, store2 = v.attempt_dirs(batch, "get_fundamentals", 2)
+    v.run_pi("prompt", db1, tmp_path, store1)
+    v.run_pi("prompt", db2, tmp_path, store2)
+    assert len(captured_envs) == 2
+    assert captured_envs[0]["STOCKBOT_DATA_DIR"] == str(store1.resolve())
+    assert captured_envs[1]["STOCKBOT_DATA_DIR"] == str(store2.resolve())
+    assert captured_envs[0]["STOCKBOT_DATA_DIR"] != captured_envs[1]["STOCKBOT_DATA_DIR"]
+    assert os.environ.get("STOCKBOT_DATA_DIR") == str(durable)
+
+
+def test_get_concurrency_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PI_VERIFY_CONCURRENCY", raising=False)
+    assert v.get_concurrency() == v.DEFAULT_CONCURRENCY == 6
+    monkeypatch.setenv("PI_VERIFY_CONCURRENCY", "1")
+    assert v.get_concurrency() == 1
+    monkeypatch.setenv("PI_VERIFY_CONCURRENCY", "3")
+    assert v.get_concurrency() == 3
+
+
+def test_get_concurrency_rejects_bad_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    for bad in ("0", "-2", "abc", ""):
+        monkeypatch.setenv("PI_VERIFY_CONCURRENCY", bad)
+        try:
+            v.get_concurrency()
+        except ValueError as exc:
+            assert "PI_VERIFY_CONCURRENCY must be an integer >= 1" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_run_matrix_bounds_concurrency() -> None:
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def worker(tool: str, attempt: int) -> v.AttemptResult:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return v.AttemptResult(tool, attempt, True, "pass", 0, "", 0.0)
+
+    jobs = [(f"tool-{i}", 1) for i in range(12)]
+    results = v.run_matrix(jobs, worker, 6)
+    assert len(results) == 12
+    assert peak <= 6
+    assert peak >= 2
+
+
+def test_run_matrix_completes_all_jobs() -> None:
+    tools = [f"t{i}" for i in range(5)]
+    jobs = v.expand_jobs(tools, 3)
+
+    def worker(tool: str, attempt: int) -> v.AttemptResult:
+        return v.AttemptResult(tool, attempt, True, "pass", 0, "", 0.0)
+
+    results = v.run_matrix(jobs, worker, 6)
+    assert len(results) == 15
+    assert {(r.tool, r.attempt) for r in results} == set(jobs)
+
+
+def test_run_matrix_failure_does_not_cancel_siblings() -> None:
+    jobs = v.expand_jobs(["a", "b"], 3)
+    ran: list[tuple[str, int]] = []
+    ran_lock = threading.Lock()
+
+    def worker(tool: str, attempt: int) -> v.AttemptResult:
+        with ran_lock:
+            ran.append((tool, attempt))
+        if (tool, attempt) == ("a", 1):
+            return v.AttemptResult(tool, attempt, False, "boom", 1, "", 0.0)
+        return v.AttemptResult(tool, attempt, True, "pass", 0, "", 0.0)
+
+    results = v.run_matrix(jobs, worker, 6)
+    assert len(results) == 6
+    assert sorted(ran) == sorted(jobs)
+    assert sum(1 for r in results if not r.ok) == 1
+
+
+def test_two_pass_one_fail_is_tool_failure() -> None:
+    trio = [v.AttemptResult("t", 1, True, "pass", 0, "", 0.0), v.AttemptResult("t", 2, True, "pass", 0, "", 0.0), v.AttemptResult("t", 3, False, "x", 1, "", 0.0)]
+    assert not all(r.ok for r in trio)
+    assert all(r.ok for r in [v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
+
+
+def test_run_matrix_returns_sorted_order() -> None:
+    def worker(tool: str, attempt: int) -> v.AttemptResult:
+        time.sleep(0.03 * (4 - attempt))
+        return v.AttemptResult(tool, attempt, True, "pass", 0, "", 0.0)
+
+    jobs = [("solo", 1), ("solo", 2), ("solo", 3)]
+    results = v.run_matrix(jobs, worker, 3)
+    assert [(r.tool, r.attempt) for r in results] == [("solo", 1), ("solo", 2), ("solo", 3)]
+
+
+def test_attempt_dirs_isolate_db_and_store(tmp_path: Path) -> None:
+    db1, store1 = v.attempt_dirs(tmp_path, "get_fundamentals", 1)
+    db2, store2 = v.attempt_dirs(tmp_path, "get_fundamentals", 2)
+    assert str(db1) != str(db2)
+    assert str(store1) != str(store2)
+    assert db1.parent != db2.parent
+    assert db1.name == db2.name == "runs.sqlite"
+    assert store1.parent == db1.parent and store2.parent == db2.parent
+
+
+def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stores: list[Path] = []
+    prompts: list[str] = []
+    ids = iter(["thesis-1", "thesis-2"])
+
+    def fake_fixture(store: Path) -> str:
+        stores.append(store)
+        return next(ids)
+
+    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        assert stockbot_store is not None
+        prompts.append(prompt)
+        return (0, False, "", "", True)
+
+    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
+        return (True, "pass")
+
+    monkeypatch.setattr(v, "ensure_thesis_fixture", fake_fixture)
+    monkeypatch.setattr(v, "run_pi", fake_run_pi)
+    monkeypatch.setattr(v, "evaluate_attempt", fake_eval)
+    base: dict[str, object] = {"id": v.THESIS_ID_PLACEHOLDER}
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r1 = v.run_verification_attempt("thesis_show", 1, base, batch, tmp_path, durable, 3)
+    r2 = v.run_verification_attempt("thesis_show", 2, base, batch, tmp_path, durable, 3)
+    assert r1.ok and r2.ok
+    assert len(stores) == 2 and stores[0] != stores[1]
+    assert "thesis-1" in prompts[0] and "thesis-2" in prompts[1]
+    assert base == {"id": v.THESIS_ID_PLACEHOLDER}
+
+
+def test_run_matrix_survives_worker_crash() -> None:
+    jobs = [("a", 1), ("a", 2), ("a", 3)]
+
+    def worker(tool: str, attempt: int) -> v.AttemptResult:
+        if attempt == 2:
+            raise RuntimeError("boom")
+        return v.AttemptResult(tool, attempt, True, "pass", 0, "", 0.0)
+
+    results = v.run_matrix(jobs, worker, 3)
+    assert len(results) == 3
+    by_attempt = {r.attempt: r for r in results}
+    assert not by_attempt[2].ok and "boom" in by_attempt[2].reason
+    assert by_attempt[1].ok and by_attempt[3].ok
+
+
+def test_verification_attempt_crash_is_failed_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        raise RuntimeError("pi exploded")
+
+    monkeypatch.setattr(v, "run_pi", boom)
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
+    assert not r.ok and "pi exploded" in r.reason and r.exit == 124
