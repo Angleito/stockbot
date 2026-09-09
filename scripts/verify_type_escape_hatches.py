@@ -3,6 +3,7 @@
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +39,8 @@ def _iter_files(root: Path):
             yield p
 
 
-def scan(root: Path) -> list[str]:
-    found: set[str] = set()
+def scan(root: Path) -> Counter[str]:
+    found: Counter[str] = Counter()
     for path in _iter_files(root):
         try:
             text = path.read_text(encoding="utf-8")
@@ -52,9 +53,9 @@ def scan(root: Path) -> list[str]:
                 continue
             for pat in _PATTERNS:
                 if pat.search(line):
-                    found.add(f"{rel}: {s}")
+                    found[f"{rel}: {s}"] += 1
                     break
-    return sorted(found)
+    return found
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,10 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     current = scan(ROOT)
     if args.update_baseline:
+        lines = sorted(sig for sig, n in current.items() for _ in range(n))
         args.baseline.write_text(
-            "\n".join(current) + ("\n" if current else ""), encoding="utf-8"
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
         )
-        print(f"wrote {len(current)} entries to {args.baseline}")
+        print(f"wrote {len(lines)} entries to {args.baseline}")
         return 0
     if not args.baseline.is_file():
         print(
@@ -75,14 +77,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    known = {
+    known: Counter[str] = Counter(
         line.strip()
         for line in args.baseline.read_text(encoding="utf-8").splitlines()
         if line.strip()
-    }
-    new = [e for e in current if e not in known]
+    )
+    new = sorted(sig for sig, n in current.items() if n > known.get(sig, 0))
     for e in new:
-        print(f"NEW {e}")
+        n = current[e]
+        print(f"NEW {e} x{n} (baseline x{known.get(e, 0)})")
     if new:
         print(
             "remove it, or ask the user to approve --update-baseline",
