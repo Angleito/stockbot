@@ -24,6 +24,8 @@ RUN python -m venv /app/venv \
  && printf '#!/bin/sh\nexec /usr/local/bin/bun /app/node_modules/.bin/pi "$@"\n' > /usr/local/bin/pi \
  && chmod +x /usr/local/bin/pi
 COPY . .
+COPY sandbox/stockbot/synthetic-pi-auth.sh /usr/local/bin/synthetic-pi-auth.sh
+ENTRYPOINT ["/usr/local/bin/synthetic-pi-auth.sh"]
 ENV STOCKBOT_DATA_DIR=/data
 ENV PATH="/app/venv/bin:$PATH"
 RUN pi --help | grep -i builtin

@@ -1,0 +1,45 @@
+# Stockbot Docker Sandbox kit. Runtime is default-deny; only these hosts/ports.
+kind: sandbox
+name: stockbot-runtime
+build:
+  dockerfile: Dockerfile
+credentials:
+  - name: OPENCODE_API_KEY
+    service: opencode-go
+    proxyManaged: true
+    destination: opencode.ai
+    header: "Authorization: Bearer <credential>"
+  - name: openai
+    oauth: true
+env:
+  STOCKBOT_CODEX_ACCOUNT_ID: ""
+  THESIS_ID: ""
+  STOCKBOT_DATA_DIR: /data
+network:
+  mode: deny-all
+  allow:
+    - chatgpt.com:443
+    - opencode.ai:443
+    - www.sec.gov:443
+    - data.sec.gov:443
+    - efts.sec.gov:443
+    - api.finra.org:443
+    - ews.fip.finra.org:443
+    - api.exa.ai:443
+    - agent.robinhood.com:443
+    - query2.finance.yahoo.com:443
+    - fc.yahoo.com:443
+    - www.slickcharts.com:443
+    - api.datacommons.org:443
+    - bigquery.googleapis.com:443
+    - cloudbilling.googleapis.com:443
+    - oauth2.googleapis.com:443
+    - www.googleapis.com:443
+mounts:
+  - type: clone
+    source: .
+    target: /app
+  - type: volume
+    source: stockbot-data
+    target: /data
+# Never mount: $HOME, ~/.ssh, ~/.pi, ~/.config, Docker socket, browser profiles.

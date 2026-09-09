@@ -10,7 +10,6 @@ services:
       - .env
     volumes:
       - ${STOCKBOT_DATA_DIR:-./data}:/data
-      - ${PI_AGENT_DIR:-~/.stockbot/pi-agent}:/root/.pi/agent:rw
     environment:
       THESIS_ID: ${THESIS_ID:?THESIS_ID required}
       STOCKBOT_DATA_DIR: /data
