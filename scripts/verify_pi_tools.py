@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import shutil
 import signal
@@ -83,6 +84,83 @@ def ensure_thesis_fixture(store: Path) -> str:
 
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
 
+
+FINRA_SETTLEMENT_ENV = "PI_VERIFY_SETTLEMENT_DATE"
+FETCH_TOP_SYMBOLS_SQL = (
+    "SELECT symbol_code, MAX(short_position) AS pos FROM short_interest "
+    "WHERE settlement_date = ? GROUP BY symbol_code ORDER BY pos DESC NULLS LAST LIMIT 25"
+)
+_SETTLEMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def missing_finra_datasets(durable: Path) -> list[str]:
+    """Durable FINRA seed datasets absent as directories."""
+    return [n for n in FINRA_SEED_DATASETS if not (durable / "parquet" / n).is_dir()]
+
+
+def fetch_finra_fixture(durable: Path, settlement_date: str) -> None:
+    """Fetch missing durable datasets with the existing refresh functions; writes to durable only."""
+    from app.analytics import screens
+    from app.services import research_data
+    from app.storage import duckdb
+
+    sec = research_data.refresh_sec_tickers(data_root=durable)
+    raw_map = sec.get("ticker_ciks") if isinstance(sec, dict) else None
+    ticker_ciks: dict[str, int] = {}
+    if isinstance(raw_map, dict):
+        for k, v in raw_map.items():
+            if isinstance(k, str) and isinstance(v, int):
+                ticker_ciks[k] = v
+    print(f"verify fetch: tickers={len(ticker_ciks)}")
+    research_data.refresh_finra_short_interest(settlement_date, data_root=durable)
+    rows = duckdb.query(
+        FETCH_TOP_SYMBOLS_SQL,
+        params=[settlement_date],
+        data_root=durable,
+    )
+    symbols = [str(r["symbol_code"]).strip().upper() for r in rows if r.get("symbol_code")]
+    resolved = [(s, ticker_ciks[s]) for s in symbols if s in ticker_ciks]
+    print(f"verify fetch: top={len(symbols)} resolved={len(resolved)} skipped={len(symbols) - len(resolved)}")
+    failed: list[dict[str, object]] = []
+    for sym, cik in resolved:
+        try:
+            research_data.refresh_sec_company_facts(cik, data_root=durable)
+        except Exception as exc:
+            failed.append({"ticker": sym, "cik": cik, "error": f"{type(exc).__name__}: {exc}"})
+    if failed:
+        print(f"verify fetch: failed_enrichments={failed}")
+    confirm = screens.get_short_interest_leaderboard(limit=5, data_root=durable)
+    entries = confirm.get("entries") if isinstance(confirm, dict) else None
+    if not isinstance(confirm, dict) or "error" in confirm or not isinstance(entries, list) or not entries:
+        err = confirm.get("error") if isinstance(confirm, dict) else None
+        raise RuntimeError(
+            f"verify fetch confirmation failed for settlement {settlement_date} "
+            f"(resolved={len(resolved)} failed={len(failed)}): {err or 'zero entries'}"
+        )
+    print(f"verify fetch: confirmed {len(entries)} entries for {settlement_date}")
+
+
+def ensure_finra_fixture(durable: Path, tool_names: list[str]) -> int:
+    """Fetch-once gate for the verify matrix; 0 ok, 1 with stderr on missing date/fetch failure."""
+    if not any(t in FINRA_SEED_TOOLS for t in tool_names):
+        return 0
+    missing = missing_finra_datasets(durable)
+    if not missing:
+        return 0
+    settlement = (os.getenv(FINRA_SETTLEMENT_ENV, "") or "").strip()
+    if not settlement or not _SETTLEMENT_RE.match(settlement):
+        print(
+            f"{FINRA_SETTLEMENT_ENV} is required to fetch missing durable datasets {missing} "
+            f"(e.g. {FINRA_SETTLEMENT_ENV}=2026-08-14)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        fetch_finra_fixture(durable, settlement)
+    except Exception as exc:
+        print(f"verify fetch failed for settlement {settlement}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def seed_finra_fixture(store: Path, durable: Path) -> None:
@@ -515,6 +593,8 @@ def main() -> int:
     # Contain live side effects (e.g. thesis_create) in per-attempt dirs; never
     # the operator's durable store. Workers set STOCKBOT_DATA_DIR per attempt.
     durable = get_data_root()
+    if ensure_finra_fixture(durable, tool_names):
+        return 1
     jobs = expand_jobs(tool_names, repetitions)
     verify_start = time.monotonic()
     def _worker(t: str, n: int) -> AttemptResult:
