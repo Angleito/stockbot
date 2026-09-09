@@ -482,6 +482,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   workflowDetail = `cannot read workflow file ${WORKFLOW_PATH}: ${err instanceof Error ? err.message : String(err)}`;
   console.error(`[stockbot] thesis workflow unreadable: ${workflowDetail}`);
  }
+ // ponytail: self-contained directive (no skill:// ref; pi cannot resolve OMP skill URLs). Full rules live in skill://adhd-output.
+ const ADHD_ALWAYS_ON = "Output shape (always on; off only on \"stop adhd mode\" / \"normal mode\"): first line is a runnable action; numbered steps (max 5, one action each); end with exactly one next action; one concrete time estimate; no `Great question`/`Sure!` opener and no `Hope this helps` closer.";
 
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
@@ -498,7 +500,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      `Stockbot thesis workflow is unavailable (${workflowDetail}). ` +
      "Decline thesis work until the workflow file is restored; do not answer from model knowledge.",
    };
-  if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
+  if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText + "\n\n" + ADHD_ALWAYS_ON };
  });
 
  // --- RESEARCH gate: block anything the bridge did not register ---
