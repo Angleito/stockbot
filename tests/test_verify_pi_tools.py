@@ -380,3 +380,42 @@ def test_verification_attempt_crash_is_failed_attempt(tmp_path: Path, monkeypatc
     durable.mkdir()
     r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
     assert not r.ok and "pi exploded" in r.reason and r.exit == 124
+
+
+def test_expand_jobs_interleaves_repetitions() -> None:
+    assert v.expand_jobs(["a", "b", "c"], 3) == [
+        ("a", 1),
+        ("b", 1),
+        ("c", 1),
+        ("a", 2),
+        ("b", 2),
+        ("c", 2),
+        ("a", 3),
+        ("b", 3),
+        ("c", 3),
+    ]
+
+
+def test_remove_successful_attempt_dirs_prunes_empty_tool_dir(tmp_path: Path) -> None:
+    batch = tmp_path / "batch"
+    recs: list[dict[str, object]] = []
+    for tool in ("tool-ok", "tool-bad"):
+        for attempt in (1, 2, 3):
+            attempt_dir = batch / tool / f"attempt-{attempt}"
+            (attempt_dir / "store").mkdir(parents=True)
+            db = attempt_dir / "runs.sqlite"
+            db.write_text("x")
+            (attempt_dir / "store" / "seed.txt").write_text("y")
+            (attempt_dir / f"attempt-{attempt}.pi.log").write_text("log")
+            (attempt_dir / f"attempt-{attempt}.stderr.log").write_text("err")
+            if tool == "tool-ok":
+                recs.append({"ok": True, "db": str(db)})
+    recs.append({"ok": True, "db": ""})
+    v.remove_successful_attempt_dirs(batch, "tool-ok", recs)
+    assert not (batch / "tool-ok").exists()
+    for attempt in (1, 2, 3):
+        attempt_dir = batch / "tool-bad" / f"attempt-{attempt}"
+        assert (attempt_dir / "runs.sqlite").is_file()
+        assert (attempt_dir / "store" / "seed.txt").is_file()
+        assert (attempt_dir / f"attempt-{attempt}.pi.log").is_file()
+        assert (attempt_dir / f"attempt-{attempt}.stderr.log").is_file()

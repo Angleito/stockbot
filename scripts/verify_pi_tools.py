@@ -56,6 +56,21 @@ def attempt_dirs(batch_root: Path, tool: str, attempt: int) -> tuple[Path, Path]
     attempt_dir = batch_root / tool / f"attempt-{attempt}"
     return attempt_dir / "runs.sqlite", attempt_dir / "store"
 
+def remove_successful_attempt_dirs(batch_root: Path, tool: str, tool_recs: list[dict[str, object]]) -> None:
+    """Delete whole attempt dirs for a fully-successful tool; prune tool dir when empty."""
+    for rec in tool_recs:
+        db_value = rec.get("db")
+        if not isinstance(db_value, str) or not db_value:
+            continue
+        attempt_dir = Path(db_value).parent
+        if not attempt_dir.name.startswith("attempt-"):
+            continue
+        shutil.rmtree(attempt_dir, ignore_errors=True)
+    try:
+        (batch_root / tool).rmdir()
+    except OSError:
+        pass
+
 
 def ensure_thesis_fixture(store: Path) -> str:
     """Create one verification thesis in the batch store; returns its ID."""
@@ -175,7 +190,7 @@ def resolve_arguments(tool: str, schemas: dict[str, dict[str, object]] | None = 
 
 
 def expand_jobs(tool_names: list[str], repetitions: int) -> list[tuple[str, int]]:
-    return [(t, n) for t in tool_names for n in range(1, repetitions + 1)]
+    return [(tool, attempt) for attempt in range(1, repetitions + 1) for tool in tool_names]
 
 
 def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
@@ -521,13 +536,7 @@ def main() -> int:
     for tool in tool_names:
         tool_recs = results[tool]
         if all(rec.get("ok") is True for rec in tool_recs):
-            for rec in tool_recs:
-                try:
-                    db_value = rec.get("db")
-                    if isinstance(db_value, str):
-                        Path(db_value).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            remove_successful_attempt_dirs(root, tool, tool_recs)
         else:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
