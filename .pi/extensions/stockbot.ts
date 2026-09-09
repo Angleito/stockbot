@@ -406,25 +406,58 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  }
  const research = new Set<string>();
 
- for (const entry of bridgeDown ? [] : entries) {
-  const fn = describeFn(entry);
-  if (!fn) continue;
-  research.add(fn.name);
-  const cardSpec = CARD_TOOLS[fn.name];
-  pi.registerTool({
-   name: fn.name,
-   label: fn.name,
-   description: fn.description,
-   parameters: Type.Unsafe(fn.parameters),
-   async execute(toolCallId, params) {
-    toolCalls++;
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+for (const entry of bridgeDown ? [] : entries) {
+ const fn = describeFn(entry);
+ if (!fn) continue;
+ research.add(fn.name);
+ const cardSpec = CARD_TOOLS[fn.name];
+ // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
+ // the system prompt when an active tool carries it) and activates matches.
+ const isSearch = fn.name === "search_tools";
+ pi.registerTool({
+  name: fn.name,
+  label: fn.name,
+  description: fn.description,
+  parameters: Type.Unsafe(fn.parameters),
+  ...(isSearch
+   ? {
+     promptSnippet: "Search for additional tools when the active tools cannot perform the task",
+     promptGuidelines: ["Use search_tools when a task requires a capability that is not currently available."],
+    }
+   : {}),
+  async execute(toolCallId, params) {
+   toolCalls++;
+   const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+   if (isSearch) {
+   const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
+   const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
+   const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
+   const matches = (Array.isArray(raw) ? raw : [])
+    .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
+    .filter((n) => research.has(n))
+    .slice(0, 4);
+    const active = pi.getActiveTools();
+    const added = matches.filter((n) => !active.includes(n));
+    if (added.length) pi.setActiveTools([...new Set([...active, ...added])]);
+    const query = (params as Json).query;
+    const text =
+     matches.length === 0
+      ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}`
+      : added.length
+        ? `Activated ${added.length} tools: ${added.join(", ")}`
+        : `Matching tools already active: ${matches.join(", ")}`;
     refreshStatus(lastCtx);
     return {
-     content: [{ type: "text", text: bridgeModelText(bridge) }],
+     content: [{ type: "text", text }],
      details: bridge,
     };
-   },
+   }
+   refreshStatus(lastCtx);
+   return {
+    content: [{ type: "text", text: bridgeModelText(bridge) }],
+    details: bridge,
+   };
+  },
    renderCall: cardSpec
     ? (args, theme) => {
      // Pi validates params against the schema before render.
@@ -541,6 +574,9 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
+  // Deferred loading: start with built-ins + search_tools only; searches
+  // activate matches additively. research.size still counts registered tools.
+  pi.setActiveTools([...new Set([...pi.getActiveTools().filter((n) => !research.has(n) || n === "search_tools"), "search_tools"])]);
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {

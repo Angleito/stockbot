@@ -95,6 +95,33 @@ test("uuid protocol carries checked search_tools text", async () => {
 		await proc.exited;
 	}
 });
+test("search_tools bridge response carries structured match names", async () => {
+	// Regression: the gateway once rendered matches to text-only content, so the
+	// extension parsed zero names and answered "No tools found". The TS
+	// activation path reads result.meta.matches; pin it here against the real bridge.
+	const dir = mkdtempSync(join(tmpdir(), "pi-ext-"));
+	const proc = Bun.spawn([`${ROOT}/venv/bin/python`, `${ROOT}/scripts/pi_bridge.py`], {
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "ignore",
+		env: { ...process.env, RUNS_DB_PATH: join(dir, "runs.sqlite") },
+	});
+	const { send, readLine } = makeBridge(proc);
+	try {
+		const runId = crypto.randomUUID();
+		send({ id: crypto.randomUUID(), op: "pi_event", run_id: runId, event: "agent_start" });
+		await readLine();
+		send(toolCallRequest(crypto.randomUUID(), runId, "call-1", "search_tools", { query: "insider sale" }));
+		const res = await readLine();
+		expect(res.error).toBeUndefined();
+		const result = res.result as Json;
+		const meta = (result as Record<string, unknown>).meta as Record<string, unknown>;
+		expect([...(meta.matches as string[])].sort()).toEqual(["get_insider_activity", "get_planned_insider_sales"]);
+	} finally {
+		proc.stdin.end();
+		await proc.exited;
+	}
+});
 
 test("concurrent tool calls correlate by id, not arrival order", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-ext-"));

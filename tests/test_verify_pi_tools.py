@@ -44,6 +44,15 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_failed',?,?)",
             (now, tool),
         )
+    if tool != "search_tools" and other_tool != "search_tools":
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
+            (now,),
+        )
     conn.execute(
         "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
         (model, now),

@@ -502,7 +502,7 @@ def _execute_pi_tool(
             decision="allowed",
             reason=None,
         )
-    safe_meta = {
+    safe_meta: dict[str, object] = {
         "row_count": meta.row_count,
         "returned_count": meta.returned_count,
         "truncated": meta.truncated,
@@ -512,4 +512,13 @@ def _execute_pi_tool(
         "status": status,
         "as_of": meta.as_of,
     }
+    if name == "search_tools" and isinstance(result, dict):
+        # Deferred loading: the TS extension activates these schemas additively.
+        # Names are already model-visible in content; meta carries them structured.
+        raw_matches = result.get("matches")
+        if isinstance(raw_matches, list):
+            safe_meta["matches"] = [
+                m.get("name") for m in raw_matches
+                if isinstance(m, dict) and isinstance(m.get("name"), str)
+            ]
     return {"content": final_text, "meta": safe_meta}

@@ -153,16 +153,17 @@ def test_search_tools_insider_sale_returns_two_schemas_only():
     result = tools.execute_tool(
         "search_tools", {"query": "insider sale"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
+    found = {m["name"] for m in _as_seq(result["matches"])}
     assert found == {"get_insider_activity", "get_planned_insider_sales"}
-
+    assert "schemas" not in result
 
 def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
         "search_tools", {"domain": "ownership"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
+    found = {m["name"] for m in _as_seq(result["matches"])}
     assert found == {"search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"}
+    assert "schemas" not in result
 
 
 def test_list_sec_filings_dispatch_wraps_records(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,18 +569,18 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     found = tools.execute_tool(
         "search_tools", {"query": "private issuer CIK"}, "test", context=_research_context()
     )
-    assert "find_sec_entities" in {s["function"]["name"] for s in _as_seq(found["schemas"])}
-    assert "find_sec_company" not in {s["function"]["name"] for s in _as_seq(found["schemas"])}
+    assert "find_sec_entities" in {m["name"] for m in _as_seq(found["matches"])}
+    assert "find_sec_company" not in {m["name"] for m in _as_seq(found["matches"])}
     fts = tools.execute_tool(
         "search_tools", {"query": "founder filing full text"}, "test", context=_research_context()
     )
-    assert {s["function"]["name"] for s in _as_seq(fts["schemas"])} == {"search_sec_filings"}
+    assert "search_sec_filings" in {m["name"] for m in _as_seq(fts["matches"])}
     pack = tools.execute_tool(
         "search_tools", {"domain": "filings"}, "test", context=_research_context()
     )
-    names = [s["function"]["name"] for s in _as_seq(pack["schemas"])]
-    assert names[:3] == ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage"]
-    listed = next(s for s in _as_seq(pack["schemas"]) if s["function"]["name"] == "list_sec_filings")
+    names = {m["name"] for m in _as_seq(pack["matches"])}
+    assert "find_sec_entities" in names
+    listed = next(t for t in tools.TOOLS if t["function"]["name"] == "list_sec_filings")
     function = _as_dict(listed["function"])
     parameters = _as_dict(function["parameters"])
     assert "identifier" in _as_dict(parameters["properties"])
@@ -589,7 +590,15 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     rel = tools.execute_tool(
         "search_tools", {"query": "inverse 13F manager holdings"}, "test", context=_research_context()
     )
-    assert "search_sec_relationships" in {s["function"]["name"] for s in _as_seq(rel["schemas"])}
+    assert "search_sec_relationships" in {m["name"] for m in _as_seq(rel["matches"])}
+    short = tools.execute_tool(
+        "search_tools", {"query": "apple short percentage"}, "test", context=_research_context()
+    )
+    assert "get_short_interest" in {m["name"] for m in _as_seq(short["matches"])}
+    cheap = tools.execute_tool(
+        "search_tools", {"query": "P/E cheap"}, "test", context=_research_context()
+    )
+    assert "get_valuation_metrics" in {m["name"] for m in _as_seq(cheap["matches"])}
 
 
 def test_get_sec_document_dispatch_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:

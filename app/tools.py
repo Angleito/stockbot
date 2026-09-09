@@ -93,9 +93,9 @@ TOOLS: list[dict[str, object]] = [
                 "dividends, balance sheet line item, shares outstanding) for a ticker. "
                 "Note: shares_outstanding is SEC-reported shares outstanding, "
                 "not public float. Call this for any request for a specific "
-                "numeric metric. Dividends responses include last paid and next "
-                "SEC-declared (upcoming) dividends with filing provenance; "
-                "undeclared estimates are never included.",
+                "numeric metric. When presenting EPS, show basic and diluted EPS side by side in a markdown table "
+                "with period, basic EPS, and diluted EPS columns, including TTM for both when available. Dividends responses include last paid and next "
+                "SEC-declared (upcoming) dividends with filing provenance; undeclared estimates are never included. Render past, present, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED. Dividend metrics are tool-computed; interpret, never recalculate.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -242,7 +242,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_sec_document",
-            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history.",
+            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history. For earnings, guidance, or material events, call get_material_events first, then retrieve the cited accession here.",
             "parameters": {
                 "type": "object",
                 "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
@@ -266,7 +266,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_material_events",
-            "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions before loading raw filings.",
+            "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions before loading raw filings. Follow the incremental chain: events, then the latest 8-K document, insider activity, >5% holder changes, financing/dilution, and financial changes; never load full history.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -278,7 +278,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_beneficial_ownership",
-            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose.",
+            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -290,7 +290,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_ownership_changes",
-            "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes.",
+            "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes. Use for stake changes; use get_beneficial_ownership for current 5%+ stakes.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -302,7 +302,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_insider_activity",
-            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling.",
+            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider transactions; use get_planned_insider_sales for planned (Form 144) sales.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -326,7 +326,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_offering_history",
-            "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated.",
+            "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated. Pair with get_dilution_profile for financing/dilution work.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -338,7 +338,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_dilution_profile",
-            "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable.",
+            "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable. Pair with get_offering_history for financing/dilution work.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}},
@@ -386,10 +386,14 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            "description": "Find the right tool first: keyword search over tool names, descriptions, and domain tags. Call this when unsure which tool fits; it returns only matching schemas.",
+            "description": "Search for relevant Stockbot tools first when the active tools cannot perform the task; returns ranked matches the harness activates.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}, "domain": {"type": "string", "description": "Browse a domain pack: filings, ownership, insider, offerings, events, governance, transactions, market."}},
+                "properties": {
+                    "query": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 4},
+                },
                 "required": list[str]()
             }
         }
@@ -552,7 +556,7 @@ TOOLS: list[dict[str, object]] = [
                 "ago). Call for analyst estimates, price targets, consensus "
                 "expectations, forward growth, or valuation-vs-consensus "
                 "questions. Consensus moves daily; the response includes the "
-                "as-of timestamp.",
+                "as-of timestamp. Always state the as-of date.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -593,7 +597,7 @@ TOOLS: list[dict[str, object]] = [
                 "commitments, cloud commitments, lease obligations, "
                 "guarantees, or any 'what is the company obligated to pay "
                 "in the future' question. Contingent items are NOT counted "
-                "in adjusted EPS.",
+                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -616,7 +620,7 @@ TOOLS: list[dict[str, object]] = [
                 "terminable, or default-triggered). The per-share obligation "
                 "drag is shown explicitly. Use for 'is the stock cheap', "
                 "P/E, forward earnings, or obligation-adjusted valuation "
-                "questions. Never present the stress scenario as 'adjusted'.",
+                "questions. Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -785,7 +789,7 @@ TOOLS: list[dict[str, object]] = [
                 "specific questions. For unfamiliar datasets: list_finra_datasets "
                 "→ describe_finra_dataset → query_finra with a bounded limit. "
                 "Use get_finra_datapoints only when the user explicitly asks "
-                "to see exact source values.",
+                "to see exact source values. For more records, paginate with offset using the returned next_offset/may_have_more indicators. If a result is flagged stale or historical (newest date older than 90 days), say so explicitly and never present it as current market data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -976,7 +980,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Current qualitative evidence from the web (news, announcements, competitive/industry developments, management commentary, publications, specialist commentary, counterevidence) with bounded highlights. NOT a source for exact financial facts, portfolio state, historical point-in-time facts, mandate calculations, or deterministic screens — use the canonical SEC/FINRA/Robinhood/local-warehouse tools for those.",
+            "description": "Current qualitative evidence from the web (news, announcements, competitive/industry developments, management commentary, publications, specialist commentary, counterevidence) with bounded highlights. NOT a source for exact financial facts, portfolio state, historical point-in-time facts, mandate calculations, or deterministic screens — use the canonical SEC/FINRA/Robinhood/local-warehouse tools for those. Distinguish published_at from retrieved_at and never claim historical completeness. Never use for market-wide screening; deterministic screens generate candidates first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1982,72 +1986,284 @@ def _wrap_list(identifier: object, records: object, key: str) -> dict[str, objec
     return {"subject": identifier, "count": len(items), key: items, "source": "SEC EDGAR"}
 
 
-# search_tools catalog: name -> (domain, keyword tags). New tools add one
-# line here; prompts never change.
-_SEC_TOOL_TAGS = {
-    "find_sec_entities": ("filings", "entity CIK ticker company issuer verify identity private no-ticker former name ambiguous exhaustive"),
-    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain security mention filer coverage search forms accession exhaustive relationship backfill"),
-    "search_sec_relationships": ("ownership", "relationships beneficial owner 13D 13G holding manager 13F insider issuer verified mention inverse transaction offering party"),
-    "get_sec_search_coverage": ("filings", "coverage backfill jobs ledger partitions complete partial queued failed search persistence"),
-    "list_sec_filings": ("filings", "list filings forms 10-K 10-Q 8-K discovery accession"),
-    "get_sec_filing": ("filings", "filing record accession metadata filed known amendment"),
-    "list_sec_documents": ("filings", "documents exhibits attachments list accession"),
-    "get_sec_document": ("filings", "document text read MD&A risk factors business primary exhibit"),
-    "diff_sec_filings": ("filings", "diff compare change amendment prior risk factors"),
-    "get_material_events": ("events", "material events changed new earnings bankruptcy 8-K since"),
-    "get_beneficial_ownership": ("ownership", "beneficial ownership 13D 13G holder stake percent activist passive"),
-    "get_ownership_changes": ("ownership", "ownership change holder stake increase decrease activist"),
-    "get_insider_activity": ("insider", "insider purchase sale transactions Form 4 open market"),
-    "get_planned_insider_sales": ("insider", "planned insider sale Form 144 proposed notice"),
-    "get_offering_history": ("offerings", "offering registration S-1 S-3 prospectus financing shelf"),
-    "get_dilution_profile": ("offerings", "dilution shares offering ATM convertible warrant"),
-    "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
-    "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
-    "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
-    "find_alternative_signals": ("alternative", "trends discovery candidate signal persistence diffusion social arbitrage term geography"),
-    "get_trend_evidence": ("alternative", "trends evidence term geography rank list retrieval batch"),
-    "investigate_social_arbitrage_candidate": ("alternative", "social arbitrage candidate evidence entity exposure gap youtube corroboration"),
-    "get_macro_context": ("macro", "datacommons macro census geography statistical variable observation facet provider unit"),
-    "search_company_patents": ("patents", "patents publication assignee classification publication count assignee alias"),
+# search_tools discovery registry: name -> domain + alias phrases. New tools
+# add one entry here; prompts never change.
+TOOL_DISCOVERY: dict[str, dict[str, object]] = {
+    "get_fundamentals": {
+        "domain": "fundamentals",
+        "aliases": ["eps", "earnings per share", "revenue metric", "balance sheet item", "shares outstanding", "dividend", "declared dividend", "net income metric", "ttm eps"],
+    },
+    "find_sec_entities": {
+        "domain": "filings",
+        "aliases": ["company lookup", "cik lookup", "ticker lookup", "private issuer", "issuer identity", "former company name", "no ticker registrant", "verify company", "entity search"],
+    },
+    "search_sec_filings": {
+        "domain": "filings",
+        "aliases": ["filing full text", "founder filings", "full text search", "efts search", "mention search", "filer search", "accession discovery", "exhaustive filing search", "8k filing search"],
+    },
+    "search_sec_relationships": {
+        "domain": "ownership",
+        "aliases": ["13f holdings", "manager holdings", "inverse holdings", "beneficial owners", "13d owners", "transaction parties", "offering participants", "ownership links"],
+    },
+    "get_sec_search_coverage": {
+        "domain": "filings",
+        "aliases": ["coverage ledger", "backfill status", "ingestion status", "search persistence", "partition coverage"],
+    },
+    "list_sec_filings": {
+        "domain": "filings",
+        "aliases": ["ticker cik lookup", "recent 10k 10q", "8k list", "accession list", "edgar list"],
+    },
+    "get_sec_filing": {
+        "domain": "filings",
+        "aliases": ["accession record", "filer form date", "amendment link", "primary document record"],
+    },
+    "list_sec_documents": {
+        "domain": "filings",
+        "aliases": ["exhibit list", "accession exhibits", "attachment list", "document index"],
+    },
+    "get_sec_document": {
+        "domain": "filings",
+        "aliases": ["bounded excerpt", "primary document window", "mda section", "risk factors section", "business section", "exhibit excerpt"],
+    },
+    "diff_sec_filings": {
+        "domain": "filings",
+        "aliases": ["amendment diff", "compare versions", "risk factor changes", "redline amendment"],
+    },
+    "get_material_events": {
+        "domain": "events",
+        "aliases": ["8k events", "what changed", "whats new company", "bankruptcy event", "earnings event", "material change"],
+    },
+    "get_beneficial_ownership": {
+        "domain": "ownership",
+        "aliases": ["5 percent holder", "activist stake", "13d holder", "passive 13g", "block holder", "percent owned"],
+    },
+    "get_ownership_changes": {
+        "domain": "ownership",
+        "aliases": ["stake increase", "stake decrease", "holder share change", "13d amendment change", "activist exit", "position change"],
+    },
+    "get_insider_activity": {
+        "domain": "insider",
+        "aliases": ["insider sale", "insider purchase", "form 4", "open market sale", "executive trades", "section 16", "insider transactions"],
+    },
+    "get_planned_insider_sales": {
+        "domain": "insider",
+        "aliases": ["planned insider sale", "form 144", "proposed sale", "planned executive sale", "insider selling plan"],
+    },
+    "get_offering_history": {
+        "domain": "offerings",
+        "aliases": ["s-1 offering", "s-3 shelf", "prospectus terms", "424b offering", "follow on offering", "ipo registration", "financing history"],
+    },
+    "get_dilution_profile": {
+        "domain": "offerings",
+        "aliases": ["dilution math", "atm dilution", "convertible dilution", "warrant overhang", "share count impact", "offering dilution"],
+    },
+    "get_governance_events": {
+        "domain": "governance",
+        "aliases": ["proxy vote", "def 14a", "shareholder meeting", "board compensation", "say on pay", "contested election", "governance record"],
+    },
+    "get_transaction_status": {
+        "domain": "transactions",
+        "aliases": ["merger status", "tender offer", "acquisition target", "s-4 merger", "14d-9 recommendation", "deal status", "buyout status"],
+    },
+    "get_short_pressure_profile": {
+        "domain": "market",
+        "aliases": ["short pressure", "squeeze positioning", "short ratio", "positioning context", "shares outstanding ratio"],
+    },
+    "get_recent_ownership_filings": {
+        "domain": "events",
+        "aliases": ["latest 13d", "recent 13g", "new activist stakes", "big investor alerts", "sc 13d feed", "latest block holders"],
+    },
+    "diff_risk_factors": {
+        "domain": "filings",
+        "aliases": ["risk factor diff", "what changed risks", "new risk language", "risk disclosure changes"],
+    },
+    "get_financial_statements": {
+        "domain": "fundamentals",
+        "aliases": ["income statement", "balance sheet", "cash flow statement", "10k statements", "10q statements", "annual report financials"],
+    },
+    "get_xbrl_facts": {
+        "domain": "fundamentals",
+        "aliases": ["xbrl fact", "revenue xbrl", "net income", "total debt", "shareholder equity", "tagged financial data"],
+    },
+    "get_short_interest": {
+        "domain": "finra",
+        "aliases": ["short interest", "short float", "days to cover", "short position", "short percentage", "consolidated short interest", "ticker short data"],
+    },
+    "get_short_interest_leaderboard": {
+        "domain": "finra",
+        "aliases": ["short leaderboard", "most shorted stocks", "highest short percentage", "crowded shorts", "short interest ranking", "heavily shorted"],
+    },
+    "get_reg_sho_volume": {
+        "domain": "finra",
+        "aliases": ["reg sho volume", "short sale volume", "short exempt volume", "daily short volume", "sho data"],
+    },
+    "get_threshold_securities": {
+        "domain": "finra",
+        "aliases": ["threshold list", "reg sho threshold", "fails to deliver", "rule 4320", "otc threshold", "naked short list"],
+    },
+    "get_analyst_estimates": {
+        "domain": "analyst",
+        "aliases": ["price target", "consensus estimates", "analyst rating", "forward growth", "earnings estimates", "recommendation trend", "eps revisions"],
+    },
+    "get_sp500_weight": {
+        "domain": "market",
+        "aliases": ["sp500 weight", "index weight", "percent of index", "s&p 500 membership", "constituent weight"],
+    },
+    "get_obligations": {
+        "domain": "fundamentals",
+        "aliases": ["purchase obligations", "lease commitments", "contractual commitments", "contingent obligations", "supply commitments", "cloud commitments", "guarantees"],
+    },
+    "get_valuation_metrics": {
+        "domain": "valuation",
+        "aliases": ["pe ratio", "trailing pe", "forward pe", "cheap stock", "undervalued stock", "earnings multiple", "price earnings", "obligation adjusted eps", "is the stock cheap"],
+    },
+    "search_web": {
+        "domain": "web",
+        "aliases": ["breaking news", "press announcements", "management commentary", "industry developments", "competitive news", "web evidence", "recent headlines"],
+    },
+    "find_alternative_signals": {
+        "domain": "alternative",
+        "aliases": ["trend discovery", "rising search terms", "candidate signals", "social arbitrage screen", "diffusion signals"],
+    },
+    "get_trend_evidence": {
+        "domain": "alternative",
+        "aliases": ["trend evidence", "google trends", "rising queries", "term geography", "top lists"],
+    },
+    "investigate_social_arbitrage_candidate": {
+        "domain": "alternative",
+        "aliases": ["social arbitrage", "youtube corroboration", "entity exposure gap", "candidate enrichment", "viral price gap"],
+    },
+    "get_macro_context": {
+        "domain": "macro",
+        "aliases": ["census data", "macro variables", "datacommons observations", "geography facet", "statistical series", "unemployment rate", "inflation data"],
+    },
+    "search_company_patents": {
+        "domain": "patents",
+        "aliases": ["patent search", "assignee patents", "publication count", "patent classifications", "company inventions"],
+    },
+    "list_finra_datasets": {
+        "domain": "finra",
+        "aliases": ["finra catalog", "dataset list", "filing cabinet", "available finra data", "which finra dataset"],
+    },
+    "describe_finra_dataset": {
+        "domain": "finra",
+        "aliases": ["dataset fields", "finra schema", "field definitions", "filter values", "dataset metadata"],
+    },
+    "get_finra_datapoints": {
+        "domain": "finra",
+        "aliases": ["exact datapoints", "settlement date values", "last five values", "field values", "source values"],
+    },
+    "query_finra": {
+        "domain": "finra",
+        "aliases": ["finra query", "dataset briefing", "trend briefing", "coverage metrics", "min max median"],
+    },
+    "thesis_create": {
+        "domain": "thesis",
+        "aliases": ["create thesis", "investment thesis", "thesis proposal", "start thesis", "thesis setup"],
+    },
+    "thesis_show": {
+        "domain": "thesis",
+        "aliases": ["show thesis", "read thesis", "thesis status", "thesis assessment"],
+    },
+    "thesis_refine": {
+        "domain": "thesis",
+        "aliases": ["refine thesis", "update thesis", "thesis clarification", "revise thesis"],
+    },
+    "thesis_watch": {
+        "domain": "thesis",
+        "aliases": ["watch rule", "thesis alerts", "add monitor", "thesis trigger"],
+    },
+    "thesis_journal": {
+        "domain": "thesis",
+        "aliases": ["thesis notes", "operator note", "journal entry", "thesis log"],
+    },
 }
 
-_SEC_DOMAIN_PACKS = {
-    "filings": ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage", "list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
-    "events": ["get_material_events"],
-    "ownership": ["search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"],
-    "insider": ["get_insider_activity", "get_planned_insider_sales"],
-    "offerings": ["get_offering_history", "get_dilution_profile"],
-    "governance": ["get_governance_events"],
-    "transactions": ["get_transaction_status"],
-    "market": ["get_short_pressure_profile"],
-}
+
+def _normalize_discovery_text(value: str) -> list[str]:
+    """Lowercase, de-punctuate, and de-pluralize discovery text into tokens."""
+    lowered = value.lower().replace("p/e", "pe").replace("13-d", "13d")
+    cleaned = "".join(c if c.isalnum() or c == " " else " " for c in lowered)
+    collapsed = " ".join(cleaned.split()).replace("10 k", "10k")
+    tokens: list[str] = []
+    for token in collapsed.split():
+        if len(token) > 3:
+            if token.endswith("ies"):
+                token = token[:-3] + "y"
+            elif token.endswith("s"):
+                token = token[:-1]
+        tokens.append(token)
+    return tokens
 
 
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
-    """Keyword search over tool names, descriptions, and domain tags."""
+    """OR/scored ranking over tool names, aliases, and descriptions."""
     del model
-    query = str(args.get("query") or "").strip().lower()
-    domain = str(args.get("domain") or "").strip().lower()
-    by_name: dict[str, dict[str, object]] = {}
+    query = str(args.get("query") or "")
+    domain = str(args.get("domain") or "").strip().lower() or None
+    try:
+        limit = int(str(args.get("limit", 4)))
+    except (TypeError, ValueError):
+        limit = 4
+    limit = max(1, min(4, limit))
+    descriptions: dict[str, str] = {}
     for tool in TOOLS:
         fn = _tool_function(tool)
         raw_name = fn.get("name")
         if isinstance(raw_name, str):
-            by_name[raw_name] = tool
-    if domain and not query:
-        names = _SEC_DOMAIN_PACKS.get(domain, [])
-        return {"domain": domain, "schemas": [by_name[n] for n in names if n in by_name]}
-    tokens = query.split()
-    matches: list[dict[str, object]] = []
-    for name, tool in by_name.items():
-        if name == "search_tools":
+            descriptions[raw_name] = str(fn.get("description") or "")
+    if domain and not query.strip():
+        names = sorted(name for name, entry in TOOL_DISCOVERY.items() if str(entry.get("domain")) == domain)
+        matches: list[dict[str, object]] = [
+            {
+                "name": name,
+                "domain": str(TOOL_DISCOVERY[name].get("domain")),
+                "reason": " ".join(descriptions.get(name, "").split()[:12]),
+            }
+            for name in names[:limit]
+        ]
+        return {"query": query, "domain": domain, "matches": matches, "count": len(matches)}
+    query_tokens = set(_normalize_discovery_text(query))
+    query_norm = " ".join(_normalize_discovery_text(query))
+    scored: list[tuple[int, str]] = []
+    reasons: dict[str, str] = {}
+    for name, entry in TOOL_DISCOVERY.items():
+        entry_domain = str(entry.get("domain"))
+        raw_aliases = entry.get("aliases")
+        aliases: list[str] = [str(a) for a in raw_aliases] if isinstance(raw_aliases, list) else []
+        alias_norms = [" ".join(_normalize_discovery_text(a)) for a in aliases]
+        alias_words = {word for phrase in alias_norms for word in phrase.split()}
+        name_words = set(_normalize_discovery_text(name))
+        desc_words = set(_normalize_discovery_text(descriptions.get(name, "")))
+        score = 0
+        if query_norm and query_norm == " ".join(_normalize_discovery_text(name)):
+            score += 100
+        if query_norm and query_norm in alias_norms:
+            score += 50
+        if domain and domain == entry_domain:
+            score += 30
+        for token in query_tokens:
+            if token in name_words:
+                score += 15
+            if token in alias_words:
+                score += 10
+            if token in desc_words:
+                score += 3
+        # ponytail: flat floor drops single weak-signal hits (a name+description
+        # token pair scores 18); retune per-signal weights if ranking needs it.
+        if score < 20:
             continue
-        tags = _SEC_TOOL_TAGS.get(name, ("", ""))[1]
-        fn_desc = _tool_function(tool).get("description", "")
-        haystack = f"{name} {str(fn_desc)} {tags}".lower().replace("_", " ")
-        if tokens and all(token in haystack for token in tokens):
-            matches.append(tool)
-    return {"query": args.get("query"), "count": len(matches), "schemas": matches}
+        scored.append((score, name))
+        hit = next((a for a, p in zip(aliases, alias_norms) if query_tokens & set(p.split())), None)
+        if query_norm in alias_norms:
+            hit = aliases[alias_norms.index(query_norm)]
+        reasons[name] = hit or " ".join(descriptions.get(name, "").split()[:12])
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    ranked: list[dict[str, object]] = [
+        {"name": name, "domain": str(TOOL_DISCOVERY[name].get("domain")), "reason": reasons[name]}
+        for _, name in scored[:limit]
+    ]
+    return {"query": query, "domain": domain, "matches": ranked, "count": len(ranked)}
 
 
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Static tool registry gate: schemas == handlers == capabilities == domains == envelopes.
+"""Static tool registry gate: schemas == handlers == capabilities == domains == envelopes == discovery.
 
-Derives all five sets from source (no hand-maintained list). Exit 0 pass, 1 fail.
+Derives all six sets from source (no hand-maintained list). Exit 0 pass, 1 fail.
 Also diffs schemas against tests/contracts/tool_inventory.json.
 """
 
@@ -18,10 +18,13 @@ from app.security.context_gateway import TOOL_ENVELOPES  # noqa: E402
 from app.tools import (  # noqa: E402
     TOOLS,
     TOOL_CAPABILITIES,
+    TOOL_DISCOVERY,
     _DIRECT_HANDLERS,
     _FINRA_HANDLERS,
     _ROBINHOOD_HANDLERS,
+    tools_for_capabilities,
 )
+from app.policy import Capability  # noqa: E402
 
 INVENTORY_PATH = Path(__file__).resolve().parent.parent / "tests" / "contracts" / "tool_inventory.json"
 
@@ -45,12 +48,18 @@ def tool_schema_name(tool: Mapping[str, object]) -> str:
 def get_registry_sets() -> dict[str, set[str]]:
     schemas = {tool_schema_name(t) for t in TOOLS}
     handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS)
+    research = {
+        str(t.get("function", {}).get("name"))
+        for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))
+    } - {"search_tools"}
     return {
         "schemas": schemas,
         "handlers": handlers,
         "capabilities": set(TOOL_CAPABILITIES),
         "domains": set(TOOL_DOMAINS),
         "envelopes": set(TOOL_ENVELOPES),
+        "research": research,
+        "discovery": set(TOOL_DISCOVERY),
     }
 
 
@@ -62,9 +71,9 @@ def registry_errors(sets: dict[str, set[str]] | None = None) -> dict[str, list[s
         "Missing capability:": sorted(s["schemas"] - s["capabilities"]),
         "Missing security domain:": sorted(s["schemas"] - s["domains"]),
         "Missing context envelope:": sorted(s["schemas"] - s["envelopes"]),
+        "Missing discovery entry:": sorted(s["research"] - s["discovery"]),
+        "Discovery without schema:": sorted(s["discovery"] - s["research"]),
     }
-
-
 def inventory_errors(schemas: set[str]) -> tuple[list[str], list[str]]:
     try:
         committed = set(json.loads(INVENTORY_PATH.read_text()))
