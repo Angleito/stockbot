@@ -309,3 +309,15 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path: 
     assert _as_dict(stored["ev:ok"])["canonical_ref"] == "V"
 
 
+def test_file_symlink_ignored_not_quarantined(tmp_path: Path) -> None:
+    r = _repo(tmp_path)
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
+    (tmp_path / "theses").mkdir(exist_ok=True)
+    target = tmp_path / "theses" / t.slug / "thesis.yaml"
+    (tmp_path / "theses" / "README.link").symlink_to(target)
+    assert "README.link" not in r.list_quarantine()
+    assert r.load_thesis(t.thesis_id).slug == t.slug
+    with pytest.raises(KeyError):
+        r.load_thesis("thesis:absent")
+
+
