@@ -29,6 +29,18 @@ def test_round_trip_create_load_list_update(tmp_path: Path) -> None:
     assert updated.scope == "NVDA datacenter" and updated.thesis_id == t.thesis_id
 
 
+def test_relative_repository_root_writes_to_expected_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    repo = ThesisRepository("data/thesis")
+    thesis = repo.create_thesis("NVDA thesis", scope="NVDA", claims=["demand remains strong"])
+    assert repo.root == (tmp_path / "data/thesis").resolve()
+    assert (tmp_path / "data/thesis" / thesis.slug / "thesis.yaml").is_file()
+    assert not (tmp_path / "data/thesis/data/thesis").exists()
+
+
 def test_zero_and_multiple_expressions(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t0 = r.create_thesis("undecided thesis", scope="NVDA", claims=["c"])
@@ -116,6 +128,24 @@ def test_traversal_and_symlink_escape_rejected(tmp_path: Path) -> None:
         atomic_write_yaml(tmp_path / "theses" / "link" / "evil.yaml",
                            {"schema_version": 1}, tmp_path / "theses")
     assert not (outside / "evil.yaml").exists()
+
+
+def test_symlinked_thesis_dir_quarantined_no_lock_outside(tmp_path: Path) -> None:
+    import shutil
+    r = ThesisRepository(tmp_path / "theses")
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["demand remains strong"])
+    real = tmp_path / "theses" / t.slug
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.move(str(real), str(outside / "real"))
+    (outside / "real" / ".lock").unlink(missing_ok=True)
+    real.symlink_to(outside / "real", target_is_directory=True)
+    with pytest.raises(ValueError):
+        r.update_thesis(t.thesis_id, scope="CHANGED")
+    assert t.slug in r.list_quarantine()
+    assert not (outside / "real" / ".lock").exists()
+    assert not (outside / ".lock").exists()
+    assert list((outside / "real" / "journal").glob("*.md")) == []
 
 
 def test_concurrent_writes_serialized(tmp_path: Path) -> None:

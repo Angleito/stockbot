@@ -48,6 +48,7 @@ class _FakeCache:
 def fake_edgar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(edgar_client, "Company", _FakeCompany)
     monkeypatch.setattr(edgar_client, "cache", _FakeCache())
+    monkeypatch.setattr(edgar_client, "_ensure_init", lambda: None)
 
 
 def _as_seq(value: object) -> list[dict[str, object]]:

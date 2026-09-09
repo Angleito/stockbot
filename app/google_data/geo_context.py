@@ -12,7 +12,7 @@ unavailable until a Marketplace table is confirmed.
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Protocol, cast
+from typing import Protocol
 
 import hashlib
 import json
@@ -20,13 +20,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
+from ._guards import result_rows
+from ._lazy_config import get_data_root_or_cwd, google_data_enabled
 
 SOURCE = "geo_context"
 _CENSUS_TEMPLATE = "census_acs"
@@ -63,46 +58,20 @@ _NOAA_SENTINELS = frozenset({9999.9, 99.99, 999.9})
 
 
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
-
-
-def _setting(fn_name: str, env_name: str, default: object = None) -> object:
-    fn = getattr(_config, fn_name, None)
-    if callable(fn):
-        try:
-            value = fn()
-            if value is not None:
-                return value
-        except Exception:
-            pass
-    value = (os.getenv(env_name) or "").strip()
-    return value or default
+    return google_data_enabled()
 
 
 def _resolve_root(data_root: Path | None = None) -> Path:
     if data_root:
         return Path(data_root)
-    try:
-        from .. import config as _cfg  # type: ignore
-        return Path(_cfg.get_data_root())
-    except Exception:
-        return Path(os.getenv("STOCKBOT_DATA_DIR", "data"))
+    return get_data_root_or_cwd()
 
 
 def _submit(template: str, params: dict[str, object], executor: _Executor | None,
             data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
-            try:
-                from . import bigquery_client as _bq
-            except ImportError:
-                from app.google_data import bigquery_client as _bq  # type: ignore
+            from . import bigquery_client as _bq
         except ImportError:
             return {"error": "bigquery client unavailable",
                     "error_type": "source_unavailable", "source": "bigquery"}
@@ -158,7 +127,22 @@ def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | s
     if not geo_ids:
         return {"status": "error", "source": SOURCE,
                 "error": "at least one geo_id is required", "error_type": "invalid_params"}
-    if not _data_enabled() or not _setting("get_google_cloud_project", "GOOGLE_CLOUD_PROJECT"):
+    if not _data_enabled():
+        return {"status": "disabled", "source": SOURCE,
+                "reason": "google data disabled or no BigQuery project"}
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        _cfg = None
+    _project: str | None = None
+    if _cfg is not None:
+        try:
+            _project = _cfg.get_google_cloud_project()
+        except Exception:
+            _project = None
+    if _project is None:
+        _project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+    if not _project:
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     try:
@@ -225,7 +209,7 @@ def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | s
         out["source"] = SOURCE
         out.setdefault("reason", "missing-coverage")
         return out
-    rows = cast(list[object], result.get("rows", []) or [])
+    rows = result_rows(result)
     if not rows:
         return {"status": "unavailable", "source": SOURCE,
                 "reason": "missing-coverage",

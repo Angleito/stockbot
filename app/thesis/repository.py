@@ -138,6 +138,9 @@ class ThesisRepository:
             return found, bad_dirs, bad_ids
         loaded: list[tuple[Path, Thesis]] = []
         for child in sorted(self.root.iterdir()):
+            if child.is_symlink():
+                bad_dirs[child.name] = f"{child}: symlinked thesis directories are not allowed"
+                continue
             thesis_file = child / "thesis.yaml"
             if not child.is_dir() or not thesis_file.is_file():
                 continue
