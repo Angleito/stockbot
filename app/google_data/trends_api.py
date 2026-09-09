@@ -55,7 +55,7 @@ def get_interest_over_time(*, terms: str | Sequence[str] | None, interval: str =
     """Reserved interest-over-time lookup; pending alpha access, never networked."""
     if isinstance(terms, str):
         terms = [terms]
-    terms = [t for t in (terms or []) if t and str(t).strip()]
+    terms = [t for t in (terms or []) if t and t.strip()]
     if not _data_enabled():
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled", "error": "GOOGLE_DATA_DISABLED"}
@@ -72,6 +72,6 @@ def get_interest_over_time(*, terms: str | Sequence[str] | None, interval: str =
     return {"status": "unavailable", "source": SOURCE,
             "error": "GOOGLE_TRENDS_API_PENDING_ACCESS",
             "error_type": "pending_access",
-            "coverage": {"terms": [str(t) for t in terms], "interval": interval,
+            "coverage": {"terms": [t for t in terms], "interval": interval,
                          "country": country, "subregion": subregion,
                          "start_date": start_date, "end_date": end_date}}

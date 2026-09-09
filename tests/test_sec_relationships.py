@@ -928,3 +928,20 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
                 amendment_of=None, source="http://x")
     n, _ok, err = disc._hydrate_relationship_filing(fh, data_root=tmp_path)
     assert "unsupported form" not in (err or "") and n == 1 and wh and seenhf["form"] == "13F-HR/A"
+
+
+def test_int_confidence_and_forward_prices_keep_float_semantics() -> None:
+    rel = _proposed(rid="rel:intconf")
+    ev = R.attach_relationship_evidence(
+        rel, source_span="A supplies B", accession="a1",
+        document_name="d1", extraction_method="llm", confidence=1,
+        known_at="2024-01-01T00:00:00Z")
+    assert ev.confidence == 1.0 and isinstance(ev.confidence, float)
+    p0, p1 = 2**53, 2**53 + 1
+    out = EV._forward_excess(
+        "sec:good", "2024-01-01", 1, ["2024-01-01", "2024-01-02"],
+        {"2024-01-01": 0},
+        {("sec:good", "2024-01-01"): p0, ("sec:good", "2024-01-02"): p1},
+        {"2024-01-01": p0, "2024-01-02": p0})
+    expected = (float(p1) - float(p0)) / float(p0) - 0.0
+    assert out == expected == 0.0

@@ -92,7 +92,7 @@ def summarize_records(
     analysis_complete = (
         None
         if query_complete is None
-        else bool(query_complete and page_complete and not capped)
+        else query_complete and page_complete and not capped
     )
 
     coverage: dict[str, object] = {

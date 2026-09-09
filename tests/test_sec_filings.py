@@ -1,8 +1,8 @@
 """Offline tests for app/sec/ (no network; edgar faked via monkeypatch)."""
 
+from datetime import date, datetime
 from pathlib import Path
 from typing import NoReturn
-
 import pytest
 
 import app.sec.documents as documents
@@ -24,7 +24,7 @@ class _FakeAttachment:
 
 
 class _FakeFiling:
-    def __init__(self, form: str = "10-K", filed: str = "2024-01-15",
+    def __init__(self, form: str = "10-K", filed: str | date | datetime = "2024-01-15",
                  accepted: str | None = None, accession: str = "0001",
                  attachments: list[_FakeAttachment] | None = None) -> None:
         self.cik = 123
@@ -600,3 +600,12 @@ def test_list_sec_filings_as_of_keeps_lazy_semantics(monkeypatch: pytest.MonkeyP
         value, _basis = pit_of(x)
         assert value is not None and value[:10] <= as_of
     assert len(sgml_calls) <= bound
+
+
+def test_filing_date_objects_normalize_to_str(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = ["2026-01-15", date(2026, 1, 15), datetime(2026, 1, 15, 12, 30)]
+    for i, filed in enumerate(cases):
+        _patch_company(monkeypatch, [_FakeFiling(accepted=None, filed=filed, accession=f"dt{i}")])
+        (filing,) = filings.list_sec_filings("AAPL")
+        assert filing.filed_at == str(filed)
+        assert filing.known_at == str(filed)

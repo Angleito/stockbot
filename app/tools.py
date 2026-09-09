@@ -9,7 +9,6 @@ from pathlib import Path
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from . import analytics
 from . import analyst_client
 from . import edgar_client
 from . import exa_client
@@ -18,6 +17,7 @@ from . import obligations
 from . import valuation
 from .config import broker_enabled, get_data_root, get_robinhood_mcp_url
 from .policy import Capability, RequestContext
+from .analytics import screens
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
 from .robinhood import RobinhoodClient
@@ -1507,7 +1507,7 @@ def _get_scanner_filter_specs(arguments: dict[str, object], model: str) -> dict[
     if isinstance(specs, list):
         rows = [{str(k): v for k, v in row.items()} for row in specs if isinstance(row, dict)]
     else:
-        rows = [{str(k): v for k, v in row.items()} for row in _scan_rows(data)]
+        rows = [{k: v for k, v in row.items()} for row in _scan_rows(data)]
     result: dict[str, object] = {
         "result_type": "scan_specs",
         "count": len(rows),
@@ -2368,7 +2368,7 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS: dict[str, ModelHandler] = {
-    "get_short_interest_leaderboard": lambda args, model: analytics.screens.get_short_interest_leaderboard(
+    "get_short_interest_leaderboard": lambda args, model: screens.get_short_interest_leaderboard(
         limit=_optional_int(args.get("limit")), settlement_date=_str_or_none(args.get("settlement_date")), as_of=_str_or_none(args.get("as_of"))
     ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
@@ -2681,7 +2681,7 @@ def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dic
     thesis_id = arguments.get("id")
     if not isinstance(thesis_id, str) or not thesis_id.strip():
         raise ValueError("thesis_refine: 'id' must be a non-empty string")
-    thesis = _thesis_for_context(repo, str(thesis_id), context)
+    thesis = _thesis_for_context(repo, thesis_id, context)
     clarification = arguments.get("clarification")
     if not isinstance(clarification, str) or not clarification.strip():
         raise ValueError("thesis_refine: 'clarification' must be a non-empty string")

@@ -125,14 +125,14 @@ def _submit(template: str, params: dict[str, object], executor: _Executor | None
 
 
 def _looks_noaa(variables: list[str]) -> bool:
-    return any(any(hint in str(v).upper() for hint in _NOAA_HINTS) for v in variables)
+    return any(any(hint in v.upper() for hint in _NOAA_HINTS) for v in variables)
 
 
 def _vintage_key(template: str, geo_ids: list[str], variables: list[str],
                  extra: dict[str, str]) -> str:
     blob = json.dumps({"t": template, "g": sorted(map(str, geo_ids)),
                        "v": sorted(map(str, variables)),
-                       "x": {k: str(v) for k, v in sorted(extra.items())}},
+                       "x": {k: v for k, v in sorted(extra.items())}},
                       sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -162,7 +162,7 @@ def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | s
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     try:
-        limit = max(1, min(int(limit), 100))
+        limit = max(1, min(limit, 100))
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
@@ -250,7 +250,7 @@ def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | s
                     "provider": row.get("provider"),
                 })
         seen_geos = {str(row.get("geo_id")) for row in rows if isinstance(row, dict)}
-        missing_geos = [g for g in geo_ids if str(g) not in seen_geos]
+        missing_geos = [g for g in geo_ids if g not in seen_geos]
     else:
         for row in rows:
             if not isinstance(row, dict) or not row.get("station_id"):
@@ -277,7 +277,7 @@ def get_geo_context(geo_ids: list[str] | str | None, *, variables: list[str] | s
                     "provider": "NOAA GSOD",
                 })
         seen_geos = {str(row.get("station_id")) for row in rows if isinstance(row, dict)}
-        missing_geos = [g for g in geo_ids if str(g) not in seen_geos]
+        missing_geos = [g for g in geo_ids if g not in seen_geos]
     if missing_geos:
         warnings.append(f"missing-coverage for {missing_geos}")
     retrieved_at = datetime.now(timezone.utc).isoformat()

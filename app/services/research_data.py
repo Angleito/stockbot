@@ -182,7 +182,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[s
             for record in raw_archive.iter_archive("sec", cik_dir.name, "companyfacts", root=raw_root):
                 archived_payloads += 1
                 try:
-                    cik = int(str(cik_dir.name).removeprefix("cik"))
+                    cik = int(cik_dir.name.removeprefix("cik"))
                     written_rows += _normalize_and_write_company_facts(
                         cik, record.payload_path.read_bytes(),
                         retrieved_at=record.retrieved_at, url=record.url,

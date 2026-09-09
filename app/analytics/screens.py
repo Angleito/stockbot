@@ -41,13 +41,13 @@ def _resolve_as_of(as_of: Optional[str]) -> str:
     classification, and SEC fact via ``known_at <= as_of``.
     """
     if as_of:
-        return str(as_of)
+        return as_of
     return datetime.now(timezone.utc).date().isoformat()
 
 
 def _clamp_limit(limit: Optional[int]) -> int:
     try:
-        return max(1, min(int(limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
+        return max(1, min((limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
     except (TypeError, ValueError):
         return DEFAULT_LIMIT
 

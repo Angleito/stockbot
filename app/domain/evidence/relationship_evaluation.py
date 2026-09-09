@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import statistics
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 
 #: Horizons (trading days) always reported separately in stored output.
 HORIZONS = (1, 5, 20)
@@ -95,8 +95,8 @@ def _forward_excess(
     horizon: int,
     calendar: list[str],
     positions: dict[str, int],
-    observations: dict[tuple[str, str], float] | None,
-    benchmark: dict[str, float] | None,
+    observations: Mapping[tuple[str, str], int | float] | None,
+    benchmark: Mapping[str, int | float] | None,
 ) -> float | None:
     """Benchmark-adjusted forward return, or None when any price is missing."""
     if observations is None or benchmark is None:
@@ -201,7 +201,7 @@ def evaluate_window(
         result.update(complete=False,
                       incomplete_reason="missing-observations-or-benchmark")
         return result
-    calendar = sorted(str(d) for d in benchmark)
+    calendar = sorted(d for d in benchmark)
     positions = {day: idx for idx, day in enumerate(calendar)}
 
     def _composite(flag: str) -> tuple[dict[str, dict[str, float]], float] | None:
@@ -246,8 +246,8 @@ def evaluate_window(
     retrieval_ok = _improves(f1, b_f1)
     market_ok = _improves(model_composite, baseline_composite)
     no_regression = violations == 0 and identity >= baseline_identity
-    result["qualifying"] = bool(retrieval_ok and market_ok and no_regression)
-    result["below_baseline"] = bool(f1 < b_f1 or model_composite < baseline_composite)
+    result["qualifying"] = (retrieval_ok and market_ok and no_regression)
+    result["below_baseline"] = (f1 < b_f1 or model_composite < baseline_composite)
     return result
 
 

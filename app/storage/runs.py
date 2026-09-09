@@ -293,7 +293,7 @@ class RunRecorder:
                 event_id = f"{self.run_id}:ev:{sequence:04d}"
                 summary = None
                 if result_summary is not None:
-                    summary = redact_json(str(result_summary))
+                    summary = redact_json(result_summary)
                     if len(summary) > self.max_result_bytes:
                         summary = summary[: self.max_result_bytes] + "...[truncated]"
                 self._conn.execute(
@@ -302,7 +302,7 @@ class RunRecorder:
                     " arguments, result_summary, success, error_type, evidence_ids, metadata)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        event_id, self.run_id, sequence, str(event_type),
+                        event_id, self.run_id, sequence, event_type,
                         started, completed,
                         duration_ms,
                         round, model, tool_name,

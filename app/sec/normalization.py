@@ -69,7 +69,7 @@ def _subject_of(form: str, filer_cik: int, filer_name: str) -> tuple[int | None,
 
 def filing_from_edgar(filing: EdgarFiling) -> Filing:
     form = _best(lambda: filing.form, "") or ""
-    filed_at = str(_best(lambda: filing.filing_date, "") or "")
+    filed_at = _str_or_none(_best(lambda: filing.filing_date, "") or "") or ""
     accepted_at = _accepted_at(filing)
     accession_no = _best(lambda: filing.accession_no)
     if accession_no is None:

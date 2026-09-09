@@ -125,7 +125,7 @@ def query_filings(
         params.append(str(cik))
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if forms:
         where.append(f"form IN ({', '.join(['?'] * len(forms))})")
         params.extend(forms)
@@ -144,7 +144,7 @@ def query_filings(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC"
     if limit is not None:
-        sql += f" LIMIT {int(limit)}"
+        sql += f" LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -255,13 +255,13 @@ def query_parties(
     params: list[str | None] = []
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if cik is not None:
         where.append("cik = ?")
         params.append(str(cik))
     if role is not None:
         where.append("role = ?")
-        params.append(str(role))
+        params.append(role)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -269,7 +269,7 @@ def query_parties(
     sql = "SELECT * FROM filing_parties"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -291,12 +291,12 @@ def store_document_text(
     root: Optional[Path | str] = None,
 ) -> int:
     now = retrieved_at or _utcnow()
-    payload = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+    payload = text.encode("utf-8") if isinstance(text, str) else text
     text_value: str = payload.decode("utf-8", errors="replace")
     content_value: str = raw_archive.content_hash(payload)
     known_value: str = known_at or filed_at or now
     row: dict[str, object] = {
-        "doc_id": str(doc_id),
+        "doc_id": doc_id,
         "content_hash": content_value,
         "accession": accession,
         "document_name": document_name,
@@ -318,14 +318,14 @@ def store_document_text(
         if accession and source_url is not None:
             filings = duckdb.query(
                 "SELECT filer_cik, filed_at FROM sec_filings WHERE accession = ? LIMIT 1",
-                [str(accession)], data_root=_duckdb_root(root))
+                [accession], data_root=_duckdb_root(root))
             if filings and filings[0].get("filer_cik"):
                 cik = int(str(filings[0]["filer_cik"]))
                 raw_filed: object = filings[0].get("filed_at") or filed_at or row["known_at"]
                 filed = str(raw_filed) if raw_filed is not None else known_value
                 events = normalization._extract_dividend_events_from_text(
                     text_value, cik=cik, entity_id=ids.sec_entity_id(cik),
-                    security_id=ids.sec_security_id(cik), accession=str(accession),
+                    security_id=ids.sec_security_id(cik), accession=accession,
                     filed_at=filed, source_url=source_url,
                     content_hash=content_value)
                 for event in events:
@@ -351,13 +351,13 @@ def query_document_text(
     params: list[str | None] = []
     if doc_id is not None:
         where.append("doc_id = ?")
-        params.append(str(doc_id))
+        params.append(doc_id)
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if document_name is not None:
         where.append("document_name = ?")
-        params.append(str(document_name))
+        params.append(document_name)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -365,7 +365,7 @@ def query_document_text(
     sql = "SELECT * FROM document_text"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -435,7 +435,7 @@ def _fts_search(
             "JOIN document_text d ON d.doc_id = sub.doc_id "
             "AND d.content_hash = sub.content_hash "
             "WHERE " + " AND ".join(where) +
-            f" ORDER BY score DESC LIMIT {int(limit)}"
+            f" ORDER BY score DESC LIMIT {limit}"
         )
         rows = conn.execute(sql, params).fetchall()
         description = conn.description
@@ -461,7 +461,7 @@ def search_document_text(
     The token path falls back to AND-of-substrings when the FTS index or
     extension is unavailable (rebuild_fts stays the explicit health signal).
     """
-    text = str(query or "").strip()
+    text = (query or "").strip()
     if not text:
         raise ValueError("query must be a non-empty string")
     if not literal:
@@ -481,7 +481,7 @@ def search_document_text(
         where.append(clause)
         params.append(param)
     sql = ("SELECT * FROM document_text WHERE " + " AND ".join(where) +
-           f" LIMIT {int(limit)}")
+           f" LIMIT {limit}")
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -595,7 +595,7 @@ def persist_search_ledger(
     now = _utcnow()
     req = _as_dict(request)
     search_row: dict[str, object] = {
-        "search_id": str(search_id),
+        "search_id": search_id,
         "request_json": _json(req),
         "coverage_status": coverage_status,
         "sources_attempted_json": _json(list(sources_attempted)),
@@ -628,7 +628,7 @@ def persist_search_ledger(
         d = _as_dict(attempt)
         attempt_rows.append({
             "attempt_id": d.get("attempt_id"),
-            "search_id": str(search_id),
+            "search_id": search_id,
             "backend": d.get("backend"),
             "query": d.get("query"),
             "filters_json": _json(d.get("filters")),
@@ -655,7 +655,7 @@ def persist_search_ledger(
             "hit_id": raw_archive.content_hash(
                 f"{search_id}\n{d.get('attempt_id')}\n{d.get('query')}\n"
                 f"{accession}\n{matched}".encode("utf-8"))[:16],
-            "search_id": str(search_id),
+            "search_id": search_id,
             "attempt_id": d.get("attempt_id"),
             "query": d.get("query"),
             "accession": accession,
@@ -695,7 +695,7 @@ def query_search(
 ) -> Optional[dict[str, object]]:
     """One persisted search-ledger row, or None."""
     rows = duckdb.query("SELECT * FROM sec_searches WHERE search_id = ? LIMIT 1",
-                        [str(search_id)], data_root=_duckdb_root(root))
+                        [search_id], data_root=_duckdb_root(root))
     return rows[0] if rows else None
 
 
@@ -705,7 +705,7 @@ def query_attempts(
     """All persisted attempt rows for one search, in attempt order."""
     return duckdb.query(
         "SELECT * FROM sec_search_attempts WHERE search_id = ? ORDER BY attempt_id",
-        [str(search_id)], data_root=_duckdb_root(root))
+        [search_id], data_root=_duckdb_root(root))
 
 
 def query_hits(
@@ -714,7 +714,7 @@ def query_hits(
     """All persisted text-hit rows for one search, best score first."""
     return duckdb.query(
         "SELECT * FROM sec_text_hits WHERE search_id = ? ORDER BY score DESC",
-        [str(search_id)], data_root=_duckdb_root(root))
+        [search_id], data_root=_duckdb_root(root))
 
 
 def store_coverage(
@@ -734,12 +734,12 @@ def store_coverage(
     """Append one ingestion-coverage row (source + form + partition key)."""
     now = retrieved_at or _utcnow()
     row: dict[str, object] = {
-        "source": str(source),
-        "form": str(form),
+        "source": source,
+        "form": form,
         "family": family,
-        "date_partition": str(date_partition),
-        "coverage_date": coverage_date or str(date_partition)[:10],
-        "status": str(status),
+        "date_partition": date_partition,
+        "coverage_date": coverage_date or date_partition[:10],
+        "status": status,
         "accession_count": accession_count or 0,
         "last_key": last_key,
         "parser_version": PARSER_VERSION,
@@ -763,17 +763,17 @@ def query_coverage(
     params: list[str | None] = []
     if source is not None:
         where.append("source = ?")
-        params.append(str(source))
+        params.append(source)
     if form is not None:
         where.append("form = ?")
-        params.append(str(form))
+        params.append(form)
     if date_partition is not None:
         where.append("date_partition = ?")
-        params.append(str(date_partition))
+        params.append(date_partition)
     sql = "SELECT * FROM sec_ingestion_coverage"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY coverage_date DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY coverage_date DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -796,11 +796,11 @@ def store_checkpoint(
     """Append one checkpoint row; reruns with identical keys write nothing."""
     now = _utcnow()
     row: dict[str, object] = {
-        "pipeline": str(pipeline),
-        "source": str(source),
-        "key": str(key),
-        "payload_hash": str(payload_hash or ""),
-        "status": str(status),
+        "pipeline": pipeline,
+        "source": source,
+        "key": key,
+        "payload_hash": payload_hash or "",
+        "status": status,
         "record_count": record_count or 0,
         "started_at": started_at or now,
         "finished_at": finished_at,
@@ -834,7 +834,7 @@ def get_checkpoint(
     rows = duckdb.query(
         "SELECT * FROM ingestion_checkpoints "
         "WHERE pipeline = ? AND source = ? AND key = ?",
-        [str(pipeline), str(source), str(key)], data_root=_duckdb_root(root))
+        [pipeline, source, key], data_root=_duckdb_root(root))
     if not rows:
         return None
     rows.sort(key=_checkpoint_order)
@@ -949,7 +949,7 @@ def query_beneficial_ownership(
         params.append(str(owner).strip())
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -957,7 +957,7 @@ def query_beneficial_ownership(
     sql = "SELECT * FROM sec_beneficial_ownership"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1035,7 +1035,7 @@ def query_13f_holdings(
         params.append(str(manager_cik).strip())
     if security_id is not None:
         where.append("security_id = ?")
-        params.append(str(security_id).strip())
+        params.append(security_id.strip())
     if cusip is not None:
         cusip_norm = normalize_cusip(cusip)
         if cusip_norm is None:
@@ -1053,7 +1053,7 @@ def query_13f_holdings(
         where.append("isin = ?")
         params.append(normalize_isin(isin))
     if security is not None:
-        raw = str(security).strip().upper()
+        raw = security.strip().upper()
         arms: list[str] = []
         vals: list[str | None] = []
         if ":" in raw:
@@ -1094,7 +1094,7 @@ def query_13f_holdings(
         params.extend(vals)
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -1102,20 +1102,20 @@ def query_13f_holdings(
     sql = "SELECT * FROM sec_13f_holdings"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
 def query_13f_issuer_candidates(issuer_name: str, *, report_period: str | None, holding_known_at: str | None, root: Optional[Path | str] = None) -> list[dict[str, object]]:
     """Exact current/former-name issuer candidates for one 13F issuer string."""
     try:
-        target = str(issuer_name or "").strip()
+        target = (issuer_name or "").strip()
     except Exception:
         target = ""
     if not target:
         return []
     try:
-        period: Optional[str] = str(report_period or "").strip()[:10] or None
+        period: Optional[str] = (report_period or "").strip()[:10] or None
     except Exception:
         period = None
     if period is not None:
@@ -1157,7 +1157,7 @@ def query_13f_issuer_candidates(issuer_name: str, *, report_period: str | None, 
 
 def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None, limit: int = 200, root: Optional[Path | str] = None) -> list[dict[str, object]]:
     """Governed issuer -> holdings via exact CUSIP/ISIN alias mapping (PIT)."""
-    eid = str(entity_id or "").strip()
+    eid = (entity_id or "").strip()
     if not eid:
         return []
     as_of_val = _validate_as_of(as_of) if as_of is not None else None
@@ -1211,7 +1211,7 @@ def query_13f_holdings_for_issuer(entity_id: str, *, as_of: Optional[str] = None
         params.extend([as_of_val])
     params.append(eid)
     if limit is not None:
-        sql += f" LIMIT {int(limit)}"
+        sql += f" LIMIT {limit}"
     rows = duckdb.query(sql, params, data_root=_duckdb_root(root))
     for row in rows:
         try:
@@ -1279,10 +1279,10 @@ def query_insider_transactions(
         params.append(str(owner_cik).strip())
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if form is not None:
         where.append("form = ?")
-        params.append(str(form))
+        params.append(form)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -1290,7 +1290,7 @@ def query_insider_transactions(
     sql = "SELECT * FROM sec_insider_transactions"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1343,7 +1343,7 @@ def query_offerings(
     params: list[str | None] = []
     if registrant is not None:
         where.append("registrant_name = ?")
-        params.append(str(registrant))
+        params.append(registrant)
     if registrant_cik is not None:
         # ponytail: canonical bare CIK plus SEC 10-digit padding match legacy rows
         try:
@@ -1361,10 +1361,10 @@ def query_offerings(
         params.append(str(filer_cik).strip())
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if form is not None:
         where.append("form = ?")
-        params.append(str(form))
+        params.append(form)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -1372,7 +1372,7 @@ def query_offerings(
     sql = "SELECT * FROM sec_offerings"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1428,10 +1428,10 @@ def query_transactions(
     params: list[str | None] = []
     if target is not None:
         where.append("target_name = ?")
-        params.append(str(target))
+        params.append(target)
     if acquirer is not None:
         where.append("acquirer_name = ?")
-        params.append(str(acquirer))
+        params.append(acquirer)
     if subject_cik is not None:
         where.append("subject_cik = ?")
         params.append(str(subject_cik).strip())
@@ -1440,7 +1440,7 @@ def query_transactions(
         params.append(str(filer_cik).strip())
     if accession is not None:
         where.append("accession = ?")
-        params.append(str(accession))
+        params.append(accession)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
@@ -1448,7 +1448,7 @@ def query_transactions(
     sql = "SELECT * FROM sec_transactions"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1534,11 +1534,11 @@ def query_relationship_type_evaluations(
     params: list[str | None] = []
     if relationship_type is not None:
         where.append("relationship_type = ?")
-        params.append(str(relationship_type))
+        params.append(relationship_type)
     sql = "SELECT * FROM relationship_type_evaluations"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY window_end DESC, retrieved_at DESC LIMIT {int(limit)}"
+    sql += f" ORDER BY window_end DESC, retrieved_at DESC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1577,13 +1577,13 @@ def query_relationship_evidence(
     params: list[str | None] = []
     if relationship_id is not None:
         where.append("relationship_id = ?")
-        params.append(str(relationship_id))
+        params.append(relationship_id)
     if entity_id is not None:
         where.append("(from_entity_id = ? OR to_entity_id = ?)")
-        params.extend([str(entity_id), str(entity_id)])
+        params.extend([entity_id, entity_id])
     if relationship_type is not None:
         where.append("relationship_type = ?")
-        params.append(str(relationship_type))
+        params.append(relationship_type)
     if not include_counterevidence:
         where.append("(is_counterevidence IS NULL OR is_counterevidence = FALSE)")
     if as_of is not None:
@@ -1593,7 +1593,7 @@ def query_relationship_evidence(
     sql = "SELECT * FROM relationship_evidence"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY known_at ASC LIMIT {int(limit)}"
+    sql += f" ORDER BY known_at ASC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1608,7 +1608,7 @@ def query_relationship_revisions(
     params: list[str | None] = []
     if relationship_id is not None:
         where.append("relationship_id = ?")
-        params.append(str(relationship_id))
+        params.append(relationship_id)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "recorded_at")
         where.append(clause)
@@ -1616,7 +1616,7 @@ def query_relationship_revisions(
     sql = "SELECT * FROM relationship_revisions"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += f" ORDER BY recorded_at ASC LIMIT {int(limit)}"
+    sql += f" ORDER BY recorded_at ASC LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -1693,7 +1693,7 @@ def enqueue_backfill_job(source: str, form: Optional[str] = None,
                                 aliases.get("end", aliases.get("to"))))
     if parser_version == PARSER_VERSION and aliases.get("parser") is not None:
         parser_version = str(aliases["parser"])
-    if not source or not str(source).strip():
+    if not source or not source.strip():
         raise ValueError("source is required (e.g. sec-global)")
     if not form_value or not str(form_value).strip():
         raise ValueError("form is required (e.g. 10-K)")
@@ -1704,7 +1704,7 @@ def enqueue_backfill_job(source: str, form: Optional[str] = None,
     if start > end:
         raise ValueError(f"invalid date range: {start!r}..{end!r}")
     job_id = _backfill_job_id(
-        str(source), str(form_value), start, end, str(parser_version), family)
+        source, str(form_value), start, end, parser_version, family)
     path = ensure_jobs_table(root)
     now = _utcnow()
     with _JOBS_LOCK:
@@ -1715,9 +1715,9 @@ def enqueue_backfill_job(source: str, form: Optional[str] = None,
                 "(id, source, form, family, start_date, end_date, "
                 "parser_version, status, batch_size, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
-                (job_id, str(source), str(form_value),
-                 str(family) if family is not None else None,
-                 start, end, str(parser_version), int(batch_size or 50), now),
+                (job_id, source, str(form_value),
+                 family if family is not None else None,
+                 start, end, parser_version, batch_size or 50, now),
             )
             conn.commit()
         finally:
@@ -1742,7 +1742,7 @@ def get_job(job_id: str, *,
             f"SELECT id, source, form, family, start_date, end_date, "
             f"parser_version, status, batch_size, created_at, started_at, "
             f"finished_at, last_key, error FROM {_JOBS_TABLE} WHERE id = ?",
-            (str(job_id),))
+            (job_id,))
         row = cur.fetchone()
     finally:
         conn.close()
@@ -1760,8 +1760,8 @@ def list_jobs(*, status: Optional[str] = None,
     params: list[str | None] = []
     if status is not None:
         sql += " WHERE status = ?"
-        params.append(str(status))
-    sql += f" ORDER BY created_at ASC LIMIT {int(limit)}"
+        params.append(status)
+    sql += f" ORDER BY created_at ASC LIMIT {limit}"
     conn = sqlite3.connect(str(path), timeout=30)
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -1789,7 +1789,7 @@ def claim_job(job_id: Optional[str] = None, *,
                     f"UPDATE {_JOBS_TABLE} SET status='running', "
                     "started_at=?, finished_at=NULL, error=NULL WHERE id = ? "
                     "AND status IN ('queued', 'failed')",
-                    (now, str(job_id)))
+                    (now, job_id))
                 conn.commit()
                 if cur.rowcount == 0:
                     return None
@@ -1824,16 +1824,16 @@ def complete_job(job_id: str, *, last_key: Optional[str] = None,
                 conn.execute(
                     f"UPDATE {_JOBS_TABLE} SET status='complete', "
                     "finished_at=?, last_key=? WHERE id = ?",
-                    (_utcnow(), str(last_key), str(job_id)))
+                    (_utcnow(), last_key, job_id))
             else:
                 conn.execute(
                     f"UPDATE {_JOBS_TABLE} SET status='complete', "
                     "finished_at=? WHERE id = ?",
-                    (_utcnow(), str(job_id)))
+                    (_utcnow(), job_id))
             conn.commit()
         finally:
             conn.close()
-    return get_job(str(job_id), root=root)
+    return get_job(job_id, root=root)
 
 
 def fail_job(job_id: str, error: object = "", *,
@@ -1848,16 +1848,16 @@ def fail_job(job_id: str, error: object = "", *,
                 conn.execute(
                     f"UPDATE {_JOBS_TABLE} SET status='failed', "
                     "finished_at=?, last_key=?, error=? WHERE id = ?",
-                    (_utcnow(), str(last_key), str(error), str(job_id)))
+                    (_utcnow(), last_key, str(error), job_id))
             else:
                 conn.execute(
                     f"UPDATE {_JOBS_TABLE} SET status='failed', "
                     "finished_at=?, error=? WHERE id = ?",
-                    (_utcnow(), str(error), str(job_id)))
+                    (_utcnow(), str(error), job_id))
             conn.commit()
         finally:
             conn.close()
-    return get_job(str(job_id), root=root)
+    return get_job(job_id, root=root)
 
 
 def requeue_job(job_id: str, *,
@@ -1870,11 +1870,11 @@ def requeue_job(job_id: str, *,
             conn.execute(
                 f"UPDATE {_JOBS_TABLE} SET status='queued', started_at=NULL, "
                 "finished_at=NULL, error=NULL WHERE id = ?",
-                (str(job_id),))
+                (job_id,))
             conn.commit()
         finally:
             conn.close()
-    return get_job(str(job_id), root=root)
+    return get_job(job_id, root=root)
 
 
 def recover_stale_jobs(*,
@@ -1897,8 +1897,8 @@ def is_partition_covered(source: str, form: str, date_partition: str, *,
                          root: Optional[Path | str] = None) -> bool:
     """True when a ``complete`` coverage row exists for the partition."""
     try:
-        rows = query_coverage(source=str(source), form=str(form),
-                              date_partition=str(date_partition), root=root)
+        rows = query_coverage(source=source, form=form,
+                              date_partition=date_partition, root=root)
     except Exception:
         return False
     return any(str(r.get("status") or "").lower() == "complete" for r in rows)

@@ -110,7 +110,7 @@ def get_macro_context(geos: list[str] | str | None, variables: list[str] | str |
                 "error": "geos and variables are both required",
                 "error_type": "invalid_params"}
     try:
-        limit = max(1, min(int(limit), _MAX_LIMIT))
+        limit = max(1, min(limit, _MAX_LIMIT))
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
@@ -155,9 +155,9 @@ def get_macro_context(geos: list[str] | str | None, variables: list[str] | str |
                     when, value = obs.get("date"), obs.get("value")
                     if when is None or value is None:
                         continue
-                    if start_date and str(when) < str(start_date):
+                    if start_date and str(when) < start_date:
                         continue
-                    if end_date and str(when) > str(end_date):
+                    if end_date and str(when) > end_date:
                         continue
                     points.append({"date": when, "value": value})
                 if not points:
@@ -235,7 +235,7 @@ def resolve_entities(nodes: list[str] | str | None, *, resolver: str | None = No
 
 def get_place_hierarchy(dcid: str) -> dict[str, object]:
     """Containing states for one place DCID via documented containedInPlace lookup."""
-    if not dcid or not str(dcid).strip():
+    if not dcid or not dcid.strip():
         return {"status": "error", "source": SOURCE,
                 "error": "dcid is required", "error_type": "invalid_params"}
     if not _data_enabled():

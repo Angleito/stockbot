@@ -104,12 +104,12 @@ def get_tag_activity(tags: list[str] | str | None, *, start_date: str | None = N
     """Observed tag activity per tag/period with last-covered date."""
     if isinstance(tags, str):
         tags = [tags]
-    tags = [t for t in (tags or []) if t and str(t).strip()]
+    tags = [t for t in (tags or []) if t and t.strip()]
     if not tags:
         return {"status": "error", "source": SOURCE,
                 "error": "at least one tag is required", "error_type": "invalid_params"}
     try:
-        limit = max(1, min(int(limit), _MAX_LIMIT))
+        limit = max(1, min(limit, _MAX_LIMIT))
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
@@ -152,7 +152,7 @@ def get_tag_activity(tags: list[str] | str | None, *, start_date: str | None = N
     warnings: list[str] = []
     if last_covered:
         try:
-            lag = (date.fromisoformat(str(end_date)[:10])
+            lag = (date.fromisoformat(end_date[:10])
                    - date.fromisoformat(str(last_covered)[:10])).days
             if lag > _STALE_LAG_DAYS:
                 warnings.append(

@@ -314,7 +314,9 @@ def _scan_unquantified_exposures(title: str, md: str, filing: _Filing, limit: in
         entry: dict[str, object] = {
             "type": kind,
             "source": f"SEC EDGAR {filing.filing_date} {title} note",
-            "filed": str(filing.filing_date),
+            # edgar filing_date is annotated str but arrives as an Arrow date at runtime;
+            # getattr keeps this str() boundary conversion honest.
+            "filed": str(getattr(filing, "filing_date")),
             "excerpt": sentence,
         }
         if kind in ("buybacks", "dividends"):
@@ -497,10 +499,10 @@ def _parse_table_schedule(note_text: str) -> list[ObligationScheduleYear] | None
         return None
     schedule: list[ObligationScheduleYear] = []
     for r in table:
-        m = re.search(r"20\d\d", str(r["fiscal_year"]))
+        m = re.search(r"20\d\d", r["fiscal_year"])
         if m:
             schedule.append({"fiscal_year": m.group(0), "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
-        elif str(r["fiscal_year"]).strip().lower() == "thereafter":
+        elif r["fiscal_year"].strip().lower() == "thereafter":
             schedule.append({"fiscal_year": "Thereafter", "amount_billions": round(r["amount_millions"] / 1000.0, 3)})
     return schedule if len(schedule) >= 2 else None
 
@@ -596,9 +598,9 @@ def _xbrl_store_facts(ticker: str) -> list[FinancialFactRow]:
 def _store_fact_key(f: FinancialFactRow) -> StoredFactKey:
     """Newest restatement wins: period end, filed at, accession."""
     return (
-        str(f.get("period_end") or ""),
-        str(f.get("filed_at") or ""),
-        str(f.get("accession") or ""),
+        (f.get("period_end") or ""),
+        (f.get("filed_at") or ""),
+        (f.get("accession") or ""),
     )
 
 
@@ -619,7 +621,7 @@ def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None =
         logger.warning("xbrl store read failed for %s: %s", ticker, e)
     store_by_kind: dict[str, FinancialFactRow] = {}
     for needle, kind in _XBRL_OBLIGATION_CONCEPTS.items():
-        cands = [f for f in store_facts if needle in str(f.get("concept") or "")]
+        cands = [f for f in store_facts if needle in (f.get("concept") or "")]
         if not cands:
             continue
         pick = max(
@@ -630,13 +632,13 @@ def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None =
             continue
         prev = store_by_kind.get(kind)
         if prev is None or (
-            str(pick.get("period_end") or ""),
-            str(pick.get("filed_at") or ""),
-            str(pick.get("accession") or ""),
+            (pick.get("period_end") or ""),
+            (pick.get("filed_at") or ""),
+            (pick.get("accession") or ""),
         ) > (
-            str(prev.get("period_end") or ""),
-            str(prev.get("filed_at") or ""),
-            str(prev.get("accession") or ""),
+            (prev.get("period_end") or ""),
+            (prev.get("filed_at") or ""),
+            (prev.get("accession") or ""),
         ):
             store_by_kind[kind] = pick
     try:
@@ -652,12 +654,12 @@ def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None =
     rows: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for kind, fact in store_by_kind.items():
-        concept = str(fact.get("concept"))
+        concept = fact.get("concept")
         val_raw = fact.get("value")
         if val_raw is None:
             continue
-        value = float(val_raw)
-        period_end = str(fact.get("period_end"))
+        value = val_raw
+        period_end = fact.get("period_end")
         key = (kind, period_end)
         if key in seen:
             continue
@@ -674,12 +676,12 @@ def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None =
                 "revenue_matched": False,
                 "default_triggered": False,
                 "source": f"SEC EDGAR XBRL {concept}",
-                "filed": str(fact.get("filed_at")),
-                "known_at": str(fact.get("known_at")),
+                "filed": fact.get("filed_at"),
+                "known_at": fact.get("known_at"),
                 "as_of": period_end,
                 "excerpt": f"XBRL fact {concept} = {value:,.0f} as of {period_end}",
                 "concept": concept,
-                "_accession": str(fact.get("accession") or ""),
+                "_accession": (fact.get("accession") or ""),
             }
         )
     if facts is not None:
@@ -693,7 +695,7 @@ def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None =
             found = _latest_report(ticker, form)
             if found is not None:
                 proxy_filing = found[0]
-                filing_date = str(proxy_filing.filing_date)
+                filing_date = str(getattr(proxy_filing, "filing_date"))
                 proxy_form = form
                 break
         for concept in facts["concept"].unique():
@@ -760,8 +762,8 @@ def _targeted_balance_rows(title: str, md: str, filing: _Filing, present_kinds: 
                         "revenue_matched": False,
                         "default_triggered": False,
                         "source": f"SEC EDGAR {filing.filing_date} {title} note",
-                        "filed": str(filing.filing_date),
-                        "as_of": str(filing.filing_date),
+                        "filed": str(getattr(filing, "filing_date")),
+                        "as_of": str(getattr(filing, "filing_date")),
                         "excerpt": _excerpt(md, m.start(), m.end()),
                     }
                 )
@@ -780,8 +782,8 @@ def _targeted_balance_rows(title: str, md: str, filing: _Filing, present_kinds: 
                         "revenue_matched": False,
                         "default_triggered": False,
                         "source": f"SEC EDGAR {filing.filing_date} {title} note",
-                        "filed": str(filing.filing_date),
-                        "as_of": str(filing.filing_date),
+                        "filed": str(getattr(filing, "filing_date")),
+                        "as_of": str(getattr(filing, "filing_date")),
                         "excerpt": _excerpt(md, m.start(), m.end()),
                     }
                 )
@@ -815,7 +817,7 @@ def _note_obligations(ticker: str, *, archive: bool = False, manifest: list[dict
             exps, caps = _scan_unquantified_exposures(title, md, filing)
             unquantified.extend(exps)
             capital.extend(caps)
-        present_kinds = {str(r["type"]) for r in rows if r.get("filed") == str(filing.filing_date)}
+        present_kinds = {str(r["type"]) for r in rows if r.get("filed") == str(getattr(filing, "filing_date"))}
         for title, md in notes_md.items():
             rows.extend(
                 _targeted_balance_rows(title, md, filing, present_kinds)
@@ -860,8 +862,8 @@ def _collect_note_rows(rows: list[dict[str, object]], title: str, md: str, filin
                     "revenue_matched": False,
                     "default_triggered": False,
                     "source": f"SEC EDGAR {filing.filing_date} {title} note table",
-                    "filed": str(filing.filing_date),
-                    "as_of": str(filing.filing_date),
+                    "filed": str(getattr(filing, "filing_date")),
+                    "as_of": str(getattr(filing, "filing_date")),
                     "excerpt": _excerpt(md, m.start(), m.end()),
                 }
             )
@@ -890,8 +892,8 @@ def _collect_note_rows(rows: list[dict[str, object]], title: str, md: str, filin
                     "revenue_matched": False,
                     "default_triggered": False,
                     "source": f"SEC EDGAR {filing.filing_date} {title} note table",
-                    "filed": str(filing.filing_date),
-                    "as_of": str(filing.filing_date),
+                    "filed": str(getattr(filing, "filing_date")),
+                    "as_of": str(getattr(filing, "filing_date")),
                     "excerpt": _excerpt(md, 0, min(len(md), 120)),
                 }
             )
@@ -965,8 +967,8 @@ def _collect_note_rows(rows: list[dict[str, object]], title: str, md: str, filin
                     "payment_horizon": payment_horizon,
                     "schedule": schedule,
                     "source": f"SEC EDGAR {filing.filing_date} {title} note",
-                    "filed": str(filing.filing_date),
-                    "as_of": str(filing.filing_date),
+                    "filed": str(getattr(filing, "filing_date")),
+                    "as_of": str(getattr(filing, "filing_date")),
                     "excerpt": s["excerpt"],
                 }
             )
@@ -1108,8 +1110,8 @@ def _balance_sheet_liabilities(ticker: str, *, archive: bool = False, manifest: 
                     "revenue_matched": False,
                     "default_triggered": False,
                     "source": f"SEC EDGAR {filing.filing_date} balance sheet",
-                    "filed": str(filing.filing_date),
-                    "as_of": str(filing.filing_date),
+                    "filed": str(getattr(filing, "filing_date")),
+                    "as_of": str(getattr(filing, "filing_date")),
                     "excerpt": f"Balance sheet line item: {label}",
                 }
             )
@@ -1198,8 +1200,8 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list[d
                         "revenue_matched": False,
                         "default_triggered": True,
                         "source": f"SEC EDGAR 8-K {filing.filing_date} material agreement",
-                        "filed": str(filing.filing_date),
-                        "as_of": str(filing.filing_date),
+                        "filed": str(getattr(filing, "filing_date")),
+                        "as_of": str(getattr(filing, "filing_date")),
                         "excerpt": _excerpt(text, m.start(), m.end()),
                         "_lifecycle_event": lifecycle_event,
                         "agreement_key": _agreement_key(window),
@@ -1230,8 +1232,8 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list[d
                         "revenue_matched": False,
                         "default_triggered": True,
                         "source": f"SEC EDGAR 8-K {filing.filing_date} material agreement",
-                        "filed": str(filing.filing_date),
-                        "as_of": str(filing.filing_date),
+                        "filed": str(getattr(filing, "filing_date")),
+                        "as_of": str(getattr(filing, "filing_date")),
                         "excerpt": _excerpt(text, trig.start(), trig.end()),
                         "_lifecycle_event": event,
                         "agreement_key": _agreement_key(window),

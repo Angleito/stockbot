@@ -222,13 +222,13 @@ def _verify_against(meta: Mapping[str, object], *,
                           entity_id), tuple(warnings)
     ticker_ok: bool | None = None
     if expected_ticker is not None:
-        want = str(expected_ticker).strip().upper()
-        ticker_ok = bool(want) and want in [str(t).strip().upper() for t in tickers]
+        want = expected_ticker.strip().upper()
+        ticker_ok = bool(want) and want in [t.strip().upper() for t in tickers]
     match_type: str | None = None
     score = 0.0
     if expected_name is not None:
         match_type, score, name_warnings = _classify_name(
-            str(expected_name), current, former_names, as_of)
+            expected_name, current, former_names, as_of)
         warnings.extend(name_warnings)
     if (ticker_ok is False) or (expected_name is not None and match_type is None):
         return _candidate(cik, str(current), tickers, SOURCE,
@@ -266,11 +266,11 @@ def verify_sec_entity(cik: int | str, *, expected_name: str | None = None,
     except (TypeError, ValueError, AttributeError):
         cik_int = None
     if cik_int is None:
-        return _candidate(None, str(expected_name or ""), (), SOURCE,
+        return _candidate(None, expected_name or "", (), SOURCE,
                           "", 0.0, "not_found")
     meta = get_submissions_metadata(cik_int)
     if meta is None:
-        return _candidate(cik_int, str(expected_name or ""), (), SOURCE,
+        return _candidate(cik_int, expected_name or "", (), SOURCE,
                           "", 0.0, "not_found")
     candidate, _warnings = _verify_against(
         meta, expected_name=expected_name,
@@ -518,7 +518,7 @@ def find_sec_entities(query: str, *, as_of: str | None = None,
                 continue
             tickers: tuple[str, ...] = tuple(
                 str(item) for item in _object_list(meta.get("tickers")))
-            if query.strip().upper() in [str(t).strip().upper() for t in tickers]:
+            if query.strip().upper() in [t.strip().upper() for t in tickers]:
                 candidate, _w = _verify_against(
                     meta, expected_ticker=query, as_of=as_of)
                 candidate = replace(candidate, match_source="+".join(
@@ -954,7 +954,7 @@ def _sort_forms_by_priority(forms: Iterable[str]) -> list[str]:
     order = {name.upper(): i for i, name in enumerate(BACKFILL_PRIORITY)}
 
     def _key(form: str) -> tuple[int, str]:
-        return (order.get(str(form).upper(), len(order)), str(form).upper())
+        return (order.get(form.upper(), len(order)), form.upper())
     return sorted(forms, key=_key)
 
 
@@ -1030,7 +1030,7 @@ def _fetch_typed(query_fn: Callable[..., list[dict[str, object]]], *,
         raw = query_fn(limit=_LOCAL_EXHAUSTIVE_GUARD, root=root, **filters)
         _push(raw)
         return out, len(raw or []) < _LOCAL_EXHAUSTIVE_GUARD, 1
-    cap = max(int(cap), 0)
+    cap = max(cap, 0)
     probe = query_fn(limit=cap + 1, root=root, **filters)
     _push(probe)
     if len(probe or []) <= cap:
@@ -1555,7 +1555,7 @@ def rank_hits(hits: Iterable[SECTextHit], *, verified_ciks: Iterable[int | None]
     """
     ciks = {c for c in verified_ciks or () if c is not None}
     names = {normalize_name(n) for n in verified_names or () if n}
-    forms = {str(f).strip().upper() for f in relevant_forms or () if str(f).strip()}
+    forms = {f.strip().upper() for f in relevant_forms or () if f.strip()}
 
     def _filed(hit: SECTextHit) -> str:
         return str(getattr(hit, "filed_at", "") or "")
@@ -1651,7 +1651,7 @@ class SECDiscoveryService:
         search_id = uuid.uuid4().hex[:12]
         now = _utcnow()
         # Interactive bound for global/current-feed reads and backfill batches.
-        batch_size = max(int(request.max_results or 50), 1)
+        batch_size = max(request.max_results or 50, 1)
         result_limit = request.max_results if request.max_results is not None else (None if request.exhaustive else 50)
         attempts: list[SearchAttempt] = []
         warnings: list[str] = []
@@ -1764,7 +1764,7 @@ class SECDiscoveryService:
                 _adopt(resolve_sec_accession(
                     request.accession_no, as_of=as_of), route="accession")
             except ValueError as exc:
-                _record("exact-accession", str(request.accession_no),
+                _record("exact-accession", request.accession_no,
                         "failed", error=exc)
                 errors.append(str(exc))
         else:
@@ -1777,11 +1777,11 @@ class SECDiscoveryService:
                         or request.ticker or request.cik)
         entity_selectors: list[str] = []
         for selector in (request.cik, request.ticker):
-            text = str(selector).strip() if selector is not None else ""
+            text = selector.strip() if selector is not None else ""
             if text and all(text != seen for seen in entity_selectors):
                 entity_selectors.append(text)
         if entity_query is not None:
-            text = str(entity_query).strip()
+            text = entity_query.strip()
             if text and all(text != seen for seen in entity_selectors):
                 entity_selectors.append(text)
         verified: list[EntityCandidate] = []
@@ -1803,7 +1803,7 @@ class SECDiscoveryService:
             _record("entity-discovery", "no query/ticker/cik/company_name",
                     "not_applicable")
         else:
-            _record("entity-discovery", str(entity_query),
+            _record("entity-discovery", entity_query,
                     "not_applicable", filters={"reason": "disabled by request"})
 
         # Route 3: EFTS text/topic/person/domain/security variants.
@@ -1820,13 +1820,13 @@ class SECDiscoveryService:
                 _add_variants(
                     _expand_entity_queries(verified, as_of) if verified else [],
                     "entity")
-                _add_variants([str(entity_query).strip()], "text")
+                _add_variants([entity_query.strip()], "text")
             if request.person_name is not None:
                 try:
                     _add_variants(
                         _expand_person_queries(request.person_name), "person")
                 except ValueError as exc:
-                    _record("efts", str(request.person_name), "failed",
+                    _record("efts", request.person_name, "failed",
                             error=exc, filters={"route": "person"})
                     errors.append(str(exc))
             elif entity_query is None and request.domain is None \
@@ -1836,7 +1836,7 @@ class SECDiscoveryService:
                 try:
                     domain_variants = _expand_domain_queries(request.domain)
                 except ValueError as exc:
-                    _record("efts", str(request.domain), "failed",
+                    _record("efts", request.domain, "failed",
                             error=exc, filters={"route": "domain"})
                     errors.append(str(exc))
                 else:
@@ -1855,7 +1855,7 @@ class SECDiscoveryService:
                     _add_variants(_expand_security_queries(
                         request.security_identifier), "security")
                 except ValueError as exc:
-                    _record("efts", str(request.security_identifier), "failed",
+                    _record("efts", request.security_identifier, "failed",
                             error=exc, filters={"route": "security"})
                     errors.append(str(exc))
                 # Security identity stays separate: no entity candidate.
@@ -1954,7 +1954,7 @@ class SECDiscoveryService:
         # Route 5: global filing indexes for forms/relationships.
         global_forms: list[str] = []
         for form in request.forms or ():
-            text = str(form or "").strip()
+            text = (form or "").strip()
             if text and all(text.upper() != seen.upper() for seen in global_forms):
                 global_forms.append(text)
         if request.search_relationships and request.person_name:
@@ -2084,7 +2084,7 @@ class SECDiscoveryService:
                 if not request.start_date and not request.end_date:
                     want_current = True
                 elif request.end_date:
-                    want_current = str(request.end_date) >= _cur_qs
+                    want_current = request.end_date >= _cur_qs
                 else:
                     want_current = True
                 if want_current:
@@ -2225,7 +2225,7 @@ class SECDiscoveryService:
                     continue
             if request.cik is not None:
                 try:
-                    text = str(request.cik).strip()
+                    text = request.cik.strip()
                     if text and text not in rel_ciks:
                         rel_ciks.append(text)
                 except Exception:
@@ -2381,7 +2381,7 @@ class SECDiscoveryService:
                         _rel_open[0] += 1
                 except Exception as exc:
                     _record("local-securities",
-                            str(request.security_identifier), "failed",
+                            request.security_identifier, "failed",
                             error=exc,
                             pit_basis="known_at" if as_of else None)
                     errors.append(f"local-securities failed: {exc}")
@@ -2392,7 +2392,7 @@ class SECDiscoveryService:
                             row.get("manager_name"), "13f-manager",
                             "sec-13f", row.get("known_at"))
                     _record("local-securities",
-                            str(request.security_identifier),
+                            request.security_identifier,
                             "complete" if _sec_exh else "partial",
                             reported=len(rows), retrieved=len(rows), pages=_sec_pg,
                             pit_basis="known_at" if as_of else None)
@@ -2493,7 +2493,7 @@ class SECDiscoveryService:
             _record("local-transactions", "disabled by request",
                     "not_applicable")
 
-        if pit_gaps:
+        if pit_gaps > 0:
             warnings.append(
                 f"{pit_gaps} global filing(s) excluded by as_of {as_of}")
         ranked = rank_hits(
@@ -2549,12 +2549,12 @@ class SECDiscoveryService:
             status = "complete_within_source_limits"
         else:
             status = "complete"
-        forms_seen = {str(f).strip().upper() for f in global_forms if str(f).strip()}
+        forms_seen = {f.strip().upper() for f in global_forms if f.strip()}
         forms_seen.update(
-            str(f.form).strip().upper() for f in filings.values()
+            f.form.strip().upper() for f in filings.values()
             if str(getattr(f, "form", "") or "").strip())
         forms_seen.update(
-            str(h.form).strip().upper() for h in ranked
+            h.form.strip().upper() for h in ranked
             if str(getattr(h, "form", "") or "").strip())
         date_coverage: str | None = None
         if request.start_date or request.end_date:
@@ -3184,7 +3184,7 @@ def evaluate_and_persist_type(
     owned = [dict(it) for it in (instances or [])
              if "relationship_type" not in it
              or normalize_label(it.get("relationship_type")) == label]
-    windows = [(str(s), str(e)) for s, e in windows]
+    windows = [(s, e) for s, e in windows]
     kwargs: dict[str, tuple[int, ...]] = {} if horizons is None else {"horizons": tuple(horizons)}
     # Normalize caller mappings to plain float dicts at the evaluation boundary.
     obs_rows: dict[tuple[str, str], float] | None = (
@@ -3246,7 +3246,7 @@ def record_type_decision(
     from .. import store as _store
     if state not in ("active", "demoted"):
         raise ValueError(f"state must be active|demoted, got {state!r}")
-    if not str(reason or "").strip():
+    if not (reason or "").strip():
         raise ValueError("human type decisions require a reason")
     label = normalize_label(relationship_type)
     prev_state, _ = _store.latest_type_state(label, root=data_root)
@@ -3293,7 +3293,7 @@ def get_sec_search_coverage(*, source: str | None = None, form: str | None = Non
     search = None
     if search_id is not None:
         try:
-            search = _store.query_search(str(search_id), root=data_root)
+            search = _store.query_search(search_id, root=data_root)
         except Exception:
             search = None
     errors = [e for e in

@@ -79,7 +79,7 @@ def _digest(canonical_ref: str, summary: str, known_at: str) -> str:
 
 def _as_dt(value: str) -> datetime | None:
     try:
-        out = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        out = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
     if out.tzinfo is None:
@@ -92,11 +92,11 @@ def _le(a: str, b: str) -> bool:
     da, db = _as_dt(a), _as_dt(b)
     if da is not None and db is not None:
         return da <= db
-    return str(a) <= str(b)
+    return a <= b
 
 
 def _day(ts: str) -> str:
-    ts = str(ts or "")
+    ts = (ts or "")
     return ts[:10] if len(ts) >= 10 else ts
 
 def targets_for_thesis(thesis: Thesis) -> tuple[str, ...]:
@@ -168,7 +168,7 @@ class SecFilingsService:
                     continue
                 ref = f"sec:{f.accession_no}"
                 summary = f"{f.form} filed by {f.filer_name or target} (filed {f.filed_at or 'unknown date'})"
-                amend = bool(getattr(f, "is_amendment", False) or str(f.form or "").endswith("/A"))
+                amend = bool(getattr(f, "is_amendment", False) or (f.form or "").endswith("/A"))
                 out.append(CanonicalEvent(
                     event_id=ref, canonical_ref=ref, source=self.name, known_at=ka,
                     entity=target, summary=summary, content_hash=_digest(ref, summary, ka),

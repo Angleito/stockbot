@@ -1200,7 +1200,7 @@ def _validate_sort(
             raise ValueError(
                 "Provide either 'sort_fields' or 'sort_order', not both."
             )
-        order = str(sort_order).strip().lower()
+        order = sort_order.strip().lower()
         if order not in ("asc", "desc"):
             raise ValueError("sort_order must be 'asc' or 'desc'.")
         if not spec.date_field:
@@ -1891,10 +1891,10 @@ def _build_spec_from_metadata(entry: CatalogEntry, raw: dict[str, object]) -> Da
     override = _METADATA_OVERRIDES.get((entry.group.lower(), entry.name.lower()), {})
     if "symbol_field" in override:
         raw_sym = override["symbol_field"]
-        symbol_field = str(raw_sym) if isinstance(raw_sym, str) and raw_sym else None
+        symbol_field = raw_sym if isinstance(raw_sym, str) and raw_sym else None
     if "date_field" in override:
         raw_dt = override["date_field"]
-        date_field = str(raw_dt) if isinstance(raw_dt, str) and raw_dt else None
+        date_field = raw_dt if isinstance(raw_dt, str) and raw_dt else None
     if override.get("market_aggregate"):
         market_aggregate = True
         symbol_field = None
@@ -1953,7 +1953,7 @@ def _spec_from_cached(entry: CatalogEntry, hit: dict[str, object]) -> DatasetSpe
             if isinstance(v, (list, tuple)):
                 valid[str(k)] = tuple(str(x) for x in v)
     raw_desc = hit.get("description")
-    description = str(raw_desc) if isinstance(raw_desc, str) and raw_desc else entry.description
+    description = raw_desc if isinstance(raw_desc, str) and raw_desc else entry.description
     raw_fields = hit.get("fields")
     cached_fields: list[dict[str, object]] = []
     if isinstance(raw_fields, (list, tuple)):
@@ -1971,9 +1971,9 @@ def _spec_from_cached(entry: CatalogEntry, hit: dict[str, object]) -> DatasetSpe
     else:
         methods = entry.methods
     raw_sym = hit.get("symbol_field")
-    symbol_field = str(raw_sym) if isinstance(raw_sym, str) and raw_sym else None
+    symbol_field = raw_sym if isinstance(raw_sym, str) and raw_sym else None
     raw_dt = hit.get("date_field")
-    date_field = str(raw_dt) if isinstance(raw_dt, str) and raw_dt else None
+    date_field = raw_dt if isinstance(raw_dt, str) and raw_dt else None
     return DatasetSpec(
         group=entry.group,
         name=entry.name,
@@ -2000,11 +2000,11 @@ def _detect_symbol_field(fields: list[dict[str, object]]) -> Optional[str]:
             return preferred
     for f in fields:
         raw_n = f.get("name")
-        n = str(raw_n) if isinstance(raw_n, str) else ""
+        n = raw_n if isinstance(raw_n, str) else ""
         if not n:
             continue
         raw_t = f.get("type")
-        t = str(raw_t).lower() if isinstance(raw_t, str) else ""
+        t = raw_t.lower() if isinstance(raw_t, str) else ""
         if "symbol" in n.lower() and t in ("string", "text", ""):
             return n
     return None
@@ -2032,7 +2032,7 @@ def _detect_date_field(
                 return raw_name
     for f in fields:
         raw_n = f.get("name")
-        n = str(raw_n) if isinstance(raw_n, str) else ""
+        n = raw_n if isinstance(raw_n, str) else ""
         if not n:
             continue
         if re.search(r"(^|.*)(date|datetime)$", n, re.I) or "Date" in n:
@@ -2177,7 +2177,7 @@ def _clamp_limit(limit: Optional[int], *, default: int = DEFAULT_LIMIT, maximum:
     if limit is None:
         return default
     try:
-        n = int(limit)
+        n = limit
     except (TypeError, ValueError):
         return default
     return max(1, min(n, maximum))

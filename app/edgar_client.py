@@ -314,7 +314,7 @@ def _dividend_valuation(ticker: str, ttm: object, *, include_price: bool) -> dic
     if not isinstance(quote, dict):
         return dict(nulls)
     try:
-        price = float(quote.get("price")) if quote.get("price") is not None else None
+        price = quote.get("price") if quote.get("price") is not None else None
     except (TypeError, ValueError):
         return dict(nulls)
     if price is None or price <= 0:
@@ -589,12 +589,12 @@ def get_recent_ownership_filings(form_type: str = "both", limit: int = 10) -> di
 
 def _resolve_issuer_ticker(cik: int) -> str | None:
     """Best-effort CIK -> ticker for drill-down (cached; None when unresolvable)."""
-    key = f"cik_ticker:{int(cik):010d}"
+    key = f"cik_ticker:{cik:010d}"
     hit = cache.get(key, ttl=_OWNERSHIP_TICKER_TTL_SECONDS)
     if isinstance(hit, str):
         return hit or None
     try:
-        tickers = Company(int(cik)).tickers
+        tickers = Company(cik).tickers
         value = tickers[0] if tickers else ""
     except Exception:
         value = ""
@@ -640,7 +640,7 @@ def _filed_key(row: dict[str, object]) -> str:
 
 
 def _fetch_recent_ownership_filings(form_type: str, limit: int) -> dict[str, object]:
-    label = str(form_type or "both").strip().upper()
+    label = (form_type or "both").strip().upper()
     if label in ("BOTH", "13D/G", "13DG"):
         forms = list(_OWNERSHIP_FEED_FORMS)
     elif label in ("SC 13D", "13D"):
@@ -650,7 +650,7 @@ def _fetch_recent_ownership_filings(form_type: str, limit: int) -> dict[str, obj
     else:
         return {"error": f"Invalid form_type '{form_type}': use 'SC 13D', 'SC 13G', or 'both'"}
     try:
-        limit = max(1, min(int(limit or 10), 25))
+        limit = max(1, min(limit or 10, 25))
     except (TypeError, ValueError):
         return {"error": f"Invalid limit '{limit}': use 1-25"}
     try:
@@ -717,7 +717,7 @@ def _fetch_latest_earnings_release(ticker: str) -> dict[str, object]:
             text = press_releases[0].text()
             out: dict[str, object] = {
                 "ticker": ticker,
-                "filed": str(filing.filing_date),
+                "filed": str(getattr(filing, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
                 "accession_no": filing.accession_no,
                 "accession": filing.accession_no,
                 "text": text,
@@ -741,7 +741,7 @@ def _fetch_latest_earnings_release(ticker: str) -> dict[str, object]:
                 text = mda if isinstance(mda, str) else getattr(mda, "text", lambda: str(mda))()
                 out: dict[str, object] = {
                     "ticker": ticker,
-                    "filed": str(filing.filing_date),
+                    "filed": str(getattr(filing, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
                     "accession_no": filing.accession_no,
                     "accession": filing.accession_no,
                     "text": text,
@@ -801,8 +801,8 @@ def _fetch_diff_risk_factors(ticker: str) -> dict[str, object]:
         ))
         out: dict[str, object] = {
             "ticker": ticker,
-            "latest_filed": str(latest.filing_date),
-            "prior_filed": str(prior.filing_date),
+            "latest_filed": str(getattr(latest, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
+            "prior_filed": str(getattr(prior, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
             "latest_accession": getattr(latest, "accession_no", None),
             "prior_accession": getattr(prior, "accession_no", None),
             "accessions": [getattr(prior, "accession_no", None), getattr(latest, "accession_no", None)],

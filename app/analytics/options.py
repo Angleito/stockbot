@@ -121,7 +121,7 @@ def compare_options(
         rows.sort(key=_target_pnl_key, reverse=True)
     else:
         rows.sort(key=_spread_pct_key)
-    bounded = max(1, min(int(limit), 30))
+    bounded = max(1, min(limit, 30))
     return {
         "contracts": rows[:bounded],
         "returned": min(len(rows), bounded),

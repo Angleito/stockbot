@@ -183,7 +183,7 @@ class RobinhoodPortfolioProvider:
         return data
 
     def get_equity_quotes(self, tickers: Sequence[str]) -> dict[str, MarketSnapshot]:
-        symbols = [str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()]
+        symbols = [ticker.strip().upper() for ticker in tickers if ticker.strip()]
         if not symbols:
             return {}
         payload = self._client.call_tool("get_equity_quotes", {"symbols": symbols})

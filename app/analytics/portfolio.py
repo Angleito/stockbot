@@ -25,7 +25,7 @@ def largest_positions(
     ordered = sorted(items, key=_position_order)
     if limit is None:
         return ordered
-    bounded = max(1, min(int(limit), 100))
+    bounded = max(1, min(limit, 100))
     return ordered[:bounded]
 
 

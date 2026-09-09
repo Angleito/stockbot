@@ -306,7 +306,19 @@ def test_search_sec_filings_default_call_is_bounded(monkeypatch: pytest.MonkeyPa
     warnings = _as_seq(result["warnings"] or [])
     assert "payload truncated to 20 context rows" not in " ".join(warnings)
 
-def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "expected_max", "expected_exhaustive"),
+    [
+        ({"query": "Acme", "limit": 5}, 5, False),
+        ({"query": "Acme", "exhaustive": True}, None, True),
+    ],
+)
+def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    expected_max: int | None,
+    expected_exhaustive: bool,
+) -> None:
     class _FakeService:
         seen: SECSearchRequest | None = None
 
@@ -318,14 +330,13 @@ def test_search_sec_filings_explicit_limit_and_exhaustive_forwarding(monkeypatch
             return _result(warnings=(), errors=())
 
     monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
-    tools.execute_tool("search_sec_filings", {"query": "Acme", "limit": 5}, "test", context=_research_context())
+    tools.execute_tool("search_sec_filings", arguments, "test", context=_research_context())
     assert _FakeService.seen is not None
-    assert _FakeService.seen.max_results == 5
-    assert _FakeService.seen.exhaustive is False
-    tools.execute_tool("search_sec_filings", {"query": "Acme", "exhaustive": True}, "test", context=_research_context())
-    assert _FakeService.seen is not None
-    assert _FakeService.seen.max_results is None
-    assert _FakeService.seen.exhaustive is True
+    if expected_max is None:
+        assert _FakeService.seen.max_results is None
+    else:
+        assert _FakeService.seen.max_results == expected_max
+    assert _FakeService.seen.exhaustive is expected_exhaustive
 
 
 def test_search_sec_filings_cap_warning_passes_through_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,24 +373,48 @@ def test_find_sec_entities_default_call_is_bounded(monkeypatch: pytest.MonkeyPat
     assert seen["data_root"] == get_data_root()
 
 
-def test_find_sec_entities_limit_and_exhaustive_forwarding(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "expected_max", "expected_exhaustive"),
+    [
+        ({"query": "Acme", "limit": 5}, 5, False),
+        ({"query": "Acme", "exhaustive": True}, None, True),
+    ],
+)
+def test_find_sec_entities_limit_and_exhaustive_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    expected_max: int | None,
+    expected_exhaustive: bool,
+) -> None:
     seen: dict[str, object] = {}
 
     def _fake(query: str, **kwargs: object) -> SECSearchResult:
-        seen.clear()
         seen.update(kwargs)
         return _result()
 
     monkeypatch.setattr(tools.sec, "find_sec_entities", _fake)
-    tools.execute_tool("find_sec_entities", {"query": "Acme", "limit": 5}, "test", context=_research_context())
-    assert seen["max_results"] == 5
-    tools.execute_tool("find_sec_entities", {"query": "Acme", "exhaustive": True}, "test", context=_research_context())
-    assert seen["max_results"] is None
-    assert seen["exhaustive"] is True
+    tools.execute_tool("find_sec_entities", arguments, "test", context=_research_context())
+    if expected_max is None:
+        assert seen["max_results"] is None
+    else:
+        assert seen["max_results"] == expected_max
+    assert seen["exhaustive"] is expected_exhaustive
 
 
 
-def test_search_sec_relationships_dispatch_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "expected_exhaustive"),
+    [
+        ({}, True),
+        ({"exhaustive": False}, False),
+        ({"exhaustive": True}, True),
+    ],
+)
+def test_search_sec_relationships_dispatch_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    expected_exhaustive: bool,
+) -> None:
     payload: dict[str, object] = {
         "entity": "1234567", "ciks": ("1234567",),
         "groups": {"beneficial_owner": {"verified": [{"accession": "ACC-1"}]}},
@@ -396,7 +431,7 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch: pytest.MonkeyPatc
         return payload
     monkeypatch.setattr(tools.sec, "search_sec_relationships", _fake)
     result = tools.execute_tool(
-        "search_sec_relationships", {"entity": "1234567"},
+        "search_sec_relationships", {"entity": "1234567", **arguments},
         "test", context=_research_context(),
     )
     assert result["ciks"] == ["1234567"]
@@ -406,19 +441,7 @@ def test_search_sec_relationships_dispatch_groups(monkeypatch: pytest.MonkeyPatc
     assert result["counts"] == {"typed": 1, "workflow": 0, "mentions": 1}
     assert _as_seq(result["attempts"])[0]["backend"] == "local-typed"
     assert seen["limit"] == 50
-    assert seen["exhaustive"] is True
-    seen.clear()
-    tools.execute_tool(
-        "search_sec_relationships", {"entity": "1234567", "exhaustive": False},
-        "test", context=_research_context(),
-    )
-    assert seen["exhaustive"] is False
-    seen.clear()
-    tools.execute_tool(
-        "search_sec_relationships", {"entity": "1234567", "exhaustive": True},
-        "test", context=_research_context(),
-    )
-    assert seen["exhaustive"] is True
+    assert seen["exhaustive"] is expected_exhaustive
 
 
 def test_search_sec_relationships_partial_on_partial_attempt(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,9 +33,9 @@ def as_of_clause(as_of: str, column: str = "known_at") -> tuple[str, str]:
     """Return (SQL fragment, parameter) enforcing ``known_at <= as_of``."""
     import re
 
-    if re.match(_DATE_GRANULARITY_AS_OF, str(as_of)):
-        return f"CAST({column} AS DATE) <= CAST(? AS DATE)", str(as_of)
-    return f"CAST({column} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)", str(as_of)
+    if re.match(_DATE_GRANULARITY_AS_OF, as_of):
+        return f"CAST({column} AS DATE) <= CAST(? AS DATE)", as_of
+    return f"CAST({column} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)", as_of
 
 
 def _data_roots(data_root: Path) -> tuple[Path, Path]:

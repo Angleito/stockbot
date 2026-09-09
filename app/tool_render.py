@@ -1286,7 +1286,7 @@ def _render_sec_facts(result: dict[str, object], max_bytes: int) -> str:
         for key, value in sheet.items():
             _add(f"- {_cell(key)}: {_table_cell(value)}")
 
-    if omitted:
+    if omitted > 0:
         _add(f"{TRUNCATED_MARKER} (Omitted rows: {omitted})")
     if not lines:
         return _minimal(result, max_bytes)

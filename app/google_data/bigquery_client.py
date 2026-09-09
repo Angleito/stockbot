@@ -625,7 +625,7 @@ def submit_template(
                 estimate = int(getattr(client, "dry_run")(params))
             else:
                 sql_text, bq_params = _render_sql(spec, params, table)
-                estimate = int(_real_dry_run(client, sql_text, bq_params, per_query_cap))
+                estimate = _real_dry_run(client, sql_text, bq_params, per_query_cap)
         except (ValueError, KeyError) as e:
             return _err(f"unavailable template parameter: {e}", "source_unavailable")
         except Exception as e:
@@ -638,7 +638,7 @@ def submit_template(
             )
         pending_resume = isinstance(existing, dict) and existing.get("status") == "pending"
         if pending_resume and isinstance(existing, dict):
-            reserve = max(estimate, int(existing.get("max_bytes", estimate)))
+            reserve = max(estimate, existing.get("max_bytes", estimate))
         else:
             reserve = estimate
         if not pending_resume:

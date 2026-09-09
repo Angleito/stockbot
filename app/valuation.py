@@ -140,7 +140,7 @@ def _obligation_annual_impact(obligations_rows: Sequence[Mapping[str, object]], 
     }
 
     def _add_fy(year: str, bucket: str, amount: float) -> None:
-        year = str(year or "").strip()
+        year = (year or "").strip()
         if not year:
             return
         entry = impact_by_fy.setdefault(

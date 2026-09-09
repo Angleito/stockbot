@@ -112,7 +112,7 @@ def _validated_as_of(as_of: Optional[str]) -> Optional[_dt.date]:
     if as_of is None:
         return _today()
     try:
-        return _dt.datetime.strptime(str(as_of), "%Y-%m-%d").date()
+        return _dt.datetime.strptime(as_of, "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return None
 
@@ -230,8 +230,8 @@ def _duration_days(row: FinancialFactRow) -> Optional[int]:
     if not start or not end:
         return None
     try:
-        start_date = _dt.date.fromisoformat(str(start)[:10])
-        end_date = _dt.date.fromisoformat(str(end)[:10])
+        start_date = _dt.date.fromisoformat(start[:10])
+        end_date = _dt.date.fromisoformat(end[:10])
     except ValueError:
         return None
     return (end_date - start_date).days
@@ -239,7 +239,7 @@ def _duration_days(row: FinancialFactRow) -> Optional[int]:
 
 def _row_period_end(row: FinancialFactRow) -> str:
     """Sort key: fact period end as text (ISO dates order lexically)."""
-    return str(row["period_end"])
+    return row["period_end"]
 
 
 def _row_payment_date(row: CanonicalDividendEventRow) -> str:
@@ -254,12 +254,12 @@ def _row_known_at(row: Mapping[str, object]) -> str:
 
 def _row_filed_accession(row: FinancialFactRow) -> tuple[str, str]:
     """Sort key: true latest filing first by filed_at, accession tie-break."""
-    return (str(row.get("filed_at") or ""), str(row.get("accession") or ""))
+    return ((row.get("filed_at") or ""), (row.get("accession") or ""))
 
 
 def _row_stored_order(row: FinancialFactRow) -> tuple[str, str, str]:
     """Sort key: newest stored fact by period end, filed_at, accession."""
-    return (str(row["period_end"]), str(row.get("filed_at") or ""), str(row.get("accession") or ""))
+    return (row["period_end"], (row.get("filed_at") or ""), (row.get("accession") or ""))
 
 
 def _row_revision_order(row: Mapping[str, object]) -> tuple[str, str, str]:
@@ -280,10 +280,10 @@ def _duration_rows(rows: Sequence[FinancialFactRow], concept: str, day_range: tu
             q.append(row)
     by_end: dict[str, FinancialFactRow] = {}
     for row in q:
-        key = str(row["period_end"])
+        key = row["period_end"]
         prev = by_end.get(key)
-        if prev is None or (str(row["filed_at"] or ""), str(row["accession"] or "")) > (
-            str(prev["filed_at"] or ""), str(prev["accession"] or "")
+        if prev is None or ((row["filed_at"] or ""), (row["accession"] or "")) > (
+            (prev["filed_at"] or ""), (prev["accession"] or "")
         ):
             by_end[key] = row
     return sorted(by_end.values(), key=_row_period_end)
@@ -299,13 +299,12 @@ def _derive_q4_from_facts(rows: Sequence[FinancialFactRow], concept: str, fy_end
         if (
             duration is not None
             and _FY_DAYS[0] <= duration <= _FY_DAYS[1]
-            and str(row["period_end"]) == fy_end.isoformat()
+            and row["period_end"] == fy_end.isoformat()
         ):
             fy.append(row)
     if not fy:
         return None
     latest_fy = max(fy, key=_row_filed_accession)
-    fy_total = float(latest_fy["value"])
     ytd = []
     for row in rows:
         if row.get("concept") != concept:
@@ -314,15 +313,15 @@ def _derive_q4_from_facts(rows: Sequence[FinancialFactRow], concept: str, fy_end
         if duration is None or not (_YTD_DAYS[0] <= duration <= _YTD_DAYS[1]):
             continue
         try:
-            row_end = _dt.date.fromisoformat(str(row["period_end"])[:10])
+            row_end = _dt.date.fromisoformat(row["period_end"][:10])
         except ValueError:
             continue
         if fy_end - _dt.timedelta(days=_MISSING_QUARTER_GAP_DAYS) <= row_end < fy_end:
             ytd.append(row)
     if not ytd:
         return None
-    ytd_q3 = float(sorted(ytd, key=_row_period_end)[-1]["value"])
-    latest_total = float(latest_fy["value"])
+    ytd_q3 = sorted(ytd, key=_row_period_end)[-1]["value"]
+    latest_total = latest_fy["value"]
     derived: FinancialFactRow = {
         **latest_fy,
         "value": latest_total - ytd_q3,
@@ -339,7 +338,7 @@ def _quarters_with_derived_q4(quarter_rows: Sequence[FinancialFactRow], all_rows
     quarter = sorted(quarter_rows, key=_row_period_end)
     if len(quarter) < 2:
         return quarter[-4:]
-    ends = [_dt.date.fromisoformat(str(row["period_end"])[:10]) for row in quarter]
+    ends = [_dt.date.fromisoformat(row["period_end"][:10]) for row in quarter]
     last_gap = (ends[-1] - ends[-2]).days
     if last_gap > _MISSING_QUARTER_GAP_DAYS:
         missing_end = ends[-1] - _dt.timedelta(days=_DERIVED_Q4_OFFSET_DAYS)
@@ -365,16 +364,16 @@ def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> Opti
     for r in recent_diluted:
         entry: dict[str, object] = {
             "fiscal_year": str(r["fiscal_year"]) if r.get("fiscal_year") is not None else "",
-            "fiscal_period": str(r.get("fiscal_period") or ""),
-            "eps_diluted": round(float(r["value"]), 2),
-            "period_end": str(r["period_end"]),
+            "fiscal_period": (r.get("fiscal_period") or ""),
+            "eps_diluted": round(r["value"], 2),
+            "period_end": r["period_end"],
         }
         if recent_basic:
             matching = next(
-                (b for b in recent_basic if str(b["period_end"]) == entry["period_end"]), None
+                (b for b in recent_basic if b["period_end"] == entry["period_end"]), None
             )
             if matching is not None:
-                entry["eps_basic"] = round(float(matching["value"]), 2)
+                entry["eps_basic"] = round(matching["value"], 2)
         quarterly_eps.append(entry)
 
     result: dict[str, object] = {
@@ -383,9 +382,9 @@ def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> Opti
         "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
     }
     if len(recent_diluted) == 4:
-        result["ttm_eps_diluted"] = round(sum(float(r["value"]) for r in recent_diluted), 2)
+        result["ttm_eps_diluted"] = round(sum(r["value"] for r in recent_diluted), 2)
     if recent_basic is not None and len(recent_basic) == 4:
-        result["ttm_eps_basic"] = round(sum(float(r["value"]) for r in recent_basic), 2)
+        result["ttm_eps_basic"] = round(sum(r["value"] for r in recent_basic), 2)
     return result
 
 
@@ -396,7 +395,7 @@ def _assemble_dividend_payload(ticker: str, rows: Sequence[FinancialFactRow], as
     quarters = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _QUARTER_DAYS)
     recent = _quarters_with_derived_q4(quarters, rows, DIVIDEND_PER_SHARE_CONCEPT)
     if len(recent) == 4 and _has_contiguous_quarters([r["period_end"] for r in recent]) and _is_recent_dividend_period(recent[-1]["period_end"], as_of):
-        ttm = round(sum(float(r["value"]) for r in recent), 4)
+        ttm = round(sum(r["value"] for r in recent), 4)
     else:
         ttm = None
     fy_rows = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _FY_DAYS)
@@ -483,7 +482,7 @@ def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root: Optional[
             continue
         key = event["dividend_event_id"]
         prev = by_id.get(key)
-        if prev is None or str(event.get("known_at") or "") >= str(prev.get("known_at") or ""):
+        if prev is None or (event.get("known_at") or "") >= (prev.get("known_at") or ""):
             by_id[key] = event
     return list(by_id.values())
 
@@ -493,7 +492,7 @@ def _classify_dividend_event(row: CanonicalDividendEventRow, as_of: _dt.date) ->
     pay = row.get("payment_date")
     if not pay:
         return "unknown"
-    return "paid" if str(pay)[:10] < as_of.isoformat() else "upcoming"
+    return "paid" if pay[:10] < as_of.isoformat() else "upcoming"
 
 
 def _extreme_event(cands: Sequence[CanonicalDividendEventRow], *, earliest: bool) -> Optional[CanonicalDividendEventRow]:
@@ -518,15 +517,15 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
         if not row.get("payment_date"):
             continue
         groups.setdefault(
-            (str(row.get("record_date") or ""), str(row.get("payment_date"))), []).append(row)
+            ((row.get("record_date") or ""), row.get("payment_date")), []).append(row)
     canonical: list[CanonicalDividendEventRow] = []
     for group in groups.values():
         clusters: list[list[DividendEventRow]] = []
         for row in group:
-            if str(row.get("dividend_type") or "") in ("", "unknown"):
+            if (row.get("dividend_type") or "") in ("", "unknown"):
                 continue
             for cluster in clusters:
-                if all(str(m.get("dividend_type") or "") == str(row.get("dividend_type") or "")
+                if all((m.get("dividend_type") or "") == (row.get("dividend_type") or "")
                        for m in cluster):
                     cluster.append(row)
                     break
@@ -534,7 +533,7 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
                 clusters.append([row])
         stray: list[DividendEventRow] = []
         for row in group:
-            if str(row.get("dividend_type") or "") not in ("", "unknown"):
+            if (row.get("dividend_type") or "") not in ("", "unknown"):
                 continue
             amount = row.get("amount_per_share")
             matched = [c for c in clusters
@@ -554,7 +553,7 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
             winner = max(bucket, key=_row_revision_order)
             out: CanonicalDividendEventRow = {
                 **winner,
-                "source_types": sorted({str(m.get("source_type")) for m in bucket if m.get("source_type")}),
+                "source_types": sorted({m.get("source_type") for m in bucket if m.get("source_type")}),
             }
             for mate in bucket:
                 if mate is winner:
@@ -563,7 +562,7 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
                 if out.get("amount_per_share") is None and isinstance(mate_amount, (int, float)):
                     out["amount_per_share"] = float(mate_amount)
                 mate_type = mate.get("dividend_type")
-                if str(out.get("dividend_type") or "") in ("", "unknown") and isinstance(mate_type, str) and mate_type not in ("", "unknown"):
+                if (out.get("dividend_type") or "") in ("", "unknown") and isinstance(mate_type, str) and mate_type not in ("", "unknown"):
                     out["dividend_type"] = mate_type
                 mate_excerpt = mate.get("evidence_excerpt")
                 if not out.get("evidence_excerpt") and isinstance(mate_excerpt, str) and mate_excerpt:
@@ -573,7 +572,7 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
                     out["source_concept"] = mate_concept
             canonical.append(out)
     undated_canonical: list[CanonicalDividendEventRow] = [
-        {**r, "source_types": [str(r["source_type"])] if r["source_type"] else []}
+        {**r, "source_types": [r["source_type"]] if r["source_type"] else []}
         for r in undated
     ]
     return undated_canonical + canonical
@@ -582,9 +581,9 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
 def _dividend_event_source_types(row: CanonicalDividendEventRow) -> list[str]:
     sts = row.get("source_types")
     if isinstance(sts, (list, tuple, set)) and sts:
-        return [str(s) for s in sts if s]
+        return [s for s in sts if s]
     st = row.get("source_type")
-    return [str(st)] if st else []
+    return [st] if st else []
 
 
 def _dividend_event_payload(events: Sequence[DividendEventRow], as_of: _dt.date, *, growth: Mapping[str, object] | None = None, ttm_dps: float | None = None, annual_history: Sequence[Mapping[str, object]] | None = None) -> dict[str, object]:
@@ -679,7 +678,7 @@ def _ttm_cash_total(rows: Sequence[FinancialFactRow], concept: str, *, outflow: 
     )
     if len(quarters) != 4 or not _has_contiguous_quarters([r["period_end"] for r in quarters]):
         return None
-    values = [abs(float(r["value"])) if outflow else float(r["value"]) for r in quarters]
+    values = [abs(r["value"]) if outflow else r["value"] for r in quarters]
     return round(sum(values), 2)
 
 
@@ -688,8 +687,8 @@ def _fy_annual_totals(rows: Sequence[FinancialFactRow], concept: str, *, outflow
     annual: dict[int, float] = {}
     for r in _duration_rows(rows, concept, _FY_DAYS):
         try:
-            year = _dt.date.fromisoformat(str(r["period_end"])[:10]).year
-            val = abs(float(r["value"])) if outflow else float(r["value"])
+            year = _dt.date.fromisoformat(r["period_end"][:10]).year
+            val = abs(r["value"]) if outflow else r["value"]
         except (TypeError, ValueError):
             continue
         annual[year] = round(val, 2)
@@ -710,20 +709,20 @@ def _debt_up_yoy(rows: Sequence[FinancialFactRow]) -> Optional[bool]:
     if latest is None:
         return None
     try:
-        end = _dt.date.fromisoformat(str(latest["period_end"])[:10])
-        now_val = float(latest["value"])
+        end = _dt.date.fromisoformat(latest["period_end"][:10])
+        now_val = latest["value"]
     except (TypeError, ValueError):
         return None
     cutoff = (end - _dt.timedelta(days=300)).isoformat()
     older = [r for r in rows
-             if r.get("concept") == _DEBT_CONCEPT and str(r.get("period_end") or "") <= cutoff]
+             if r.get("concept") == _DEBT_CONCEPT and (r.get("period_end") or "") <= cutoff]
     if not older:
         return None
     base = _latest_concept_value(older, _DEBT_CONCEPT)
     if base is None:
         return None
     try:
-        then_val = float(base["value"])
+        then_val = base["value"]
     except (TypeError, ValueError):
         return None
     return now_val > then_val
@@ -767,7 +766,7 @@ def _assemble_dividend_safety(
     elif ttm_dps is None or ttm_eps_diluted is None:
         _set("earnings_payout_ratio", None, "missing ttm dps or diluted eps")
     else:
-        _set("earnings_payout_ratio", round(float(ttm_dps) / float(ttm_eps_diluted), 4))
+        _set("earnings_payout_ratio", round(ttm_dps / ttm_eps_diluted, 4))
 
     fcf_nonpositive = ttm_fcf is not None and ttm_fcf <= 0
     if fcf_nonpositive:
@@ -787,7 +786,7 @@ def _assemble_dividend_safety(
 
     cash_row = _latest_concept_value(rows, _CASH_CONCEPT)
     try:
-        cash = float(cash_row["value"]) if cash_row is not None else None
+        cash = cash_row["value"] if cash_row is not None else None
     except (TypeError, ValueError):
         cash = None
     if cash is None or ttm_div_paid is None:

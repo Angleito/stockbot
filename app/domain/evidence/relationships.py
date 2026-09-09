@@ -152,9 +152,9 @@ def _record(rel: Relationship, prev: str | None, new: str, actor: str,
 def _check_as_of(as_of: str | None) -> str | None:
     if as_of is None:
         return None
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(as_of)):
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", as_of):
         raise ValueError(f"as_of must be YYYY-MM-DD, got {as_of!r}")
-    return str(as_of)
+    return as_of
 
 
 def validate_relationship(rel: Relationship, *, as_of: str | None = None,
@@ -203,7 +203,7 @@ def _auto_verify_errors(rel: Relationship, *, as_of: str | None,
         if endpoints_verified is None or endpoints_verified.get(eid) is not True:
             reasons.append(f"endpoint-unverified:{eid}")
     if supporting:
-        floor = min(float(e.confidence or 0.0) for e in supporting)
+        floor = min((e.confidence or 0.0) for e in supporting)
         if floor < AUTO_VERIFY_MIN_CONFIDENCE:
             reasons.append(f"min-confidence-{floor:.2f}-below-0.95")
     else:
@@ -276,7 +276,7 @@ def propose_relationship(from_entity_id: str | None, to_entity_id: str | None,
 def attach_relationship_evidence(
         rel: Relationship, *, source_span: object = None,
         accession: object = None, document_name: object = None,
-        extraction_method: str | None = None, confidence: float = 0.0,
+        extraction_method: str | None = None, confidence: int | float = 0.0,
         known_at: str | None = None, actor: str = "extractor",
         reason: str = "evidence attached",
         initial_status: str | None = None,

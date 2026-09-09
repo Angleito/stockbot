@@ -289,7 +289,7 @@ def expected_inputs_hash(scope: dict[str, object], term: str, table: str, list_k
             continue
         if str(cand.get("list_kind") or "") != scope_kind:
             continue
-        if str(cand.get("term") or "") != str(term or ""):
+        if str(cand.get("term") or "") != (term or ""):
             continue
         period = str(cand.get("period") or cand.get("week") or "")
         if not period or period < week_start or period > week_end:
@@ -297,14 +297,14 @@ def expected_inputs_hash(scope: dict[str, object], term: str, table: str, list_k
         cgeo = str(cand.get("geo") or "")
         if cgeo.split(":")[0] not in geos:
             continue
-        if _series_basis(cand) != str(basis or ""):
+        if _series_basis(cand) != (basis or ""):
             continue
         pairs.append([str(cand.get("observation_id") or ""),
                       str(cand.get("content_hash") or "")])
-    target_table = str(table or "")
-    target_kind = str(list_kind or "")
-    target_geo = str(geo or "")
-    target_basis = str(basis or "")
+    target_table = table or ""
+    target_kind = list_kind or ""
+    target_geo = geo or ""
+    target_basis = basis or ""
     periods: set[str] = set()
     if target_geo.split(":")[0] in geos or (not geos and not target_geo):
         for cand in candidates:
@@ -678,11 +678,6 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
         return {"status": "error", "source": SOURCE,
                 "error": f"{len(geos)} geos exceeds bound {_MAX_GEOS}",
                 "error_type": "invalid_params"}
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError):
-        return {"status": "error", "source": SOURCE,
-                "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
     limit = max(1, min(limit, _MAX_LIMIT))
     if week_start is None and week_end is None:
         week_end = end_date
@@ -1002,7 +997,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                     else:
                         _geos = [_geo.split(":")[0]]
                     _scope = _feature_scope_json(
-                        week_start=str(week_start or ""), week_end=str(week_end or ""),
+                        week_start=week_start or "", week_end=week_end or "",
                         geos=_geos, table=str(_obs.get("table") or ""),
                         list_kind=str(_obs.get("list_kind") or ""))
                     _shash = _feature_scope_hash(_scope)

@@ -537,7 +537,7 @@ def _partition_year(date_value: Optional[str]) -> Optional[str]:
     if not date_value:
         return None
     try:
-        return str(_dt.date.fromisoformat(str(date_value)[:10]).year)
+        return str(_dt.date.fromisoformat(date_value[:10]).year)
     except (TypeError, ValueError):
         return None
 

@@ -137,7 +137,7 @@ def _check_dates(
 def _clean_list(values: list[str] | str | None) -> list[str]:
     if isinstance(values, str):
         values = [values]
-    return [str(v).strip() for v in (values or []) if v and str(v).strip()]
+    return [v.strip() for v in (values or []) if v and v.strip()]
 
 
 def search_company_patents(company_id: str, *, start_date: str | None = None,
@@ -148,7 +148,7 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
                            executor: _Executor | None = None,
                            data_root: Path | None = None) -> dict[str, object]:
     """Publications for documented assignee aliases; empty aliases refuse."""
-    if not company_id or not str(company_id).strip():
+    if not company_id or not company_id.strip():
         return {"status": "error", "source": SOURCE,
                 "error": "company_id is required", "error_type": "invalid_params"}
     assignees = _clean_list(assignees) + _clean_list(aliases)
@@ -160,7 +160,7 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     try:
-        limit = max(1, min(int(limit), _MAX_LIMIT))
+        limit = max(1, min(limit, _MAX_LIMIT))
     except (TypeError, ValueError):
         return {"status": "error", "source": SOURCE,
                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
@@ -200,7 +200,7 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
             "title": row.get("title"),
             "url": row.get("url") or row.get("source_link"),
         })
-    return {"status": "ok", "source": SOURCE, "company_id": str(company_id).strip(),
+    return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
             "publications": publications, "count": len(publications)}
 
 
@@ -216,7 +216,7 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
     Null publication dates become gaps (excluded, counted); null citations
     count zero; years with no inventive CPC report ``__NONE__``.
     """
-    if not company_id or not str(company_id).strip():
+    if not company_id or not company_id.strip():
         return {"status": "error", "source": SOURCE,
                 "error": "company_id is required", "error_type": "invalid_params"}
     assignees = _clean_list(assignees) + _clean_list(aliases)
@@ -282,5 +282,5 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
                       "family_count": bucket["family_count"],
                       "total_citations": bucket["total_citations"],
                       "top_cpc": ranked[0][1] if ranked else "__NONE__"})
-    return {"status": "ok", "source": SOURCE, "company_id": str(company_id).strip(),
+    return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
             "years": years, "gaps": gaps}

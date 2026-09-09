@@ -558,7 +558,7 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
                 if str(frow.get("calc_version") or "") != str(CALC_VERSION):
                     continue
                 if feature_scope_hash is not None:
-                    if str(frow.get("feature_scope_hash") or "") != str(feature_scope_hash):
+                    if str(frow.get("feature_scope_hash") or "") != feature_scope_hash:
                         continue
                 if cutoff is not None and str(frow.get("calculated_at") or "") > cutoff:
                     continue
@@ -572,7 +572,7 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
                     scope, str(record.get("term") or ""),
                     str(record.get("table") or ""),
                     str(record.get("list_kind") or ""), basis, str(record.get("geo") or ""), candidates)
-                if str(frow.get("inputs_hash") or "") != str(expected):
+                if str(frow.get("inputs_hash") or "") != expected:
                     continue
                 by_scope.setdefault(str(frow.get("feature_scope_hash") or ""), []).append(frow)
         flat = [r for rows in by_scope.values() for r in rows]
@@ -616,12 +616,12 @@ def query_signals(query: Optional[str] = None, geo: Optional[str] = None,
         record["available_feature_scopes"] = available
     rows = sorted(latest.values(), key=_signal_sort_key)
     if query is not None:
-        rows = [r for r in rows if str(query).lower() in str(r.get("term", "")).lower()]
+        rows = [r for r in rows if query.lower() in str(r.get("term", "")).lower()]
     if geo is not None:
-        rows = [r for r in rows if str(r.get("geo")) == str(geo)]
+        rows = [r for r in rows if str(r.get("geo")) == geo]
     if limit is not None:
         try:
-            rows = rows[:max(0, int(limit))]
+            rows = rows[:max(0, limit)]
         except (TypeError, ValueError):
             pass
     return rows
