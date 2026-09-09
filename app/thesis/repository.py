@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -119,7 +120,7 @@ def _coerce_expression(item: TradeExpression | Mapping[str, object], _path: str 
 
 class ThesisRepository:
     def __init__(self, root: Path | str) -> None:
-        self.root = Path(root)
+        self.root = Path(os.path.realpath(root))
 
     # -- internal helpers -------------------------------------------------
 
