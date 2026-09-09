@@ -6,32 +6,19 @@ RUNS_DB_PATH is isolated per session by the root conftest fixture.
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from app import finra_analysis
+from app.policy import RequestContext
 from app.redact import redact_json, redact_text, redact_value
-from app.runtime import BudgetExhaustedError, ExecutionBudget
-from app.security import quarantine_reader
+from app.runtime import ExecutionBudget
 from app.storage.runs import (
     RunRecorder,
     finalize_failed_run,
-    reset_current_budget,
     reset_current_recorder,
-    set_current_budget,
     set_current_recorder,
 )
-
-
-def _usage(**overrides):
-    usage = {
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-        "cost": 0.00012,
-    }
-    usage.update(overrides)
-    return usage
 
 
 def test_redact_text_units():
@@ -64,6 +51,7 @@ def test_redact_value_units():
         "provider_instrument_id": "inst-7",
     }
     redacted = redact_value(value)
+    assert isinstance(redacted, dict)
     assert redacted["accountNumber"] == "[REDACTED]"
     assert redacted["nested"]["client_secret"] == "[REDACTED]"
     # Structural research identifiers pass through.
@@ -81,124 +69,34 @@ def test_redact_json_units():
     assert redact_json("not json") == "not json"
 
 
-def test_nested_helpers_reserve_budget(monkeypatch):
-    """Nested model helpers reserve against the active budget before any
-    network call; with capacity they proceed to the call."""
-    budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=64, max_model_calls=1,
-        max_runtime=600.0, max_evidence_tokens=48000,
-    )
-    assert budget.reserve_model_call() is True
-    token = set_current_budget(budget)
-    monkeypatch.setattr(
-        quarantine_reader.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
-    )
-    monkeypatch.setattr(
-        finra_analysis.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
-    )
-    try:
-        with pytest.raises(BudgetExhaustedError):
-            quarantine_reader._llm_complete("test", "prompt")
-        with pytest.raises(BudgetExhaustedError):
-            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
-    finally:
-        reset_current_budget(token)
-
-    # With capacity the helpers run through to the (stubbed) network call.
-    class _FakeResp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "id": "req_nested",
-                "usage": _usage(),
-                "choices": [{"message": {"content": "summary text", "finish_reason": "stop"}}],
-            }
-
-    budget2 = ExecutionBudget(
-        max_rounds=8, max_tool_calls=64, max_model_calls=2,
-        max_runtime=600.0, max_evidence_tokens=48000,
-    )
-    token2 = set_current_budget(budget2)
-    monkeypatch.setattr(quarantine_reader.requests, "post", lambda *a, **k: _FakeResp())
-    monkeypatch.setattr(finra_analysis.requests, "post", lambda *a, **k: _FakeResp())
-    try:
-        assert quarantine_reader._llm_complete("test", "prompt") == "summary text"
-        assert (
-            finra_analysis._post_completion("test", [{"role": "user", "content": "x"}], 10)
-            == "summary text"
-        )
-    finally:
-        reset_current_budget(token2)
-
-
-def test_reserve_methods_enforce_runtime(monkeypatch):
+def test_reserve_methods_enforce_runtime():
     """Reserves refuse once elapsed runtime is gone, even with call slots left."""
     budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=2, max_model_calls=2,
+        max_tool_calls=2,
         max_runtime=1.0, max_evidence_tokens=48000,
     )
-    assert budget.reserve_model_call() is True
     assert budget.reserve_tool_call() is True
+    assert budget.reserve_search_call() is True
     budget._started -= 60  # pretend the budget started 60s ago
     assert budget.runtime_remaining() <= 0
-    assert budget.reserve_model_call() is False
+    assert budget.reserve_search_call() is False
     assert budget.reserve_tool_call() is False
 
-    # The nested-helper path surfaces the same refusal as an exception.
-    token = set_current_budget(budget)
-    monkeypatch.setattr(
-        quarantine_reader.requests, "post",
-        lambda *a, **k: pytest.fail("nested model call must not run"),
+
+def _recorder(run_id: str) -> RunRecorder:
+    return RunRecorder(
+        run_id=run_id, request_id="req", question="q", as_of=None, model="t",
+        provider="p", model_parameters={}, agent_version="0",
+        prompt_version="0", tool_registry_version="t", git_sha="g",
     )
-    try:
-        with pytest.raises(BudgetExhaustedError):
-            quarantine_reader._llm_complete("test", "prompt")
-    finally:
-        reset_current_budget(token)
-
-def _recorder(run_id, **overrides):
-    kwargs = {
-        "request_id": "req", "question": "q", "as_of": None, "model": "t",
-        "provider": "p", "model_parameters": {}, "agent_version": "0",
-        "prompt_version": "0", "tool_registry_version": "t", "git_sha": "g",
-    }
-    kwargs.update(overrides)
-    return RunRecorder(run_id=run_id, **kwargs)
 
 
-def test_concurrent_tool_reservations_capped():
-    """8 threads racing for 20 tool slots hand out exactly 20."""
-    budget = ExecutionBudget(
-        max_rounds=8, max_tool_calls=20, max_model_calls=8,
-        max_runtime=600.0, max_evidence_tokens=48000,
-    )
-    granted = []
-    lock = threading.Lock()
-
-    def worker():
-        local = [budget.reserve_tool_call() for _ in range(10)]
-        with lock:
-            granted.extend(local)
-
-    threads = [threading.Thread(target=worker) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert sum(granted) == 20
-    assert budget.tool_calls == 20
-
-
-def test_concurrent_recorder_writes_unique_ids(tmp_path, monkeypatch):
+def test_concurrent_recorder_writes_unique_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """8 threads x 10 tool+evidence rows keep every row with a unique ID."""
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     recorder = _recorder("run-conc-1")
     with recorder:
-        def worker():
+        def worker() -> None:
             for _ in range(10):
                 seq = recorder.next_tool_seq()
                 tc_id = f"{recorder.run_id}:tc:{seq}"
@@ -234,7 +132,7 @@ def test_concurrent_recorder_writes_unique_ids(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path, monkeypatch):
+def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Pre-telemetry DBs gain the columns on open; queue/handler/cache persist."""
     path = tmp_path / "runs.sqlite"
     conn = sqlite3.connect(str(path))
@@ -283,15 +181,15 @@ def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path, monkeypatch
         conn.close()
 
 
-def test_execute_pi_tool_ids_and_telemetry(tmp_path, monkeypatch):
+def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Pi-supplied call IDs become run-scoped rows; handler/queue/cache persist."""
     import app.pi_gateway as gateway
 
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
-    monkeypatch.setattr(
-        gateway, "execute_tool",
-        lambda *a, **k: {"ok": True, "cache_hit": True, "cache_type": "unit_test"},
-    )
+    def _fake_execute_tool(name: str, arguments: dict[str, object], model: str, *, context: RequestContext) -> dict[str, object]:
+        return {"ok": True, "cache_hit": True, "cache_type": "unit_test"}
+
+    monkeypatch.setattr(gateway, "execute_tool", _fake_execute_tool)
     session = gateway.PiSessionContext(session_id="s1")
     with _recorder("run-pi-1") as recorder:
         token = set_current_recorder(recorder)
@@ -303,7 +201,9 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path, monkeypatch):
                 protocol_id="proto-9", bridge_queue_ms=7.5,
             )
             assert correlated.get("content")
-            assert "proto-9" not in correlated["content"]
+            content = correlated["content"]
+            assert isinstance(content, str)
+            assert "proto-9" not in content
         finally:
             reset_current_recorder(token)
     conn = sqlite3.connect(str(tmp_path / "runs.sqlite"))
@@ -327,7 +227,7 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_finalize_failed_run_reconstructs_orphan_summary(tmp_path, monkeypatch):
+def test_finalize_failed_run_reconstructs_orphan_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Orphaned runs terminalize as failed with aggregates rebuilt from child rows."""
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     now = datetime.now(timezone.utc).isoformat()

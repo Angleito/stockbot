@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Sequence
+from typing import Sequence
 
 from ..market.quotes import Quote
 from ..market.securities import SecurityResolution
@@ -13,12 +13,12 @@ ZERO = Decimal("0")
 
 
 def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
-    if numerator is None or denominator in (None, ZERO):
+    if numerator is None or denominator is None or denominator == ZERO:
         return None
     return numerator / denominator
 
 
-def valuation_price(quote: Quote | None) -> dict[str, Any]:
+def valuation_price(quote: Quote | None) -> dict[str, object]:
     """Select the single deterministic valuation price for a quote.
 
     Precedence: (1) ``last`` when present; (2) ``mid`` (the bid/ask midpoint
@@ -75,7 +75,7 @@ def portfolio_market_value(
     incompleteness). With no priced values, total is None.
     """
     priced = [value for value in values if value is not None]
-    total = sum(priced) if priced else None
+    total = sum(priced, ZERO) if priced else None
     return total, len(priced), len(values)
 
 
@@ -93,8 +93,10 @@ def build_position(
 ) -> Position:
     """Build a valued position; portfolio_weight is None here (computed by
     the snapshot builder once the invested total is known)."""
-    valuation = valuation_price(quote) if quote else {"price": None, "price_type": None}
-    market_price = Decimal(valuation["price"]) if valuation["price"] is not None else None
+    valuation: dict[str, object] = valuation_price(quote) if quote else {"price": None, "price_type": None}
+    raw_price = valuation.get("price")
+    market_price = Decimal(raw_price) if isinstance(raw_price, str) else None
+    raw_price_type = valuation.get("price_type")
     market_value = position_market_value(raw.quantity, market_price)
     gain = unrealized_gain(market_value, raw.average_cost, raw.quantity)
     cost_basis = raw.average_cost * raw.quantity if raw.average_cost is not None else None
@@ -113,7 +115,7 @@ def build_position(
         portfolio_weight=None,
         source=raw.source,
         retrieved_at=raw.retrieved_at,
-        price_type=valuation["price_type"],
+        price_type=raw_price_type if isinstance(raw_price_type, str) else None,
         quote_retrieved_at=quote.retrieved_at if quote else None,
         asset_type=raw.asset_type,
     )

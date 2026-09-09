@@ -26,10 +26,6 @@ def get_data_root() -> Path:
         p = REPO_ROOT / p
     return p
 
-# Default fallback only when the env var is unset. Keep env/CLI overrides
-# authoritative; this value must be valid on the target OpenRouter account.
-FALLBACK_MODEL = "google/gemini-2.5-flash"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 FINRA_TOKEN_URL = (
     "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token"
     "?grant_type=client_credentials"
@@ -57,39 +53,6 @@ def _require_env(name: str) -> str:
     return value
 
 
-def init_config() -> None:
-    """Validate env vars required by the research/chat tool path.
-
-    Raises ValueError if OPENROUTER_API_KEY or SEC_EDGAR_IDENTITY is missing.
-    """
-    _require_env("SEC_EDGAR_IDENTITY")
-    _require_env("OPENROUTER_API_KEY")
-
-
-def get_sec_edgar_identity() -> str:
-    """The SEC EDGAR identity string (validated, placeholder-rejected)."""
-    return _require_env("SEC_EDGAR_IDENTITY")
-
-
-def get_default_model() -> str:
-    return os.getenv("DEFAULT_MODEL", FALLBACK_MODEL)
-
-
-def _positive_env(name: str, default: float, *, integer: bool = False) -> int | float:
-    """Read a positive numeric setting without silently accepting bad limits."""
-    label = "integer" if integer else "number"
-    value = (os.getenv(name) or "").strip()
-    if not value:
-        return default
-    try:
-        parsed = int(value) if integer else float(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a positive {label}") from exc
-    if parsed <= 0:
-        raise ValueError(f"{name} must be a positive {label}")
-    return parsed
-
-
 def _env_bool(name: str) -> bool:
     """True when the env var is set to a truthy value (1/true/yes)."""
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
@@ -109,32 +72,17 @@ def configure_logging(*, stream_url: str | None = None) -> None:
         logging.getLogger().addHandler(handler)
 
 
-def get_local_chat_policy():  # type: ignore[no-untyped-def]
-    """Build the single-principal runtime chat policy from local config."""
-    from .policy import ChatPolicy
-    configured = (os.getenv("CHAT_ALLOWED_MODELS") or "").split(",")
-    return ChatPolicy(
-        allowed_models=frozenset({
-            get_default_model(),
-            *(item.strip() for item in configured if item.strip()),
-        }),
-        max_messages=_positive_env("CHAT_MAX_MESSAGES", 20, integer=True),
-        max_message_chars=_positive_env("CHAT_MAX_CONTENT_CHARS", 12_000, integer=True),
-        upstream_timeout_seconds=_positive_env("OPENROUTER_TIMEOUT_SECONDS", 60.0),
-    )
+def init_config() -> None:
+    """Validate env vars required by the SEC research path.
 
-
-def get_finra_analysis_model() -> Optional[str]:
-    """Secondary low-cost OpenRouter model used to phrase FINRA briefings.
-
-    Optional: when unset (or blank), FINRA analysis is deterministic-only.
+    Raises ValueError if SEC_EDGAR_IDENTITY is missing.
     """
-    value = (os.getenv("FINRA_ANALYSIS_MODEL") or "").strip()
-    return value or None
+    _require_env("SEC_EDGAR_IDENTITY")
 
 
-def get_openrouter_api_key() -> str:
-    return _require_env("OPENROUTER_API_KEY")
+def get_sec_edgar_identity() -> str:
+    """The SEC EDGAR identity string (validated, placeholder-rejected)."""
+    return _require_env("SEC_EDGAR_IDENTITY")
 
 
 def get_finra_client_id() -> str:
@@ -174,3 +122,118 @@ def get_exa_api_key() -> Optional[str]:
     """Exa API key, or None when unset (integration is optional)."""
     value = (os.getenv("EXA_API_KEY") or "").strip()
     return value or None
+
+
+def _env_optional(name: str) -> Optional[str]:
+    """Optional env value: stripped string, or None when unset/blank."""
+    value = (os.getenv(name) or "").strip()
+    return value or None
+
+
+def _env_int(name: str, default: int) -> int:
+    """Optional int env value; default on missing/unparseable, never raises."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def google_data_enabled() -> bool:
+    """True when GOOGLE_DATA_ENABLED is set to a truthy value (default off)."""
+    return _env_bool("GOOGLE_DATA_ENABLED")
+
+
+def get_google_cloud_project() -> Optional[str]:
+    """GCP project for BigQuery, or None when unset (source stays disabled)."""
+    return _env_optional("GOOGLE_CLOUD_PROJECT")
+
+
+def get_datacommons_api_key() -> Optional[str]:
+    """Data Commons API key, or None when unset (required by Data Commons)."""
+    return _env_optional("DATACOMMONS_API_KEY")
+
+
+def get_google_cloud_api_key() -> Optional[str]:
+    """Google Cloud API key (YouTube Data API v3), or None when unset."""
+    return _env_optional("GOOGLE_CLOUD_API_KEY")
+
+
+def get_bq_max_bytes_per_query() -> int:
+    """Per-query billing cap (bytes); default 1 GiB."""
+    return _env_int("BIGQUERY_MAX_BYTES_PER_QUERY", 1073741824)
+
+
+def get_bq_monthly_bytes_limit() -> int:
+    """Monthly reservation ceiling (bytes); default 500 GiB."""
+    return _env_int("BIGQUERY_MONTHLY_BYTES_LIMIT", 536870912000)
+
+
+def get_bq_daily_bytes_limit() -> int:
+    """Daily reservation ceiling (bytes); default 10 GiB."""
+    return _env_int("BIGQUERY_DAILY_BYTES_LIMIT", 10737418240)
+
+
+def google_trends_api_enabled() -> bool:
+    """True when GOOGLE_TRENDS_API_ENABLED is set (default off, pending alpha)."""
+    return _env_bool("GOOGLE_TRENDS_API_ENABLED")
+
+
+def bigquery_enabled() -> bool:
+    """True when GOOGLE_DATA_ENABLED and a BigQuery project is configured."""
+    return google_data_enabled() and bool(get_google_cloud_project())
+
+
+def datacommons_enabled() -> bool:
+    """True when GOOGLE_DATA_ENABLED (key required separately at call time)."""
+    return google_data_enabled()
+
+
+def youtube_enabled() -> bool:
+    """True when GOOGLE_DATA_ENABLED and the YouTube source is configured."""
+    return google_source_enabled("youtube")
+
+
+def get_youtube_search_daily_limit() -> int:
+    """Daily YouTube search reservation cap; default 80.
+
+    A present-but-unusable value raises ValueError (fail closed at use).
+    """
+    raw = (os.getenv("YOUTUBE_SEARCH_DAILY_LIMIT") or "").strip()
+    if not raw:
+        return 80
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"non-positive YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}")
+    return value
+
+
+def google_source_enabled(name: str) -> bool:
+    """True when GOOGLE_DATA_ENABLED and the named source is configured.
+
+    youtube needs GOOGLE_CLOUD_API_KEY (+ positive search limit);
+    datacommons/macro needs DATACOMMONS_API_KEY; all other
+    (BigQuery-backed) names need GOOGLE_CLOUD_PROJECT and positive
+    byte limits. Unknown names fail closed as BigQuery-backed.
+    """
+    if not google_data_enabled():
+        return False
+    n = (name or "").strip().lower()
+    if n == "youtube":
+        try:
+            limit = get_youtube_search_daily_limit()
+        except ValueError:
+            return False
+        return bool(get_google_cloud_api_key()) and limit > 0
+    if n in ("datacommons", "data_commons", "data-commons", "macro", "macro_context"):
+        return bool(get_datacommons_api_key())
+    return (
+        bool(get_google_cloud_project())
+        and get_bq_max_bytes_per_query() > 0
+        and get_bq_monthly_bytes_limit() > 0
+    )

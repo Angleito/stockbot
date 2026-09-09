@@ -61,7 +61,7 @@ class RelationshipEvidence:
     from_entity_id: str | None = None
     to_entity_id: str | None = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str | float | bool | None]:
         return {
             "evidence_id": self.evidence_id,
             "relationship_id": self.relationship_id,
@@ -88,7 +88,7 @@ class RelationshipRevision:
     superseded_revision_id: str | None = None
     known_at: str | None = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str | float | bool | None]:
         return {
             "revision_id": self.revision_id,
             "relationship_id": self.relationship_id,
@@ -114,11 +114,11 @@ class Relationship:
     status: str = "unknown"
     known_at: str | None = None
     current_revision_id: str | None = None
-    evidence: list = field(default_factory=list)
-    counterevidence: list = field(default_factory=list)
-    revisions: list = field(default_factory=list)
+    evidence: list[RelationshipEvidence] = field(default_factory=list)
+    counterevidence: list[RelationshipEvidence] = field(default_factory=list)
+    revisions: list[RelationshipRevision] = field(default_factory=list)
 
-    def supporting(self) -> list:
+    def supporting(self) -> list[RelationshipEvidence]:
         return [e for e in self.evidence if not e.is_counterevidence]
 
 
@@ -152,13 +152,13 @@ def _record(rel: Relationship, prev: str | None, new: str, actor: str,
 def _check_as_of(as_of: str | None) -> str | None:
     if as_of is None:
         return None
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(as_of)):
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", as_of):
         raise ValueError(f"as_of must be YYYY-MM-DD, got {as_of!r}")
-    return str(as_of)
+    return as_of
 
 
 def validate_relationship(rel: Relationship, *, as_of: str | None = None,
-                           endpoints_verified: dict | None = None) -> list[str]:
+                           endpoints_verified: dict[str, bool] | None = None) -> list[str]:
     """Generic validation -> error codes; empty means valid."""
     errors: list[str] = []
     if not rel.from_entity_id or not rel.to_entity_id:
@@ -188,7 +188,7 @@ def validate_relationship(rel: Relationship, *, as_of: str | None = None,
 
 
 def _auto_verify_errors(rel: Relationship, *, as_of: str | None,
-                        endpoints_verified: dict | None) -> list[str]:
+                        endpoints_verified: dict[str, bool] | None) -> list[str]:
     """Conservative rule -> blocking reasons; empty means verify."""
     reasons = validate_relationship(
         rel, as_of=as_of, endpoints_verified=endpoints_verified)
@@ -203,7 +203,7 @@ def _auto_verify_errors(rel: Relationship, *, as_of: str | None,
         if endpoints_verified is None or endpoints_verified.get(eid) is not True:
             reasons.append(f"endpoint-unverified:{eid}")
     if supporting:
-        floor = min(float(e.confidence or 0.0) for e in supporting)
+        floor = min((e.confidence or 0.0) for e in supporting)
         if floor < AUTO_VERIFY_MIN_CONFIDENCE:
             reasons.append(f"min-confidence-{floor:.2f}-below-0.95")
     else:
@@ -276,7 +276,7 @@ def propose_relationship(from_entity_id: str | None, to_entity_id: str | None,
 def attach_relationship_evidence(
         rel: Relationship, *, source_span: object = None,
         accession: object = None, document_name: object = None,
-        extraction_method: str | None = None, confidence: float = 0.0,
+        extraction_method: str | None = None, confidence: int | float = 0.0,
         known_at: str | None = None, actor: str = "extractor",
         reason: str = "evidence attached",
         initial_status: str | None = None,
@@ -328,7 +328,7 @@ def attach_relationship_counterevidence(
 
 
 def evaluate_relationship(rel: Relationship, *, as_of: str | None = None,
-                          endpoints_verified: dict | None = None,
+                          endpoints_verified: dict[str, bool] | None = None,
                           known_at: str | None = None) -> tuple[str, list[str]]:
     """Conservative evaluation -> (decision, reasons); writes a revision.
 
@@ -366,7 +366,7 @@ def revise_relationship_status(rel: Relationship, new_status: str, *,
 
 
 def supersede_relationship(rel: Relationship, *, new_status: str = "verified",
-                           evidence: list | None = None, actor: str = "human",
+                           evidence: list[RelationshipEvidence] | None = None, actor: str = "human",
                            reason: str = "",
                            known_at: str | None = None) -> RelationshipRevision:
     """Later qualifying evidence supersedes a prior (even human) decision.

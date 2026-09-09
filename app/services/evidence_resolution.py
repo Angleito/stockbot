@@ -72,16 +72,18 @@ def warehouse_name_to_ticker(
         return None
     entity_ids: set[str] = set()
     for row in entity_rows:
-        if isinstance(row.get("name"), str) and row["name"].casefold() == lowered:
+        name_val = row.get("name")
+        if isinstance(name_val, str) and name_val.casefold() == lowered:
             entity_ids.add(str(row["entity_id"]))
     try:
         alias_rows = duckdb.query(
             "SELECT alias_value, entity_id FROM entity_aliases", data_root=data_root
         )
     except Exception:
-        alias_rows = []
+        alias_rows: list[dict[str, object]] = []
     for row in alias_rows:
-        if isinstance(row.get("alias_value"), str) and row["alias_value"].casefold() == lowered:
+        alias_val = row.get("alias_value")
+        if isinstance(alias_val, str) and alias_val.casefold() == lowered:
             entity_ids.add(str(row["entity_id"]))
     if not entity_ids:
         return None
@@ -94,7 +96,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            sec_rows = []
+            sec_rows: list[dict[str, object]] = []
         for row in sec_rows:
             if row.get("ticker"):
                 tickers.add(str(row["ticker"]).strip().upper())
@@ -105,7 +107,7 @@ def warehouse_name_to_ticker(
                 data_root=data_root,
             )
         except Exception:
-            alias_tickers = []
+            alias_tickers: list[dict[str, object]] = []
         for row in alias_tickers:
             if row.get("alias_value"):
                 tickers.add(str(row["alias_value"]).strip().upper())

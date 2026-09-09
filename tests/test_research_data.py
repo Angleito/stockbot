@@ -5,6 +5,7 @@ for real against a tmp data root.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,7 @@ TICKERS_PAYLOAD = {
 }
 
 
-def _facts_payload(cik, val):
+def _facts_payload(cik: int, val: int) -> dict[str, object]:
     return {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
         "EntityCommonStockSharesOutstanding": {"units": {"shares": [
             {"end": "2026-08-01", "val": val, "accn": f"a{cik}", "filed": "2026-08-02"},
@@ -28,14 +29,16 @@ def _facts_payload(cik, val):
     }}}
 
 
-def _finra_row(symbol, pos):
+def _finra_row(symbol: str, pos: int) -> dict[str, object]:
     return {
         "symbolCode": symbol, "issueName": symbol,
         "settlementDate": "2026-08-14", "currentShortPositionQuantity": pos,
     }
 
 
-def _page(rows, total, offset):
+def _page(
+    rows: list[dict[str, object]], total: int, offset: int
+) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
     return (
         json.dumps(rows).encode(), rows,
         {"record-total": str(total), "record-offset": str(offset), "record-limit": "1000"},
@@ -43,34 +46,46 @@ def _page(rows, total, offset):
 
 
 class _Resp:
-    def __init__(self, content, status_code, headers=None):
+    def __init__(self, content: bytes, status_code: int, headers: dict[str, str] | None = None) -> None:
         self.content = content
         self.status_code = status_code
         self.headers = headers or {}
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
-def _install_mocks(monkeypatch, get_script, page_script, sleeps):
+def _install_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    get_script: list[_Resp],
+    page_script: list[tuple[bytes, list[dict[str, object]], dict[str, str]]],
+    sleeps: list[float],
+) -> list[str]:
     """Scripted HTTP responses; records SEC URLs and every sleep duration."""
-    get_calls = []
+    get_calls: list[str] = []
 
-    def fake_get(url, **kwargs):
+    def fake_get(url: str, **kwargs: object) -> _Resp:
         get_calls.append(url)
         return get_script.pop(0)  # IndexError when the script is exhausted
+
+    def fake_ingestion_post_query(
+        group: str, dataset_name: str, payload: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        return page_script.pop(0)
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
 
     monkeypatch.setattr(research_data.requests, "get", fake_get)
     monkeypatch.setattr(
         research_data.finra_client, "ingestion_post_query",
-        lambda *args, **kwargs: page_script.pop(0),
+        fake_ingestion_post_query,
     )
-    monkeypatch.setattr(research_data.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(research_data.time, "sleep", fake_sleep)
     return get_calls
 
-
-def test_refresh_data_offline_end_to_end(tmp_path, monkeypatch):
+def test_refresh_data_offline_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Fetch (with 429 retry) -> archive -> normalize -> Parquet -> market-wide screen."""
     sleeps: list[float] = []
     get_script = [
@@ -88,9 +103,13 @@ def test_refresh_data_offline_end_to_end(tmp_path, monkeypatch):
     summary = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "AMD"], data_root=tmp_path)
 
     assert summary["unresolved_tickers"] == []
-    assert len(summary["sec_facts"]) == 2
-    assert "ticker_ciks" not in summary["sec_tickers"]  # full map stays internal
-    assert summary["sec_tickers"]["ticker_count"] == 2
+    sec_facts = summary["sec_facts"]
+    assert isinstance(sec_facts, list)
+    assert len(sec_facts) == 2
+    sec_tickers = summary["sec_tickers"]
+    assert isinstance(sec_tickers, dict)
+    assert "ticker_ciks" not in sec_tickers  # full map stays internal
+    assert sec_tickers["ticker_count"] == 2
     assert get_calls == [
         research_data.SEC_TICKERS_URL,
         research_data.SEC_TICKERS_URL,  # retry after 429
@@ -117,13 +136,21 @@ def test_refresh_data_offline_end_to_end(tmp_path, monkeypatch):
 
     # Market-wide screen (P1 promise): the leaderboard is not universe-bound.
     result = screens.materialize_short_interest_screen("2026-08-14", data_root=tmp_path)
-    assert [e["ticker"] for e in result["entries"]] == ["AAPL", "AMD"]  # 20/100 > 20/200
-    assert result["coverage"]["finra_rows"] == 3
-    assert result["coverage"]["eligible_rows"] == 2
-    assert result["coverage"]["exclusions"]["unmapped_symbol"] == 1  # XOM
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries if isinstance(e, dict)] == ["AAPL", "AMD"]  # 20/100 > 20/200
+    coverage = result["coverage"]
+    assert isinstance(coverage, dict)
+    assert coverage["finra_rows"] == 3
+    assert coverage["eligible_rows"] == 2
+    exclusions = coverage["exclusions"]
+    assert isinstance(exclusions, dict)
+    assert exclusions["unmapped_symbol"] == 1  # XOM
 
 
-def test_cli_refresh_data_coverage_report(tmp_path, monkeypatch, capsys):
+def test_cli_refresh_data_coverage_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     sleeps: list[float] = []
     get_script = [
         _Resp(b"429", 429),
@@ -137,7 +164,7 @@ def test_cli_refresh_data_coverage_report(tmp_path, monkeypatch, capsys):
     ]
     _install_mocks(monkeypatch, get_script, page_script, sleeps)
 
-    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=tmp_path)
+    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=str(tmp_path))
     out = capsys.readouterr().out
 
     assert "FINRA securities:             3" in out
@@ -148,7 +175,7 @@ def test_cli_refresh_data_coverage_report(tmp_path, monkeypatch, capsys):
     assert "Leaderboard entries: ['AAPL', 'AMD']" in out
 
 
-def test_unresolved_ticker_is_reported_not_fetched(tmp_path, monkeypatch):
+def test_unresolved_ticker_is_reported_not_fetched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
     get_script = [
         _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
@@ -160,11 +187,13 @@ def test_unresolved_ticker_is_reported_not_fetched(tmp_path, monkeypatch):
     summary = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "ZZZZ"], data_root=tmp_path)
 
     assert summary["unresolved_tickers"] == ["ZZZZ"]
-    assert len(summary["sec_facts"]) == 1
+    sec_facts = summary["sec_facts"]
+    assert isinstance(sec_facts, list)
+    assert len(sec_facts) == 1
     assert len(get_calls) == 2  # tickers + AAPL facts; no facts request for ZZZZ
 
 
-def test_prepare_without_universe_skips_sec_facts(tmp_path, monkeypatch):
+def test_prepare_without_universe_skips_sec_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
     get_script = [_Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200)]
     page_script = [_page([_finra_row("AAPL", 20)], 1, 0)]
@@ -175,23 +204,27 @@ def test_prepare_without_universe_skips_sec_facts(tmp_path, monkeypatch):
     assert summary["sec_facts"] == []
     assert len(get_calls) == 1  # SEC ticker universe only
     assert summary["unresolved_tickers"] == []
-    assert "ticker_ciks" not in summary["sec_tickers"]
-    assert summary["sec_tickers"]["ticker_count"] == 2
+    sec_tickers = summary["sec_tickers"]
+    assert isinstance(sec_tickers, dict)
+    assert "ticker_ciks" not in sec_tickers
+    assert sec_tickers["ticker_count"] == 2
 
 
-def test_finra_missing_record_total_raises(tmp_path, monkeypatch):
+def test_finra_missing_record_total_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
     get_script = [
         _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
         _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
     ]
-    page_script = [(b"[]", [], {})]  # no record-total header
+    page_script: list[tuple[bytes, list[dict[str, object]], dict[str, str]]] = [(b"[]", [], {})]  # no record-total header
     _install_mocks(monkeypatch, get_script, page_script, sleeps)
 
     with pytest.raises(ValueError, match="Record-Total"):
         prepare_short_interest_data("2026-08-14", tickers=["AAPL"], data_root=tmp_path)
 
-def test_enrichment_failure_does_not_block_finra_or_siblings(tmp_path, monkeypatch):
+def test_enrichment_failure_does_not_block_finra_or_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """P1: a failed facts request must never prevent the FINRA snapshot."""
     sleeps: list[float] = []
     get_script = [
@@ -204,8 +237,12 @@ def test_enrichment_failure_does_not_block_finra_or_siblings(tmp_path, monkeypat
 
     summary = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "AMD"], data_root=tmp_path)
 
-    assert summary["finra"]["rows"] == 1  # market-wide snapshot still landed
-    assert len(summary["sec_facts"]) == 1  # AAPL enrichment succeeded
+    finra = summary["finra"]
+    assert isinstance(finra, dict)
+    assert finra["rows"] == 1  # market-wide snapshot still landed
+    sec_facts = summary["sec_facts"]
+    assert isinstance(sec_facts, list)
+    assert len(sec_facts) == 1  # AAPL enrichment succeeded
     assert summary["failed_enrichments"] == [
         {"ticker": "AMD", "cik": 2488, "error": "RuntimeError: HTTP 500"},
     ]
@@ -218,7 +255,7 @@ def test_enrichment_failure_does_not_block_finra_or_siblings(tmp_path, monkeypat
     ]
 
 
-def test_cik_only_enrichment_failure_reports_null_ticker(tmp_path, monkeypatch):
+def test_cik_only_enrichment_failure_reports_null_ticker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
     get_script = [
         _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
@@ -235,7 +272,9 @@ def test_cik_only_enrichment_failure_reports_null_ticker(tmp_path, monkeypatch):
     ]
 
 
-def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkeypatch, capsys):
+def test_coverage_counters_truthful_with_invalid_short_interest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     """P2 regression: invalid rows never reach mapping/shares checks, so the
     CLI must print the screen's stage counters, not derived complements."""
     sleeps: list[float] = []
@@ -252,11 +291,12 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
 
     # One CLI run drives prepare + materialize; a replay of the screen then
     # re-reads the persisted run (unique-key dedup makes it a no-op write).
-    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=tmp_path)
+    cli._cmd_refresh_data("2026-08-14", ["AAPL", "AMD"], [], data_root=str(tmp_path))
     out = capsys.readouterr().out
 
     result = screens.materialize_short_interest_screen("2026-08-14", data_root=tmp_path)
     coverage = result["coverage"]
+    assert isinstance(coverage, dict)
     assert coverage["finra_rows"] == 4
     assert coverage["valid_short_interest_rows"] == 3  # BAD excluded here
     assert coverage["mapped_rows"] == 2
@@ -272,7 +312,9 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
         "invalid_short_interest": 1,  # BAD
         "conflicting_versions": 0,
     }
-    assert [e["ticker"] for e in result["entries"]] == ["AAPL", "AMD"]
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries if isinstance(e, dict)] == ["AAPL", "AMD"]
 
     # CLI prints the counters: BAD never inflated mapping/shares coverage
     # (the old derived formula would have printed "Ticker mappings: 3").
@@ -284,7 +326,7 @@ def test_coverage_counters_truthful_with_invalid_short_interest(tmp_path, monkey
     assert "Leaderboard entries: ['AAPL', 'AMD']" in out
 
 
-def _replay_facts_payload(cik):
+def _replay_facts_payload(cik: int) -> dict[str, object]:
     """Companyfacts payload with a shares fact plus EPS facts (pre/post-EPS)."""
     return {
         "cik": cik,
@@ -307,7 +349,7 @@ def _replay_facts_payload(cik):
     }
 
 
-def test_replay_sec_facts_adds_eps_rows_deterministically(tmp_path):
+def test_replay_sec_facts_adds_eps_rows_deterministically(tmp_path: Path):
     """Offline replay: pre-EPS store rows stay put, EPS rows appear once,
     rerun writes zero, retrieved_at comes from the manifest not the clock."""
     from app.normalization import normalize_sec_company_facts
@@ -352,7 +394,7 @@ def test_replay_sec_facts_adds_eps_rows_deterministically(tmp_path):
     assert parquet.read_table("financial_facts", root=tmp_path / "parquet").num_rows == 3
 
 
-def test_replay_sec_facts_isolates_corrupt_payloads(tmp_path):
+def test_replay_sec_facts_isolates_corrupt_payloads(tmp_path: Path):
     from app.storage import raw_archive
 
     good = json.dumps(_replay_facts_payload(320193)).encode()
@@ -368,7 +410,15 @@ def test_replay_sec_facts_isolates_corrupt_payloads(tmp_path):
     )
     summary = research_data.replay_sec_facts_from_archive(data_root=tmp_path)
     assert summary["archived_payloads"] == 2
-    assert len(summary["failed"]) == 1
-    assert summary["failed"][0]["cik"] == "cik0000000007"
-    assert "JSONDecodeError" in summary["failed"][0]["error"]
-    assert summary["written_rows"] > 0  # the valid payload still processed
+    failed = summary["failed"]
+    assert isinstance(failed, list)
+    assert len(failed) == 1
+    first_failure = failed[0]
+    assert isinstance(first_failure, dict)
+    assert first_failure["cik"] == "cik0000000007"
+    failure_error = first_failure["error"]
+    assert isinstance(failure_error, str)
+    assert "JSONDecodeError" in failure_error
+    written_rows = summary["written_rows"]
+    assert isinstance(written_rows, (int, float))
+    assert written_rows > 0  # the valid payload still processed

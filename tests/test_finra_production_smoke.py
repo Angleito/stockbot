@@ -16,6 +16,7 @@ truthful stale/current labeling.
 """
 
 import os
+from collections.abc import Iterator
 
 import pytest
 
@@ -40,16 +41,16 @@ class _NoCache:
     """Ensure production smoke tests exercise FINRA, never SQLite history."""
 
     @staticmethod
-    def get(_key, ttl=None):
+    def get(_key: str, ttl: object = None) -> None:
         return None
 
     @staticmethod
-    def set(_key, _value):
+    def set(_key: str, _value: object) -> None:
         pass
 
 
 @pytest.fixture(autouse=True)
-def _production_mode(monkeypatch):
+def _production_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # Never force mock mode: this suite must exercise the production API.
     monkeypatch.delenv("FINRA_USE_MOCK", raising=False)
     monkeypatch.setattr(finra_client, "cache", _NoCache())
@@ -62,11 +63,27 @@ def _production_mode(monkeypatch):
     finra_client.reset_partitions_cache()
 
 
+def _as_seq(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, dict)
+    return value
+
+
+def _as_str_list(value: object) -> list[str]:
+    assert isinstance(value, list)
+    for item in value:
+        assert isinstance(item, str)
+    return value
+
+
 def test_prod_smoke_catalog_discovery():
     result = finra_client.list_datasets()
     assert "error" not in result, result
-    assert result["count"] > 0
-    ids = {d["dataset"] for d in result["datasets"]}
+    count = result["count"]
+    assert isinstance(count, int)
+    assert count > 0
+    ids = {d["dataset"] for d in _as_seq(result["datasets"])}
     assert "otcMarket/consolidatedShortInterest" in ids
 
 
@@ -89,9 +106,14 @@ def test_prod_smoke_latest_five_short_interest_no_400():
     assert "http_status" not in result  # no 400: unrestricted sortFields never sent
     assert result["sort_source"] == "partitions"
     assert result["pagination_source"] == "partitions"
-    dates = [r["settlementDate"] for r in result["records"]]
+    records = _as_seq(result["records"])
+    dates: list[str] = []
+    for r in records:
+        d = r["settlementDate"]
+        assert isinstance(d, str)
+        dates.append(d)
     assert dates == sorted(dates, reverse=True)
-    row_fields = set(result["records"][0])
+    row_fields = set(records[0])
     assert {"settlementDate", "daysToCoverQuantity", "averageDailyVolumeQuantity"} <= row_fields
     assert result["environment"] == "production"
     assert result["data_freshness"] == "current", result
@@ -111,7 +133,12 @@ def test_prod_smoke_tuple_safe_partition_retrieval():
     assert "error" not in result, result
     assert "http_status" not in result
     assert result["sort_source"] == "partitions"
-    dates = [r["summaryStartDate"] for r in result["records"]]
+    records = _as_seq(result["records"])
+    dates: list[str] = []
+    for r in records:
+        d = r["summaryStartDate"]
+        assert isinstance(d, str)
+        dates.append(d)
     assert dates == sorted(dates, reverse=True)
     assert result["environment"] == "production"
 
@@ -124,5 +151,5 @@ def test_prod_smoke_truthful_freshness_labeling():
     assert result["data_freshness"] == "current", result
     assert result["environment"] == "production"
     rendered = render_tool_result(result)
-    assert not any("STALE" in w for w in result["warnings"])
+    assert not any("STALE" in w for w in _as_str_list(result["warnings"]))
     assert "STALE" not in rendered

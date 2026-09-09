@@ -1,6 +1,7 @@
 """Offline tests for proxy/governance parsing (no network)."""
 
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -12,14 +13,14 @@ from app.sec.governance import (
 )
 
 
-def test_contested_form_is_proxy_contest():
+def test_contested_form_is_proxy_contest() -> None:
     event = normalize_proxy("acc-1", "DFAN14A", issuer="AAA")
     assert event.event_type == "proxy_contest"
     assert event.contested is True
     assert event.event_id == "acc-1:gov"
 
 
-def test_def14a_is_annual_meeting():
+def test_def14a_is_annual_meeting() -> None:
     event = normalize_proxy("acc-2", "DEF 14A", issuer="AAA",
                             filed_at="2024-04-01")
     assert event.event_type == "annual_meeting"
@@ -27,34 +28,35 @@ def test_def14a_is_annual_meeting():
     assert event.filed_at == "2024-04-01"
 
 
-def test_unknown_event_type_rejected():
+def test_unknown_event_type_rejected() -> None:
     with pytest.raises(ValueError):
         normalize_proxy("acc-3", "DEF 14A", issuer="AAA").__class__(
             event_id="x", issuer="AAA", event_type="nope",
             accession_no="acc-3")
 
 
-def test_extract_proposals_with_board_rec():
+def test_extract_proposals_with_board_rec() -> None:
     text = ("Proposal No. 1 Election of directors\n"
             "The board recommends a vote for this proposal.\n"
             "Proposal No. 2 Ratify auditors\n"
             "The board recommends a vote against this proposal.\n")
     out = extract_proposals(text, issuer="AAA", accession_no="acc-1")
     assert [p.proposal_id for p in out] == ["acc-1:p1", "acc-1:p2"]
+    assert out[0].description is not None
     assert "Proposal No. 1" in out[0].description
     assert out[0].board_recommendation == "for"
     assert out[1].board_recommendation == "against"
     assert out[0].status == "unknown"
 
 
-def test_extract_proposals_empty():
+def test_extract_proposals_empty() -> None:
     assert extract_proposals("", issuer="AAA",
                              accession_no="acc-1") == []
     assert extract_proposals(None, issuer="AAA",
                              accession_no="acc-1") == []
 
 
-def test_extract_votes_with_numbers():
+def test_extract_votes_with_numbers() -> None:
     text = ("Votes for 12,345,678 and votes against 1,234. "
             "Abstentions 500. The proposal was approved.")
     out = extract_votes(text, issuer="AAA", accession_no="acc-1")
@@ -65,21 +67,21 @@ def test_extract_votes_with_numbers():
     assert out[0].outcome == "approved"
 
 
-def test_extract_votes_no_numbers():
+def test_extract_votes_no_numbers() -> None:
     assert extract_votes("no vote counts here", issuer="AAA",
                          accession_no="acc-1") == []
 
 
-def test_get_governance_events_survives_text_failure(monkeypatch):
+def test_get_governance_events_survives_text_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [SimpleNamespace(accession_no="a1", form="DEF 14A",
                                filed_at="2024-04-01", company="AAA"),
                SimpleNamespace(accession_no="a2", form="DFAN14A",
                                filed_at="2024-05-01", company="AAA")]
 
-    def fake_list(ticker_or_cik, **kwargs):
+    def fake_list(ticker_or_cik: str, **kwargs: object) -> list[SimpleNamespace]:
         return filings
 
-    def fake_text(accession_no):
+    def fake_text(accession_no: str) -> NoReturn:
         raise RuntimeError("offline")
 
     monkeypatch.setattr(governance, "list_sec_filings", fake_list)

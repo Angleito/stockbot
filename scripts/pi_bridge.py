@@ -39,6 +39,7 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 _sessions: dict[str, PiSessionContext] = {}
 _recorders: dict[str, RunRecorder] = {}
-_inflight: dict[str, set[concurrent.futures.Future]] = {}
+_inflight: dict[str, set[concurrent.futures.Future[None]]] = {}
 
 _state_lock = threading.Lock()
 _stdout_lock = threading.Lock()
@@ -63,19 +64,36 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 TOOL_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
-def _write(response: dict) -> None:
+def _as_int(value: object) -> int | None:
+    """Coerce a JSON number-ish telemetry field; None when absent or malformed."""
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_name(tool: dict[str, object]) -> str:
+    fn = tool["function"]
+    assert isinstance(fn, dict)
+    name = fn["name"]
+    assert isinstance(name, str)
+    return name
+
+def _write(response: dict[str, object]) -> None:
     with _stdout_lock:
         sys.stdout.write(json.dumps(response) + "\n")
         sys.stdout.flush()
 
 
-def _track(run_id: str, fut: concurrent.futures.Future) -> None:
+def _track(run_id: str, fut: concurrent.futures.Future[None]) -> None:
     with _state_lock:
         _inflight.setdefault(run_id, set()).add(fut)
     fut.add_done_callback(lambda f, rid=run_id: _untrack(rid, f))
 
 
-def _untrack(run_id: str, fut: concurrent.futures.Future) -> None:
+def _untrack(run_id: str, fut: concurrent.futures.Future[None]) -> None:
     with _state_lock:
         pending = _inflight.get(run_id)
         if pending is None:
@@ -85,17 +103,17 @@ def _untrack(run_id: str, fut: concurrent.futures.Future) -> None:
             _inflight.pop(run_id, None)
 
 
-def _run_futures(run_id: str) -> list:
+def _run_futures(run_id: str) -> list[concurrent.futures.Future[None]]:
     with _state_lock:
         return list(_inflight.get(run_id, ()))
 
 
-def _all_futures() -> list:
+def _all_futures() -> list[concurrent.futures.Future[None]]:
     with _state_lock:
         return [fut for futs in _inflight.values() for fut in list(futs)]
 
 
-def _drain_futures(futures: list) -> int:
+def _drain_futures(futures: list[concurrent.futures.Future[None]]) -> int:
     if not futures:
         return 0
     _, not_done = concurrent.futures.wait(futures, timeout=TOOL_DRAIN_TIMEOUT_SECONDS)
@@ -104,7 +122,7 @@ def _drain_futures(futures: list) -> int:
     return len(not_done)
 
 
-def _describe() -> dict:
+def _describe() -> dict[str, object]:
     if not PI_RESEARCH_PROMPT:
         return {"error": "prompt_missing"}
     return {
@@ -113,20 +131,20 @@ def _describe() -> dict:
     }
 
 
-def _doctor() -> dict:
+def _doctor() -> dict[str, object]:
     tools = tools_for_capabilities(frozenset({Capability.RESEARCH}))
     return {
         "bridge_ok": True,
         "prompt_chars": len(PI_RESEARCH_PROMPT),
         "tool_count": len(tools),
-        "tool_names": [t["function"]["name"] for t in tools],
+        "tool_names": [_tool_name(t) for t in tools],
         "registry_version": TOOL_REGISTRY_VERSION,
         "python": sys.version,
         "cwd": str(Path.cwd()),
     }
 
 
-def _validate_tool_call(request: dict) -> dict | None:
+def _validate_tool_call(request: Mapping[str, object]) -> dict[str, object] | None:
     """Return an error response (without id) or None when submittable."""
     name = request.get("name")
     if not isinstance(name, str) or not name:
@@ -143,21 +161,34 @@ def _validate_tool_call(request: dict) -> dict | None:
     return None
 
 
-def _run_tool_call(request: dict) -> None:
+def _run_tool_call(request: Mapping[str, object]) -> None:
     """Executor worker: run one tool call, then write its correlated response."""
     protocol_id = request.get("id")
     name = request.get("name")
     arguments = request.get("arguments", {})
-    run_id = request.get("run_id")
+    raw_run_id = request.get("run_id")
+    if not isinstance(name, str) or not name:
+        _write({"id": protocol_id, "error": "missing_arg"})
+        return
+    if not isinstance(arguments, dict):
+        _write({"id": protocol_id, "error": "missing_arg"})
+        return
+    if not isinstance(raw_run_id, str) or not raw_run_id:
+        _write({"id": protocol_id, "error": "unknown_run"})
+        return
     tool_call_id = request.get("tool_call_id")
+    data_root = request.get("data_root")
+    raw_as_of = request.get("as_of")
+    as_of = raw_as_of if isinstance(raw_as_of, str) and raw_as_of else None
+    raw_queue_ms = request.get("bridge_queue_ms")
     try:
-        queue_ms = float(request.get("bridge_queue_ms") or 0.0)
+        queue_ms = float(raw_queue_ms if isinstance(raw_queue_ms, (int, float, str)) else 0.0)
     except (TypeError, ValueError):
         queue_ms = 0.0
     try:
         with _state_lock:
-            session = _sessions.get(run_id)
-            recorder = _recorders.get(run_id)
+            session = _sessions.get(raw_run_id)
+            recorder = _recorders.get(raw_run_id)
         if session is None:
             _write({"id": protocol_id, "error": "unknown_run"})
             return
@@ -170,6 +201,8 @@ def _run_tool_call(request: dict) -> None:
                 tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
                 protocol_id=protocol_id if isinstance(protocol_id, str) else None,
                 bridge_queue_ms=queue_ms,
+                data_root=data_root if isinstance(data_root, str) and data_root else None,
+                as_of=as_of,
             )
         finally:
             if token is not None:
@@ -234,7 +267,7 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
     return finalize_failed_run(run_id, error_type=error_type, error_message=error_message)
 
 
-def _pi_event(request: dict) -> dict:
+def _pi_event(request: Mapping[str, object]) -> dict[str, object]:
     run_id = request.get("run_id")
     event = request.get("event")
     if not isinstance(run_id, str) or not run_id:
@@ -312,12 +345,12 @@ def _pi_event(request: dict) -> dict:
             usage = request.get("usage")
             now = datetime.now(timezone.utc).isoformat()
             recorder.record_model_call(
-                round=int(request.get("turn") or 0), provider="pi",
+                round=_as_int(request.get("turn")) or 0, provider="pi",
                 model=str(request.get("model") or "pi"),
                 started_at=str(request.get("started_at") or now),
                 completed_at=str(request.get("completed_at") or now),
                 usage=usage if isinstance(usage, dict) else {},
-                tool_call_count=int(request.get("tool_call_count") or 0),
+                tool_call_count=_as_int(request.get("tool_call_count")) or 0,
             )
         elif event == "security_block":
             raw = json.dumps([request.get("tool"), request.get("arguments")], sort_keys=True)
@@ -327,7 +360,7 @@ def _pi_event(request: dict) -> dict:
                 decision="denied", reason=str(request.get("reason") or "pi tool_call gate"),
             )
         elif event in ("turn_start", "turn_end", "message_end"):
-            recorder.record_event(event, round=request.get("turn"), metadata=meta or None)
+            recorder.record_event(event, round=_as_int(request.get("turn")), metadata=meta or None)
         else:
             logger.warning("pi_event: unknown event %r ignored", event)
         return {"ok": True}
@@ -335,7 +368,7 @@ def _pi_event(request: dict) -> dict:
         logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
         return {"ok": True}
 
-def _abort_run(request: dict) -> dict:
+def _abort_run(request: Mapping[str, object]) -> dict[str, object]:
     run_id = request.get("run_id")
     error_type = request.get("error_type")
     error_message = request.get("error_message")
@@ -352,7 +385,7 @@ def _abort_run(request: dict) -> dict:
     return {"ok": True, "finalized": finalized}
 
 
-def _handle(line: str) -> dict | None:
+def _handle(line: str) -> dict[str, object] | None:
     """Route one input line. Returns a response dict, or None when the
     response will be written asynchronously by a worker (tool_call)."""
     try:
@@ -374,7 +407,9 @@ def _handle(line: str) -> dict | None:
         if error is not None:
             return {"id": protocol_id, **error}
         fut = _executor.submit(_run_tool_call, dict(request))
-        _track(request.get("run_id"), fut)
+        raw_run_id = request.get("run_id")
+        if isinstance(raw_run_id, str) and raw_run_id:
+            _track(raw_run_id, fut)
         return None
     if op == "abort_run":
         return {"id": protocol_id, **_abort_run(request)}
@@ -388,6 +423,7 @@ def main() -> bool:
         for line in sys.stdin:
             if not line.strip():
                 continue
+            response: dict[str, object] | None
             try:
                 response = _handle(line)
             except Exception:  # process never exits on a single request

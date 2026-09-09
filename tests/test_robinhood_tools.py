@@ -1,12 +1,14 @@
 import json
-import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
 from app.policy import Capability, LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT, RequestContext
+from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_research import PortfolioResearchPosition
 from app.tool_render import render_tool_result
 
@@ -14,17 +16,36 @@ from app.tool_render import render_tool_result
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
 
-def _fixture(name):
+def _fixture(name: str):
     return json.loads((FIXTURES / name).read_text())
 
 
-class FakeRobinhood:
-    def __init__(self):
-        self.calls = []
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
 
-    def call_tool(self, name, arguments):
+
+def _as_seq(value: object):
+    assert isinstance(value, (list, tuple))
+    return value
+
+
+def _tool_name(entry: object) -> str:
+    assert isinstance(entry, dict)
+    fn = entry.get("function")
+    assert isinstance(fn, dict)
+    name = fn.get("name")
+    assert isinstance(name, str)
+    return name
+
+
+class FakeRobinhood:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
         self.calls.append((name, arguments))
-        return {
+        payloads: dict[str, object] = {
             "get_equity_quotes": _fixture("equity_quotes.json"),
             "get_option_chains": _fixture("option_chains.json"),
             "get_option_instruments": _fixture("option_instruments.json"),
@@ -35,12 +56,19 @@ class FakeRobinhood:
             "get_scanner_filter_specs": _fixture("scan_specs.json"),
             "get_scans": _fixture("scans.json"),
             "run_scan": _fixture("scan_results.json"),
-        }[name]
+        }
+        return payloads[name]
 
 
-def test_market_snapshot_uses_compact_observed_fields(monkeypatch):
+def _client_for(fake: FakeRobinhood):
+    def _make(**kwargs: object) -> FakeRobinhood:
+        return fake
+    return _make
+
+
+def test_market_snapshot_uses_compact_observed_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     result = tools.get_market_snapshot("wing")
     assert result["ticker"] == "WING"
     assert result["last"] == "116.84"
@@ -51,29 +79,30 @@ def test_market_snapshot_uses_compact_observed_fields(monkeypatch):
     assert f"(local {expected_local})" in rendered
 
 
-def test_option_chain_is_normalized_and_bounded(monkeypatch):
+def test_option_chain_is_normalized_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     result = tools.get_option_chain("WING", "put", limit=1)
     assert result["returned"] == 1
-    assert result["contracts"][0]["contract_id"] == "wing-put-80"
-    assert result["contracts"][0]["delta"] == "-0.12"
+    contracts = _as_seq(result["contracts"])
+    assert contracts[0]["contract_id"] == "wing-put-80"
+    assert contracts[0]["delta"] == "-0.12"
     assert [name for name, _ in fake.calls] == [
         "get_option_chains", "get_option_instruments", "get_option_quotes"
     ]
 
 
-def test_compare_options_returns_deterministic_analysis(monkeypatch):
+def test_compare_options_returns_deterministic_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     result = tools.compare_robinhood_options("WING", "put", 80)
     assert result["result_type"] == "option_comparison"
     assert result["ranking"] == "target_pnl_desc"
-    assert all("target_pnl" in row for row in result["contracts"])
+    assert all("target_pnl" in row for row in _as_seq(result["contracts"]))
 
 
-def test_tool_schemas_have_dispatchers():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+def test_tool_schemas_have_dispatchers() -> None:
+    names = {_tool_name(entry) for entry in tools.TOOLS}
     robinhood_names = {
         "get_market_snapshot", "get_option_chain", "analyze_option_contract",
         "compare_options", "get_portfolio_snapshot",
@@ -89,16 +118,16 @@ def test_tool_schemas_have_dispatchers():
     assert "place_option_order" not in names
 
 
-def test_no_trading_tool_names():
+def test_no_trading_tool_names() -> None:
     banned = ("order", "place", "submit", "cancel", "replace", "withdraw", "deposit", "transfer", "trade")
-    names = [entry["function"]["name"] for entry in tools.TOOLS]
+    names = [_tool_name(entry) for entry in tools.TOOLS]
     assert len(names) >= 24
     for name in names:
         for token in banned:
             assert token not in name.lower(), f"{name} contains banned token {token}"
 
 
-def test_execution_rechecks_application_capability():
+def test_execution_rechecks_application_capability() -> None:
     context = RequestContext("research", frozenset({Capability.RESEARCH}))
     result = tools.execute_tool(
         "get_portfolio_snapshot", {}, model="test", context=context
@@ -106,14 +135,14 @@ def test_execution_rechecks_application_capability():
     assert result == {"error": "Tool is not permitted: get_portfolio_snapshot"}
 
 
-def test_execute_tool_requires_explicit_context():
+def test_execute_tool_requires_explicit_context() -> None:
     with pytest.raises(TypeError, match="context"):
-        tools.execute_tool("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")
+        tools.execute_tool("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")  # type: ignore[missing-argument]  # verifies context is a required keyword-only argument
 
 
-def test_scan_read_handlers_are_bounded(monkeypatch):
+def test_scan_read_handlers_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     specs = tools._get_scanner_filter_specs({}, model="test")
     assert specs["result_type"] == "scan_specs"
     assert specs["count"] == 3
@@ -121,11 +150,11 @@ def test_scan_read_handlers_are_bounded(monkeypatch):
     scans = tools._get_scans({}, model="test")
     assert scans["result_type"] == "scan_list"
     assert scans["count"] == 2
-    assert scans["scans"][1]["cortex_managed"] is True
+    assert _as_seq(scans["scans"])[1]["cortex_managed"] is True
     results = tools._run_scan({"scan_id": "scan-rsi-1"}, model="test")
     assert results["result_type"] == "scan_results"
     assert results["total"] == 3
-    assert results["rows"][0]["ticker"] == "WING"
+    assert _as_seq(results["rows"])[0]["ticker"] == "WING"
     assert results["live"] is True
     assert fake.calls == [
         ("get_scanner_filter_specs", {}),
@@ -134,19 +163,19 @@ def test_scan_read_handlers_are_bounded(monkeypatch):
     ]
 
 
-def test_run_scan_limit_is_capped(monkeypatch):
+def test_run_scan_limit_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     result = tools._run_scan({"scan_id": "scan-rsi-1", "limit": 999}, model="test")
-    assert len(result["rows"]) <= 25
+    assert len(_as_seq(result["rows"])) <= 25
 
 
-def test_scan_renderers_are_bounded_markdown():
+def test_scan_renderers_are_bounded_markdown() -> None:
     fake = FakeRobinhood()
     from pytest import MonkeyPatch
 
     with MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+        monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
         list_result = tools._get_scans({}, model="test")
         results_result = tools._run_scan({"scan_id": "scan-rsi-1"}, model="test")
     for result in (list_result, results_result):
@@ -244,17 +273,21 @@ def _hand_built_research(snapshot: PortfolioSnapshot) -> list[PortfolioResearchP
     ]
 
 
-def test_portfolio_snapshot_handler_refresh_path(monkeypatch):
+def test_portfolio_snapshot_handler_refresh_path(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     snapshot = _hand_built_snapshot()
+    def _fake_sync(provider: RobinhoodPortfolioProvider, **kwargs: object) -> PortfolioSnapshot:
+        return snapshot
     monkeypatch.setattr(
         tools, "sync_robinhood_portfolio",
-        lambda provider, **kwargs: snapshot,
+        _fake_sync,
     )
+    def _fake_enrich(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
+        return _hand_built_research(snapshot_arg)
     monkeypatch.setattr(
         tools, "enrich_portfolio_research",
-        lambda snapshot, **kwargs: _hand_built_research(snapshot),
+        _fake_enrich,
     )
     result = tools._get_portfolio_snapshot({"refresh": True}, model="test")
 
@@ -269,36 +302,42 @@ def test_portfolio_snapshot_handler_refresh_path(monkeypatch):
     assert isinstance(result["cash"], str)
     assert isinstance(result["invested_value"], str)
     assert isinstance(result["concentration"], str)
-    assert len(result["positions"]) == 2
-    for row in result["positions"]:
+    assert len(_as_seq(result["positions"])) == 2
+    positions = _as_seq(result["positions"])
+    for row in positions:
         assert isinstance(row["quantity"], str)
         assert isinstance(row["market_value"], str)
         assert isinstance(row["market_price"], str)
-    assert result["positions"][0]["resolved"] is True
-    assert result["positions"][0]["sec"]["Revenue"]["value"] == "1000000"
-    assert result["positions"][0]["finra"]["short_position"] == "100"
-    assert result["positions"][1]["resolved"] is False
-    assert result["positions"][1]["sec"] == {}
-    assert result["freshness"]["sec_latest_filed_at"] == "2026-08-20"
-    assert result["freshness"]["snapshot_created_at"] == snapshot.created_at.isoformat()
+    assert positions[0]["resolved"] is True
+    assert positions[0]["sec"]["Revenue"]["value"] == "1000000"
+    assert positions[0]["finra"]["short_position"] == "100"
+    assert positions[1]["resolved"] is False
+    assert positions[1]["sec"] == {}
+    freshness = _as_dict(result["freshness"])
+    assert freshness["sec_latest_filed_at"] == "2026-08-20"
+    assert freshness["snapshot_created_at"] == snapshot.created_at.isoformat()
     assert result["created_at_local"] == snapshot.created_at.astimezone().isoformat()
-    assert result["freshness"]["snapshot_created_at_local"] == snapshot.created_at.astimezone().isoformat()
+    assert freshness["snapshot_created_at_local"] == snapshot.created_at.astimezone().isoformat()
     # No raw provider payloads or internal structures leak to the top level.
     assert "accounts" not in result
     assert "quotes" not in result
     assert "structured_content" not in result
     assert all(
         not ({"symbol", "id", "account_id", "instrument_id", "avg_price"} & set(row))
-        for row in result["positions"]
+        for row in positions
     )
 
 
-def test_portfolio_payload_and_rendering_never_expose_account_identifiers(monkeypatch):
+def test_portfolio_payload_and_rendering_never_expose_account_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     snapshot = _hand_built_snapshot()
-    monkeypatch.setattr(tools, "sync_robinhood_portfolio", lambda provider, **kwargs: snapshot)
-    monkeypatch.setattr(tools, "enrich_portfolio_research", lambda snapshot, **kwargs: [])
+    def _fake_sync2(provider: RobinhoodPortfolioProvider, **kwargs: object) -> PortfolioSnapshot:
+        return snapshot
+    monkeypatch.setattr(tools, "sync_robinhood_portfolio", _fake_sync2)
+    def _fake_enrich2(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
+        return []
+    monkeypatch.setattr(tools, "enrich_portfolio_research", _fake_enrich2)
 
     result = tools._get_portfolio_snapshot({"refresh": True}, model="test")
     payload = json.dumps(result)
@@ -317,14 +356,14 @@ _BROKER_TOOL_NAMES = {
 }
 
 
-def test_research_context_excludes_broker_tools():
-    names = {entry["function"]["name"] for entry in tools.tools_for_capabilities(frozenset({Capability.RESEARCH}))}
+def test_research_context_excludes_broker_tools() -> None:
+    names = {_tool_name(entry) for entry in tools.tools_for_capabilities(frozenset({Capability.RESEARCH}))}
     assert not (names & _BROKER_TOOL_NAMES)
 
 
-def test_broker_context_includes_broker_tools():
+def test_broker_context_includes_broker_tools() -> None:
     names = {
-        entry["function"]["name"]
+        _tool_name(entry)
         for entry in tools.tools_for_capabilities(
             frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ})
         )
@@ -332,30 +371,36 @@ def test_broker_context_includes_broker_tools():
     assert _BROKER_TOOL_NAMES <= names
 
 
-def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch, caplog):
-    def fail(arguments, model):
+def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    def fail(arguments: dict[str, object], model: str) -> dict[str, object]:
         raise RuntimeError("provider rejected account_number=100000001")
 
     monkeypatch.setitem(tools._ROBINHOOD_HANDLERS, "get_portfolio_snapshot", fail)
     result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=LOCAL_BROKER_CONTEXT)
-    assert "100000001" not in result["error"]
+    err = result["error"]
+    assert isinstance(err, str)
+    assert "100000001" not in err
     assert "100000001" not in render_tool_result(result)
     assert "100000001" not in " ".join(record.getMessage() for record in caplog.records)
 
 
-def test_portfolio_snapshot_refresh_flag_controls_sync(monkeypatch):
+def test_portfolio_snapshot_refresh_flag_controls_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
-    monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+    monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     snapshot = _hand_built_snapshot()
     sync_calls = {"count": 0}
 
-    def fake_sync(provider, **kwargs):
+    def fake_sync(provider: RobinhoodPortfolioProvider, **kwargs: object) -> PortfolioSnapshot:
         sync_calls["count"] += 1
         return snapshot
 
     monkeypatch.setattr(tools, "sync_robinhood_portfolio", fake_sync)
-    monkeypatch.setattr(tools, "read_latest_snapshot", lambda **kwargs: snapshot)
-    monkeypatch.setattr(tools, "enrich_portfolio_research", lambda snapshot, **kwargs: [])
+    def _fake_read(data_root: Path | None = None) -> PortfolioSnapshot | None:
+        return snapshot
+    monkeypatch.setattr(tools, "read_latest_snapshot", _fake_read)
+    def _fake_enrich3(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
+        return []
+    monkeypatch.setattr(tools, "enrich_portfolio_research", _fake_enrich3)
 
     tools._get_portfolio_snapshot({"refresh": False}, model="test")
     assert sync_calls["count"] == 0
@@ -363,12 +408,12 @@ def test_portfolio_snapshot_refresh_flag_controls_sync(monkeypatch):
     assert sync_calls["count"] == 1
 
 
-def test_option_chain_renderer_is_bounded_markdown():
+def test_option_chain_renderer_is_bounded_markdown() -> None:
     fake = FakeRobinhood()
     from pytest import MonkeyPatch
 
     with MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(tools, "_robinhood_client", lambda **kwargs: fake)
+        monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
         result = tools.get_option_chain("WING", "put")
     rendered = render_tool_result(result, max_bytes=4096)
     assert "WING PUT OPTIONS" in rendered

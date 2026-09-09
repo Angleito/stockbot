@@ -16,7 +16,7 @@ import datetime as _dt
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,7 +38,7 @@ class Dataset:
     partition_field: Optional[str] = None
 
 
-def _fields(*pairs: tuple[str, Any]) -> list[pa.Field]:
+def _fields(*pairs: tuple[str, pa.DataType]) -> list[pa.Field]:
     return [pa.field(name, type_) for name, type_ in pairs]
 
 
@@ -493,6 +493,35 @@ DATASETS["relationship_type_evaluations"] = Dataset(
 )
 
 
+DATASETS["google_observations"] = Dataset(
+    name="google_observations",
+    schema=pa.schema(_fields(
+        ("observation_id", TEXT), ("source", TEXT), ("table", TEXT),
+        ("term", TEXT), ("geo", TEXT), ("list_kind", TEXT),
+        ("period", TEXT), ("observed_at", TEXT), ("known_at", TEXT),
+        ("retrieved_at", TEXT), ("source_record_id", TEXT),
+        ("content_hash", TEXT), ("collector_version", TEXT),
+        ("calc_version", TEXT), ("metrics_json", TEXT),
+        ("features_json", TEXT),
+        ("evidence_json", TEXT), ("source_url", TEXT),
+    )),
+    unique_keys=("observation_id", "content_hash"),
+    partition_field="known_at",
+)
+
+DATASETS["google_signal_features"] = Dataset(
+    name="google_signal_features",
+    schema=pa.schema(_fields(
+        ("observation_id", TEXT), ("feature_scope_hash", TEXT),
+        ("feature_scope_json", TEXT), ("features_json", TEXT),
+        ("calc_version", TEXT), ("calculated_at", TEXT),
+        ("inputs_hash", TEXT),
+    )),
+    unique_keys=("observation_id", "feature_scope_hash", "calc_version", "inputs_hash"),
+    partition_field="calculated_at",
+)
+
+
 def dataset(name: str) -> Dataset:
     try:
         return DATASETS[name]
@@ -508,7 +537,7 @@ def _partition_year(date_value: Optional[str]) -> Optional[str]:
     if not date_value:
         return None
     try:
-        return str(_dt.date.fromisoformat(str(date_value)[:10]).year)
+        return str(_dt.date.fromisoformat(date_value[:10]).year)
     except (TypeError, ValueError):
         return None
 
@@ -518,7 +547,7 @@ def _exclusive_part_path(directory: Path) -> Path:
     return directory / f"part-{uuid.uuid4().hex}.parquet"
 
 
-def _unique_key(row: dict, keys: tuple[str, ...]) -> tuple[str, ...]:
+def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(str(row.get(key) or "") for key in keys)
 
 
@@ -536,7 +565,7 @@ def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
     return pa.concat_tables(tables, promote_options="permissive")
 
 
-def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
+def write_rows(name: str, rows: list[dict[str, object]], root: Optional[Path] = None) -> int:
     """Append rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
     root = Path(root) if root else get_data_root() / "parquet"
@@ -561,7 +590,7 @@ def write_rows(name: str, rows: list[dict], root: Optional[Path] = None) -> int:
     ]
     if not new_rows:
         return 0
-    by_partition: dict[str, list[dict]] = {}
+    by_partition: dict[str, list[dict[str, object]]] = {}
     for row in new_rows:
         if ds.partition_field:
             year = _partition_year(str(row.get(ds.partition_field) or "")) or "unknown"

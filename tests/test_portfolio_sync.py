@@ -13,9 +13,10 @@ Coverage under test:
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 from pathlib import Path
+from typing import override
 
 import pytest
 
@@ -42,15 +43,15 @@ QUOTE_TIME = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def data_root(tmp_path):
+def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
-def _fixture(name):
+def _fixture(name: str):
     return json.loads((FIXTURES / name).read_text())
 
 
-def _inline_positions(account_number):
+def _inline_positions(account_number: str) -> dict[str, object]:
     positions = {
         "100000001": [
             {"id": "pos-2", "instrument_id": "instr-aapl", "symbol": "AAPL", "quantity": "0.5",
@@ -70,7 +71,7 @@ def _inline_positions(account_number):
     return {"data": {"positions": positions.get(account_number, [])}}
 
 
-def _inline_balance(account_number):
+def _inline_balance(account_number: str) -> dict[str, object]:
     cash = {"100000001": "1234.56", "100000002": "2000.00"}[account_number]
     return {"data": {"cash": cash, "buying_power": {"buying_power": "2500.00"} }}
 
@@ -95,30 +96,42 @@ class FakeClient:
     (used for per-account responses, mirroring the real MCP server).
     """
 
-    def __init__(self, payloads):
+    def __init__(self, payloads: dict[str, object]) -> None:
         self.payloads = payloads
-        self.calls = []
+        self.calls: list[tuple[str, object]] = []
 
-    def call_tool(self, name, arguments):
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
         self.calls.append((name, arguments))
         payload = self.payloads[name]
         if callable(payload):
-            return payload(arguments)
+            return payload(arguments or {})
         return payload
 
 
-def _happy_payloads():
+def _positions_for(args: dict[str, object]) -> dict[str, object]:
+    account = args["account_number"]
+    assert isinstance(account, str)
+    return _inline_positions(account)
+
+
+def _balance_for(args: dict[str, object]) -> dict[str, object]:
+    account = args["account_number"]
+    assert isinstance(account, str)
+    return _inline_balance(account)
+
+
+def _happy_payloads() -> dict[str, object]:
     return {
         "get_accounts": _fixture("accounts.json"),
-        "get_equity_positions": lambda args: _inline_positions(args["account_number"]),
-        "get_portfolio": lambda args: _inline_balance(args["account_number"]),
+        "get_equity_positions": _positions_for,
+        "get_portfolio": _balance_for,
         "get_equity_quotes": _inline_quotes(),
     }
 
 
-def _alias_row(**overrides):
+def _alias_row(**overrides: object) -> dict[str, object]:
     """One entity_aliases row for WING/sec:cik:0000320193; overrides win."""
-    row = {
+    row: dict[str, object] = {
         "alias_type": "ticker",
         "alias_value": "WING",
         "entity_id": "sec:cik:0000320193",
@@ -134,7 +147,7 @@ def _alias_row(**overrides):
     return row
 
 
-def _seed_wing_alias(data_root):
+def _seed_wing_alias(data_root: Path) -> None:
     parquet.write_rows("entities", [{
         "entity_id": "sec:cik:0000320193",
         "name": "Wing Stop Inc",
@@ -170,14 +183,14 @@ def _seed_wing_alias(data_root):
     }], root=data_root / "parquet")
 
 
-def _run_sync(data_root, payloads=None):
+def _run_sync(data_root: Path, payloads: dict[str, object] | None = None) -> tuple[FakeClient, RobinhoodPortfolioProvider, PortfolioSnapshot]:
     client = FakeClient(payloads or _happy_payloads())
     provider = RobinhoodPortfolioProvider(client)
     snapshot = sync_robinhood_portfolio(provider, data_root=data_root, now=NOW)
     return client, provider, snapshot
 
 
-def test_sync_uses_exact_readonly_call_sequence(data_root):
+def test_sync_uses_exact_readonly_call_sequence(data_root: Path) -> None:
     client, _, snapshot = _run_sync(data_root)
     assert client.calls == [
         ("get_accounts", {}),
@@ -190,7 +203,7 @@ def test_sync_uses_exact_readonly_call_sequence(data_root):
     assert snapshot.snapshot_id == SNAPSHOT_ID
 
 
-def test_sync_builds_valued_snapshot_with_two_accounts(data_root):
+def test_sync_builds_valued_snapshot_with_two_accounts(data_root: Path) -> None:
     _seed_wing_alias(data_root)
     _, _, snapshot = _run_sync(data_root)
     assert isinstance(snapshot, PortfolioSnapshot)
@@ -220,17 +233,19 @@ def test_sync_builds_valued_snapshot_with_two_accounts(data_root):
     weights = [position.portfolio_weight for position in snapshot.positions]
     assert all(weight is not None for weight in weights)
     assert snapshot.total_value is not None
-    assert sum(weights) == pytest.approx(snapshot.invested_value / snapshot.total_value)
+    assert snapshot.invested_value is not None
+    known_weights = [w for w in weights if w is not None]
+    assert sum(known_weights, Decimal(0)) == pytest.approx(snapshot.invested_value / snapshot.total_value)
 
 
-def test_local_account_id_is_opaque_and_deterministic():
+def test_local_account_id_is_opaque_and_deterministic() -> None:
     assert local_account_id("100000001") == local_account_id("100000001")
     assert local_account_id("100000001") == "local:91b1e23ddbc8bddc"
     assert "100000001" not in local_account_id("100000001")
     assert local_account_id("100000001") != local_account_id("100000002")
 
 
-def test_sync_raises_on_malformed_quantity(data_root):
+def test_sync_raises_on_malformed_quantity(data_root: Path) -> None:
     payloads = _happy_payloads()
     payloads["get_equity_positions"] = _fixture("positions.json")
     client = FakeClient(payloads)
@@ -239,7 +254,7 @@ def test_sync_raises_on_malformed_quantity(data_root):
         sync_robinhood_portfolio(provider, data_root=data_root, now=NOW)
 
 
-def test_zero_quantity_position_is_valued_at_zero(data_root):
+def test_zero_quantity_position_is_valued_at_zero(data_root: Path) -> None:
     _, _, snapshot = _run_sync(data_root)
     tsla = next(position for position in snapshot.positions if position.ticker == "TSLA")
     assert tsla.quantity == Decimal("0")
@@ -247,7 +262,7 @@ def test_zero_quantity_position_is_valued_at_zero(data_root):
     assert tsla.portfolio_weight == Decimal("0")
 
 
-def test_snapshot_and_positions_are_persisted_once(data_root):
+def test_snapshot_and_positions_are_persisted_once(data_root: Path) -> None:
     _seed_wing_alias(data_root)
     client, _, _ = _run_sync(data_root)
     snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
@@ -265,7 +280,7 @@ def test_snapshot_and_positions_are_persisted_once(data_root):
     assert positions.column("price_type").to_pylist() == ["last"] * 5
 
 
-def _assert_position_close(actual, expected):
+def _assert_position_close(actual: Position, expected: Position) -> None:
     assert actual.position_id == expected.position_id
     assert actual.account_id == expected.account_id
     assert actual.security_id == expected.security_id
@@ -290,7 +305,7 @@ def _assert_position_close(actual, expected):
         assert getattr(actual, field) == pytest.approx(getattr(expected, field))
 
 
-def test_read_latest_snapshot_round_trips(data_root):
+def test_read_latest_snapshot_round_trips(data_root: Path) -> None:
     snapshot = _run_sync(data_root)[2]
     restored = read_latest_snapshot(data_root=data_root)
     assert restored is not None
@@ -310,11 +325,11 @@ def test_read_latest_snapshot_round_trips(data_root):
 
 
 
-def test_read_latest_snapshot_none_when_empty(data_root):
+def test_read_latest_snapshot_none_when_empty(data_root: Path) -> None:
     assert read_latest_snapshot(data_root=data_root) is None
 
 
-def test_cash_only_account_survives_round_trip(data_root):
+def test_cash_only_account_survives_round_trip(data_root: Path) -> None:
     # Positions only in account A; account B holds cash only.  Before
     # portfolio_accounts, the read side derived account ids from position
     # rows and dropped B.
@@ -337,7 +352,7 @@ def test_cash_only_account_survives_round_trip(data_root):
     )
 
 
-def test_empty_portfolio_with_cash_round_trips_account_ids(data_root):
+def test_empty_portfolio_with_cash_round_trips_account_ids(data_root: Path) -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001")],
@@ -352,7 +367,7 @@ def test_empty_portfolio_with_cash_round_trips_account_ids(data_root):
     assert restored.positions == ()
 
 
-def test_account_ids_round_trip_preserves_order(data_root):
+def test_account_ids_round_trip_preserves_order(data_root: Path) -> None:
     account_a = local_account_id("100000001")
     account_b = local_account_id("100000002")
     snapshot = build_portfolio_snapshot(
@@ -368,7 +383,7 @@ def test_account_ids_round_trip_preserves_order(data_root):
     assert restored.account_ids == snapshot.account_ids
 
 
-def test_decimal_round_trip_is_exact(data_root):
+def test_decimal_round_trip_is_exact(data_root: Path) -> None:
     # Values chosen to stress column scales: a small fractional quantity
     # whose price product needs all 14 fractional digits, a large dollar
     # amount, a repeating-fraction percentage, and non-integral decimals
@@ -412,14 +427,17 @@ def test_decimal_round_trip_is_exact(data_root):
         assert getattr(actual, field) == getattr(expected, field)
 
 
-def test_missing_quote_price_degrades_snapshot_but_persists(data_root):
+def test_missing_quote_price_degrades_snapshot_but_persists(data_root: Path) -> None:
     payloads = _happy_payloads()
-    payloads["get_equity_positions"] = lambda args: (
-        {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                 "quantity": "10", "average_buy_price": "95.50"}]}}
-        if args["account_number"] == "100000001"
-        else {"data": {"positions": []}}
-    )
+    def _wing_only(args: dict[str, object]) -> dict[str, object]:
+        account = args["account_number"]
+        assert isinstance(account, str)
+        if account == "100000001":
+            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
+                                     "quantity": "10", "average_buy_price": "95.50"}]}}
+        empty: list[dict[str, object]] = []
+        return {"data": {"positions": empty}}
+    payloads["get_equity_positions"] = _wing_only
     payloads["get_equity_quotes"] = {
         "data": {"results": [{"quote": {"symbol": "WING", "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
     }
@@ -443,18 +461,21 @@ def test_missing_quote_price_degrades_snapshot_but_persists(data_root):
     assert positions.num_rows == 1
     assert positions.column("market_price").to_pylist() == [None]
     restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
     assert restored.invested_value is None
     assert restored.positions[0].market_price is None
 
-def test_partial_pricing_nils_total_and_weights(data_root):
+def test_partial_pricing_nils_total_and_weights(data_root: Path) -> None:
     payloads = _happy_payloads()
-    payloads["get_equity_positions"] = lambda args: (
-        {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                 "quantity": "10", "average_buy_price": "95.50"}]}}
-        if args["account_number"] == "100000001"
-        else {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
-                                      "quantity": "5", "average_buy_price": "150.25"}]}}
-    )
+    def _two_accounts(args: dict[str, object]) -> dict[str, object]:
+        account = args["account_number"]
+        assert isinstance(account, str)
+        if account == "100000001":
+            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
+                                     "quantity": "10", "average_buy_price": "95.50"}]}}
+        return {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
+                                  "quantity": "5", "average_buy_price": "150.25"}]}}
+    payloads["get_equity_positions"] = _two_accounts
     payloads["get_equity_quotes"] = {
         "data": {"results": [{"quote": {"symbol": "WING", "last_trade_price": "116.84",
                                        "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
@@ -466,15 +487,17 @@ def test_partial_pricing_nils_total_and_weights(data_root):
     assert all(position.portfolio_weight is None for position in snapshot.positions)
 
 
-def test_zero_quantity_unpriced_does_not_block_completeness(data_root):
+def test_zero_quantity_unpriced_does_not_block_completeness(data_root: Path) -> None:
     payloads = _happy_payloads()
-    payloads["get_equity_positions"] = lambda args: (
-        {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                 "quantity": "0", "average_buy_price": "95.50"}]}}
-        if args["account_number"] == "100000001"
-        else {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
-                                      "quantity": "5", "average_buy_price": "150.25"}]}}
-    )
+    def _zero_wing(args: dict[str, object]) -> dict[str, object]:
+        account = args["account_number"]
+        assert isinstance(account, str)
+        if account == "100000001":
+            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
+                                     "quantity": "0", "average_buy_price": "95.50"}]}}
+        return {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
+                                  "quantity": "5", "average_buy_price": "150.25"}]}}
+    payloads["get_equity_positions"] = _zero_wing
     payloads["get_equity_quotes"] = {
         "data": {"results": [{"quote": {"symbol": "AAPL", "last_trade_price": "160.00",
                                        "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
@@ -489,7 +512,7 @@ def test_zero_quantity_unpriced_does_not_block_completeness(data_root):
     assert wing.portfolio_weight == Decimal("0")
 
 
-def test_empty_accounts_still_persists_empty_snapshot(data_root):
+def test_empty_accounts_still_persists_empty_snapshot(data_root: Path) -> None:
     client = FakeClient({"get_accounts": {"accounts": []}})
     provider = RobinhoodPortfolioProvider(client)
     snapshot = sync_robinhood_portfolio(provider, data_root=data_root, now=NOW)
@@ -504,11 +527,11 @@ def test_empty_accounts_still_persists_empty_snapshot(data_root):
     assert snapshot.snapshot_id == SNAPSHOT_ID
 
 
-def test_persisted_rows_contain_no_oauth_data(data_root, monkeypatch):
-    captured = []
+def test_persisted_rows_contain_no_oauth_data(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, list[dict[str, object]]]] = []
     real_write_rows = parquet.write_rows
 
-    def spy(name, rows, root=None):
+    def spy(name: str, rows: list[dict[str, object]], root: Path | None = None) -> int:
         captured.append((name, list(rows)))
         return real_write_rows(name, rows, root=root)
 
@@ -527,7 +550,7 @@ def test_persisted_rows_contain_no_oauth_data(data_root, monkeypatch):
                 )
 
 
-def test_persisted_rows_never_contain_raw_account_ids(data_root):
+def test_persisted_rows_never_contain_raw_account_ids(data_root: Path) -> None:
     _seed_wing_alias(data_root)
     _run_sync(data_root)
     snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
@@ -547,26 +570,26 @@ def test_persisted_rows_never_contain_raw_account_ids(data_root):
         local_account_id("100000002"),
         local_account_id("100000002"),
     ]
-    assert accounts.column("account_id").to_pylist() == [
-        local_account_id("100000001"),
-        local_account_id("100000002"),
-    ]
 
 
-def test_sync_without_explicit_now_uses_utc_now(data_root, monkeypatch):
+def test_sync_without_explicit_now_uses_utc_now(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FrozenClock(datetime):
         """datetime subclass freezing now(); isinstance checks still pass."""
 
         calls = 0
 
-        @staticmethod
-        def now(tz=None):
+        @classmethod
+        @override
+        def now(cls, tz: tzinfo | None = None) -> FrozenClock:
             FrozenClock.calls += 1
             return FrozenClock(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
 
-        @staticmethod
-        def fromisoformat(value):
-            return datetime.fromisoformat(value)
+        @classmethod
+        @override
+        def fromisoformat(cls, date_string: str, /) -> FrozenClock:
+            parsed = datetime.fromisoformat(date_string)
+            return cls(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute,
+                       parsed.second, parsed.microsecond, tzinfo=parsed.tzinfo)
 
     import app.services.portfolio_sync as portfolio_sync
 
@@ -584,7 +607,7 @@ def test_sync_without_explicit_now_uses_utc_now(data_root, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_security_alias_learned_after_as_of_unresolved(data_root):
+def test_resolve_security_alias_learned_after_as_of_unresolved(data_root: Path) -> None:
     as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
     parquet.write_rows("entity_aliases", [
         _alias_row(known_at="2026-08-26T00:00:00Z", retrieved_at="2026-08-26T00:00:00Z", content_hash="learned-later"),
@@ -601,7 +624,7 @@ def test_resolve_security_alias_learned_after_as_of_unresolved(data_root):
     assert known.entity_id == "sec:cik:0000320193"
 
 
-def test_resolve_security_expired_alias_unresolved(data_root):
+def test_resolve_security_expired_alias_unresolved(data_root: Path) -> None:
     parquet.write_rows("entity_aliases", [
         _alias_row(valid_from="2026-01-01", valid_to="2026-08-24", known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="expired"),
         _alias_row(valid_from="2026-01-01", valid_to="2026-08-25", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="boundary"),
@@ -619,7 +642,7 @@ def test_resolve_security_expired_alias_unresolved(data_root):
     assert boundary.resolution_method == "unresolved"
 
 
-def test_resolve_security_ambiguous_ticker(data_root):
+def test_resolve_security_ambiguous_ticker(data_root: Path) -> None:
     parquet.write_rows("entity_aliases", [
         _alias_row(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193", content_hash="alias-a"),
         _alias_row(entity_id="sec:cik:0000999999", security_id="sec:equity:0000999999", source="control", content_hash="alias-b"),
@@ -633,7 +656,7 @@ def test_resolve_security_ambiguous_ticker(data_root):
     assert resolution.security_id is None
 
 
-def test_resolve_security_same_entity_multiple_rows_resolves(data_root):
+def test_resolve_security_same_entity_multiple_rows_resolves(data_root: Path) -> None:
     parquet.write_rows("entity_aliases", [
         _alias_row(security_id=None, known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="older"),
         _alias_row(security_id="sec:equity:0000320193", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="newer"),
@@ -647,7 +670,7 @@ def test_resolve_security_same_entity_multiple_rows_resolves(data_root):
     assert resolution.security_id == "sec:equity:0000320193"
 
 
-def test_build_position_passes_asset_type():
+def test_build_position_passes_asset_type() -> None:
     raw = BrokeragePositionInput(
         position_id="pos-1",
         account_id="acc-1",
@@ -689,7 +712,7 @@ def _position(
     )
 
 
-def test_cash_complete_multi_account_sums():
+def test_cash_complete_multi_account_sums() -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
@@ -702,7 +725,7 @@ def test_cash_complete_multi_account_sums():
     assert snapshot.total_value == Decimal("3500")
 
 
-def test_partial_cash_nils_total_and_weights():
+def test_partial_cash_nils_total_and_weights() -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
@@ -715,7 +738,7 @@ def test_partial_cash_nils_total_and_weights():
     assert all(position.portfolio_weight is None for position in snapshot.positions)
 
 
-def test_missing_balance_nils_total():
+def test_missing_balance_nils_total() -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
@@ -727,7 +750,7 @@ def test_missing_balance_nils_total():
     assert snapshot.total_value is None
 
 
-def test_duplicate_balance_for_one_account_incomplete():
+def test_duplicate_balance_for_one_account_incomplete() -> None:
     # The mapping signature cannot represent duplicate balances (the
     # provider yields one CashBalance per account), so this collapses to a
     # missing-balance case and stays incomplete.
@@ -742,7 +765,7 @@ def test_duplicate_balance_for_one_account_incomplete():
     assert snapshot.total_value is None
 
 
-def test_mismatched_balance_account_ids_incomplete():
+def test_mismatched_balance_account_ids_incomplete() -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
@@ -754,7 +777,7 @@ def test_mismatched_balance_account_ids_incomplete():
     assert snapshot.total_value is None
 
 
-def test_cash_only_portfolio_has_valid_totals():
+def test_cash_only_portfolio_has_valid_totals() -> None:
     snapshot = build_portfolio_snapshot(
         broker="robinhood",
         account_ids=[local_account_id("100000001")],
@@ -768,7 +791,7 @@ def test_cash_only_portfolio_has_valid_totals():
     assert snapshot.positions == ()
 
 
-def test_snapshot_builder_is_provider_neutral():
+def test_snapshot_builder_is_provider_neutral() -> None:
     snapshot = build_portfolio_snapshot(
         broker="testbroker",
         account_ids=["acct"],
@@ -889,7 +912,11 @@ class TestScanProvider:
         client = FakeClient({"get_scanner_filter_specs": _fixture("scan_specs.json")})
         data = RobinhoodPortfolioProvider(client).get_scanner_filter_specs()
         assert client.calls == [("get_scanner_filter_specs", {})]
-        assert data["filter_specs"][0]["filter_type"] == "FILTER_TYPE_INSTRUMENT_TYPE"
+        filter_specs = data["filter_specs"]
+        assert isinstance(filter_specs, list)
+        first_spec = filter_specs[0]
+        assert isinstance(first_spec, dict)
+        assert first_spec["filter_type"] == "FILTER_TYPE_INSTRUMENT_TYPE"
 
     def test_get_scans_returns_rows(self):
         client = FakeClient({"get_scans": _fixture("scans.json")})
@@ -903,4 +930,8 @@ class TestScanProvider:
         data = RobinhoodPortfolioProvider(client).run_scan("scan-rsi-1")
         assert client.calls == [("run_scan", {"scan_id": "scan-rsi-1"})]
         assert data["total"] == 3
-        assert data["results"][0]["ticker"] == "WING"
+        results = data["results"]
+        assert isinstance(results, list)
+        first_result = results[0]
+        assert isinstance(first_result, dict)
+        assert first_result["ticker"] == "WING"

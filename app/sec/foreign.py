@@ -1,14 +1,30 @@
 """Reporting-regime detection from filing history (no parsers needed)."""
 
+from datetime import date, datetime
 
-def list_sec_filings(*args, **kwargs):
+from .models import Filing
+
+
+def list_sec_filings(
+    ticker_or_cik: str | int,
+    forms: str | list[str] | tuple[str, ...] | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
+    as_of: str | date | datetime | None = None,
+    limit: int | None = 50,
+) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
-def reporting_regime(ticker_or_cik, *, as_of=None) -> dict:
+def reporting_regime(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+) -> dict[str, object]:
     try:
         filings = list_sec_filings(ticker_or_cik, limit=100, as_of=as_of)
         forms = sorted({getattr(f, "form", "") for f in filings

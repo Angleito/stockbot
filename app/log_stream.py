@@ -4,6 +4,7 @@ import logging
 import queue
 import threading
 import urllib.request
+from typing import override
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class LogStreamHandler(logging.Handler):
         self._worker = threading.Thread(target=self._run, name="log-stream", daemon=True)
         self._worker.start()
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
         try:
             self._queue.put_nowait(self.format(record))

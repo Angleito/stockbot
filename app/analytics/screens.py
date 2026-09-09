@@ -14,7 +14,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 from .. import finra_client
 from ..config import get_data_root
@@ -41,13 +41,13 @@ def _resolve_as_of(as_of: Optional[str]) -> str:
     classification, and SEC fact via ``known_at <= as_of``.
     """
     if as_of:
-        return str(as_of)
+        return as_of
     return datetime.now(timezone.utc).date().isoformat()
 
 
 def _clamp_limit(limit: Optional[int]) -> int:
     try:
-        return max(1, min(int(limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
+        return max(1, min((limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
     except (TypeError, ValueError):
         return DEFAULT_LIMIT
 
@@ -77,7 +77,7 @@ def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path
     return str(latest)
 
 
-def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict], int]:
+def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict[str, object]], int]:
     """Short-interest rows for one settlement cycle, point-in-time.
 
     Only source versions knowable on/before ``as_of`` are visible, and the
@@ -140,7 +140,7 @@ def _security_type_map(as_of: str, data_root: Path) -> dict[str, str]:
     return {str(row["entity_id"]): str(row["security_type"]) for row in rows}
 
 
-def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
+def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict[str, object]]]:
     """Shares-outstanding facts per entity, newest filed first.
 
     The as-of clause is mandatory: a fact filed after ``as_of`` is never
@@ -155,7 +155,7 @@ def _facts_by_entity(as_of: str, data_root: Path) -> dict[str, list[dict]]:
         params=[_SHARES_CONCEPT, param],
         data_root=data_root,
     )
-    by_entity: dict[str, list[dict]] = {}
+    by_entity: dict[str, list[dict[str, object]]] = {}
     for row in rows:
         by_entity.setdefault(str(row["entity_id"]), []).append(row)
     return by_entity
@@ -211,11 +211,16 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
     ).hexdigest()[:16]
 
 
+def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
+    """Short-interest percent descending, ticker ascending."""
+    return (-float(str(item["short_interest_percent"])), str(item["ticker"]))
+
+
 def materialize_short_interest_screen(
     settlement_date: str,
     as_of: Optional[str] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, object]:
     """Build one complete settlement-date leaderboard from normalized data.
 
     ``as_of`` is the knowledge horizon: FINRA rows, ticker aliases, security
@@ -272,14 +277,14 @@ def materialize_short_interest_screen(
         "common_equity_rows": 0,
         "shares_outstanding_rows": 0,
     }
-    candidates: list[dict] = []
+    candidates: list[dict[str, object]] = []
     for row in rows:
         symbol = str(row["symbol_code"])
-        short_shares = row.get("short_position")
-        if short_shares is None or float(short_shares) < 0:
+        short_shares_raw = row.get("short_position")
+        if short_shares_raw is None or float(str(short_shares_raw)) < 0:
             exclusions["invalid_short_interest"] += 1
             continue
-        short_shares = float(short_shares)
+        short_shares = float(str(short_shares_raw))
         counters["valid_short_interest_rows"] += 1
         entity_ids = ticker_aliases.get(symbol)
         if not entity_ids:
@@ -305,7 +310,7 @@ def materialize_short_interest_screen(
             exclusions["missing_shares_outstanding"] += 1
             continue
         counters["shares_outstanding_rows"] += 1
-        shares = float(fact["value"])
+        shares = float(str(fact["value"]))
         candidates.append({
             "entity_id": entity_id,
             "security_id": f"sec:equity:{entity_id.rsplit(':', 1)[1]}",
@@ -319,7 +324,7 @@ def materialize_short_interest_screen(
             "sec_accession": fact.get("accession"),
             "sec_source_url": fact.get("source_url"),
         })
-    candidates.sort(key=lambda item: (-item["short_interest_percent"], item["ticker"]))
+    candidates.sort(key=_leaderboard_key)
     run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
     parquet.write_rows(
@@ -374,7 +379,7 @@ def read_short_interest_screen(
     as_of: Optional[str] = None,
     limit: Optional[int] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, object]:
     """Read a published screen run, bounded to ``limit`` entries."""
     data_root = Path(data_root) if data_root else get_data_root()
     limit = _clamp_limit(limit)
@@ -398,7 +403,8 @@ def read_short_interest_screen(
         freshness = "stale" if days > finra_client.STALE_AFTER_DAYS else "current"
     except (TypeError, ValueError):
         freshness = "unknown"
-    exclusions = json.loads(run["exclusions_json"])
+    exclusions_raw = run["exclusions_json"]
+    exclusions = json.loads(exclusions_raw) if isinstance(exclusions_raw, str) else {}
     if run.get("valid_short_interest_rows") is None:
         # Old-schema run (pre stage-counter commit): the sequential pipeline
         # excluded rows in this exact order, so the cumulative counters are
@@ -414,6 +420,8 @@ def read_short_interest_screen(
         unambiguous = run["unambiguous_rows"]
         common_equity = run["common_equity_rows"]
         shares_outstanding = run["shares_outstanding_rows"]
+    run_eligible = run["eligible_rows"]
+    eligible_count = run_eligible if isinstance(run_eligible, int) else 0
     return {
         "source": "FINRA consolidated short interest + SEC EDGAR company facts (parquet)",
         "metric": "short shares divided by SEC-reported shares outstanding (not public float)",
@@ -424,7 +432,7 @@ def read_short_interest_screen(
         "environment": run["environment"],
         "row_count": run["eligible_rows"],
         "returned_count": len(entries),
-        "truncated": len(entries) < run["eligible_rows"],
+        "truncated": len(entries) < eligible_count,
         "coverage": {
             "finra_rows": run["finra_rows"],
             "eligible_rows": run["eligible_rows"],
@@ -463,7 +471,7 @@ def get_short_interest_leaderboard(
     settlement_date: Optional[str] = None,
     as_of: Optional[str] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, object]:
     """Return a bounded leaderboard, materializing the requested cycle
     (republishing only when its inputs changed) for the requested ``as_of``.
 
@@ -505,14 +513,20 @@ def _cycle_settlement_dates(as_of: str, data_root: Path) -> list[str]:
     return [str(row["settlement_date"]) for row in rows]
 
 
+class _CycleItem(TypedDict):
+    row: dict[str, object]
+    entity_id: str
+    fact: dict[str, object]
+
+
 def _cycle_entities(
     settlement_date: str,
     as_of: str,
     ticker_aliases: dict[str, list[str]],
     security_types: dict[str, str],
-    facts_by_entity: dict[str, list[dict]],
+    facts_by_entity: dict[str, list[dict[str, object]]],
     data_root: Path,
-) -> dict[str, dict]:
+) -> dict[str, _CycleItem]:
     """Eligible entities for one settlement cycle: symbol -> row + fact.
 
     Same point-in-time rules as the leaderboard: only source versions and
@@ -520,7 +534,7 @@ def _cycle_entities(
     classified as common equity rank.
     """
     rows, _ = _snapshot_rows(settlement_date, as_of, data_root)
-    result: dict[str, dict] = {}
+    result: dict[str, _CycleItem] = {}
     for row in rows:
         symbol = str(row["symbol_code"])
         short_shares = row.get("short_position")
@@ -539,7 +553,7 @@ def _cycle_entities(
     return result
 
 
-def _select_fact_for_period(facts: list[dict], settlement_date: str) -> Optional[dict]:
+def _select_fact_for_period(facts: list[dict[str, object]], settlement_date: str) -> Optional[dict[str, object]]:
     """Latest fact whose period end is on/before the settlement date; facts
     are pre-sorted newest first and already restricted by known_at <= as_of."""
     for fact in facts:
@@ -547,17 +561,23 @@ def _select_fact_for_period(facts: list[dict], settlement_date: str) -> Optional
         if not period_end or period_end > settlement_date:
             continue
         value = fact.get("value")
-        if value is None or float(value) <= 0:
+        if value is None or float(str(value)) <= 0:
             continue
         return fact
     return None
+
+
+def _change_key(e: dict[str, object]) -> tuple[float, str]:
+    """Largest percentage-point change first, ticker ascending."""
+    change = e["si_pp_change"]
+    return (-(float(str(change)) if change is not None else 0.0), str(e["ticker"]))
 
 
 def short_interest_change_screen(
     as_of: str,
     limit: Optional[int] = None,
     data_root: Optional[Path] = None,
-) -> dict:
+) -> dict[str, object]:
     """Dated research slice: short-interest change + shares-outstanding change
     between the two most recent settlement cycles knowable on/before as_of.
 
@@ -575,20 +595,20 @@ def short_interest_change_screen(
     security_types = _security_type_map(as_of, data_root)
     facts_by_entity = _facts_by_entity(as_of, data_root)
     current = _cycle_entities(current_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
-    prior = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
-    entries: list[dict] = []
+    prior: dict[str, _CycleItem] = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
+    entries: list[dict[str, object]] = []
     for symbol, item in sorted(current.items()):
         row, fact = item["row"], item["fact"]
-        short_current = float(row["short_position"])
-        si_pct_current = 100 * short_current / float(fact["value"])
-        entry: dict = {
+        short_current = float(str(row["short_position"]))
+        si_pct_current = 100 * short_current / float(str(fact["value"]))
+        entry: dict[str, object] = {
             "ticker": symbol,
             "issue_name": row.get("issue_name"),
             "settlement_current": current_date,
             "settlement_prior": prior_date,
             "short_shares_current": short_current,
             "short_interest_percent_current": si_pct_current,
-            "shares_outstanding_current": float(fact["value"]),
+            "shares_outstanding_current": float(str(fact["value"])),
             "sec_shares_as_of_current": str(fact["period_end"]),
             "sec_filed_at_current": str(fact["filed_at"]),
             "sec_accession_current": fact.get("accession"),
@@ -610,24 +630,24 @@ def short_interest_change_screen(
         prior_item = prior.get(symbol)
         if prior_item is not None:
             prior_row, prior_fact = prior_item["row"], prior_item["fact"]
-            short_prior = float(prior_row["short_position"])
-            si_pct_prior = 100 * short_prior / float(prior_fact["value"])
+            short_prior = float(str(prior_row["short_position"]))
+            si_pct_prior = 100 * short_prior / float(str(prior_fact["value"]))
             entry.update({
                 "short_shares_prior": short_prior,
                 "short_interest_percent_prior": si_pct_prior,
-                "shares_outstanding_prior": float(prior_fact["value"]),
+                "shares_outstanding_prior": float(str(prior_fact["value"])),
                 "sec_shares_as_of_prior": str(prior_fact["period_end"]),
                 "sec_filed_at_prior": str(prior_fact["filed_at"]),
                 "sec_accession_prior": prior_fact.get("accession"),
                 "sec_source_url_prior": prior_fact.get("source_url"),
                 "short_change_abs": short_current - short_prior,
                 "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
-                "shares_change_abs": float(fact["value"]) - float(prior_fact["value"]),
-                "shares_change_pct": 100 * (float(fact["value"]) - float(prior_fact["value"])) / float(prior_fact["value"]),
+                "shares_change_abs": float(str(fact["value"])) - float(str(prior_fact["value"])),
+                "shares_change_pct": 100 * (float(str(fact["value"])) - float(str(prior_fact["value"]))) / float(str(prior_fact["value"])),
                 "si_pp_change": si_pct_current - si_pct_prior,
             })
         entries.append(entry)
-    entries.sort(key=lambda e: (-(e["si_pp_change"] if e["si_pp_change"] is not None else 0.0), e["ticker"]))
+    entries.sort(key=_change_key)
     for index, entry in enumerate(entries, 1):
         entry["rank"] = index
     return {

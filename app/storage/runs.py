@@ -1,9 +1,10 @@
 """SQLite run/event/tool/model observability store. stdlib only.
 
-One RunRecorder per agent run appends rows to agent_runs/agent_events/
+One RunRecorder per Pi run appends rows to agent_runs/agent_events/
 tool_calls/model_calls under data/runs.sqlite (or $RUNS_DB_PATH).
-Observability must never break research: every recorder method swallows
-its own errors, disables the recorder, and logs a single warning.
+Pi emits model telemetry through scripts/pi_bridge.py; there are no nested
+Python completions. Observability must never break research: every recorder
+method swallows its own errors, disables the recorder, and logs a warning.
 """
 
 from __future__ import annotations
@@ -17,27 +18,14 @@ import threading
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
-
-import requests
+from types import TracebackType
+from typing import Optional
 
 from ..config import get_data_root
 from ..redact import redact_json, redact_text
-from ..runtime import EventType, ExecutionBudget
+from ..runtime import EventType
 
 logger = logging.getLogger(__name__)
-
-def model_error_category(exc: Exception) -> str:
-    """Map an upstream exception to a coarse category for observability."""
-    if isinstance(exc, requests.Timeout):
-        return "timeout"
-    if isinstance(exc, requests.HTTPError):
-        return "http"
-    if isinstance(exc, requests.ConnectionError):
-        return "connection"
-    if isinstance(exc, json.JSONDecodeError):
-        return "parse"
-    return "other"
 
 # Default data root when the recorder is not given an explicit one.
 DEFAULT_DATA_ROOT = get_data_root()
@@ -106,6 +94,15 @@ def _duration_ms(started_at: str, completed_at: str) -> float:
     return (end - start).total_seconds() * 1000.0
 
 
+def _usage_int(value: object) -> int:
+    """Narrow a provider usage counter to int; raises on malformed."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (str, float)):
+        return int(value)
+    raise TypeError(f"malformed usage counter: {value!r}")
+
+
 def get_runs_db_path(data_root: Path) -> Path:
     """Resolve the runs DB path: $RUNS_DB_PATH wins, else data_root/runs.sqlite."""
     env = os.environ.get("RUNS_DB_PATH")
@@ -126,7 +123,7 @@ class RunRecorder:
         as_of: Optional[str],
         model: str,
         provider: str,
-        model_parameters: dict,
+        model_parameters: dict[str, object],
         agent_version: str,
         prompt_version: str,
         tool_registry_version: str,
@@ -228,7 +225,7 @@ class RunRecorder:
                 self._disable(exc)
             return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
         with self._lock:
             if self._conn is not None:
                 try:
@@ -264,12 +261,12 @@ class RunRecorder:
         round: Optional[int] = None,
         model: Optional[str] = None,
         tool_name: Optional[str] = None,
-        arguments: Optional[Any] = None,
+        arguments: object | None = None,
         result_summary: Optional[str] = None,
         success: Optional[bool] = None,
         error_type: Optional[str] = None,
         evidence_ids: Optional[list[str]] = None,
-        metadata: Optional[dict] = None,
+        metadata: Optional[dict[str, object]] = None,
         started_at: Optional[str] = None,
         completed_at: Optional[str] = None,
         duration_ms: Optional[float] = None,
@@ -283,6 +280,7 @@ class RunRecorder:
             if not self.enabled:
                 return None
             try:
+                assert self._conn is not None
                 self._note_round(round)
                 started = started_at or _now()
                 completed = completed_at or _now()
@@ -295,7 +293,7 @@ class RunRecorder:
                 event_id = f"{self.run_id}:ev:{sequence:04d}"
                 summary = None
                 if result_summary is not None:
-                    summary = redact_json(str(result_summary))
+                    summary = redact_json(result_summary)
                     if len(summary) > self.max_result_bytes:
                         summary = summary[: self.max_result_bytes] + "...[truncated]"
                 self._conn.execute(
@@ -304,7 +302,7 @@ class RunRecorder:
                     " arguments, result_summary, success, error_type, evidence_ids, metadata)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        event_id, self.run_id, sequence, str(event_type),
+                        event_id, self.run_id, sequence, event_type,
                         started, completed,
                         duration_ms,
                         round, model, tool_name,
@@ -354,6 +352,7 @@ class RunRecorder:
             if not self.enabled:
                 return
             try:
+                assert self._conn is not None
                 self._note_round(round)
                 message = redact_text(error_message)[:2000] if error_message is not None else None
                 self._conn.execute(
@@ -402,6 +401,7 @@ class RunRecorder:
                 return
             try:
                 self._note_round(round)
+                assert self._conn is not None
                 self._conn.execute(
                     "INSERT INTO evidence (evidence_id, run_id, tool_call_id, round,"
                     " tool_name, rendered_hash, rendered_bytes, estimated_tokens,"
@@ -437,6 +437,7 @@ class RunRecorder:
                 return None
             try:
                 created = _now()
+                assert self._conn is not None
                 sequence = self._conn.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM security_events"
                     " WHERE run_id = ?",
@@ -473,7 +474,7 @@ class RunRecorder:
         model: str,
         started_at: str,
         completed_at: str,
-        usage: Optional[dict] = None,
+        usage: Optional[dict[str, object]] = None,
         finish_reason: Optional[str] = None,
         tool_call_count: int = 0,
         provider_request_id: Optional[str] = None,
@@ -488,17 +489,18 @@ class RunRecorder:
             try:
                 self._note_round(round)
                 self.model_calls += 1
+                assert self._conn is not None
                 usage = usage or {}
-                input_tokens = int(usage.get("prompt_tokens", 0))
-                output_tokens = int(usage.get("completion_tokens", 0))
-                reasoning_tokens = int(usage.get("reasoning_tokens", 0))
-                cached_tokens = int(
-                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-                )
+                input_tokens = _usage_int(usage.get("prompt_tokens", 0))
+                output_tokens = _usage_int(usage.get("completion_tokens", 0))
+                reasoning_tokens = _usage_int(usage.get("reasoning_tokens", 0))
+                details_raw = usage.get("prompt_tokens_details")
+                details: dict[str, object] = details_raw if isinstance(details_raw, dict) else {}
+                cached_tokens = _usage_int(details.get("cached_tokens", 0))
                 cost = self._estimate_cost(model, input_tokens, output_tokens, usage)
                 self._input_tokens += input_tokens
                 self._output_tokens += output_tokens
-                self._total_tokens += int(usage.get("total_tokens", 0))
+                self._total_tokens += _usage_int(usage.get("total_tokens", 0))
                 self._estimated_model_cost += cost
                 self._conn.execute(
                     "INSERT INTO model_calls (model_call_id, run_id, round, provider,"
@@ -537,6 +539,7 @@ class RunRecorder:
             try:
                 completed_at = _now()
                 message = redact_text(error_message)[:2000] if error_message is not None else None
+                assert self._conn is not None
                 answer_hash = hashlib.sha256(answer.encode()).hexdigest() if answer else None
                 duration = (
                     _duration_ms(self.started_at, completed_at) if self.started_at else None
@@ -574,7 +577,7 @@ class RunRecorder:
 
     @staticmethod
     def _estimate_cost(
-        model: str, input_tokens: int, output_tokens: int, usage: dict
+        model: str, input_tokens: int, output_tokens: int, usage: dict[str, object]
     ) -> float:
         """Provider-reported usage.cost wins; else the static list-price table."""
         cost = usage.get("cost")
@@ -660,7 +663,7 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
         return False
 
 
-# -- current-recorder contextvar (nested model calls inside tools) ----------
+# -- current-recorder contextvar (Pi bridge + gateway share one recorder) ----------
 
 _current_recorder: ContextVar[Optional[RunRecorder]] = ContextVar(
     "current_recorder", default=None
@@ -671,74 +674,12 @@ def get_current_recorder() -> Optional[RunRecorder]:
     return _current_recorder.get()
 
 
-def set_current_recorder(recorder: RunRecorder) -> Token:
+def set_current_recorder(recorder: RunRecorder) -> Token[Optional[RunRecorder]]:
     return _current_recorder.set(recorder)
 
 
-def reset_current_recorder(token: Token) -> None:
+def reset_current_recorder(token: Token[Optional[RunRecorder]]) -> None:
     _current_recorder.reset(token)
-
-
-def record_model_call_from_current(
-    *,
-    provider: str,
-    model: str,
-    started_at: str,
-    completed_at: str,
-    usage: Optional[dict] = None,
-    finish_reason: Optional[str] = None,
-    tool_call_count: int = 0,
-    provider_request_id: Optional[str] = None,
-    status: str = "completed",
-    error_type: Optional[str] = None,
-    error_category: Optional[str] = None,
-) -> float:
-    """Record a nested model call against the active recorder, if any."""
-    recorder = get_current_recorder()
-    if recorder is None:
-        return 0.0
-    return recorder.record_model_call(
-        round=recorder.current_round,
-        provider=provider,
-        model=model,
-        started_at=started_at,
-        completed_at=completed_at,
-        usage=usage,
-        finish_reason=finish_reason,
-        tool_call_count=tool_call_count,
-        provider_request_id=provider_request_id,
-        status=status,
-        error_type=error_type,
-        error_category=error_category,
-    )
-
-
-# -- current-budget contextvar (reserve-before-call inside nested helpers) ---
-
-_current_budget: ContextVar[Optional[ExecutionBudget]] = ContextVar(
-    "current_budget", default=None
-)
-
-
-def get_current_budget() -> Optional[ExecutionBudget]:
-    return _current_budget.get()
-
-
-def set_current_budget(budget: ExecutionBudget) -> Token:
-    return _current_budget.set(budget)
-
-
-def reset_current_budget(token: Token) -> None:
-    _current_budget.reset(token)
-
-
-def reserve_model_call_from_current() -> bool:
-    """Reserve one model call against the active budget, if any. No active
-    budget (standalone tool use) always succeeds."""
-    budget = get_current_budget()
-    if budget is None:
-        return True
-    return budget.reserve_model_call()
 
 
 # -- read-side query helpers -------------------------------------------------
@@ -752,7 +693,7 @@ def _query_conn() -> Optional[sqlite3.Connection]:
     return conn
 
 
-def list_runs(limit: int = 20) -> list[dict]:
+def list_runs(limit: int = 20) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -768,7 +709,7 @@ def list_runs(limit: int = 20) -> list[dict]:
         return []
 
 
-def get_run(run_id: str) -> Optional[dict]:
+def get_run(run_id: str) -> Optional[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -784,7 +725,7 @@ def get_run(run_id: str) -> Optional[dict]:
         return None
 
 
-def get_events(run_id: str) -> list[dict]:
+def get_events(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -800,7 +741,7 @@ def get_events(run_id: str) -> list[dict]:
         return []
 
 
-def get_tool_calls(run_id: str) -> list[dict]:
+def get_tool_calls(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -816,7 +757,7 @@ def get_tool_calls(run_id: str) -> list[dict]:
         return []
 
 
-def get_model_calls(run_id: str) -> list[dict]:
+def get_model_calls(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -832,7 +773,7 @@ def get_model_calls(run_id: str) -> list[dict]:
         return []
 
 
-def get_security_events(run_id: str) -> list[dict]:
+def get_security_events(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:
@@ -849,7 +790,7 @@ def get_security_events(run_id: str) -> list[dict]:
         return []
 
 
-def get_security_summary(run_id: str) -> dict:
+def get_security_summary(run_id: str) -> dict[str, int]:
     """Counts of security events grouped by decision."""
     counts: dict[str, int] = {
         "allowed": 0,
@@ -860,12 +801,13 @@ def get_security_summary(run_id: str) -> dict:
         "response_stripped": 0,
     }
     for event in get_security_events(run_id):
-        decision = event.get("decision") or "unknown"
+        decision_value = event.get("decision")
+        decision = decision_value if isinstance(decision_value, str) and decision_value else "unknown"
         counts[decision] = counts.get(decision, 0) + 1
     return counts
 
 
-def get_evidence(run_id: str) -> list[dict]:
+def get_evidence(run_id: str) -> list[dict[str, object]]:
     try:
         conn = _query_conn()
         if conn is None:

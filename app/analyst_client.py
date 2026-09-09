@@ -19,7 +19,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 
@@ -63,13 +63,14 @@ _RECOMMENDATION_LABELS = {
 }
 
 
-def _no_data(ticker: str, what: str) -> dict:
+def _no_data(ticker: str, what: str) -> dict[str, object]:
     return {"error": f"No data found for {ticker}: {what}"}
 
 
-def _session_get(session: requests.Session, url: str, **kwargs) -> requests.Response:
-    kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
-    return session.get(url, **kwargs)
+def _session_get(
+    session: requests.Session, url: str, headers: dict[str, str] | None = None
+) -> requests.Response:
+    return session.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
 def _ensure_session() -> requests.Session:
@@ -101,7 +102,7 @@ def _reset_crumb() -> None:
     _crumb_at = 0.0
 
 
-def _quote_summary(ticker: str, modules: str) -> dict:
+def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
     """Fetch quoteSummary for ticker; retries once after refreshing the crumb."""
     url = (
         f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}"
@@ -118,36 +119,59 @@ def _quote_summary(ticker: str, modules: str) -> dict:
         )
         resp = _session_get(_ensure_session(), url, headers={"Accept": "application/json"})
     resp.raise_for_status()
-    payload = resp.json()
-    result = (payload.get("quoteSummary") or {}).get("result") or []
-    if not result:
-        error = (payload.get("quoteSummary") or {}).get("error") or {}
+    decoded: object = resp.json()
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    summary: object = decoded.get("quoteSummary") or {}
+    if not isinstance(summary, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    result_obj: object = summary.get("result") or []
+    if not isinstance(result_obj, list) or not result_obj:
+        err: object = summary.get("error") or {}
+        detail: object = err.get("description") if isinstance(err, dict) else None
         raise ValueError(
-            error.get("description", f"Yahoo returned no data for {ticker}")
+            detail if isinstance(detail, str) else f"Yahoo returned no data for {ticker}"
         )
-    return result[0]
+    first: object = result_obj[0]
+    if not isinstance(first, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")
+    return first
 
 
-def _raw(value: Any) -> Optional[float]:
+def _raw(value: object) -> Optional[float]:
     if not isinstance(value, dict):
         return None
-    raw = value.get("raw")
-    return float(raw) if raw is not None else None
+    raw: object = value.get("raw")
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float, str)):
+        return float(raw)
+    return None
 
 
-def _int(value: Any) -> Optional[int]:
+def _int(value: object) -> Optional[int]:
     raw = _raw(value)
     return int(raw) if raw is not None else None
 
 
-def _trend_rows(data: dict) -> list[dict]:
-    rows: list[dict] = []
-    for row in (data.get("earningsTrend") or {}).get("trend") or []:
+def _obj(value: object) -> dict[str, object]:
+    """Narrow an untrusted Yahoo JSON value to a mapping ({} when absent/mistyped)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _trend_rows(data: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    raw_trend = _obj(data.get("earningsTrend")).get("trend")
+    if not isinstance(raw_trend, list):
+        return rows
+    for row in raw_trend:
+        if not isinstance(row, dict):
+            continue
         period = row.get("period")
-        label = _PERIOD_LABELS.get(period, period)
-        eps = row.get("earningsEstimate") or {}
-        rev = row.get("revenueEstimate") or {}
-        eps_trend = row.get("epsTrend") or {}
+        label = _PERIOD_LABELS.get(period, period) if isinstance(period, str) else period
+        eps = _obj(row.get("earningsEstimate"))
+        rev = _obj(row.get("revenueEstimate"))
+        eps_trend = _obj(row.get("epsTrend"))
         rows.append(
             {
                 "period": label,
@@ -190,14 +214,14 @@ def _recommendation_label(key: Optional[str], mean: Optional[float]) -> str:
     return "unknown"
 
 
-def get_analyst_estimates(ticker: str) -> dict:
+def get_analyst_estimates(ticker: str) -> dict[str, object]:
     """Return normalized analyst consensus estimates for ticker (cached 1h)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return _no_data("", "empty ticker")
     key = f"analyst_estimates:{ticker}"
     hit = cache.get(key, ttl=ESTIMATES_CACHE_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, dict):
         return hit
     try:
         data = _quote_summary(
@@ -207,8 +231,8 @@ def get_analyst_estimates(ticker: str) -> dict:
         logger.warning("analyst estimates failed for %s: %s", ticker, e)
         return {"error": f"Analyst estimates unavailable for {ticker}: {e}"}
 
-    fd = data.get("financialData") or {}
-    ks = data.get("defaultKeyStatistics") or {}
+    fd = _obj(data.get("financialData"))
+    ks = _obj(data.get("defaultKeyStatistics"))
     price = _raw(fd.get("currentPrice"))
     shares = _int(ks.get("sharesOutstanding"))
     market_cap = _raw(ks.get("marketCap"))
@@ -218,7 +242,7 @@ def get_analyst_estimates(ticker: str) -> dict:
     recommendation_mean = _raw(fd.get("recommendationMean"))
     estimates = _trend_rows(data)
 
-    value = {
+    value: dict[str, object] = {
         "ticker": ticker,
         "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": "Yahoo Finance sell-side consensus (unofficial endpoint)",
@@ -233,7 +257,7 @@ def get_analyst_estimates(ticker: str) -> dict:
             "num_analysts": _int(fd.get("numberOfAnalystOpinions")),
             "recommendation_mean": recommendation_mean,
             "recommendation": _recommendation_label(
-                recommendation_key, recommendation_mean
+                recommendation_key if isinstance(recommendation_key, str) else None, recommendation_mean
             ),
         },
         "valuation": {
@@ -245,33 +269,33 @@ def get_analyst_estimates(ticker: str) -> dict:
     cache.set(key, value)
     return value
 
-def get_quote_price(ticker: str) -> dict:
+def get_quote_price(ticker: str) -> dict[str, object]:
     """Latest Yahoo price with retrieval instant (uncached; 5-min TTL lives in valuation)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return {"price": None, "retrieved_at": None}
     try:
         data = _quote_summary(ticker, "price")
-        price = _raw((data.get("price") or {}).get("regularMarketPrice"))
+        price = _raw(_obj(data.get("price")).get("regularMarketPrice"))
         if price is None:
             data = _quote_summary(ticker, "financialData")
-            price = _raw((data.get("financialData") or {}).get("currentPrice"))
+            price = _raw(_obj(data.get("financialData")).get("currentPrice"))
         if price is None:
             raise ValueError(f"Yahoo returned no price for {ticker}")
-        return {"price": float(price), "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return {"price": price, "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     except Exception as e:
         logger.warning("quote price failed for %s: %s", ticker, e)
         return {"price": None, "retrieved_at": None}
 
 
-def get_sp500_weight(ticker: str) -> dict:
+def get_sp500_weight(ticker: str) -> dict[str, object]:
     """Return the S&P 500 index weight for ticker (Slickcharts, cached 24h)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return _no_data("", "empty ticker")
     key = f"sp500_weight:{ticker}"
     hit = cache.get(key, ttl=WEIGHT_CACHE_TTL_SECONDS)
-    if hit is not None:
+    if isinstance(hit, dict):
         return hit
     try:
         resp = _session_get(_ensure_session(), SLICKCHARTS_SP500_URL)
@@ -289,7 +313,7 @@ def get_sp500_weight(ticker: str) -> dict:
         return {"error": f"S&P 500 index weight unavailable for {ticker}: {e}"}
     if match is None:
         return _no_data(ticker, "not found in S&P 500 constituent list")
-    value = {
+    value: dict[str, object] = {
         "ticker": ticker,
         "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": "Slickcharts S&P 500 constituents",
@@ -306,7 +330,7 @@ def get_sp500_weight(ticker: str) -> dict:
     return value
 
 
-def _find_weight(html: str, ticker: str) -> Optional[dict]:
+def _find_weight(html: str, ticker: str) -> Optional[dict[str, object]]:
     body = re.search(r"<tbody>(.*?)</tbody>", html, re.S)
     if body is None:
         return None

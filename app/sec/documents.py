@@ -1,26 +1,32 @@
 """Document-level retrieval off a filing accession."""
 
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dataclasses import replace
 
-from .models import pit_of
+if TYPE_CHECKING:
+    # Provider SDK filing type at the boundary only; never constructed here.
+    from edgar import Filing as EdgarFiling
+from .models import Filing, FilingDocument, pit_of
 from .normalization import document_from_attachment, filing_from_edgar
 
 _MAX_CHARS = 32_000
 
-def get_by_accession_number(accession_no: str):
+def get_by_accession_number(accession_no: str) -> EdgarFiling:
     """Seam for tests: monkeypatch this name, never `edgar` itself."""
     from .client import ensure_identity
     from edgar import get_by_accession_number as _get
 
     ensure_identity()
-    return _get(accession_no)
+    filing: EdgarFiling = _get(accession_no)
+    return filing
 
 
-def _filing(accession_no: str):
+def _filing(accession_no: str) -> EdgarFiling:
     try:
         filing = get_by_accession_number(accession_no)
     except ValueError:
@@ -32,12 +38,12 @@ def _filing(accession_no: str):
     return filing
 
 
-def _meta(accession_no: str):
+def _meta(accession_no: str) -> Filing:
     """Hydrate filing metadata first so exact lookups cannot bypass PIT."""
     return filing_from_edgar(_filing(accession_no))
 
 
-def _require_known(accession_no: str, as_of):
+def _require_known(accession_no: str, as_of: str | None) -> Filing:
     """Validate as_of and reject accessions unknown at that date."""
     from .filings import _check_as_of
 
@@ -52,10 +58,10 @@ def _require_known(accession_no: str, as_of):
     return meta
 
 
-def list_sec_documents(accession_no: str, as_of=None):
+def list_sec_documents(accession_no: str, as_of: str | None = None) -> list[FilingDocument]:
     meta = _require_known(accession_no, as_of)
     filing = _filing(accession_no)
-    out = []
+    out: list[FilingDocument] = []
     for a in filing.attachments:
         doc = document_from_attachment(accession_no, a)
         out.append(replace(
@@ -70,7 +76,7 @@ def list_sec_documents(accession_no: str, as_of=None):
     return out
 
 
-def _resolve_in(filing, accession_no: str, document_name=None):
+def _resolve_in(filing: EdgarFiling, accession_no: str, document_name: str | None = None) -> object:
     if document_name is None:
         try:
             attachment = filing.document
@@ -87,7 +93,7 @@ def _resolve_in(filing, accession_no: str, document_name=None):
         raise ValueError(f"no documents for accession: {accession_no!r}") from exc
     for attachment in attachments:
         try:
-            name = attachment.document
+            name = getattr(attachment, "document")
         except Exception:
             continue
         if name == document_name:
@@ -95,11 +101,11 @@ def _resolve_in(filing, accession_no: str, document_name=None):
     raise ValueError(f"document not found: {document_name!r}")
 
 
-def _resolve(accession_no: str, document_name=None):
+def _resolve(accession_no: str, document_name: str | None = None) -> object:
     return _resolve_in(_filing(accession_no), accession_no, document_name)
 
 
-def _text_of(attachment) -> str:
+def _text_of(attachment: object) -> str:
     for attr in ("content", "text"):
         try:
             value = getattr(attachment, attr)
@@ -117,7 +123,7 @@ def _text_of(attachment) -> str:
     return ""
 
 
-def _raw_root_for(data_root):
+def _raw_root_for(data_root: Path | str | None) -> Path | None:
     """Raw archive root under a data root (tolerates a parquet-root input)."""
     if data_root is None:
         return None
@@ -129,7 +135,7 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _check_window(offset: int, max_chars) -> tuple[int, int | None]:
+def _check_window(offset: int | str | float, max_chars: int | str | float | None) -> tuple[int, int | None]:
     try:
         offset = int(offset)
     except (TypeError, ValueError):
@@ -147,11 +153,14 @@ def _check_window(offset: int, max_chars) -> tuple[int, int | None]:
     return offset, max_chars
 
 
-def _bounded_response(*, accession_no, document_name, description, url,
-                      full_text, content_hash, source_content_hash,
-                      source_representation, raw_archive_path, source_url,
-                      filed_at, known_at, retrieved_at, offset, max_chars,
-                      cache_hit, cache_type, warnings=None) -> dict:
+def _bounded_response(*, accession_no: str, document_name: object,
+                      description: object, url: object, full_text: str,
+                      content_hash: object, source_content_hash: object,
+                      source_representation: object, raw_archive_path: object,
+                      source_url: object, filed_at: object, known_at: object,
+                      retrieved_at: object, offset: int, max_chars: int | None,
+                      cache_hit: bool, cache_type: str,
+                      warnings: Iterable[str] | None = None) -> dict[str, object]:
     total = len(full_text)
     if offset > total:
         raise ValueError(f"offset {offset} beyond document length {total}")
@@ -182,7 +191,7 @@ def _bounded_response(*, accession_no, document_name, description, url,
     return out
 
 
-def _source_bytes_of(attachment) -> tuple[bytes | None, str | None]:
+def _source_bytes_of(attachment: object) -> tuple[bytes | None, str | None]:
     """Exact source bytes when EdgarTools exposes them.
 
     ``download()`` bytes win, then byte-valued ``content``/``text``.
@@ -211,7 +220,7 @@ def _source_bytes_of(attachment) -> tuple[bytes | None, str | None]:
     return None, None
 
 
-def _stored_candidates(accession_no, document_name, as_of, data_root):
+def _stored_candidates(accession_no: str, document_name: str | None, as_of: str | None, data_root: Path | str | None) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
     """Local archive rows for one accession/document; returns (filing, rows).
 
     Filing lookup resolves the primary name when document_name is None;
@@ -220,13 +229,18 @@ def _stored_candidates(accession_no, document_name, as_of, data_root):
     """
     from . import store as _store
 
+    filings: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = []
     try:
         filings = _store.query_filings(
             accession=accession_no, as_of=as_of, limit=5, root=data_root)
     except Exception:
         filings = []
     filing = filings[0] if filings else None
-    effective = document_name or (filing.get("primary_document") if filing else None)
+    filing_name = filing.get("primary_document") if filing else None
+    if filing_name is not None and not isinstance(filing_name, str):
+        filing_name = str(filing_name)
+    effective = document_name or filing_name
     try:
         if effective is not None:
             rows = _store.query_document_text(
@@ -244,7 +258,7 @@ def _stored_candidates(accession_no, document_name, as_of, data_root):
     return filing, rows
 
 
-def _pick_revision(rows, *, as_of, accession_no, document_name):
+def _pick_revision(rows: list[dict[str, object]], *, as_of: str | None, accession_no: str, document_name: object) -> tuple[dict[str, object] | None, list[str] | None, dict[str, object] | None]:
     """Deterministic revision choice; returns (row, warnings) or an error dict.
 
     Rows arrive ordered known_at DESC, retrieved_at DESC, content_hash DESC.
@@ -272,9 +286,9 @@ def _pick_revision(rows, *, as_of, accession_no, document_name):
     return rows[0], None, None
 
 
-def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
+def get_sec_document(accession_no: str, document_name: str | None = None, as_of: str | None = None, *,
                      offset: int = 0, max_chars: int | None = None,
-                     data_root=None) -> dict:
+                     data_root: Path | str | None = None) -> dict[str, object]:
     """Exact document retrieval; EFTS callers pass the matched document name.
     Primary-document fallback applies only when document_name is None.
 
@@ -287,16 +301,20 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
 
     offset, max_chars = _check_window(offset, max_chars)
     as_of = _check_as_of(as_of)
-    accession_no = str(accession_no)
+    accession_no = accession_no if isinstance(accession_no, str) else str(accession_no)
     filing_row, rows = _stored_candidates(accession_no, document_name, as_of, data_root)
     if rows:
         display_name = document_name or rows[0].get("document_name")
-        row, warnings, conflict = _pick_revision(
+        row, rev_warnings, conflict = _pick_revision(
             rows, as_of=as_of, accession_no=accession_no,
             document_name=display_name)
         if conflict is not None:
             return conflict
-        full = row.get("text") or ""
+        if row is None:  # Unreachable: a winning revision always yields a row.
+            raise ValueError(
+                f"no document revision for {accession_no}/{display_name}")
+        raw_text = row.get("text")
+        full = raw_text if isinstance(raw_text, str) else ""
         source_url = row.get("source_url")
         return _bounded_response(
             accession_no=accession_no,
@@ -314,7 +332,7 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
             retrieved_at=row.get("retrieved_at"),
             offset=offset, max_chars=max_chars,
             cache_hit=True, cache_type="stockbot_archive",
-            warnings=warnings,
+            warnings=rev_warnings,
         )
     filing = _filing(accession_no)
     meta = filing_from_edgar(filing)
@@ -333,15 +351,15 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
             "text": attachment,
         }
     try:
-        name = attachment.document
+        name = getattr(attachment, "document")
     except Exception:
         name = None
     try:
-        description = attachment.description
+        description = getattr(attachment, "description")
     except Exception:
         description = None
     try:
-        url = attachment.url or ""
+        url = getattr(attachment, "url", None) or ""
     except Exception:
         url = ""
     doc_name = (name if isinstance(name, str) else None) or document_name or \
@@ -363,17 +381,17 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
     known_at = meta.known_at or meta.filed_at
     source_url = url or meta.source or None
     warnings: list[str] = []
-    raw_path = None
-    retrieved_at = None
+    raw_path: str | None = None
+    retrieved_at: str | None = None
     try:
         record = _archive.archive_sec_document(
-            accession_no, str(doc_name), source_bytes, url=source_url or "",
+            accession_no, doc_name, source_bytes, url=source_url or "",
             metadata={"form": meta.form, "representation": representation},
             root=_raw_root_for(data_root))
         raw_path = str(record.payload_path)
         retrieved_at = record.retrieved_at
         _store.store_document_text(
-            doc_id, normalized, accession=accession_no, document_name=str(doc_name),
+            doc_id, normalized, accession=accession_no, document_name=doc_name,
             source_url=source_url, raw_archive_path=raw_path,
             source_content_hash=source_content_hash,
             source_representation=representation,
@@ -384,7 +402,7 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
         retrieved_at = retrieved_at or _utcnow()
     return _bounded_response(
         accession_no=accession_no,
-        document_name=str(doc_name),
+        document_name=doc_name,
         description=description,
         url=url,
         full_text=normalized,
@@ -402,15 +420,19 @@ def get_sec_document(accession_no: str, document_name=None, as_of=None, *,
     )
 
 
-def get_sec_filing_text(accession_no: str, document_name=None, as_of=None) -> str:
-    return get_sec_document(accession_no, document_name, as_of=as_of)["text"]
+def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_of: str | None = None) -> str:
+    text = get_sec_document(accession_no, document_name, as_of=as_of)["text"]
+    if not isinstance(text, str):
+        raise ValueError(f"no text for accession: {accession_no!r}")
+    return text
 
 
 
-def _exhibit_dict(accession_no: str, attachment) -> dict:
-    def _get(name):
+def _exhibit_dict(accession_no: str, attachment: object) -> dict[str, object]:
+    def _get(name: str) -> object:
         try:
-            return getattr(attachment, name)
+            value: object = getattr(attachment, name)
+            return value
         except Exception:
             return None
 
@@ -424,7 +446,7 @@ def _exhibit_dict(accession_no: str, attachment) -> dict:
     }
 
 
-def get_filing_exhibits(accession_no: str) -> list:
+def get_filing_exhibits(accession_no: str) -> list[dict[str, object]]:
     filing = _filing(accession_no)
     exhibits = getattr(filing, "exhibits", None)
     if exhibits is None:
@@ -432,9 +454,9 @@ def get_filing_exhibits(accession_no: str) -> list:
     return [_exhibit_dict(accession_no, a) for a in exhibits]
 
 
-def get_filing_exhibit(accession_no: str, exhibit: str) -> dict:
+def get_filing_exhibit(accession_no: str, exhibit: str) -> dict[str, object]:
     want = exhibit.upper()
     for row in get_filing_exhibits(accession_no):
-        if (row["exhibit"] or "").upper() == want:
+        if str(row.get("exhibit") or "").upper() == want:
             return row
     raise ValueError(f"exhibit not found: {exhibit!r}")

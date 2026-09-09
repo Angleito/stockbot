@@ -4,6 +4,8 @@ Fixture payloads mirror the shapes seeded in tests/test_analytics_screens.py;
 no network access.
 """
 
+from pathlib import Path
+
 from app.normalization import (
     COMPANY_TICKERS_PARSER_VERSION,
     COMPANY_FACTS_PARSER_VERSION,
@@ -18,26 +20,30 @@ from app.storage import parquet
 RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
 
-def _tickers_payload(cik=1):
+def _tickers_payload(cik: int = 1) -> dict[str, dict[str, str | int]]:
     return {"0": {"cik_str": cik, "ticker": "AAA", "title": "Alpha Corp"}}
 
 
-def _facts_payload(cik=1, facts=None):
+def _facts_payload(cik: int = 1, facts: list[dict[str, object]] | None = None) -> dict[str, object]:
     return {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
         "EntityCommonStockSharesOutstanding": {"units": {"shares": facts or []}},
     }}}
 
-def _eps_payload(cik=1, diluted=None, basic=None):
+def _eps_payload(
+    cik: int = 1,
+    diluted: list[dict[str, object]] | None = None,
+    basic: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     """Companyfacts payload with us-gaap EPS concepts (USD/shares units)."""
-    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"us-gaap": {}}}
+    us_gaap: dict[str, object] = {}
     if diluted is not None:
-        payload["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {"units": {"USD/shares": diluted}}
+        us_gaap["EarningsPerShareDiluted"] = {"units": {"USD/shares": diluted}}
     if basic is not None:
-        payload["facts"]["us-gaap"]["EarningsPerShareBasic"] = {"units": {"USD/shares": basic}}
-    return payload
+        us_gaap["EarningsPerShareBasic"] = {"units": {"USD/shares": basic}}
+    return {"cik": cik, "entityName": f"CIK{cik}", "facts": {"us-gaap": us_gaap}}
 
 
-def _normalize(payload):
+def _normalize(payload: object) -> dict[str, list[dict[str, object]]]:
     return normalize_sec_company_facts(
         payload, retrieved_at=RETRIEVED_AT, content_hash="h1",
         source_url="u", source_record_id="cik0000000001",
@@ -80,7 +86,11 @@ def test_ticker_normalization_skips_malformed_rows():
 
 def test_facts_canonical_concepts():
     payload = _facts_payload(facts=[{"end": "2026-06-30", "val": 10, "accn": "a1", "filed": "2026-08-02"}])
-    payload["facts"]["dei"]["RevenueFromContractWithCustomerExcludingAssessedTax"] = {
+    facts_env = payload["facts"]
+    assert isinstance(facts_env, dict)
+    dei_env = facts_env["dei"]
+    assert isinstance(dei_env, dict)
+    dei_env["RevenueFromContractWithCustomerExcludingAssessedTax"] = {
         "units": {"USD": [{"end": "2026-06-30", "val": 123.5, "accn": "a2", "filed": "2026-08-02"}]},
     }
     datasets = normalize_sec_company_facts(
@@ -148,7 +158,7 @@ def test_security_classification():
 
 
 def test_short_interest_normalization():
-    rows = [{
+    rows: list[dict[str, object]] = [{
         "symbolCode": " aaa ", "issueName": "  Alpha  ",
         "currentShortPositionQuantity": "-5", "settlementDate": "2026-08-14",
     }]
@@ -166,7 +176,7 @@ def test_short_interest_normalization():
 
 
 def test_short_interest_corrected_snapshot_is_new_version():
-    rows = [{"symbolCode": "AAA", "currentShortPositionQuantity": 20, "settlementDate": "2026-08-14"}]
+    rows: list[dict[str, object]] = [{"symbolCode": "AAA", "currentShortPositionQuantity": 20, "settlementDate": "2026-08-14"}]
     v1 = normalize_finra_short_interest(
         rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
         content_hash="v1-hash", source_url="u", source_record_id="r",
@@ -178,11 +188,11 @@ def test_short_interest_corrected_snapshot_is_new_version():
     assert v1["short_interest"][0]["row_id"] != v2["short_interest"][0]["row_id"]
 
 def test_eps_facts_normalized_with_period_metadata():
-    diluted = [{
+    diluted: list[dict[str, object]] = [{
         "start": "2025-05-01", "end": "2025-07-31", "val": 1.5, "accn": "a1",
         "fy": 2025, "fp": "Q2", "filed": "2025-08-28",
     }]
-    basic = [{
+    basic: list[dict[str, object]] = [{
         "start": "2025-05-01", "end": "2025-07-31", "val": 1.52, "accn": "a2",
         "fy": 2025, "fp": "Q2", "filed": "2025-08-28",
     }]
@@ -216,7 +226,11 @@ def test_eps_instant_fact_without_period_metadata_is_nullable():
 
 def test_eps_non_usd_shares_units_are_ignored():
     payload = _eps_payload()
-    payload["facts"]["us-gaap"]["EarningsPerShareDiluted"] = {
+    facts_env = payload["facts"]
+    assert isinstance(facts_env, dict)
+    gaap_env = facts_env["us-gaap"]
+    assert isinstance(gaap_env, dict)
+    gaap_env["EarningsPerShareDiluted"] = {
         "units": {
             "USD": [{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
             "shares": [{"end": "2025-07-31", "val": 2, "accn": "a2", "filed": "2025-08-28"}],
@@ -236,7 +250,7 @@ def test_malformed_eps_facts_are_skipped_without_crash():
     assert datasets["financial_facts"] == []
 
 
-def test_eps_rows_dedup_on_rerun(tmp_path):
+def test_eps_rows_dedup_on_rerun(tmp_path: Path):
     datasets = _normalize(_eps_payload(
         diluted=[{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
         basic=[{"end": "2025-07-31", "val": 1.52, "accn": "a2", "filed": "2025-08-28"}],
@@ -302,7 +316,7 @@ def test_multiple_record_dates_emit_undated():
     assert event["payment_date"] is None
 
 
-def test_store_document_text_extracts_filing_text_event(tmp_path):
+def test_store_document_text_extracts_filing_text_event(tmp_path: Path):
     from app.sec import store as sec_store
     from app.storage import duckdb
     parquet.write_rows("sec_filings", [{

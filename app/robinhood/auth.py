@@ -18,7 +18,7 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import override
 
 
 DEFAULT_TOKEN_PATH = Path.home() / ".stockbot" / "robinhood" / "oauth.json"
@@ -75,7 +75,7 @@ class OAuthConfig:
         return server_origin(self.server_url)
 
 
-def parse_callback_url(callback_url: str) -> Any:
+def parse_callback_url(callback_url: str) -> tuple[str, str, str | None]:
     """Extract OAuth redirect parameters while preserving state and issuer."""
     query = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
     if query.get("error"):
@@ -116,11 +116,12 @@ class LoopbackCallback:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, format, *args):  # noqa: A002 - stdlib handler API
+            @override
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib handler API
                 return
 
         self._handler_type = Handler
-        self.server = None
+        self.server: http.server.ThreadingHTTPServer | None = None
         self.redirect_uri = (
             f"http://{self.host}:{self.requested_port}{self.path}"
             if self.requested_port
@@ -171,7 +172,7 @@ class LoopbackCallback:
         if not webbrowser.open(url):
             print("If it did not open, paste that URL into a browser.")
 
-    async def callback_handler(self) -> Any:
+    async def callback_handler(self) -> tuple[str, str, str | None]:
         callback_url = await asyncio.to_thread(self._received.get)
         try:
             return parse_callback_url(callback_url)
@@ -179,7 +180,7 @@ class LoopbackCallback:
             self.close()
 
 
-def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, Any] | None:
+def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, object] | None:
     if not path.exists():
         return None
     try:
@@ -191,7 +192,7 @@ def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, Any] | None:
 
 def load_tokens_for_origin(
     origin: str, path: Path = DEFAULT_TOKEN_PATH
-) -> dict[str, Any] | None:
+) -> dict[str, object] | None:
     """Load state only when it was issued for exactly this MCP origin.
 
     Legacy unbound files are intentionally treated as unusable so a user must
@@ -217,9 +218,11 @@ def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datet
     tokens = state.get("tokens")
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
         return False
-    issued = state.get("issued_at")
+    issued: object = state.get("issued_at")
     expires_in = tokens.get("expires_in")
     if issued is not None and expires_in is not None:
+        if not isinstance(issued, str):
+            return False
         try:
             issued_dt = datetime.fromisoformat(issued)
         except (TypeError, ValueError):
@@ -229,7 +232,7 @@ def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datet
     return True
 
 
-def save_tokens(tokens: dict[str, Any], path: Path = DEFAULT_TOKEN_PATH) -> None:
+def save_tokens(tokens: dict[str, object], path: Path = DEFAULT_TOKEN_PATH) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     fd, temporary = tempfile.mkstemp(prefix="oauth.", dir=str(path.parent))
@@ -249,7 +252,7 @@ def save_tokens(tokens: dict[str, Any], path: Path = DEFAULT_TOKEN_PATH) -> None
         raise OAuthStoreError(f"Cannot write OAuth state at {path}") from exc
 
 
-def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -> Any:
+def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -> object:
     """Build the SDK v2 OAuthClientProvider with callbacks for token storage."""
     try:
         from mcp.client.auth import AuthorizationCodeResult, OAuthClientProvider
@@ -264,10 +267,14 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
 
     origin = config.server_origin
 
-    def state_for_origin() -> dict[str, Any]:
+    def state_for_origin() -> dict[str, object]:
         # Do not preserve token/client metadata from a different (or legacy,
         # unbound) server when the SDK writes a fresh authorization state.
-        return load_tokens_for_origin(origin, path) or {"server_origin": origin}
+        existing = load_tokens_for_origin(origin, path)
+        if existing is not None:
+            return existing
+        fresh: dict[str, object] = {"server_origin": origin}
+        return fresh
 
     class Storage:
         async def get_tokens(self):
@@ -275,9 +282,14 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
             tokens = state.get("tokens")
             return OAuthToken.model_validate(tokens) if tokens else None
 
-        async def set_tokens(self, tokens):
+        async def set_tokens(self, tokens: object) -> None:
             state = state_for_origin()
-            state["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            model_dump = getattr(tokens, "model_dump", None)
+            if callable(model_dump):
+                dumped: object = model_dump(mode="json", exclude_none=True)
+                state["tokens"] = dumped
+            else:
+                state["tokens"] = tokens
             state["issued_at"] = datetime.now(timezone.utc).isoformat()
             save_tokens(state, path)
 
@@ -286,9 +298,14 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
             info = state.get("client_info")
             return OAuthClientInformationFull.model_validate(info) if info else None
 
-        async def set_client_info(self, client_info):
+        async def set_client_info(self, client_info: object) -> None:
             state = state_for_origin()
-            state["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
+            model_dump = getattr(client_info, "model_dump", None)
+            if callable(model_dump):
+                dumped: object = model_dump(mode="json", exclude_none=True)
+                state["client_info"] = dumped
+            else:
+                state["client_info"] = client_info
             save_tokens(state, path)
 
     callback = LoopbackCallback(config.redirect_uri)
@@ -297,7 +314,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
         callback.start()
         await callback.redirect_handler(url)
 
-    async def callback_handler() -> Any:
+    async def callback_handler():
         code, state, iss = await callback.callback_handler()
         return AuthorizationCodeResult(code=code, state=state, iss=iss)
 
@@ -306,10 +323,11 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
         redirect_uris=[AnyUrl(callback.redirect_uri)],
         scope=" ".join(config.scopes) or None,
     )
-    return OAuthClientProvider(
+    provider: object = OAuthClientProvider(
         server_url=config.server_url,
         client_metadata=metadata,
         storage=Storage(),
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
     )
+    return provider

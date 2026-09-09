@@ -1,6 +1,8 @@
 """XBRL fact lineage: fact -> accession -> filing -> period -> concept."""
 
 import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 _KEYS = ("concept", "value", "period_start", "period_end", "fiscal_year",
          "fiscal_period", "filed_at", "accession", "source_url", "known_at")
@@ -8,31 +10,39 @@ _KEYS = ("concept", "value", "period_start", "period_end", "fiscal_year",
 _AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def fact_lineage(row: dict) -> dict:
-    """Pure projection; missing keys -> None."""
+def fact_lineage(row: Mapping[str, object]) -> dict[str, object]:
+    """Pure projection; missing keys -> None.
+
+    Rows arrive as plain dicts from the duckdb parquet views, so the
+    boundary takes a Mapping and projects only the known lineage keys.
+    """
     try:
-        items = dict(row) if isinstance(row, dict) else {}
+        items: dict[str, object] = dict(row) if isinstance(row, dict) else {}
     except Exception:
         items = {}
     return {key: items.get(key) for key in _KEYS}
 
 
-def period_lineage(rows: list) -> list:
-    """Group by period_end; earliest filed_at is originally_reported."""
-    groups: dict = {}
+def period_lineage(
+    rows: Sequence[Mapping[str, object]] | None,
+) -> list[dict[str, object]]:
+    """Group by period_end; earliest filed_at is originally_reported.
+
+    Rows with a missing or non-text period_end cannot be grouped, so they
+    are skipped like the missing-key rows the original code already dropped.
+    """
+    groups: dict[str, list[Mapping[str, object]]] = {}
     for row in rows or []:
         try:
-            end = row.get("period_end") if isinstance(row, dict) else None
+            end = row.get("period_end")
         except Exception:
             continue
-        if not end:
+        if not isinstance(end, str) or not end:
             continue
         groups.setdefault(end, []).append(row)
-    out = []
+    out: list[dict[str, object]] = []
     for end in sorted(groups):
-        group = sorted(groups[end],
-                       key=lambda r: (str(r.get("filed_at") or ""),
-                                      str(r.get("known_at") or "")))
+        group = sorted(groups[end], key=_filed_known)
         original = fact_lineage(group[0])
         latest = fact_lineage(group[-1])
         out.append({"period_end": end, "originally_reported": original,
@@ -40,12 +50,22 @@ def period_lineage(rows: list) -> list:
     return out
 
 
-def xbrl_lineage(entity_id, concept, *, as_of=None, root=None) -> list:
+def _filed_known(row: Mapping[str, object]) -> tuple[str, str]:
+    return (str(row.get("filed_at") or ""), str(row.get("known_at") or ""))
+
+
+def xbrl_lineage(
+    entity_id: str,
+    concept: str,
+    *,
+    as_of: str | None = None,
+    root: Path | None = None,
+) -> list[dict[str, object]]:
     """Newest period_end first; as_of gates on known_at (strict YYYY-MM-DD)."""
     from app.storage import duckdb
 
     clause = ""
-    params: list = [entity_id, concept]
+    params: list[str] = [entity_id, concept]
     if as_of is not None:
         if not isinstance(as_of, str) or not _AS_OF_RE.match(as_of):
             raise ValueError(

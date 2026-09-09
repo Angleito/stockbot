@@ -2,6 +2,9 @@
 
 import json
 import uuid
+from collections.abc import Callable
+from pathlib import Path
+from types import TracebackType
 
 import pytest
 
@@ -15,22 +18,27 @@ _APPROVED_SEARCH_TYPES = {"auto", "fast", "deep-lite"}
 _APPROVED_CATEGORIES = {"news", "company", "publication", "financial report"}
 
 
-def _search_web_schema() -> dict:
-    return next(
-        entry["function"]
-        for entry in tools.TOOLS
-        if entry["function"]["name"] == "search_web"
-    )
+def _search_web_schema():
+    for entry in tools.TOOLS:
+        fn = entry.get("function")
+        assert isinstance(fn, dict)
+        if fn.get("name") == "search_web":
+            return fn
+    raise AssertionError("search_web not registered")
 
 
-def test_search_web_registered_everywhere():
-    names = {entry["function"]["name"] for entry in tools.TOOLS}
+def test_search_web_registered_everywhere() -> None:
+    names: set[object] = set()
+    for entry in tools.TOOLS:
+        fn = entry.get("function")
+        assert isinstance(fn, dict)
+        names.add(fn.get("name"))
     assert "search_web" in names
     assert "search_web" in tools._DIRECT_HANDLERS
     assert tools.TOOL_CAPABILITIES["search_web"] == Capability.RESEARCH
 
 
-def test_search_web_schema_shape():
+def test_search_web_schema_shape() -> None:
     schema = _search_web_schema()
     params = schema["parameters"]
     assert params["required"] == ["query"]
@@ -48,12 +56,12 @@ def test_search_web_schema_shape():
         assert key not in params["required"]
 
 
-def test_search_web_dispatcher_parity(monkeypatch):
-    calls = []
+def test_search_web_dispatcher_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_search(query, **kwargs):
+    def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append((query, kwargs))
-        return {"result_type": "web_search", "query": query, "evidence": []}
+        return {"result_type": "web_search", "query": query, "evidence": list[dict[str, object]]()}
 
     monkeypatch.setattr(tools.exa_client, "search", fake_search)
     result = tools.execute_tool(
@@ -73,12 +81,12 @@ def test_search_web_dispatcher_parity(monkeypatch):
     }
 
 
-def test_search_web_dispatcher_passes_optional_args(monkeypatch):
-    calls = []
+def test_search_web_dispatcher_passes_optional_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_search(query, **kwargs):
+    def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append((query, kwargs))
-        return {"result_type": "web_search", "query": query, "evidence": []}
+        return {"result_type": "web_search", "query": query, "evidence": list[dict[str, object]]()}
 
     monkeypatch.setattr(tools.exa_client, "search", fake_search)
     tools.execute_tool(
@@ -103,7 +111,7 @@ def test_search_web_dispatcher_passes_optional_args(monkeypatch):
     assert kwargs["start_published_date"] == "2026-07-01"
 
 
-def test_search_web_disabled_is_soft(monkeypatch):
+def test_search_web_disabled_is_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXA_ENABLED", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     result = tools.execute_tool(
@@ -114,7 +122,7 @@ def test_search_web_disabled_is_soft(monkeypatch):
     assert result["soft"] is True
 
 
-def test_search_web_invalid_args_are_soft(monkeypatch):
+def test_search_web_invalid_args_are_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXA_ENABLED", "true")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     result = tools.execute_tool(
@@ -123,7 +131,9 @@ def test_search_web_invalid_args_are_soft(monkeypatch):
         model="test",
         context=RESEARCH_CONTEXT,
     )
-    assert "Unsupported category 'gossip'" in result["error"]
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "Unsupported category 'gossip'" in error
     assert result["soft"] is True
 
     result = tools.execute_tool(
@@ -132,19 +142,27 @@ def test_search_web_invalid_args_are_soft(monkeypatch):
         model="test",
         context=RESEARCH_CONTEXT,
     )
-    assert "Unsupported search_type 'deep'" in result["error"]
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "Unsupported search_type 'deep'" in error
     assert result["soft"] is True
 
 
-def _bridge_request(payload: dict) -> dict:
+def _bridge_request(payload: dict[str, object]) -> dict[str, object]:
     payload = {"id": _next_msg_id("ev"), **payload}
     if payload.get("op") == "tool_call":
-        responses = []
+        responses: list[dict[str, object]] = []
+
+        def _capture(response: dict[str, object]) -> None:
+            responses.append(response)
+
         orig_write = pi_bridge._write
-        pi_bridge._write = responses.append
+        pi_bridge._write = _capture
         try:
             assert pi_bridge._handle(json.dumps(payload)) is None
-            for fut in pi_bridge._run_futures(payload["run_id"]):
+            run_id_val = payload["run_id"]
+            assert isinstance(run_id_val, str)
+            for fut in pi_bridge._run_futures(run_id_val):
                 fut.result(timeout=60)
         finally:
             pi_bridge._write = orig_write
@@ -160,19 +178,19 @@ def _next_msg_id(tag: str) -> str:
     return f"{tag}-{uuid.uuid4().hex[:8]}"
 
 
-def _start_run(run_id: str) -> dict:
+def _start_run(run_id: str) -> dict[str, object]:
     return _bridge_request(
         {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"}
     )
 
 
-def _end_run(run_id: str) -> dict:
+def _end_run(run_id: str) -> dict[str, object]:
     return _bridge_request(
         {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"}
     )
 
 
-def _bridge_search(run_id: str, query: str) -> dict:
+def _bridge_search(run_id: str, query: str) -> dict[str, object]:
     return _bridge_request(
         {
             "id": _next_msg_id("tc"),
@@ -186,13 +204,13 @@ def _bridge_search(run_id: str, query: str) -> dict:
     )
 
 
-def _fake_exa_search(calls: list, evidence=None):
-    def fake_search(query, **kwargs):
+def _fake_exa_search(calls: list[str], evidence: list[dict[str, object]] | None = None) -> Callable[..., dict[str, object]]:
+    def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append(query)
         return {
             "result_type": "web_search",
             "query": query,
-            "evidence": evidence if evidence is not None else [],
+            "evidence": evidence if evidence is not None else list[dict[str, object]](),
             "row_count": 0,
             "source": "exa",
         }
@@ -204,7 +222,7 @@ def _new_run_id(tag: str) -> str:
     return f"run-{tag}-{uuid.uuid4().hex[:8]}"
 
 
-def test_pi_each_agent_run_gets_fresh_session():
+def test_pi_each_agent_run_gets_fresh_session() -> None:
     run_a = _new_run_id("fresh-a")
     run_b = _new_run_id("fresh-b")
     assert run_a != run_b
@@ -221,10 +239,10 @@ def test_pi_each_agent_run_gets_fresh_session():
         _end_run(run_b)
 
 
-def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch):
+def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import execute_pi_tool
 
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     run_one = _new_run_id("budget-one")
     run_two = _new_run_id("budget-two")
@@ -240,15 +258,18 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch):
         assert _start_run(run_two) == {"ok": True}
         response = _bridge_search(run_two, "AMD revenue")
         result = response["result"]
+        assert isinstance(result, dict)
         assert "content" in result
-        assert result["meta"]["status"] == "completed"
+        meta = result["meta"]
+        assert isinstance(meta, dict)
+        assert meta["status"] == "completed"
         assert len(calls) == 1
     finally:
         _end_run(run_one)
         _end_run(run_two)
 
 
-def test_pi_model_receives_exact_security_checked_text(monkeypatch):
+def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext
     from app.security.context_gateway import (
         QuarantinedContext,
@@ -258,7 +279,7 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch):
     from app.security.response_guard import guard_response
     from app.tool_render import render_tool_result
 
-    evidence = [
+    evidence: list[dict[str, object]] = [
         {
             "title": "AMD Q3",
             "url": "https://example.com/amd-q3",
@@ -266,12 +287,12 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch):
             "highlight": "Q3 revenue grew 12 percent amid account_number is 12345678 review",
         }
     ]
-    calls = []
-    seen = []
+    calls: list[str] = []
+    seen: list[dict[str, object]] = []
 
-    def fake_search(query, **kwargs):
+    def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append(query)
-        result = {
+        result: dict[str, object] = {
             "result_type": "web_search",
             "query": query,
             "evidence": evidence,
@@ -286,7 +307,9 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch):
     try:
         assert _start_run(run_id) == {"ok": True}
         response = _bridge_search(run_id, "AMD revenue")
-        text = response["result"]["content"]
+        search_result = response["result"]
+        assert isinstance(search_result, dict)
+        text = search_result["content"]
         raw = seen[0]
         assert "12345678" in json.dumps(raw)
         rendered = render_tool_result(raw)
@@ -303,29 +326,36 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch):
         _end_run(run_id)
 
 
-def test_pi_tool_call_is_written_to_run_recorder(monkeypatch):
+def test_pi_tool_call_is_written_to_run_recorder(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.storage.runs import get_tool_calls
 
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     run_id = _new_run_id("recorder")
     try:
         assert _start_run(run_id) == {"ok": True}
         response = _bridge_search(run_id, "AMD revenue")
-        assert "content" in response["result"]
+        recorder_result = response["result"]
+        assert isinstance(recorder_result, dict)
+        assert "content" in recorder_result
         rows = get_tool_calls(run_id)
         assert any(row["tool_name"] == "search_web" for row in rows)
     finally:
         _end_run(run_id)
 
 
-def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch):
+def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.storage.runs import RunRecorder
 
-    exited = []
+    exited: list[str] = []
     orig_exit = RunRecorder.__exit__
 
-    def spy_exit(self, exc_type, exc, tb):
+    def spy_exit(
+        self: RunRecorder,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         exited.append(self.run_id)
         return orig_exit(self, exc_type, exc, tb)
 
@@ -343,10 +373,10 @@ def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch):
         pi_bridge._recorders.pop(run_id, None)
 
 
-def test_pi_search_web_caps_at_25_per_run(monkeypatch):
+def test_pi_search_web_caps_at_25_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
 
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     session = PiSessionContext(session_id=_new_run_id("cap"))
     results = [
@@ -362,8 +392,8 @@ def test_pi_search_web_caps_at_25_per_run(monkeypatch):
     assert len(calls) == 25
 
 
-def test_pi_search_web_resets_cap_for_next_run(monkeypatch):
-    calls = []
+def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     run_a = _new_run_id("cap-a")
     run_b = _new_run_id("cap-b")
@@ -371,24 +401,30 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch):
         assert _start_run(run_a) == {"ok": True}
         for i in range(25):
             response = _bridge_search(run_a, f"probe {i}")
-            assert "content" in response["result"]
+            probe_result = response["result"]
+            assert isinstance(probe_result, dict)
+            assert "content" in probe_result
         capped = _bridge_search(run_a, "probe 25")
-        assert capped["result"].get("error_type") == "budget_exhausted"
+        capped_result = capped["result"]
+        assert isinstance(capped_result, dict)
+        assert capped_result.get("error_type") == "budget_exhausted"
         assert len(calls) == 25
         assert _end_run(run_a) == {"ok": True}
         assert _start_run(run_b) == {"ok": True}
         response = _bridge_search(run_b, "probe fresh")
-        assert "content" in response["result"]
+        fresh_result = response["result"]
+        assert isinstance(fresh_result, dict)
+        assert "content" in fresh_result
         assert len(calls) == 26
     finally:
         _end_run(run_a)
         _end_run(run_b)
 
 
-def test_pi_search_web_respects_runtime_budget(monkeypatch):
+def test_pi_search_web_respects_runtime_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
 
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     session = PiSessionContext(session_id=_new_run_id("runtime"))
     session.budget.max_runtime = 0.0
@@ -398,10 +434,10 @@ def test_pi_search_web_respects_runtime_budget(monkeypatch):
     assert calls == []
 
 
-def test_pi_search_evidence_tokens_enforce_budget(monkeypatch):
+def test_pi_search_evidence_tokens_enforce_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
 
-    evidence = [
+    evidence: list[dict[str, object]] = [
         {
             "title": "AMD Q3",
             "url": "https://example.com/amd-q3",
@@ -409,7 +445,7 @@ def test_pi_search_evidence_tokens_enforce_budget(monkeypatch):
             "highlight": "Q3 revenue grew 12 percent on data-center demand",
         }
     ]
-    calls = []
+    calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls, evidence=evidence))
     session = PiSessionContext(session_id=_new_run_id("evidence-budget"))
     session.budget.max_evidence_tokens = 5
@@ -419,7 +455,7 @@ def test_pi_search_evidence_tokens_enforce_budget(monkeypatch):
     assert session.budget.evidence_tokens == 0
 
 
-def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch, tmp_path):
+def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import hashlib
 
     from app.storage.runs import get_model_calls, get_run
@@ -455,6 +491,7 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch, tmp_p
             {"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}
         ) == {"ok": True}
         run = get_run(run_id)
+        assert run is not None
         assert run["question"] == question
         assert run["status"] == "completed"
         assert run["input_tokens"] == 120
@@ -477,7 +514,7 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch, tmp_p
     finally:
         _end_run(run_id)
 
-def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch, tmp_path):
+def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.storage.runs import get_run
 
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
@@ -496,13 +533,14 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch, tmp_path):
         with pi_bridge._state_lock:
             pi_bridge._inflight.pop(run_r, None)
         message = "Tool call timed out after 50ms"
-        terminal = {
+        terminal: dict[str, object] = {
             "op": "pi_event", "run_id": run_r, "event": "agent_end",
             "status": "failed", "answer": "",
             "error_type": "tool_timeout", "error_message": message,
         }
         assert _bridge_request(terminal) == {"ok": True}
         run = get_run(run_r)
+        assert run is not None
         assert run["status"] == "failed"
         assert run["error_type"] == "tool_timeout"
         assert run["completed_at"] is not None
@@ -510,13 +548,17 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch, tmp_path):
         first_completed = run["completed_at"]
         assert _bridge_request(terminal) == {"ok": True}
         again = get_run(run_r)
+        assert again is not None
         assert again["completed_at"] == first_completed
         assert again["status"] == "failed"
         assert _start_run(run_s) == {"ok": True}
-        assert _bridge_request(
-            {"op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"}
-        ) == {"ok": True}
-        assert get_run(run_s)["status"] == "completed"
+        end_ok: dict[str, object] = {
+            "op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"
+        }
+        assert _bridge_request(end_ok) == {"ok": True}
+        completed = get_run(run_s)
+        assert completed is not None
+        assert completed["status"] == "completed"
     finally:
         for rid in (run_r, run_s):
             pi_bridge._sessions.pop(rid, None)

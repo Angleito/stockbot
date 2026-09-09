@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 import duckdb
 
@@ -33,9 +33,9 @@ def as_of_clause(as_of: str, column: str = "known_at") -> tuple[str, str]:
     """Return (SQL fragment, parameter) enforcing ``known_at <= as_of``."""
     import re
 
-    if re.match(_DATE_GRANULARITY_AS_OF, str(as_of)):
-        return f"CAST({column} AS DATE) <= CAST(? AS DATE)", str(as_of)
-    return f"CAST({column} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)", str(as_of)
+    if re.match(_DATE_GRANULARITY_AS_OF, as_of):
+        return f"CAST({column} AS DATE) <= CAST(? AS DATE)", as_of
+    return f"CAST({column} AS TIMESTAMPTZ) <= CAST(? AS TIMESTAMPTZ)", as_of
 
 
 def _data_roots(data_root: Path) -> tuple[Path, Path]:
@@ -62,7 +62,7 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
     for name in parquet.dataset_names():
         directory = parquet_root / name
         empty_dir = directory / "__empty__"
-        files = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
+        files: list[Path] = [p for p in directory.rglob("*.parquet")] if directory.exists() else []
         real_files = [p for p in files if empty_dir not in p.parents]
         if empty_dir.exists():
             import shutil
@@ -89,9 +89,9 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
 
 def query(
     sql: str,
-    params: Sequence[Any] = (),
+    params: Sequence[object] = (),
     data_root: Optional[Path] = None,
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """Run a read-only SQL query over the parquet views; returns rows as
     dicts.
 

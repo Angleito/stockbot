@@ -1,6 +1,10 @@
 """Offline tests for M&A transaction parsing (no network)."""
 
+from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
+
+import pytest
 
 from app.sec import transactions
 from app.sec.models import Transaction
@@ -56,26 +60,29 @@ def test_diff_names_only_changed_fields():
     assert diff["consideration"] == ["$10 per share", "$12 per share"]
 
 
-def test_get_transaction_status_newest_first(monkeypatch):
+def test_get_transaction_status_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [SimpleNamespace(accession_no="new", form="SC TO-T/A",
                                filed_at="2024-02-01", company="tgt"),
                SimpleNamespace(accession_no="old", form="SC TO-T",
                                filed_at="2024-01-01", company="tgt")]
 
-    def fake_list(ticker_or_cik, **kwargs):
+    def fake_list(ticker_or_cik: str, **kwargs: object) -> list[SimpleNamespace]:
         return filings
 
+
     monkeypatch.setattr(transactions, "list_sec_filings", fake_list)
-    monkeypatch.setattr(transactions, "load_transaction_text",
-                        lambda acc: (_ for _ in ()).throw(
-                            RuntimeError("offline")))
+
+    def fake_text_offline(accession_no: str) -> NoReturn:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(transactions, "load_transaction_text", fake_text_offline)
     out = transactions.get_transaction_status("TGT")
     assert [t.accession_no for t in out] == ["new", "old"]
     assert [t.status for t in out] == ["unknown", "unknown"]
     assert all(t.target == "" for t in out)
 
 
-def test_store_transaction_unknown_status_both_directions(tmp_path):
+def test_store_transaction_unknown_status_both_directions(tmp_path: Path) -> None:
     from app.sec.store import query_transactions, store_transaction
 
     assert store_transaction({
@@ -102,15 +109,20 @@ def test_empty_target_falls_back_to_text_span():
     assert txn.event_id.startswith("TARGET CO:")
     assert txn.filer_name == "Acquirer Inc"
 
-def test_get_transaction_status_falls_back_to_text_span(monkeypatch):
+def test_get_transaction_status_falls_back_to_text_span(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [SimpleNamespace(accession_no="acc-live", form="S-4",
                                filed_at="2024-05-01", company="tgt",
                                subject_name=None, subject_cik=None,
                                filer_name="Acquirer Inc", filer_cik=111111)]
-    monkeypatch.setattr(transactions, "list_sec_filings",
-                        lambda *a, **k: filings)
-    monkeypatch.setattr(transactions, "load_transaction_text",
-                        lambda acc: "Proposed merger with Target Co; terms disclosed.")
+
+    def fake_list(ticker_or_cik: str, **kwargs: object) -> list[SimpleNamespace]:
+        return filings
+
+    def fake_text(accession_no: str) -> str:
+        return "Proposed merger with Target Co; terms disclosed."
+
+    monkeypatch.setattr(transactions, "list_sec_filings", fake_list)
+    monkeypatch.setattr(transactions, "load_transaction_text", fake_text)
     out = transactions.get_transaction_status("TGT")
     assert len(out) == 1
     assert out[0].target == "Target Co"

@@ -2,12 +2,15 @@
  *
  * Single source of truth stays in Python (app/tools.py TOOLS); tool schemas
  * pass through untouched via Type.Unsafe, and the system prompt comes from
- * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT).
+ * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT) plus
+ * the raw `.pi/stockbot.yaml` thesis workflow text appended at startup.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
@@ -20,8 +23,10 @@ export function toolCallRequest(
  name: string,
  params: Json,
  bridgeQueueMs = 0,
+ dataRoot?: string,
+ asOf?: string,
 ): Json {
- return {
+ const req: Json = {
   id,
   op: "tool_call",
   run_id: runId,
@@ -30,6 +35,9 @@ export function toolCallRequest(
   arguments: params,
   bridge_queue_ms: bridgeQueueMs,
  };
+ if (dataRoot) req.data_root = dataRoot;
+ if (asOf) req.as_of = asOf;
+ return req;
 }
 
 export function bridgeModelText(bridge: Json): string {
@@ -60,6 +68,11 @@ const CARD_TOOLS: Record<string, { title: string; argKeys: string[] }> = {
  get_short_interest_leaderboard: { title: "Short leaderboard", argKeys: [] },
  get_valuation_metrics: { title: "Valuation", argKeys: ["ticker"] },
  search_web: { title: "Web search", argKeys: ["query"] },
+ find_alternative_signals: { title: "Alt signals", argKeys: ["query"] },
+ get_trend_evidence: { title: "Trend evidence", argKeys: ["geos"] },
+ investigate_social_arbitrage_candidate: { title: "Arbitrage check", argKeys: ["term"] },
+ get_macro_context: { title: "Macro context", argKeys: ["geos"] },
+ search_company_patents: { title: "Patents", argKeys: ["company_id"] },
 };
 
 function short(value: unknown, max = 80): string {
@@ -368,6 +381,7 @@ export function createBridgeClient(
 }
 
 export default async function stockbotExtension(pi: ExtensionAPI) {
+ registerYoutubeAnalytics(pi);
  const { callBridge } = createBridgeClient();
 
  // --- describe: prompt + RESEARCH tool registry ---
@@ -404,7 +418,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    parameters: Type.Unsafe(fn.parameters),
    async execute(toolCallId, params) {
     toolCalls++;
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text: bridgeModelText(bridge) }],
@@ -451,6 +465,24 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   });
  }
 
+ // --- thesis workflow (raw text, never YAML-parsed in TS) ---
+ const WORKFLOW_PATH = `${ROOT}/.pi/stockbot.yaml`;
+ let workflowText = "";
+ let workflowDown = false;
+ let workflowDetail = "";
+ try {
+  workflowText = readFileSync(WORKFLOW_PATH, "utf-8");
+  if (!workflowText.trim()) {
+   workflowDown = true;
+   workflowDetail = `empty workflow file ${WORKFLOW_PATH}`;
+   console.error(`[stockbot] thesis workflow unreadable: ${workflowDetail}`);
+  }
+ } catch (err) {
+  workflowDown = true;
+  workflowDetail = `cannot read workflow file ${WORKFLOW_PATH}: ${err instanceof Error ? err.message : String(err)}`;
+  console.error(`[stockbot] thesis workflow unreadable: ${workflowDetail}`);
+ }
+
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
   pendingQuestion = event.prompt;
@@ -460,23 +492,24 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      `Stockbot research tools are unavailable (${bridgeDetail}). ` +
      "Decline investment-research questions as tool-unavailable; do not answer from model knowledge.",
    };
-  if (systemPrompt) return { systemPrompt };
+  if (workflowDown)
+   return {
+    systemPrompt:
+     `Stockbot thesis workflow is unavailable (${workflowDetail}). ` +
+     "Decline thesis work until the workflow file is restored; do not answer from model knowledge.",
+   };
+  if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
  });
 
- // --- RESEARCH gate: block anything the bridge did not register ---
- // (portfolio/broker shapes + builtins when --no-builtin-tools is dropped)
- pi.on("tool_call", (event) => {
-  if (!research.has(event.toolName)) {
-   emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
-   blocks++;
-   return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
-  }
- });
+ // Normal Pi: built-in tools pass through; Stockbot tool auth stays in bridge/policy.
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
- let runId = crypto.randomUUID();
+ let runId: string = crypto.randomUUID();
  let pendingQuestion = "";
+ const dataRoots = new Map<string, string>();
+ const doneFiles = new Map<string, string>();
+ const asOfs = new Map<string, string>();
  let seq = 0;
  let turns = 0;
  let toolCalls = 0;
@@ -511,9 +544,19 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {
-  runId = crypto.randomUUID();
+  const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+  runId = trustedRunId ? trustedRunId : crypto.randomUUID();
   seq = 0;
   toolStartedAt.clear();
+  // Routing/completion bind from process environment only. Prompt text
+  // (including forged STOCKBOT_* lines) has no routing/write effect;
+  // absent/empty means unbound: no completion write, no data-root override.
+  const envDataRoot = process.env.STOCKBOT_DATA_DIR;
+  if (envDataRoot) dataRoots.set(runId, envDataRoot);
+  const envDoneFile = process.env.STOCKBOT_DONE_FILE;
+  if (envDoneFile) doneFiles.set(runId, envDoneFile);
+  const envAsOf = process.env.STOCKBOT_AS_OF;
+  if (envAsOf) asOfs.set(runId, envAsOf);
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });
@@ -581,5 +624,16 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    .map((b) => b.text as string)
    .join("\n");
   await emit({ event: "agent_end", status: "completed", answer });
+  const doneFile = doneFiles.get(runId);
+  if (doneFile) {
+   try {
+    writeFileSync(doneFile, JSON.stringify({ status: "completed", answer }));
+   } catch {
+    // observability never breaks research
+   }
+  }
+  doneFiles.delete(runId);
+  dataRoots.delete(runId);
+  asOfs.delete(runId);
  });
 }

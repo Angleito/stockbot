@@ -1,23 +1,26 @@
 """Offline tests for app/sec/offerings.py (no network)."""
 
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import app.sec.offerings as offerings
 
 
-def _filing(form, filed_at, accession, company="ACME"):
+def _filing(form: str, filed_at: str, accession: str, company: str = "ACME") -> SimpleNamespace:
     return SimpleNamespace(form=form, filed_at=filed_at,
                            accession_no=accession, company=company)
 
 
-def _history(monkeypatch):
+def _history(monkeypatch: pytest.MonkeyPatch):
     filings = [
         _filing("S-3", "2024-01-10", "s3"),
         _filing("424B5", "2024-02-01", "b5"),
         _filing("EFFECT", "2024-02-05", "eff"),
         _filing("RW", "2024-03-01", "rw"),
     ]
-    terms = {
+    terms: dict[str, dict[str, str | list[str]] | None] = {
         "s3": {},
         "b5": {"shares": "1,000", "price_per_share": "10.00",
                "offering_type": "Common Stock",
@@ -25,12 +28,19 @@ def _history(monkeypatch):
         "eff": None,
         "rw": {},
     }
-    monkeypatch.setattr(offerings, "list_sec_filings", lambda *a, **k: filings)
-    monkeypatch.setattr(offerings, "load_terms", lambda acc: terms[acc])
+
+    def _fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return filings
+
+    def _fake_terms(accession_no: str) -> dict[str, str | list[str]] | None:
+        return terms[accession_no]
+
+    monkeypatch.setattr(offerings, "list_sec_filings", _fake_list)
+    monkeypatch.setattr(offerings, "load_terms", _fake_terms)
     return offerings.get_offering_history("ACME")
 
 
-def test_history_links_and_statuses(monkeypatch):
+def test_history_links_and_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
     out = _history(monkeypatch)
     assert [o.form for o in out] == ["S-3", "424B5", "EFFECT", "RW"]
     assert [o.filed_at for o in out] == ["2024-01-10", "2024-02-01",
@@ -43,7 +53,7 @@ def test_history_links_and_statuses(monkeypatch):
     assert next(o for o in out if o.accession_no == "rw").status == "withdrawn"
 
 
-def test_missing_terms_yield_none_fields(monkeypatch):
+def test_missing_terms_yield_none_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     out = _history(monkeypatch)
     shelf = next(o for o in out if o.accession_no == "s3")
     assert shelf.shares is None and shelf.price_per_share is None
@@ -52,14 +62,14 @@ def test_missing_terms_yield_none_fields(monkeypatch):
     assert shelf.source_registration is None and shelf.status == "filed"
 
 
-def test_atm_detected_from_type_text():
+def test_atm_detected_from_type_text() -> None:
     rec = offerings.normalize_offering("a", "424B5", issuer="ACME",
                                        filed_at="2024-02-01", terms={
                                            "offering_type": "At The Market offering"})
     assert rec.is_atm is True
 
 
-def test_store_offering_both_directions_registration_not_issuance(tmp_path):
+def test_store_offering_both_directions_registration_not_issuance(tmp_path: Path) -> None:
     from app.sec.store import query_offerings, store_offering
 
     assert store_offering({

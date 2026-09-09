@@ -2,6 +2,7 @@
 
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import pyarrow as pa
@@ -11,12 +12,12 @@ from app.domain.market import ids
 
 
 @pytest.fixture
-def archive_root(tmp_path):
+def archive_root(tmp_path: Path) -> Path:
     return tmp_path / "raw"
 
 
 @pytest.fixture
-def data_root(tmp_path):
+def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
@@ -29,7 +30,7 @@ def _payload(text: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_archive_stores_payload_and_manifest(archive_root):
+def test_archive_stores_payload_and_manifest(archive_root: Path):
     record = raw_archive.archive(
         "sec", "companyfacts", "cik0000320193", _payload("hello"),
         url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
@@ -47,7 +48,7 @@ def test_archive_stores_payload_and_manifest(archive_root):
     assert manifest["sha256"] == record.sha256
 
 
-def test_archive_is_immutable_and_idempotent(archive_root):
+def test_archive_is_immutable_and_idempotent(archive_root: Path):
     first = raw_archive.archive("finra", "data", "otc/cycle", _payload("x"), url="u", root=archive_root)
     second = raw_archive.archive("finra", "data", "otc/cycle", _payload("x"), url="u", root=archive_root)
     assert first.payload_path == second.payload_path
@@ -55,7 +56,7 @@ def test_archive_is_immutable_and_idempotent(archive_root):
     assert {p for p in archive_root.rglob("*.json")} == {second.payload_path, second.manifest_path}
 
 
-def test_archive_keeps_distinct_payload_revisions(archive_root):
+def test_archive_keeps_distinct_payload_revisions(archive_root: Path):
     first = raw_archive.archive("sec", "companyfacts", "cik1", _payload("v1"), url="u", root=archive_root)
     second = raw_archive.archive("sec", "companyfacts", "cik1", _payload("v2"), url="u", root=archive_root)
     assert first.payload_path != second.payload_path
@@ -63,7 +64,7 @@ def test_archive_keeps_distinct_payload_revisions(archive_root):
     assert [r.sha256 for r in revisions] == sorted(r.sha256 for r in revisions)
 
 
-def test_find_and_has_payload(archive_root):
+def test_find_and_has_payload(archive_root: Path):
     record = raw_archive.archive("sec", "companyfacts", "cik1", _payload("v1"), url="u", root=archive_root)
     assert raw_archive.find("sec", "companyfacts", "cik1", root=archive_root) == record
     assert raw_archive.find("sec", "companyfacts", "cik1", sha256=record.sha256, root=archive_root) == record
@@ -78,8 +79,9 @@ def test_find_and_has_payload(archive_root):
 # ---------------------------------------------------------------------------
 
 
-def _fact_row(entity_id="sec:cik:0000320193", value=100.0, period_end="2026-08-01",
-              filed="2026-08-02", accession="0000320193-26-000001", known_at="2026-08-02T00:00:00Z"):
+def _fact_row(entity_id: str = "sec:cik:0000320193", value: float = 100.0, period_end: str = "2026-08-01",
+              filed: str = "2026-08-02", accession: str = "0000320193-26-000001",
+              known_at: str = "2026-08-02T00:00:00Z") -> dict[str, object]:
     cik = int(entity_id.removeprefix("sec:cik:"))
     return {
         "fact_id": ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", period_end, value),
@@ -103,7 +105,7 @@ def _fact_row(entity_id="sec:cik:0000320193", value=100.0, period_end="2026-08-0
     }
 
 
-def test_parquet_roundtrip_and_hive_partitions(data_root):
+def test_parquet_roundtrip_and_hive_partitions(data_root: Path):
     row = _fact_row()
     assert parquet.write_rows("financial_facts", [row], root=data_root / "parquet") == 1
     table = parquet.read_table("financial_facts", root=data_root / "parquet")
@@ -114,7 +116,7 @@ def test_parquet_roundtrip_and_hive_partitions(data_root):
     assert list(partition_dir.glob("*.parquet"))
 
 
-def test_parquet_rerun_is_deterministic_no_duplicates(data_root):
+def test_parquet_rerun_is_deterministic_no_duplicates(data_root: Path):
     row = _fact_row()
     assert parquet.write_rows("financial_facts", [row], root=data_root / "parquet") == 1
     assert parquet.write_rows("financial_facts", [row], root=data_root / "parquet") == 0
@@ -122,7 +124,7 @@ def test_parquet_rerun_is_deterministic_no_duplicates(data_root):
     assert parquet.count_rows("financial_facts", root=data_root / "parquet") == 1
 
 
-def test_parquet_unknown_dataset_rejected(data_root):
+def test_parquet_unknown_dataset_rejected(data_root: Path):
     with pytest.raises(ValueError, match="Unknown parquet dataset"):
         parquet.write_rows("nope", [{}], root=data_root / "parquet")
 
@@ -132,13 +134,13 @@ def test_parquet_unknown_dataset_rejected(data_root):
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_row(snapshot_id="snap-001", broker="robinhood",
-                  created_at="2026-08-25T12:00:00Z", cash=Decimal("1234.5"),
-                  invested_value=Decimal("23456.78"), total_value=Decimal("24691.28"),
-                  account_count=2, position_count=5, priced_position_count=4,
-                  unresolved_position_count=1, source="robinhood-api",
-                  parser_version="portfolio-parser-v1",
-                  calculation_version="portfolio-calc-v1"):
+def _snapshot_row(snapshot_id: str = "snap-001", broker: str = "robinhood",
+                  created_at: str = "2026-08-25T12:00:00Z", cash: Decimal = Decimal("1234.5"),
+                  invested_value: Decimal = Decimal("23456.78"), total_value: Decimal = Decimal("24691.28"),
+                  account_count: int = 2, position_count: int = 5, priced_position_count: int = 4,
+                  unresolved_position_count: int = 1, source: str = "robinhood-api",
+                  parser_version: str = "portfolio-parser-v1",
+                  calculation_version: str = "portfolio-calc-v1") -> dict[str, object]:
     return {
         "snapshot_id": snapshot_id,
         "broker": broker,
@@ -156,14 +158,16 @@ def _snapshot_row(snapshot_id="snap-001", broker="robinhood",
     }
 
 
-def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc-001",
-                  security_id="sec:cik:0000320193", entity_id="sec:cik:0000320193",
-                  ticker="AAPL", quantity=Decimal("10.0"), average_cost=Decimal("150.25"),
-                  market_price=Decimal("160.0"), price_type="last_trade",
-                  market_value=Decimal("1600.0"), unrealized_gain=Decimal("97.5"),
-                  unrealized_gain_pct=Decimal("0.0649"), portfolio_weight=Decimal("0.0648"),
-                  source="robinhood-api", quote_retrieved_at="2026-08-25T12:00:00Z",
-                  asset_type="equity"):
+def _position_row(snapshot_id: str = "snap-001", position_id: str = "pos-001", account_id: str = "acc-001",
+                  security_id: str = "sec:cik:0000320193", entity_id: str = "sec:cik:0000320193",
+                  ticker: str = "AAPL", quantity: Decimal = Decimal("10.0"),
+                  average_cost: Decimal = Decimal("150.25"),
+                  market_price: Decimal = Decimal("160.0"), price_type: str = "last_trade",
+                  market_value: Decimal = Decimal("1600.0"), unrealized_gain: Decimal = Decimal("97.5"),
+                  unrealized_gain_pct: Decimal = Decimal("0.0649"),
+                  portfolio_weight: Decimal = Decimal("0.0648"),
+                  source: str = "robinhood-api", quote_retrieved_at: str = "2026-08-25T12:00:00Z",
+                  asset_type: str = "equity") -> dict[str, object]:
     return {
         "snapshot_id": snapshot_id,
         "position_id": position_id,
@@ -185,7 +189,7 @@ def _position_row(snapshot_id="snap-001", position_id="pos-001", account_id="acc
     }
 
 
-def test_portfolio_snapshot_roundtrip(data_root):
+def test_portfolio_snapshot_roundtrip(data_root: Path):
     row = _snapshot_row()
     assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 1
     table = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
@@ -195,7 +199,7 @@ def test_portfolio_snapshot_roundtrip(data_root):
     assert table.column("created_at").to_pylist() == ["2026-08-25T12:00:00Z"]
 
 
-def test_portfolio_position_roundtrip(data_root):
+def test_portfolio_position_roundtrip(data_root: Path):
     row = _position_row()
     assert parquet.write_rows("portfolio_positions", [row], root=data_root / "parquet") == 1
     table = parquet.read_table("portfolio_positions", root=data_root / "parquet")
@@ -205,7 +209,7 @@ def test_portfolio_position_roundtrip(data_root):
     assert table.column("market_price").to_pylist() == [Decimal("160.0")]
 
 
-def test_portfolio_snapshot_immutability(data_root):
+def test_portfolio_snapshot_immutability(data_root: Path):
     row = _snapshot_row()
     assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 1
     assert parquet.write_rows("portfolio_snapshots", [row], root=data_root / "parquet") == 0
@@ -216,7 +220,7 @@ def test_portfolio_snapshot_immutability(data_root):
     assert set(table.column("snapshot_id").to_pylist()) == {"snap-001", "snap-002"}
 
 
-def test_portfolio_positions_link_to_snapshot(data_root):
+def test_portfolio_positions_link_to_snapshot(data_root: Path):
     parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet")
     positions = [
         _position_row(snapshot_id="snap-001", position_id="pos-001", ticker="AAPL"),
@@ -235,7 +239,7 @@ def test_portfolio_positions_link_to_snapshot(data_root):
     ]
 
 
-def test_portfolio_datasets_are_unpartitioned(data_root):
+def test_portfolio_datasets_are_unpartitioned(data_root: Path):
     assert parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet") == 1
     assert parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet") == 1
     snap_dir = data_root / "parquet" / "portfolio_snapshots" / "partition=none"
@@ -246,7 +250,7 @@ def test_portfolio_datasets_are_unpartitioned(data_root):
     assert parquet.read_table("portfolio_positions", root=data_root / "parquet").num_rows == 1
 
 
-def test_portfolio_columns_are_typed(data_root):
+def test_portfolio_columns_are_typed(data_root: Path):
     parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet")
     parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet")
     snap = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
@@ -279,7 +283,7 @@ def test_portfolio_schemas_have_no_oauth_columns():
             )
 
 
-def test_portfolio_empty_read_returns_empty_table(data_root):
+def test_portfolio_empty_read_returns_empty_table(data_root: Path):
     for name in ("portfolio_snapshots", "portfolio_positions"):
         table = parquet.read_table(name, root=data_root / "parquet")
         assert table.num_rows == 0
@@ -291,7 +295,7 @@ def test_portfolio_empty_read_returns_empty_table(data_root):
 # ---------------------------------------------------------------------------
 
 
-def test_duckdb_query_returns_rows_as_dicts(data_root):
+def test_duckdb_query_returns_rows_as_dicts(data_root: Path):
     parquet.write_rows("financial_facts", [_fact_row(), _fact_row(value=200.0, period_end="2026-08-15", filed="2026-08-16", known_at="2026-08-16T00:00:00Z", accession="0000320193-26-000002")], root=data_root / "parquet")
     rows = duckdb.query("SELECT concept, value FROM financial_facts ORDER BY value", data_root=data_root)
     assert rows == [
@@ -300,7 +304,8 @@ def test_duckdb_query_returns_rows_as_dicts(data_root):
     ]
 
 
-def _as_of_rows(sql: str, as_of: str, params=(), data_root=None) -> list[dict]:
+def _as_of_rows(sql: str, as_of: str, params: tuple[str, ...] | list[str] = (),
+                data_root: Path | None = None) -> list[dict[str, object]]:
     clause, param = duckdb.as_of_clause(as_of)
     return duckdb.query(
         f"SELECT * FROM ({sql}) AS _pt WHERE {clause}",
@@ -309,7 +314,7 @@ def _as_of_rows(sql: str, as_of: str, params=(), data_root=None) -> list[dict]:
     )
 
 
-def test_as_of_blocks_later_known_at(data_root):
+def test_as_of_blocks_later_known_at(data_root: Path):
     early = _fact_row(value=100.0, period_end="2026-08-01", filed="2026-08-02", known_at="2026-08-02T00:00:00Z")
     late = _fact_row(value=300.0, period_end="2026-08-10", filed="2026-08-20", known_at="2026-08-20T00:00:00Z", accession="0000320193-26-000002")
     parquet.write_rows("financial_facts", [early, late], root=data_root / "parquet")
@@ -330,14 +335,14 @@ def test_as_of_blocks_later_known_at(data_root):
     assert {r["value"] for r in rows} == {100.0, 300.0}
 
 
-def test_as_of_includes_facts_filed_on_the_as_of_date(data_root):
+def test_as_of_includes_facts_filed_on_the_as_of_date(data_root: Path):
     row = _fact_row(value=100.0, filed="2026-08-14", known_at="2026-08-14T00:00:00Z")
     parquet.write_rows("financial_facts", [row], root=data_root / "parquet")
     rows = _as_of_rows("SELECT * FROM financial_facts", as_of="2026-08-14", data_root=data_root)
     assert [r["value"] for r in rows] == [100.0]
 
 
-def test_as_of_timestamp_granularity(data_root):
+def test_as_of_timestamp_granularity(data_root: Path):
     row = _fact_row(value=100.0, filed="2026-08-14", known_at="2026-08-14T09:30:00Z")
     parquet.write_rows("financial_facts", [row], root=data_root / "parquet")
     before = _as_of_rows("SELECT * FROM financial_facts", as_of="2026-08-14T09:00:00Z", data_root=data_root)
@@ -345,9 +350,9 @@ def test_as_of_timestamp_granularity(data_root):
     assert before == []
     assert [r["value"] for r in at] == [100.0]
 
-def test_events_evidence_registry_roundtrip(data_root):
+def test_events_evidence_registry_roundtrip(data_root: Path):
     """CorporateEvent/Evidence datasets dedup on rerun."""
-    event_row = {
+    event_row: dict[str, object] = {
         "event_id": "sec:event:NVDA:0123456789abcdef",
         "entity_id": "sec:cik:0001045810",
         "security_id": None,
@@ -368,7 +373,7 @@ def test_events_evidence_registry_roundtrip(data_root):
         "content_hash": "h1",
         "parser_version": "obligations-v2",
     }
-    evidence_row = {
+    evidence_row: dict[str, object] = {
         "evidence_id": "sec:evidence:abcdef0123456789",
         "event_id": event_row["event_id"],
         "source_type": "filing_text",
@@ -397,7 +402,7 @@ def test_events_evidence_registry_roundtrip(data_root):
     assert evidence.column("span_end").to_pylist() == [45]
 
 
-def test_13f_old_schema_exposes_new_columns_and_appends(data_root):
+def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
     import pyarrow as pa
     import pyarrow.parquet as parq
     root = data_root / "parquet"

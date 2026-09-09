@@ -1,20 +1,41 @@
 """Deterministic SC 13D/G beneficial-ownership normalization (no network)."""
 
-from .models import BeneficialOwnership, OwnershipChangeEvent
+from __future__ import annotations
+
+from datetime import date, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .models import BeneficialOwnership, Filing, OwnershipChangeEvent
+
+if TYPE_CHECKING:
+    # Provider SDK schedules share no common base, and tests exercise this
+    # boundary with SimpleNamespace doubles, so both shapes are named.
+    from types import SimpleNamespace
+
+    from edgar.beneficial_ownership import Schedule13D, Schedule13G
 
 _FORMS_13D = ("SC 13D", "SC 13D/A")
 _FORMS_13G = ("SC 13G", "SC 13G/A")
 _DEFAULT_FORMS = ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
 
 
-def list_sec_filings(*args, **kwargs):
+def list_sec_filings(
+    ticker_or_cik: str | int,
+    forms: str | list[str] | tuple[str, ...] | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
+    as_of: str | date | datetime | None = None,
+    limit: int | None = 50,
+) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date,
+                 end_date=end_date, as_of=as_of, limit=limit)
 
 
-def _safe_int(value):
+def _safe_int(value: object) -> int | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -28,7 +49,7 @@ def _safe_int(value):
         return None
 
 
-def _safe_float(value):
+def _safe_float(value: object) -> float | None:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -40,10 +61,13 @@ def _safe_float(value):
         return None
 
 
-def _first(obj, *names):
+def _first(obj: object, *names: str) -> object:
+    """First present attribute; the SDK/test-double schedules probed here are
+    dynamically shaped, so callers validate the result (`_safe_int`,
+    `_safe_float`, `str`)."""
     for name in names:
         try:
-            value = getattr(obj, name)
+            value: object = getattr(obj, name)
         except Exception:
             continue
         if value is not None:
@@ -51,7 +75,7 @@ def _first(obj, *names):
     return None
 
 
-def _purpose_of(items) -> "str | None":
+def _purpose_of(items: object) -> str | None:
     if items is None:
         return None
     for attr in ("purpose_of_transaction", "purpose"):
@@ -71,7 +95,9 @@ def _purpose_of(items) -> "str | None":
     if text and not text.startswith("<"):
         return text
     return None
-def _subject_of(schedule) -> "tuple[str | None, str | None]":
+
+
+def _subject_of(schedule: Schedule13D | Schedule13G | SimpleNamespace) -> tuple[str | None, str | None]:
     """Authoritative subject from structured issuer info; never the filer."""
     try:
         info = getattr(schedule, "issuer_info", None)
@@ -92,9 +118,19 @@ def _subject_of(schedule) -> "tuple[str | None, str | None]":
     return (cik or None), (name or None)
 
 
-def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no,
-                       subject_cik=None, subject_name=None,
-                       document_name=None, known_at=None, source_url=None):
+def normalize_schedule(
+    schedule: Schedule13D | Schedule13G | SimpleNamespace,
+    *,
+    issuer: str,
+    form: str,
+    filed_at: str | None,
+    accession_no: str,
+    subject_cik: str | int | None = None,
+    subject_name: str | None = None,
+    document_name: str | None = None,
+    known_at: str | None = None,
+    source_url: str | None = None,
+) -> list[BeneficialOwnership]:
     """One BeneficialOwnership per reporting person; never raises.
 
     Subject identity comes only from explicit args or the schedule's
@@ -117,20 +153,20 @@ def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no,
     except Exception:
         explicit_cik = None
     try:
-        explicit_name = str(subject_name).strip() if subject_name is not None else None
+        explicit_name = subject_name.strip() if subject_name is not None else None
     except Exception:
         explicit_name = None
     resolved_cik = explicit_cik or info_cik
     resolved_name = explicit_name or info_name
     try:
-        is_amend = str(form or "").strip().upper().endswith("/A")
+        is_amend = (form or "").strip().upper().endswith("/A")
     except Exception:
         is_amend = False
     try:
-        known = str(known_at) if known_at is not None else filed_at
+        known = known_at if known_at is not None else filed_at
     except Exception:
         known = filed_at
-    out = []
+    out: list[BeneficialOwnership] = []
     iterator = persons
     for person in iterator:
         try:
@@ -166,8 +202,7 @@ def normalize_schedule(schedule, *, issuer, form, filed_at, accession_no,
             continue
     return out
 
-
-def load_schedule(accession_no: str):
+def load_schedule(accession_no: str) -> Schedule13D | Schedule13G:
     """Live seam: edgar import stays here; raises on failure."""
     from .documents import get_by_accession_number
 
@@ -176,17 +211,28 @@ def load_schedule(accession_no: str):
     if form in _FORMS_13D:
         from edgar.beneficial_ownership import Schedule13D
 
-        return Schedule13D.from_filing(filing)
+        schedule = Schedule13D.from_filing(filing)
+        if schedule is None:
+            raise ValueError(f"no schedule for accession {accession_no!r}")
+        return schedule
     from edgar.beneficial_ownership import Schedule13G
 
-    return Schedule13G.from_filing(filing)
+    schedule = Schedule13G.from_filing(filing)
+    if schedule is None:
+        raise ValueError(f"no schedule for accession {accession_no!r}")
+    return schedule
 
 
-def get_beneficial_ownership(ticker_or_cik, *, as_of=None, limit=20,
-                             forms=_DEFAULT_FORMS):
+def get_beneficial_ownership(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 20,
+    forms: tuple[str, ...] | list[str] = _DEFAULT_FORMS,
+) -> list[BeneficialOwnership]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
-    out = []
+    out: list[BeneficialOwnership] = []
     for filing in filings:
         try:
             accession = getattr(filing, "accession_no", "")
@@ -213,7 +259,13 @@ def get_beneficial_ownership(ticker_or_cik, *, as_of=None, limit=20,
     return out
 
 
-def query_subject_owners(subject_cik, *, as_of=None, root=None, limit=200):
+def query_subject_owners(
+    subject_cik: int | str,
+    *,
+    as_of: str | None = None,
+    root: Path | str | None = None,
+    limit: int = 200,
+) -> list[dict[str, object]]:
     """Subject -> reporting owners over ``sec_beneficial_ownership`` (PIT)."""
     from . import store as _store
 
@@ -221,7 +273,13 @@ def query_subject_owners(subject_cik, *, as_of=None, root=None, limit=200):
         subject_cik=subject_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_owner_subjects(owner_cik, *, as_of=None, root=None, limit=200):
+def query_owner_subjects(
+    owner_cik: int | str,
+    *,
+    as_of: str | None = None,
+    root: Path | str | None = None,
+    limit: int = 200,
+) -> list[dict[str, object]]:
     """Owner/reporter -> subjects over ``sec_beneficial_ownership`` (PIT)."""
     from . import store as _store
 
@@ -229,7 +287,19 @@ def query_owner_subjects(owner_cik, *, as_of=None, root=None, limit=200):
         owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
 
 
-def diff_ownership(previous: BeneficialOwnership, current: BeneficialOwnership):
+def _filer_key(record: BeneficialOwnership) -> str:
+    return record.filer_cik or record.filer_name
+
+
+def _record_order(record: BeneficialOwnership) -> tuple[str, str]:
+    return (record.filed_at or "", record.accession_no)
+
+
+def _event_order(event: OwnershipChangeEvent) -> tuple[str, str]:
+    return (event.filed_at or "", event.current_accession)
+
+
+def diff_ownership(previous: BeneficialOwnership, current: BeneficialOwnership) -> OwnershipChangeEvent:
     share_change = None
     if previous.shares is not None and current.shares is not None:
         share_change = current.shares - previous.shares
@@ -265,21 +335,25 @@ def diff_ownership(previous: BeneficialOwnership, current: BeneficialOwnership):
     )
 
 
-def get_ownership_changes(ticker_or_cik, *, as_of=None, limit=20):
+def get_ownership_changes(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 20,
+) -> list[OwnershipChangeEvent]:
     records = get_beneficial_ownership(ticker_or_cik, as_of=as_of, limit=None)
-    groups: dict = {}
+    groups: dict[str, list[BeneficialOwnership]] = {}
     for record in records:
-        groups.setdefault(record.filer_cik or record.filer_name, []).append(record)
-    events = []
+        groups.setdefault(_filer_key(record), []).append(record)
+    events: list[OwnershipChangeEvent] = []
     for filings in groups.values():
-        filings.sort(key=lambda r: (r.filed_at or "", r.accession_no))
+        filings.sort(key=_record_order)
         for prev, curr in zip(filings, filings[1:]):
             try:
                 events.append(diff_ownership(prev, curr))
             except Exception:
                 continue
-    events.sort(key=lambda e: (e.filed_at or "", e.current_accession),
-                reverse=True)
+    events.sort(key=_event_order, reverse=True)
     if limit is not None:
         events = events[:limit]
     return events

@@ -1,15 +1,17 @@
 """Offline tests for app/sec/ownership.py (no network)."""
 
+from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
 import app.sec.ownership as ownership
 from app.sec.models import BeneficialOwnership
 
-
 class _Person:
-    def __init__(self, cik, name, sole_v=0, shared_v=0, sole_d=0, shared_d=0,
-                 agg=0, pct=0.0):
+    def __init__(self, cik: str, name: str, sole_v: int = 0, shared_v: int = 0,
+                 sole_d: int = 0, shared_d: int = 0, agg: int = 0,
+                 pct: float | str = 0.0) -> None:
         self.cik = cik
         self.name = name
         self.sole_voting_power = sole_v
@@ -20,7 +22,7 @@ class _Person:
         self.percent_of_class = pct
 
 
-def _schedule(persons, purpose=None):
+def _schedule(persons: list[_Person], purpose: str | None = None) -> SimpleNamespace:
     items = SimpleNamespace(purpose_of_transaction=purpose)
     return SimpleNamespace(reporting_persons=persons, items=items)
 
@@ -78,7 +80,7 @@ def test_text_changed_needs_both_purposes():
     assert missing2.text_changed is False
 
 
-def test_changes_group_by_filer_and_skip_failures(monkeypatch):
+def test_changes_group_by_filer_and_skip_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [
         SimpleNamespace(accession_no="a1", form="SC 13D",
                         filed_at="2024-01-15", company="ACME"),
@@ -87,13 +89,14 @@ def test_changes_group_by_filer_and_skip_failures(monkeypatch):
         SimpleNamespace(accession_no="a2", form="SC 13D/A",
                         filed_at="2024-06-15", company="ACME"),
     ]
-    monkeypatch.setattr(ownership, "list_sec_filings",
-                        lambda *a, **k: filings)
+    def fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return filings
+    monkeypatch.setattr(ownership, "list_sec_filings", fake_list)
 
-    def fake_load(accession):
-        if accession == "bad":
+    def fake_load(accession_no: str) -> SimpleNamespace:
+        if accession_no == "bad":
             raise RuntimeError("boom")
-        n = 1000 if accession == "a1" else 1500
+        n = 1000 if accession_no == "a1" else 1500
         return _schedule([_Person("1", "Alice", agg=n)], purpose="p")
 
     monkeypatch.setattr(ownership, "load_schedule", fake_load)
@@ -111,7 +114,7 @@ def test_unparseable_schedule_yields_no_records():
         accession_no="a9") == []
 
 
-def test_store_queries_both_ownership_directions(tmp_path):
+def test_store_queries_both_ownership_directions(tmp_path: Path) -> None:
     from app.sec.store import query_beneficial_ownership, store_beneficial_ownership
 
     assert store_beneficial_ownership({
@@ -129,7 +132,7 @@ def test_store_queries_both_ownership_directions(tmp_path):
     assert by_owner[0]["filer_cik"] != by_owner[0]["subject_cik"]
 
 
-def test_store_queries_13f_both_directions(tmp_path):
+def test_store_queries_13f_both_directions(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings, store_13f_holding
 
     assert store_13f_holding({
@@ -145,7 +148,7 @@ def test_store_queries_13f_both_directions(tmp_path):
     assert [r["manager_cik"] for r in by_security] == ["103567"]
 
 
-def test_13f_former_name_validity_and_as_of(tmp_path):
+def test_13f_former_name_validity_and_as_of(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings_for_issuer, query_13f_issuer_candidates, store_13f_holding
     from app.storage import parquet as _pq
     now = "2024-06-01T00:00:00Z"
@@ -184,7 +187,7 @@ def test_13f_former_name_validity_and_as_of(tmp_path):
     assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", root=tmp_path)) == 2
 
 
-def test_13f_cusip_canonical_round_trip(tmp_path):
+def test_13f_cusip_canonical_round_trip(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings, store_13f_holding
     from app.storage import parquet as _pq
 
@@ -215,7 +218,7 @@ def test_13f_cusip_canonical_round_trip(tmp_path):
     assert by_accession[0]["cusip"] is None
 
 
-def test_13f_issuer_dedupes_legacy_cusip(tmp_path):
+def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings_for_issuer
     from app.storage import parquet as _pq
     now = "2024-06-01T00:00:00Z"
@@ -260,7 +263,7 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path):
     assert (None, "sole=1000") in by_key
 
 
-def test_13f_distinct_rows_survive_shared_filing(tmp_path):
+def test_13f_distinct_rows_survive_shared_filing(tmp_path: Path) -> None:
     from app.sec import insider as _ins
     from app.sec.store import (
         query_13f_holdings,
@@ -319,13 +322,17 @@ def test_13f_distinct_rows_survive_shared_filing(tmp_path):
         dicts.append(d)
     assert [store_13f_holding(d, root=tmp_path) for d in dicts] == [1, 1, 1]
     assert [store_13f_holding(d, root=tmp_path) for d in dicts] == [0, 0, 0]
+    def _by_source_row(row: dict[str, object]) -> int:
+        source_row = row["source_row"]
+        assert isinstance(source_row, int)
+        return source_row
+
     direct = sorted(query_13f_holdings(manager_cik="5", root=tmp_path),
-                    key=lambda r: r["source_row"])
-    assert [r["source_row"] for r in direct] == [1, 2, 3]
+                    key=_by_source_row)
     assert [r["shares_prn_type"] for r in direct] == ["SH", "SH", "PRN"]
     governed = sorted(
         query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path),
-        key=lambda r: r["source_row"])
+        key=_by_source_row)
     assert all("_rn" not in r for r in governed)
     # Rows 1-2 are one logical holding (differ only by source_row) and dedupe;
     # the shares/value/voting-distinct third row survives.
@@ -344,7 +351,7 @@ def test_13f_distinct_rows_survive_shared_filing(tmp_path):
     ("", None),
     ("---", None),
 ])
-def test_cusip_contract(raw, expected):
+def test_cusip_contract(raw: str | None, expected: str | None) -> None:
     from app.sec.cusip import cusip_security_id, normalize_cusip
 
     assert normalize_cusip(raw) == expected
@@ -352,7 +359,7 @@ def test_cusip_contract(raw, expected):
     assert cusip_security_id("---") is None
 
 
-def test_13f_cusip_form_insensitive_dedup(tmp_path):
+def test_13f_cusip_form_insensitive_dedup(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings, store_13f_holding
     from app.storage import parquet as _pq
 
@@ -381,7 +388,7 @@ def test_13f_cusip_form_insensitive_dedup(tmp_path):
         accession="ACC-EMPTY2", root=tmp_path)[0]["cusip"] is None
 
 
-def test_13f_dashed_query_finds_canonical(tmp_path):
+def test_13f_dashed_query_finds_canonical(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings, store_13f_holding
 
     assert store_13f_holding({
@@ -398,7 +405,7 @@ def test_13f_dashed_query_finds_canonical(tmp_path):
         security="cusip:037833100", root=tmp_path)) == 1
 
 
-def test_13f_legacy_dashed_row_maps_to_issuer(tmp_path):
+def test_13f_legacy_dashed_row_maps_to_issuer(tmp_path: Path) -> None:
     from app.sec.store import query_13f_holdings_for_issuer
     from app.storage import parquet as _pq
     now = "2024-06-01T00:00:00Z"

@@ -27,7 +27,11 @@ def _specialization(forms: list[str]) -> str:
     return "generic"
 
 
-def diff_filings(current_accession, previous_accession, section=None) -> dict:
+def diff_filings(
+    current_accession: str,
+    previous_accession: str,
+    section: str | None = None,
+) -> dict[str, object]:
     from . import documents, filings
 
     try:

@@ -5,28 +5,46 @@ from app.analytics.options import analyze_option, compare_options
 from app.robinhood.options import OptionQuote, normalize_option_quote
 
 
-def _quote(**overrides) -> OptionQuote:
-    values = {
-        "contract_id": "wing-put-80",
-        "ticker": "WING",
-        "expiration": date(2027, 1, 15),
-        "strike": Decimal("80"),
-        "option_type": "put",
-        "underlying_price": Decimal("116.84"),
-        "bid": Decimal("2.00"),
-        "ask": Decimal("2.40"),
-        "mark": Decimal("2.20"),
-        "implied_volatility": Decimal("0.55"),
-        "delta": Decimal("-0.12"),
-        "gamma": Decimal("0.01"),
-        "theta": Decimal("-0.02"),
-        "vega": Decimal("0.10"),
-        "volume": 10,
-        "open_interest": 100,
-        "retrieved_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
-    }
-    values.update(overrides)
-    return OptionQuote(**values)
+def _quote(
+    contract_id: str = "wing-put-80",
+    ticker: str = "WING",
+    expiration: date = date(2027, 1, 15),
+    strike: Decimal = Decimal("80"),
+    option_type: str = "put",
+    underlying_price: Decimal | None = Decimal("116.84"),
+    bid: Decimal | None = Decimal("2.00"),
+    ask: Decimal | None = Decimal("2.40"),
+    mark: Decimal | None = Decimal("2.20"),
+    implied_volatility: Decimal | None = Decimal("0.55"),
+    delta: Decimal | None = Decimal("-0.12"),
+    gamma: Decimal | None = Decimal("0.01"),
+    theta: Decimal | None = Decimal("-0.02"),
+    vega: Decimal | None = Decimal("0.10"),
+    rho: Decimal | None = None,
+    volume: int | None = 10,
+    open_interest: int | None = 100,
+    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=timezone.utc),
+) -> OptionQuote:
+    return OptionQuote(
+        contract_id=contract_id,
+        ticker=ticker,
+        expiration=expiration,
+        strike=strike,
+        option_type=option_type,
+        underlying_price=underlying_price,
+        bid=bid,
+        ask=ask,
+        mark=mark,
+        implied_volatility=implied_volatility,
+        delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
+        rho=rho,
+        volume=volume,
+        open_interest=open_interest,
+        retrieved_at=retrieved_at,
+    )
 
 
 def test_normalize_option_quote_preserves_nullable_provider_values():
@@ -76,4 +94,8 @@ def test_call_target_payoff_and_comparison_are_deterministic():
     assert result["target_pnl"] == "2600"
     compared = compare_options([call, put], target_price=150, as_of=date(2026, 8, 25))
     assert compared["ranking"] == "target_pnl_desc"
-    assert compared["contracts"][0]["contract_id"] == "wing-call-120"
+    contracts = compared["contracts"]
+    assert isinstance(contracts, list)
+    first = contracts[0]
+    assert isinstance(first, dict)
+    assert first["contract_id"] == "wing-call-120"

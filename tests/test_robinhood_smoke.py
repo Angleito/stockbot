@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 import pytest
 
 from app.config import get_robinhood_mcp_url
@@ -51,7 +53,7 @@ TRADING_KEYWORDS = (
 FORBIDDEN_COLUMNS = ("token", "oauth", "secret", "access", "refresh", "authorization")
 
 
-def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path):
+def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     client = RobinhoodClient(
         get_robinhood_mcp_url(),

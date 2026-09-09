@@ -7,8 +7,9 @@ service.  Provider method names are never registered as LLM tools.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Protocol
 
 from .account import (
     BrokerageAccount,
@@ -25,7 +26,14 @@ from .options import MarketSnapshot
 _QUOTE_LIST_KEYS = ("quotes", "data", "results", "items", "records")
 
 
-def _provider_data(payload: Any) -> Any:
+class ToolClient(Protocol):
+    """Structural MCP tool surface the provider consumes (real client + test fakes)."""
+
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
+        ...
+
+
+def _provider_data(payload: object) -> object:
     """Unwrap the MCP response envelope to the tool's ``data`` object.
 
     Live responses carry both ``structured_content.data`` and a text-JSON
@@ -33,26 +41,30 @@ def _provider_data(payload: Any) -> Any:
     (used by tests) are unwrapped/passed through unchanged.
     """
     if isinstance(payload, dict):
-        structured = payload.get("structured_content") or payload.get("structuredContent")
-        if isinstance(structured, dict) and isinstance(structured.get("data"), dict):
-            return structured["data"]
-        content = payload.get("content")
+        structured: object = payload.get("structured_content") or payload.get("structuredContent")
+        if isinstance(structured, dict):
+            inner: object = structured.get("data")
+            if isinstance(inner, dict):
+                return inner
+        content: object = payload.get("content")
         if isinstance(content, list):
             for block in content:
-                text = block.get("text") if isinstance(block, dict) else None
+                text: object = block.get("text") if isinstance(block, dict) else None
                 if isinstance(text, str) and text.strip():
                     try:
-                        parsed = json.loads(text)
+                        parsed: object = json.loads(text)
                     except (TypeError, ValueError):
                         continue
                     if isinstance(parsed, dict):
-                        return parsed.get("data", parsed)
-        if isinstance(payload.get("data"), dict):
-            return payload["data"]
+                        fallback: object = parsed.get("data", parsed)
+                        return fallback
+        bare: object = payload.get("data")
+        if isinstance(bare, dict):
+            return bare
     return payload
 
 
-def _rows(payload: Any, *keys: str, wrap: bool = True) -> list[dict[str, Any]] | None:
+def _rows(payload: object, *keys: str, wrap: bool = True) -> list[dict[str, object]] | None:
     """Extract row dicts from a provider payload.
 
     A bare list is used directly; a bare dict is wrapped as a single row;
@@ -65,7 +77,7 @@ def _rows(payload: Any, *keys: str, wrap: bool = True) -> list[dict[str, Any]] |
     if not isinstance(payload, dict):
         return None
     for key in keys:
-        value = payload.get(key)
+        value: object = payload.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
         if isinstance(value, dict):
@@ -73,14 +85,14 @@ def _rows(payload: Any, *keys: str, wrap: bool = True) -> list[dict[str, Any]] |
     return [payload] if wrap else None
 
 
-def _quote_rows(payload: Any) -> list[dict[str, Any]]:
+def _quote_rows(payload: object) -> list[dict[str, object]]:
     """Extract quote rows, accepting the common list aliases or a bare list."""
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if not isinstance(payload, dict):
         return []
     for key in _QUOTE_LIST_KEYS:
-        value = payload.get(key)
+        value: object = payload.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
         if isinstance(value, dict):
@@ -88,7 +100,7 @@ def _quote_rows(payload: Any) -> list[dict[str, Any]]:
     return [payload]
 
 
-def _quote_retrieved_at(row: dict[str, Any]) -> datetime:
+def _quote_retrieved_at(row: Mapping[str, object]) -> datetime:
     raw = _first_present(row, "retrieved_at", "retrievedAt", "timestamp", "venue_last_trade_time", "venueLastTradeTime")
     if isinstance(raw, str):
         try:
@@ -111,7 +123,7 @@ class RobinhoodPortfolioProvider:
     :class:`RobinhoodToolError` from the client.
     """
 
-    def __init__(self, client) -> None:
+    def __init__(self, client: ToolClient) -> None:
         self._client = client
 
     def get_accounts(self) -> list[BrokerageAccount]:
@@ -146,14 +158,14 @@ class RobinhoodPortfolioProvider:
             )
         return normalize_cash_balance(row, account_id=account_id)
 
-    def get_scanner_filter_specs(self) -> dict[str, Any]:
+    def get_scanner_filter_specs(self) -> dict[str, object]:
         """The scanner filter-type catalog (no parameters)."""
         data = _provider_data(self._client.call_tool("get_scanner_filter_specs", {}))
         if not isinstance(data, dict):
             raise ValueError("Unexpected get_scanner_filter_specs payload shape: expected an object")
         return data
 
-    def get_scans(self) -> list[dict[str, Any]]:
+    def get_scans(self) -> list[dict[str, object]]:
         """The user's saved scanners, one dict per scan."""
         data = _provider_data(self._client.call_tool("get_scans", {}))
         rows = _rows(data, "scans", "results", "items")
@@ -163,7 +175,7 @@ class RobinhoodPortfolioProvider:
             )
         return rows
 
-    def run_scan(self, scan_id: str) -> dict[str, Any]:
+    def run_scan(self, scan_id: str) -> dict[str, object]:
         """Execute a saved scanner; returns live market results."""
         data = _provider_data(self._client.call_tool("run_scan", {"scan_id": scan_id}))
         if not isinstance(data, dict):
@@ -171,13 +183,14 @@ class RobinhoodPortfolioProvider:
         return data
 
     def get_equity_quotes(self, tickers: Sequence[str]) -> dict[str, MarketSnapshot]:
-        symbols = [str(ticker).strip().upper() for ticker in tickers if str(ticker).strip()]
+        symbols = [ticker.strip().upper() for ticker in tickers if ticker.strip()]
         if not symbols:
             return {}
         payload = self._client.call_tool("get_equity_quotes", {"symbols": symbols})
         snapshots: dict[str, MarketSnapshot] = {}
         for row in _quote_rows(_provider_data(payload)):
-            quote = row.get("quote") if isinstance(row.get("quote"), dict) else row
+            nested: object = row.get("quote")
+            quote: Mapping[str, object] = nested if isinstance(nested, dict) else row
             ticker = str(_first_present(quote, "ticker", "symbol") or "").upper()
             if not ticker:
                 continue

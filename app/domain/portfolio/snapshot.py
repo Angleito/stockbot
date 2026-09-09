@@ -39,7 +39,7 @@ def build_portfolio_snapshot(
         and set(cash_balances) == set(account_ids)
         and all(c is not None for c in cash_balances.values())
     )
-    cash = sum(cash_balances.values()) if cash_complete else None
+    cash = sum((c for c in cash_balances.values() if c is not None), Decimal("0")) if cash_complete else None
     invested_value = (
         Decimal("0")
         if not positions and cash is not None

@@ -10,32 +10,17 @@ from app.robinhood.auth import OAuthStoreError
     "value",
     ("Your Name your.email@example.com", "YourName [EMAIL]", "  sk-or-...  ", "your_finra_client_id"),
 )
-def test_require_env_rejects_documented_placeholder_values(monkeypatch, value):
+def test_require_env_rejects_documented_placeholder_values(monkeypatch: pytest.MonkeyPatch, value: str):
     monkeypatch.setenv("TEST_SETTING", value)
 
     with pytest.raises(ValueError, match="TEST_SETTING is not properly set"):
         config._require_env("TEST_SETTING")
 
 
-def test_require_env_strips_and_returns_configured_value(monkeypatch):
+def test_require_env_strips_and_returns_configured_value(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TEST_SETTING", "  configured-value  ")
 
     assert config._require_env("TEST_SETTING") == "configured-value"
-
-
-def test_local_chat_policy_reads_server_controls(monkeypatch):
-    monkeypatch.setenv("DEFAULT_MODEL", "provider/default")
-    monkeypatch.setenv("CHAT_ALLOWED_MODELS", "provider/secondary")
-    monkeypatch.setenv("CHAT_MAX_MESSAGES", "3")
-    monkeypatch.setenv("CHAT_MAX_CONTENT_CHARS", "40")
-    monkeypatch.setenv("OPENROUTER_TIMEOUT_SECONDS", "2.5")
-
-    policy = config.get_local_chat_policy()
-
-    assert policy.allowed_models == {"provider/default", "provider/secondary"}
-    assert policy.max_messages == 3
-    assert policy.max_message_chars == 40
-    assert policy.upstream_timeout_seconds == 2.5
 
 
 @pytest.mark.parametrize(
@@ -48,27 +33,27 @@ def test_local_chat_policy_reads_server_controls(monkeypatch):
         "https://agent.robinhood.com/mcp/trading?x=1",
     ),
 )
-def test_robinhood_endpoint_is_pinned(monkeypatch, url):
+def test_robinhood_endpoint_is_pinned(monkeypatch: pytest.MonkeyPatch, url: str):
     monkeypatch.setenv("ROBINHOOD_MCP_URL", url)
     with pytest.raises(OAuthStoreError, match="Robinhood MCP URL"):
         config.get_robinhood_mcp_url()
 
-def test_broker_enabled_prefers_new_true(monkeypatch):
+def test_broker_enabled_prefers_new_true(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BROKER_ENABLED", "true")
     monkeypatch.setenv("ROBINHOOD_ENABLED", "false")
     assert config.broker_enabled() is True
 
-def test_broker_enabled_explicit_new_false_wins(monkeypatch):
+def test_broker_enabled_explicit_new_false_wins(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BROKER_ENABLED", "false")
     monkeypatch.setenv("ROBINHOOD_ENABLED", "true")
     assert config.broker_enabled() is False
 
-def test_broker_enabled_legacy_fallback(monkeypatch):
+def test_broker_enabled_legacy_fallback(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BROKER_ENABLED", raising=False)
     monkeypatch.setenv("ROBINHOOD_ENABLED", "true")
     assert config.broker_enabled() is True
 
-def test_broker_enabled_defaults_false(monkeypatch):
+def test_broker_enabled_defaults_false(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BROKER_ENABLED", raising=False)
     monkeypatch.delenv("ROBINHOOD_ENABLED", raising=False)
     assert config.broker_enabled() is False

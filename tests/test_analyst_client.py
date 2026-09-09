@@ -21,11 +21,11 @@ YAHOO_FIXTURES = Path(__file__).parent / "fixtures" / "yahoo"
 SLICK_FIXTURES = Path(__file__).parent / "fixtures" / "slickcharts"
 
 
-def _load_yahoo(name: str) -> dict:
+def _load_yahoo(name: str):
     return json.loads((YAHOO_FIXTURES / name).read_text())
 
 
-def _response(payload=None, text: str = "", status: int = 200) -> MagicMock:
+def _response(payload: dict[str, object] | None = None, text: str = "", status: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.json.return_value = payload
@@ -37,11 +37,11 @@ def _response(payload=None, text: str = "", status: int = 200) -> MagicMock:
     return resp
 
 
-def _fake_session(*responses: MagicMock):
+def _fake_session(*responses: MagicMock) -> MagicMock:
     """Session whose get() returns responses in order, last one repeated."""
     calls = {"i": 0}
 
-    def get(url, **kwargs):
+    def get(url: str, **kwargs: object) -> MagicMock:
         idx = min(calls["i"], len(responses) - 1)
         calls["i"] += 1
         return responses[idx]
@@ -54,29 +54,33 @@ def _fake_session(*responses: MagicMock):
 class FakeCache:
     """In-memory stand-in for app.cache that records accesses."""
 
-    def __init__(self):
+    data: dict[str, object]
+    gets: int
+    sets: int
+
+    def __init__(self) -> None:
         self.data = {}
         self.gets = 0
         self.sets = 0
 
-    def get(self, key, ttl=None):
+    def get(self, key: str, ttl: float | None = None) -> object | None:
         self.gets += 1
         return self.data.get(key)
 
-    def set(self, key, value):
+    def set(self, key: str, value: object) -> None:
         self.sets += 1
         self.data[key] = value
 
 
 @pytest.fixture
-def fake_cache(monkeypatch):
+def fake_cache(monkeypatch: pytest.MonkeyPatch) -> FakeCache:
     cache = FakeCache()
     monkeypatch.setattr(analyst_client, "cache", cache)
     return cache
 
 
 @pytest.fixture
-def yahoo_session(monkeypatch):
+def yahoo_session(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _load_yahoo("quoteSummary_NVDA.json")
     monkeypatch.setattr(
         analyst_client,
@@ -86,31 +90,46 @@ def yahoo_session(monkeypatch):
     monkeypatch.setattr(analyst_client, "_get_crumb", lambda: "crumb-1")
 
 
-def test_get_analyst_estimates_normalized(yahoo_session, fake_cache):
+def _as_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+def _as_seq(value: object):
+    assert isinstance(value, (list, tuple))
+    return value
+
+def test_get_analyst_estimates_normalized(yahoo_session: None, fake_cache: FakeCache) -> None:
     result = analyst_client.get_analyst_estimates("NVDA")
 
     assert result["ticker"] == "NVDA"
-    assert result["source"].startswith("Yahoo")
-    assert result["quote"]["price"] == 213.05
-    assert result["price_targets"]["median"] == 300.0
-    assert result["price_targets"]["mean"] == pytest.approx(304.72882)
-    assert result["price_targets"]["high"] == 500.0
-    assert result["price_targets"]["low"] == 180.0
-    assert result["price_targets"]["num_analysts"] == 59
-    assert result["price_targets"]["recommendation"] == "Strong Buy"
-    assert result["valuation"]["forward_pe"] == pytest.approx(16.336937)
+    source = result["source"]
+    assert isinstance(source, str)
+    assert source.startswith("Yahoo")
+    quote = _as_dict(result["quote"])
+    assert quote["price"] == 213.05
+    targets = _as_dict(result["price_targets"])
+    assert targets["median"] == 300.0
+    assert targets["mean"] == pytest.approx(304.72882)
+    assert targets["high"] == 500.0
+    assert targets["low"] == 180.0
+    assert targets["num_analysts"] == 59
+    assert targets["recommendation"] == "Strong Buy"
+    valuation = _as_dict(result["valuation"])
+    assert valuation["forward_pe"] == pytest.approx(16.336937)
 
-    periods = {r["period"]: r for r in result["forward_estimates"]}
-    cq = periods["current_quarter"]
+    periods = {r["period"]: r for r in _as_seq(result["forward_estimates"])}
+    cq = _as_dict(periods["current_quarter"])
     assert cq["period_end_date"] == "2026-07-31"
     assert cq["eps_avg"] == pytest.approx(2.09161)
     assert cq["eps_growth_pct"] == pytest.approx(99.2)
     assert cq["revenue_avg"] == pytest.approx(92_176_624_640)
     assert cq["revenue_growth_pct"] == pytest.approx(97.2)
-    assert cq["eps_revision"]["current"] == pytest.approx(2.09161)
-    assert cq["eps_revision"]["days60_ago"] == pytest.approx(2.07667)
+    eps_rev = _as_dict(cq["eps_revision"])
+    assert eps_rev["current"] == pytest.approx(2.09161)
+    assert eps_rev["days60_ago"] == pytest.approx(2.07667)
 
-    ny = periods["next_fiscal_year"]
+    ny = _as_dict(periods["next_fiscal_year"])
     assert ny["period_end_date"] == "2028-01-31"
     assert ny["eps_avg"] == pytest.approx(13.041)
 
@@ -118,13 +137,13 @@ def test_get_analyst_estimates_normalized(yahoo_session, fake_cache):
     assert fake_cache.gets == 1
 
 
-def test_get_analyst_estimates_cache_hit(yahoo_session, fake_cache):
+def test_get_analyst_estimates_cache_hit(yahoo_session: None, fake_cache: FakeCache) -> None:
     fake_cache.data["analyst_estimates:NVDA"] = {"cached": True}
     result = analyst_client.get_analyst_estimates("NVDA")
     assert result == {"cached": True}
 
 
-def test_get_analyst_estimates_crumb_refresh(monkeypatch, fake_cache):
+def test_get_analyst_estimates_crumb_refresh(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     payload = _load_yahoo("quoteSummary_NVDA.json")
     session = _fake_session(
         _response(status=401),  # stale crumb -> refresh + retry
@@ -139,18 +158,18 @@ def test_get_analyst_estimates_crumb_refresh(monkeypatch, fake_cache):
 
     monkeypatch.setattr(analyst_client, "_get_crumb", crumb)
     result = analyst_client.get_analyst_estimates("NVDA")
-    assert result["price_targets"]["median"] == 300.0
+    assert _as_dict(result["price_targets"])["median"] == 300.0
     assert crumb_calls["n"] == 2
     assert session.get.call_count == 2
 
 
-def test_get_analyst_estimates_missing_ticker():
+def test_get_analyst_estimates_missing_ticker() -> None:
     result = analyst_client.get_analyst_estimates("")
     assert "error" in result
 
 
-def test_get_analyst_estimates_network_error(monkeypatch, fake_cache):
-    def boom(url, **kwargs):
+def test_get_analyst_estimates_network_error(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
+    def boom(url: str, **kwargs: object) -> None:
         raise requests.ConnectionError("no network")
 
     session = MagicMock()
@@ -158,10 +177,12 @@ def test_get_analyst_estimates_network_error(monkeypatch, fake_cache):
     monkeypatch.setattr(analyst_client, "_ensure_session", lambda: session)
     result = analyst_client.get_analyst_estimates("NVDA")
     assert "error" in result
-    assert "NVDA" in result["error"]
+    err = result["error"]
+    assert isinstance(err, str)
+    assert "NVDA" in err
 
 
-def test_get_sp500_weight(monkeypatch, fake_cache):
+def test_get_sp500_weight(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     html = (SLICK_FIXTURES / "sp500_trimmed.html").read_text()
     monkeypatch.setattr(
         analyst_client,
@@ -176,7 +197,7 @@ def test_get_sp500_weight(monkeypatch, fake_cache):
     assert fake_cache.sets == 1
 
 
-def test_get_sp500_weight_symbol_case(monkeypatch, fake_cache):
+def test_get_sp500_weight_symbol_case(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     html = (SLICK_FIXTURES / "sp500_trimmed.html").read_text()
     monkeypatch.setattr(
         analyst_client,
@@ -188,7 +209,7 @@ def test_get_sp500_weight_symbol_case(monkeypatch, fake_cache):
     assert result["weight_pct"] == pytest.approx(7.40)
 
 
-def test_get_sp500_weight_not_in_index(monkeypatch, fake_cache):
+def test_get_sp500_weight_not_in_index(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     html = (SLICK_FIXTURES / "sp500_trimmed.html").read_text()
     monkeypatch.setattr(
         analyst_client,
@@ -197,10 +218,12 @@ def test_get_sp500_weight_not_in_index(monkeypatch, fake_cache):
     )
     result = analyst_client.get_sp500_weight("ZZZZ")
     assert "error" in result
-    assert "not found" in result["error"]
+    err2 = result["error"]
+    assert isinstance(err2, str)
+    assert "not found" in err2
 
 
-def test_get_sp500_weight_http_403(monkeypatch, fake_cache):
+def test_get_sp500_weight_http_403(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     monkeypatch.setattr(
         analyst_client,
         "_ensure_session",
@@ -208,16 +231,18 @@ def test_get_sp500_weight_http_403(monkeypatch, fake_cache):
     )
     result = analyst_client.get_sp500_weight("NVDA")
     assert "error" in result
-    assert "403" in result["error"]
+    err3 = result["error"]
+    assert isinstance(err3, str)
+    assert "403" in err3
 
 
-def test_execute_tool_dispatch(monkeypatch, fake_cache):
+def test_execute_tool_dispatch(monkeypatch: pytest.MonkeyPatch, fake_cache: FakeCache) -> None:
     payload = _load_yahoo("quoteSummary_NVDA.json")
     html = (SLICK_FIXTURES / "sp500_trimmed.html").read_text()
     yahoo_session = _fake_session(_response(payload=payload))
     slick_session = _fake_session(_response(text=html))
 
-    def session_for(url, **kwargs):
+    def session_for(url: str, **kwargs: object):
         if "yahoo" in url:
             return yahoo_session.get(url, **kwargs)
         return slick_session.get(url, **kwargs)
@@ -228,12 +253,12 @@ def test_execute_tool_dispatch(monkeypatch, fake_cache):
     monkeypatch.setattr(analyst_client, "_get_crumb", lambda: "crumb-1")
 
     result = execute_tool("get_analyst_estimates", {"ticker": "NVDA"}, "model-x", context=LOCAL_CONTEXT)
-    assert result["price_targets"]["median"] == 300.0
+    assert _as_dict(result["price_targets"])["median"] == 300.0
     result = execute_tool("get_sp500_weight", {"ticker": "NVDA"}, "model-x", context=LOCAL_CONTEXT)
     assert result["weight_pct"] == pytest.approx(7.40)
 
 
-def test_render_analyst_estimates(yahoo_session, fake_cache):
+def test_render_analyst_estimates(yahoo_session: None, fake_cache: FakeCache) -> None:
     result = analyst_client.get_analyst_estimates("NVDA")
     text = tool_render.render_tool_result(result)
     assert "NVDA analyst consensus" in text

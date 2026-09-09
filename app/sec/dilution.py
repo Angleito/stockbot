@@ -1,5 +1,11 @@
 """Deterministic dilution math (pure) + one wiring function."""
 
+from collections.abc import Sequence
+from typing import TypeGuard
+
+from .models import Offering
+from .offerings import OFFERING_FORMS, REGISTRATION_FORMS
+
 FORMULAS = {
     "dilution_pct": "dilution_pct = new_shares / (existing_shares + new_shares) * 100",
     "atm_pct_of_market_cap": "atm_pct_of_market_cap = atm_size / market_cap * 100",
@@ -8,8 +14,6 @@ FORMULAS = {
 
 _NQ = "not_quantifiable"
 
-from .offerings import REGISTRATION_FORMS
-
 _OFFERING_424B_FORMS = frozenset(
     {"424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8"})
 
@@ -17,39 +21,57 @@ _REGISTRATION_ACCESSION_FORMS = frozenset(
     {f.strip().upper() for f in REGISTRATION_FORMS} | {"EFFECT", "RW"})
 
 
-def get_offering_history(*args, **kwargs):
+def get_offering_history(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 50,
+    forms: tuple[str, ...] | list[str] = OFFERING_FORMS,
+) -> list[Offering]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .offerings import get_offering_history as _real
 
-    return _real(*args, **kwargs)
+    return _real(ticker_or_cik, as_of=as_of, limit=limit, forms=forms)
 
 
-def get_fundamentals(ticker, metric, as_of=None):
+def get_fundamentals(
+    ticker: str,
+    metric: str,
+    as_of: str | None = None,
+) -> dict[str, object]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from app.services import sec_facts
 
     return sec_facts.get_fundamentals(ticker, metric, as_of=as_of)
 
 
-def _positive(value):
+def _positive(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) \
         and value > 0
 
 
-def dilution_profile(*, existing_shares=None, new_shares=None, price=None,
-                     market_cap=None, atm_size=None, convertible_shares=None,
-                     warrant_shares=None, source_accessions=()) -> dict:
+def dilution_profile(
+    *,
+    existing_shares: int | float | None = None,
+    new_shares: int | float | None = None,
+    price: int | float | None = None,
+    market_cap: int | float | None = None,
+    atm_size: int | float | None = None,
+    convertible_shares: int | float | None = None,
+    warrant_shares: int | float | None = None,
+    source_accessions: Sequence[str] = (),
+) -> dict[str, object]:
     if _positive(existing_shares) and _positive(new_shares):
-        dilution_pct = float(new_shares) / float(existing_shares + new_shares) * 100
+        dilution_pct: float | str = float(new_shares) / float(existing_shares + new_shares) * 100
     else:
         dilution_pct = _NQ
     if _positive(atm_size) and _positive(market_cap):
-        atm_pct = float(atm_size) / float(market_cap) * 100
+        atm_pct: float | str = float(atm_size) / float(market_cap) * 100
     else:
         atm_pct = _NQ
     if isinstance(existing_shares, (int, float)) and not isinstance(
             existing_shares, bool) and existing_shares > 0:
-        extra = 0
+        extra: int | float = 0
         bad = False
         for part in (new_shares, convertible_shares, warrant_shares):
             if part is None:
@@ -59,14 +81,14 @@ def dilution_profile(*, existing_shares=None, new_shares=None, price=None,
                 bad = True
                 break
             extra += part
-        fully_diluted = _NQ if bad else existing_shares + extra
+        fully_diluted: int | float | str = _NQ if bad else existing_shares + extra
     else:
         fully_diluted = _NQ
     cw = (convertible_shares or 0) + (warrant_shares or 0) \
         if convertible_shares is not None or warrant_shares is not None else None
     if cw is not None and _positive(cw) and isinstance(
             fully_diluted, (int, float)) and fully_diluted > 0:
-        cw_pct = float(cw) / float(fully_diluted) * 100
+        cw_pct: float | str = float(cw) / float(fully_diluted) * 100
     else:
         cw_pct = _NQ
     return {
@@ -86,9 +108,13 @@ def dilution_profile(*, existing_shares=None, new_shares=None, price=None,
     }
 
 
-def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
+def get_dilution_profile(
+    ticker_or_cik: str,
+    *,
+    as_of: str | None = None,
+) -> dict[str, object]:
     try:
-        history = get_offering_history(ticker_or_cik, as_of=as_of) or []
+        history: list[Offering] = get_offering_history(ticker_or_cik, as_of=as_of) or []
     except Exception:
         history = []
     try:
@@ -96,16 +122,16 @@ def get_dilution_profile(ticker_or_cik, *, as_of=None) -> dict:
                                  as_of=as_of)
     except Exception:
         facts = None
-    existing = None
+    existing: int | None = None
     try:
         raw = facts.get("shares_outstanding") if isinstance(facts, dict) else None
-        if raw is not None and not isinstance(raw, bool):
+        if isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
             existing = int(float(raw))
     except (ValueError, TypeError):
         existing = None
     disclosed_total = 0
-    offering_accessions = []
-    registration_accessions = []
+    offering_accessions: list[str] = []
+    registration_accessions: list[str] = []
     disclosed_known = False
     for offering in history or []:
         try:

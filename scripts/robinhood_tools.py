@@ -78,7 +78,8 @@ def main() -> int:
     for tool in tools:
         name = str(tool.get("name", "<unknown>"))
         description = str(tool.get("description") or "")
-        schema = tool.get("input_schema") or tool.get("inputSchema") or {}
+        schema_raw = tool.get("input_schema") or tool.get("inputSchema")
+        schema: dict[str, object] = schema_raw if isinstance(schema_raw, dict) else {}
         print(f"- {name}")
         print(f"  capability: {_classify(name)}")
         print(f"  description: {_truncate(description, 200)}")

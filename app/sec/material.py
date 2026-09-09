@@ -8,7 +8,13 @@ without import cycles.
 from __future__ import annotations
 
 import re
-from datetime import date
+from collections.abc import Sequence
+from datetime import date, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .events8k import EightKReport
+    from .models import CurrentReportEvent, RegulatoryEvent
 
 EIGHT_K_ITEM_EVENTS = {
     "1.01": "material_agreement",
@@ -44,11 +50,21 @@ SEVERITY = {
 _SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def material_events_from_8k(accession_no, eight_k_events, *, issuer, event_date=None,
-                             known_at=None):
+def material_events_from_8k(
+    accession_no: str,
+    eight_k_events: Sequence[CurrentReportEvent],
+    *,
+    issuer: str,
+    event_date: str | date | None = None,
+    known_at: str | None = None,
+) -> list[RegulatoryEvent]:
     from .models import RegulatoryEvent
 
-    out = []
+    if isinstance(event_date, datetime):
+        event_date = event_date.date().isoformat()
+    elif isinstance(event_date, date):
+        event_date = event_date.isoformat()
+    out: list[RegulatoryEvent] = []
     for event in eight_k_events:
         event_type = EIGHT_K_ITEM_EVENTS.get(event.item_number)
         if event_type is None:
@@ -68,12 +84,15 @@ def material_events_from_8k(accession_no, eight_k_events, *, issuer, event_date=
     return out
 
 
-def load_report(accession_no):
+def load_report(accession_no: str) -> tuple[EightKReport, str | None, str]:
     """Live seam: accession -> (report, event_date, known_at). Raises on failure."""
     from .documents import get_by_accession_number
+    from .events8k import EightKReport
 
     filing = get_by_accession_number(accession_no)
     report = filing.obj()
+    if not isinstance(report, EightKReport):
+        raise ValueError(f"no 8-K report for accession {accession_no!r}")
     raw_date = getattr(report, "date_of_report", None) or getattr(filing, "filing_date", None)
     event_date = str(raw_date) if raw_date is not None else None
     raw_known = (getattr(filing, "acceptance_datetime", None)
@@ -84,7 +103,17 @@ def load_report(accession_no):
     return report, event_date, str(raw_known)
 
 
-def get_material_events(ticker_or_cik, since, *, as_of=None, limit=50):
+def _event_order(event: RegulatoryEvent) -> tuple[str, str]:
+    return (event.effective_date or event.known_at, event.event_id)
+
+
+def get_material_events(
+    ticker_or_cik: str | int,
+    since: str,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 50,
+) -> list[RegulatoryEvent]:
     if not isinstance(since, str) or not _SINCE_RE.match(since):
         raise ValueError(f"invalid since date: {since!r} (expected YYYY-MM-DD)")
     try:
@@ -94,7 +123,7 @@ def get_material_events(ticker_or_cik, since, *, as_of=None, limit=50):
     from .events8k import extract_8k_events
     from .filings import list_sec_filings
 
-    out = []
+    out: list[RegulatoryEvent] = []
     filings = list_sec_filings(ticker_or_cik, forms=["8-K", "8-K/A"],
                                start_date=since, as_of=as_of, limit=limit)
     for filing in filings:
@@ -106,5 +135,5 @@ def get_material_events(ticker_or_cik, since, *, as_of=None, limit=50):
             filing.accession_no,
             extract_8k_events(report, filing.accession_no, event_date=event_date),
             issuer=filing.filer_name, event_date=event_date, known_at=known_at))
-    out.sort(key=lambda e: (e.effective_date or e.known_at, e.event_id))
+    out.sort(key=_event_order)
     return out

@@ -1,19 +1,14 @@
-"""Security properties at the untrusted HTTP and agent boundaries."""
+"""Security properties at the Robinhood origin boundary."""
 
-from fastapi.testclient import TestClient
+from pathlib import Path
+
 import pytest
 
-from app.main import app
 from app.robinhood.auth import OAuthConfig, OAuthStoreError, load_tokens_for_origin, save_tokens
 from app.robinhood.client import RobinhoodClient
 
 
-def test_chat_route_is_gone():
-    client = TestClient(app)
-    assert client.post("/chat", json={"messages": [{"role": "user", "content": "hello"}]}).status_code == 404
-
-
-def test_oauth_state_is_bound_to_the_robinhood_origin(tmp_path):
+def test_oauth_state_is_bound_to_the_robinhood_origin(tmp_path: Path):
     path = tmp_path / "oauth.json"
     save_tokens({"server_origin": "https://agent.robinhood.com", "tokens": {"access_token": "x"}}, path)
     assert load_tokens_for_origin("https://agent.robinhood.com", path)

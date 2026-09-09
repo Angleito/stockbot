@@ -39,7 +39,7 @@ def _ensure_session() -> requests.Session:
     return _session
 
 
-def _error(message: str) -> dict:
+def _error(message: str) -> dict[str, object]:
     return {"error": message, "source": "exa"}
 
 
@@ -52,8 +52,8 @@ def search(
     start_published_date: str | None = None,
     end_published_date: str | None = None,
     search_type: str = "auto",
-    limit: int = 5,
-) -> dict:
+    limit: object = EXA_DEFAULT_LIMIT,
+) -> dict[str, object]:
     """Search the web via Exa, returning bounded highlight-based evidence.
 
     Never raises; every failure returns {"error": ..., "source": "exa"}.
@@ -94,7 +94,7 @@ def search(
             "end_published_date, or exclude_domains"
         )
 
-    payload: dict = {
+    payload: dict[str, object] = {
         "query": query,
         "numResults": limit,
         "contents": {"highlights": True},
@@ -133,7 +133,7 @@ def search(
     if not isinstance(raw_results, list):
         return _error("Exa search returned an invalid response")
 
-    evidence: list[dict] = []
+    evidence: list[dict[str, object]] = []
     for item in raw_results:
         if not isinstance(item, dict) or not item.get("url"):
             continue

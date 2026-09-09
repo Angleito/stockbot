@@ -1,14 +1,14 @@
-"""Tool implementations + OpenAI-format JSON schemas for OpenRouter."""
+"""Tool implementations + OpenAI-format JSON schemas for Pi."""
 
 import hashlib
 import json
 import logging
-from datetime import date
+from collections.abc import Callable, Sequence
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING
 
-from . import analytics
 from . import analyst_client
 from . import edgar_client
 from . import exa_client
@@ -17,6 +17,7 @@ from . import obligations
 from . import valuation
 from .config import broker_enabled, get_data_root, get_robinhood_mcp_url
 from .policy import Capability, RequestContext
+from .analytics import screens
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
 from .robinhood import RobinhoodClient
@@ -26,15 +27,64 @@ from .robinhood.client import RobinhoodAuthRequired
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
 from .services import risk as risk_service
-from .services.portfolio_research import SEC_CONCEPTS, enrich_portfolio_research
+from .domain.market.entities import EntityRelationship
+from .domain.portfolio.models import Position
+from .services.portfolio_research import PortfolioResearchPosition, SEC_CONCEPTS, enrich_portfolio_research
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
+from .sec.models import SECSearchResult
 from .services import sec_facts
 from . import sec
 from .storage import duckdb
 
+if TYPE_CHECKING:
+    from .thesis.intake import IntakeProposal
+    from .thesis.models import Thesis
+    from .thesis.repository import ThesisRepository
+
 logger = logging.getLogger(__name__)
 
-TOOLS = [
+# Structured thesis-proposal delta fields shared by thesis_create/refine.
+# IntakeProposal.from_dict remains the source of truth for value shapes.
+_THESIS_DELTA_PROPERTIES = {
+    "scope": {"type": "string", "description": "Ticker scope (e.g. NVDA) or 'unknown'."},
+    "claims": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"statement": {"type": "string"}},
+            "required": ["statement"],
+        },
+    },
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "invalidators": {"type": "array", "items": {"type": "string"}},
+    "unknowns": {"type": "array", "items": {"type": "string"}},
+    "expressions": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "intent": {"type": "string"},
+                "instrument": {"type": "string"},
+                "direction": {"type": "string"},
+                "structure": {"type": "string"},
+                "horizon": {"type": "string"},
+            },
+            "required": list[str](),
+        },
+    },
+    "questions": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}, "question_type": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+}
+
+_THESIS_PROPOSAL_KEYS = tuple(_THESIS_DELTA_PROPERTIES)
+
+TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
@@ -99,7 +149,7 @@ TOOLS = [
                 "exhaustive": {"type": "boolean", "description": "Fan out over all routes (default false; non-exhaustive)."},
                 "limit": {"type": "integer"}
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -160,7 +210,7 @@ TOOLS = [
                     "search_id": {"type": "string"},
                     "limit": {"type": "integer"}
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -340,7 +390,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}, "domain": {"type": "string", "description": "Browse a domain pack: filings, ownership, insider, offerings, events, governance, transactions, market."}},
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -360,7 +410,7 @@ TOOLS = [
                     "form_type": {"type": "string", "enum": ["SC 13D", "SC 13G", "both"]},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25}
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -446,7 +496,7 @@ TOOLS = [
                     "settlement_date": {"type": "string", "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle."},
                     "as_of": {"type": "string", "description": "Optional knowledge horizon (YYYY-MM-DD). Only data knowable on or before this date is used. Defaults to today; pass an explicit date for a historical screen."}
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -485,7 +535,7 @@ TOOLS = [
                         "description": "Optional trade date YYYY-MM-DD."
                     }
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -596,7 +646,7 @@ TOOLS = [
                         "description": "Optional substring match on name/description."
                     }
                 },
-                "required": []
+                "required": list[str]()
             }
         }
     },
@@ -879,7 +929,7 @@ TOOLS = [
                 "properties": {
                     "refresh": {"type": "boolean", "description": "If true, refresh account and quote data from Robinhood before returning the snapshot."}
                 },
-                "required": []
+                "required": list[str]()
             },
         },
     },
@@ -888,7 +938,7 @@ TOOLS = [
         "function": {
             "name": "get_scanner_filter_specs",
             "description": "Lists every valid Robinhood scanner filter type and usage (read-only catalog).",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": dict[str, object](), "required": list[str]()},
         },
     },
     {
@@ -896,7 +946,7 @@ TOOLS = [
         "function": {
             "name": "evaluate_mandate",
             "description": "Deterministic risk/mandate evaluation of the latest portfolio snapshot against data/mandate.json: sector exposure, single-position weight, minimum cash, prohibited assets. Breaches are computed by Stockbot; explain them, do not recalculate.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "parameters": {"type": "object", "properties": dict[str, object](), "additionalProperties": False},
         },
     },
     {
@@ -904,7 +954,7 @@ TOOLS = [
         "function": {
             "name": "get_scans",
             "description": "Lists the user's saved Robinhood scanners (screeners): id, title, active filters, configured columns, sort order, and whether the scan is Cortex-managed (read-only).",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": dict[str, object](), "required": list[str]()},
         },
     },
     {
@@ -940,6 +990,178 @@ TOOLS = [
                     "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Maximum results, 1-25 (default 5)."},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_create",
+            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_thesis": {"type": "string", "description": "The user's investment thesis in their own words."},
+                    **_THESIS_DELTA_PROPERTIES,
+                },
+                "required": ["user_thesis"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_show",
+            "description": "Reads one thesis with its assessment, watch rules, and open questions. Nonmutating.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "as_of": {"type": "string", "description": "Point-in-time cutoff (ISO-8601); omit for current state."},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_refine",
+            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "clarification": {"type": "string", "description": "New information or correction in the user's own words."},
+                    **_THESIS_DELTA_PROPERTIES,
+                },
+                "required": ["id", "clarification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_watch",
+            "description": "Lists a thesis's watch rules, or appends one validated supported rule (IDs and domain input only). Never modifies existing rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "rule_type": {"type": "string", "description": "Semantic monitor name to add (omit to only list rules)."},
+                    "claim_ids": {"type": "array", "items": {"type": "string"}},
+                    "expression_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "thesis_journal",
+            "description": "Appends one operator note to a thesis journal (active theses only).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "title": {"type": "string"},
+                    "body": {"type": "string", "description": "Note body (Markdown)."},
+                    "trigger_id": {"type": "string", "description": "Trigger this entry completes (omit for ordinary notes)."},
+                    "run_id": {"type": "string", "description": "Live run this entry completes (trigger-linked only)."},
+                    "known_at": {"type": "string", "description": "PIT cutoff this entry is known at (ISO-8601)."},
+                },
+                "required": ["id", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_alternative_signals",
+            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Substring filter over candidate terms."},
+                    "geo": {"type": "string", "description": "Geography filter, e.g. US."},
+                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; candidates known after it are excluded."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max candidates (default 20)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trend_evidence",
+            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
+                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geographies, e.g. [US]."},
+                    "geo": {"type": "string", "description": "Single geography shorthand for geos."},
+                    "term": {"type": "string", "description": "Optional substring filter over collected terms."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Max rows (default 100)."},
+                    "week_start": {"type": "string", "description": "Interest-week start YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
+                    "week_end": {"type": "string", "description": "Interest-week end YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "investigate_social_arbitrage_candidate",
+            "description": "Bounded enrichment for one discovery term: local signal evidence and SEC-confirmed/unresolved entity mappings plus a pointer to transient YouTube corroboration. Returns evidence and explicit gaps; never fabricates causality and never trades.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string", "description": "Discovery term to investigate."},
+                    "geo": {"type": "string", "description": "Geography, e.g. US."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Max evidence rows per source (default 5; YouTube never above 5)."},
+                },
+                "required": ["term"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_macro_context",
+            "description": "Bounded Data Commons statistical observations for explicit geography/variable IDs with unit/facet/provider provenance. Distinct facets stay distinct; never splices incompatible series.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geography DCIDs, e.g. [geoId/06]."},
+                    "variables": {"type": "array", "items": {"type": "string"}, "description": "Statistical variable IDs, e.g. [Count_Person]."},
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max observations (default 100)."},
+                },
+                "required": ["geos", "variables"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_company_patents",
+            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string", "description": "Documented assignee name from existing company evidence."},
+                    "assignees": {"type": "array", "items": {"type": "string"}, "description": "Documented assignee aliases (verified, never inferred from matching text)."},
+                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
+                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max publications (default 20)."},
+                },
+                "required": ["company_id", "assignees"],
             },
         },
     },
@@ -980,61 +1202,65 @@ def authorize_robinhood_browser() -> bool:
         return False
 
 
-def _provider_payload(value):
+def _provider_payload(value: object) -> object:
+    """Unwrap MCP envelope (genuinely dynamic provider JSON)."""
     if isinstance(value, dict):
         structured = value.get("structured_content") or value.get("structuredContent")
         if structured is not None:
-            return structured
+            payload: object = structured
+            return payload
         content = value.get("content")
         if isinstance(content, list):
             for block in content:
                 text = block.get("text") if isinstance(block, dict) else None
                 if text:
                     try:
-                        return json.loads(text)
+                        parsed: object = json.loads(text)
+                        return parsed
                     except (TypeError, ValueError):
                         return {"text": text}
         return value
     return value
 
 
-def _rows(payload, *keys: str) -> list[dict]:
-    payload = _provider_payload(payload)
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-    if not isinstance(payload, dict):
+def _rows(payload: object, *keys: str) -> list[dict[str, object]]:
+    unwrapped = _provider_payload(payload)
+    if isinstance(unwrapped, list):
+        return [{str(k): v for k, v in row.items()} for row in unwrapped if isinstance(row, dict)]
+    if not isinstance(unwrapped, dict):
         return []
     for key in keys:
-        value = payload.get(key)
+        value = unwrapped.get(key)
         if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
+            return [{str(k): v for k, v in row.items()} for row in value if isinstance(row, dict)]
     for key in ("data", "results", "items", "records"):
-        value = payload.get(key)
+        value = unwrapped.get(key)
         if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
+            return [{str(k): v for k, v in row.items()} for row in value if isinstance(row, dict)]
         if isinstance(value, dict):
             nested = _rows(value, *keys)
             if nested:
                 return nested
-    return [payload]
+    return [{str(k): v for k, v in unwrapped.items()}]
 
 
-def _first(value, *keys):
+def _first(value: object, *keys: str) -> object:
     if not isinstance(value, dict):
         return None
     for key in keys:
         if value.get(key) is not None:
-            return value[key]
+            found: object = value[key]
+            return found
     return None
 
 
-def _quote_row(value):
+def _quote_row(value: object) -> object:
     if isinstance(value, dict) and isinstance(value.get("quote"), dict):
         return value["quote"]
     return value
 
 
-def get_market_snapshot(ticker: str) -> dict:
+def get_market_snapshot(ticker: str) -> dict[str, object]:
     ticker = ticker.strip().upper()
     provider = RobinhoodPortfolioProvider(_robinhood_client())
     quote = provider.get_equity_quotes([ticker]).get(ticker)
@@ -1056,7 +1282,7 @@ def get_market_snapshot(ticker: str) -> dict:
 _PORTFOLIO_TOP_POSITIONS = 15
 _PORTFOLIO_TOP_LARGEST = 5
 
-def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict:
+def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict[str, object]:
     """Deterministic mandate evaluation over the latest persisted snapshot."""
     path = mandate_path or Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
     try:
@@ -1098,27 +1324,61 @@ def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = 
     }
 
 
-def _str_or_none(value) -> str | None:
+def _str_or_none(value: object) -> str | None:
     return str(value) if value is not None else None
 
 
-def _research_freshness(freshness_items: list[dict]) -> dict:
+def _optional_int(value: object) -> int | None:
+    """Lenient tool-JSON int coercion (None stays None, garbage raises)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())
+    return int(str(value))
+
+
+def _tool_function(tool: dict[str, object]) -> dict[str, object]:
+    """OpenAI schema function dict (TOOLS entries are untyped app-side JSON)."""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        return {str(k): v for k, v in function.items()}
+    return {}
+
+
+ModelHandler = Callable[[dict[str, object], str], dict[str, object]]
+ContextHandler = Callable[[dict[str, object], RequestContext], dict[str, object]]
+
+
+def _freshness_key(item: dict[str, object]) -> tuple[str, str, str]:
+    return (
+        str(item.get("sec_latest_filed_at") or "0000-00-00"),
+        str(item.get("finra_settlement_date") or "0000-00-00"),
+        str(item.get("finra_known_at") or ""),
+    )
+
+
+def _bases_count_key(bases: list[object]) -> Callable[[str], int]:
+    def _count(s: str) -> int:
+        return bases.count(s)
+    return _count
+
+
+def _research_freshness(freshness_items: list[dict[str, object]]) -> dict[str, object]:
     """Aggregate per-position research freshness to one latest non-empty dict."""
     non_empty = [item for item in freshness_items if item]
     if not non_empty:
         return {}
-    return max(
-        non_empty,
-        key=lambda item: (
-            item.get("sec_latest_filed_at") or "0000-00-00",
-            item.get("finra_settlement_date") or "0000-00-00",
-            item.get("finra_known_at") or "",
-        ),
-    )
+    return max(non_empty, key=_freshness_key)
 
 
-def _position_research_row(position, research_item) -> dict:
-    row = {
+def _position_research_row(position: Position, research_item: PortfolioResearchPosition | None) -> dict[str, object]:
+    row: dict[str, object] = {
         "ticker": position.ticker,
         "quantity": str(position.quantity),
         "market_price": _str_or_none(position.market_price),
@@ -1131,10 +1391,10 @@ def _position_research_row(position, research_item) -> dict:
         "resolved": position.entity_id is not None,
     }
     if research_item is not None:
-        sec = {}
+        sec: dict[str, object] = {}
         for concept in SEC_CONCEPTS:
             fact = research_item.latest_sec_metrics.get(concept)
-            if fact:
+            if isinstance(fact, dict) and fact:
                 sec[concept] = {
                     "value": _str_or_none(fact.get("value")),
                     "period_end": fact.get("period_end") or None,
@@ -1153,7 +1413,7 @@ def _position_research_row(position, research_item) -> dict:
     return row
 
 
-def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
+def _get_portfolio_snapshot(arguments: dict[str, object], model: str) -> dict[str, object]:
     """Bounded, deterministic portfolio snapshot (spec §23)."""
     del model
     refresh = bool(arguments.get("refresh", False))
@@ -1183,7 +1443,7 @@ def _get_portfolio_snapshot(arguments: dict, model: str) -> dict:
     return {
         "result_type": "portfolio_snapshot",
         # Persistent snapshot/account identifiers stay local. Tool results are
-        # rendered into OpenRouter context, where they are not needed.
+        # rendered into model context, where they are not needed.
         "created_at": snapshot.created_at.isoformat(),
         "created_at_local": snapshot.created_at.astimezone().isoformat(),
         "broker": snapshot.broker,
@@ -1234,44 +1494,49 @@ _SCAN_RESULTS_ROWS = 20
 _SCAN_WRITE_PREVIEW_ROWS = 10
 
 
-def _scan_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _scan_rows(data: dict[str, object]) -> list[dict[str, object]]:
     """Instrument rows from a scan payload under any of the common keys."""
     rows = _rows(data, "results", "instruments", "rows", "items")
     return rows if rows is not None else []
 
 
-def _get_scanner_filter_specs(arguments: dict, model: str) -> dict:
+def _get_scanner_filter_specs(arguments: dict[str, object], model: str) -> dict[str, object]:
     del arguments, model
     data = RobinhoodPortfolioProvider(_robinhood_client()).get_scanner_filter_specs()
     specs = data.get("filter_specs")
-    rows = [row for row in specs if isinstance(row, dict)] if isinstance(specs, list) else _scan_rows(data)
-    return {
+    if isinstance(specs, list):
+        rows = [{str(k): v for k, v in row.items()} for row in specs if isinstance(row, dict)]
+    else:
+        rows = [{k: v for k, v in row.items()} for row in _scan_rows(data)]
+    result: dict[str, object] = {
         "result_type": "scan_specs",
         "count": len(rows),
         "specs": rows[:_SCAN_SPECS_CAP],
         "omitted_count": max(0, len(rows) - _SCAN_SPECS_CAP),
         "source": "robinhood_mcp",
     }
+    return result
 
 
-def _get_scans(arguments: dict, model: str) -> dict:
+def _get_scans(arguments: dict[str, object], model: str) -> dict[str, object]:
     del arguments, model
     rows = RobinhoodPortfolioProvider(_robinhood_client(
         account_tools=frozenset({"get_scans"})
     )).get_scans()
-    return {
+    result: dict[str, object] = {
         "result_type": "scan_list",
         "count": len(rows),
         "scans": rows[:_SCAN_LIST_CAP],
         "omitted_count": max(0, len(rows) - _SCAN_LIST_CAP),
         "source": "robinhood_mcp",
     }
+    return result
 
 
-def _run_scan(arguments: dict, model: str) -> dict:
+def _run_scan(arguments: dict[str, object], model: str) -> dict[str, object]:
     del model
     scan_id = str(arguments["scan_id"])
-    limit = max(1, min(int(arguments.get("limit") or _SCAN_RESULTS_ROWS), 25))
+    limit = max(1, min(int(str(arguments.get("limit") or _SCAN_RESULTS_ROWS)), 25))
     data = RobinhoodPortfolioProvider(_robinhood_client(
         account_tools=frozenset({"run_scan"})
     )).run_scan(scan_id)
@@ -1290,14 +1555,14 @@ def _run_scan(arguments: dict, model: str) -> dict:
     }
 
 
-def _load_option_quotes(ticker: str, option_type: str, **filters) -> list[OptionQuote]:
+def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> list[OptionQuote]:
     client = _robinhood_client()
     chain = _provider_payload(
         client.call_tool("get_option_chains", {"underlying_symbol": ticker})
     )
     chain_rows = _rows(chain, "chains", "option_chains")
     chain_id = _first(chain_rows[0], "chain_id", "chainId", "id") if chain_rows else None
-    instrument_args = {"chain_symbol": ticker, "type": option_type}
+    instrument_args: dict[str, object] = {"chain_symbol": ticker, "type": option_type}
     if chain_id:
         instrument_args["chain_id"] = chain_id
     if filters.get("expiration_date") is not None:
@@ -1314,7 +1579,7 @@ def _load_option_quotes(ticker: str, option_type: str, **filters) -> list[Option
         if str(_first(row, "type", "option_type", "optionType") or option_type).lower() in {option_type, option_type[0]}
     ]
     today = date.today()
-    filtered_instruments = []
+    filtered_instruments: list[dict[str, object]] = []
     for row in instruments:
         expiration = str(_first(row, "expiration", "expiration_date", "expirationDate") or "")[:10]
         try:
@@ -1326,9 +1591,9 @@ def _load_option_quotes(ticker: str, option_type: str, **filters) -> list[Option
             strike_value = Decimal(str(strike))
         except (ValueError, TypeError):
             strike_value = None
-        if filters.get("min_dte") is not None and (dte is None or dte < int(filters["min_dte"])):
+        if filters.get("min_dte") is not None and (dte is None or dte < int(str(filters["min_dte"]))):
             continue
-        if filters.get("max_dte") is not None and (dte is None or dte > int(filters["max_dte"])):
+        if filters.get("max_dte") is not None and (dte is None or dte > int(str(filters["max_dte"]))):
             continue
         if filters.get("strike_min") is not None and (strike_value is None or strike_value < Decimal(str(filters["strike_min"]))):
             continue
@@ -1344,17 +1609,19 @@ def _load_option_quotes(ticker: str, option_type: str, **filters) -> list[Option
         "option_quotes",
         "results",
     ) if ids else []
-    quotes_by_id = {}
+    quotes_by_id: dict[str, object] = {}
     for row in quotes:
         quote = _quote_row(row)
         quote_id = _first(quote, "id", "instrument_id", "contract_id")
         if quote_id:
             quotes_by_id[str(quote_id)] = quote
-    normalized = []
+    normalized: list[OptionQuote] = []
     for instrument in instruments:
         instrument_id = str(_first(instrument, "id", "instrument_id", "contract_id") or "")
-        merged = dict(instrument)
-        merged.update(quotes_by_id.get(instrument_id, {}))
+        merged: dict[str, object] = dict(instrument)
+        raw_quote = quotes_by_id.get(instrument_id)
+        if isinstance(raw_quote, dict):
+            merged.update(raw_quote)
         merged["contract_id"] = instrument_id
         merged["ticker"] = ticker
         try:
@@ -1364,7 +1631,7 @@ def _load_option_quotes(ticker: str, option_type: str, **filters) -> list[Option
     return normalized
 
 
-def get_option_chain(ticker: str, option_type: str, min_dte=None, max_dte=None, strike_min=None, strike_max=None, limit=20) -> dict:
+def get_option_chain(ticker: str, option_type: str, min_dte: object = None, max_dte: object = None, strike_min: object = None, strike_max: object = None, limit: object = 20) -> dict[str, object]:
     ticker = ticker.strip().upper()
     option_type = option_type.lower()
     quotes = _load_option_quotes(
@@ -1378,8 +1645,8 @@ def get_option_chain(ticker: str, option_type: str, min_dte=None, max_dte=None, 
     today = date.today()
     filtered = [
         quote for quote in quotes
-        if (min_dte is None or (quote.expiration - today).days >= int(min_dte))
-        and (max_dte is None or (quote.expiration - today).days <= int(max_dte))
+        if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
+        and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
         and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
         and (strike_max is None or quote.strike <= Decimal(str(strike_max)))
     ]
@@ -1388,7 +1655,7 @@ def get_option_chain(ticker: str, option_type: str, min_dte=None, max_dte=None, 
             "error": f"No Robinhood {option_type} contracts matched the requested filters for {ticker}",
             "source": "robinhood_mcp",
         }
-    bounded = max(1, min(int(limit or 20), 30))
+    bounded = max(1, min(int(str(limit or 20)), 30))
     return {
         "result_type": "option_chain",
         "ticker": ticker,
@@ -1401,23 +1668,23 @@ def get_option_chain(ticker: str, option_type: str, min_dte=None, max_dte=None, 
     }
 
 
-def analyze_option_contract(ticker: str, expiration: str, strike, option_type: str, target_price=None) -> dict:
+def analyze_option_contract(ticker: str, expiration: str, strike: object, option_type: str, target_price: object = None) -> dict[str, object]:
     quotes = _load_option_quotes(ticker.strip().upper(), option_type.lower(), expiration_date=expiration)
     matches = [quote for quote in quotes if quote.expiration.isoformat() == expiration and quote.strike == Decimal(str(strike))]
     if not matches:
         return {"error": "No matching Robinhood option contract found", "source": "robinhood_mcp"}
-    return {"result_type": "option_analysis", **analyze_option(matches[0], target_price=target_price), "source": "robinhood_mcp"}
+    return {"result_type": "option_analysis", **analyze_option(matches[0], target_price=(str(target_price) if target_price is not None else None)), "source": "robinhood_mcp"}
 
 
-def compare_robinhood_options(ticker: str, option_type: str, target_price, min_dte=None, max_dte=None, strike_min=None, strike_max=None, limit=20) -> dict:
+def compare_robinhood_options(ticker: str, option_type: str, target_price: object, min_dte: object = None, max_dte: object = None, strike_min: object = None, strike_max: object = None, limit: object = 20) -> dict[str, object]:
     quotes = _load_option_quotes(
         ticker.strip().upper(), option_type.lower(), min_dte=min_dte, max_dte=max_dte, strike_min=strike_min, strike_max=strike_max
     )
     today = date.today()
     filtered = [
         quote for quote in quotes
-        if (min_dte is None or (quote.expiration - today).days >= int(min_dte))
-        and (max_dte is None or (quote.expiration - today).days <= int(max_dte))
+        if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
+        and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
         and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
         and (strike_max is None or quote.strike <= Decimal(str(strike_max)))
     ]
@@ -1426,19 +1693,29 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price, min_d
             "error": f"No Robinhood {option_type} contracts matched the requested filters for {ticker}",
             "source": "robinhood_mcp",
         }
-    return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=target_price, limit=limit)}
+    return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=(str(target_price) if target_price is not None else None), limit=int(str(limit or 20)))}
 
 
-def _search_web(args: dict, model: str) -> dict:
+def _search_web(args: dict[str, object], model: str) -> dict[str, object]:
     """Exa-backed web search; harness-level soft failures must not stop the run."""
+    raw_inc = args.get("include_domains")
+    if isinstance(raw_inc, list):
+        include_domains: list[str] | None = [str(x) for x in raw_inc]
+    else:
+        include_domains = None
+    raw_exc = args.get("exclude_domains")
+    if isinstance(raw_exc, list):
+        exclude_domains: list[str] | None = [str(x) for x in raw_exc]
+    else:
+        exclude_domains = None
     result = exa_client.search(
-        args["query"],
-        category=args.get("category"),
-        include_domains=args.get("include_domains"),
-        exclude_domains=args.get("exclude_domains"),
-        start_published_date=args.get("start_published_date"),
-        end_published_date=args.get("end_published_date"),
-        search_type=args.get("search_type") or "auto",
+        str(args["query"]),
+        category=_str_or_none(args.get("category")),
+        include_domains=include_domains,
+        exclude_domains=exclude_domains,
+        start_published_date=_str_or_none(args.get("start_published_date")),
+        end_published_date=_str_or_none(args.get("end_published_date")),
+        search_type=str(args.get("search_type") or "auto"),
         limit=args.get("limit") or exa_client.EXA_DEFAULT_LIMIT,
     )
     if isinstance(result, dict) and "error" in result:
@@ -1449,8 +1726,8 @@ def _search_web(args: dict, model: str) -> dict:
 def plan_public_search_queries(
     primary_name: str | None = None,
     primary_ticker: str | None = None,
-    related_names: Any = (),
-) -> list[dict]:
+    related_names: Sequence[object] = (),
+) -> list[dict[str, object]]:
     """PUBLIC search targets → search_web args (planning only, no numbers).
 
     Targets come only from the user request, canonical/public
@@ -1485,14 +1762,14 @@ def suggest_public_search_queries(
     primary_entity_id: str | None,
     primary_name: str | None,
     primary_ticker: str | None,
-    relationships: Any = (),
-    names_by_entity: Any = None,
-) -> list[dict]:
+    relationships: Sequence[EntityRelationship] = (),
+    names_by_entity: dict[str, str] | None = None,
+) -> list[dict[str, object]]:
     """Warehouse-aware wrapper: single-hop EntityRelationships."""
     related: list[str] = []
     if primary_entity_id:
         for rel in relationships or ():
-            other = None
+            other: str | None = None
             try:
                 if rel.from_entity_id == primary_entity_id:
                     other = rel.to_entity_id
@@ -1505,9 +1782,203 @@ def suggest_public_search_queries(
     return plan_public_search_queries(primary_name, primary_ticker, related)
 
 
-def _wrap_list(identifier, records, key: str) -> dict:
+def _google_soft(result: dict[str, object]) -> dict[str, object]:
+    """Collector passthrough: error dicts get soft:true like _search_web."""
+    if isinstance(result, dict) and "error" in result and "soft" not in result:
+        result = dict(result)
+        result["soft"] = True
+    return result
+
+
+def _google_import_error(source: str, exc: Exception) -> dict[str, object]:
+    return {"status": "unavailable", "source": source, "soft": True,
+            "error": f"Google data unavailable: {exc}", "error_type": "source_unavailable"}
+
+
+def _arg_str(args: dict[str, object], key: str) -> str | None:
+    """JSON-boundary narrow: schema strings only, None otherwise."""
+    raw = args.get(key)
+    return raw if isinstance(raw, str) else None
+
+
+def _arg_str_list(args: dict[str, object], key: str) -> list[str]:
+    raw = args.get(key)
+    if isinstance(raw, list):
+        return [v for v in raw if isinstance(v, str)]
+    return []
+
+
+def _arg_int(args: dict[str, object], key: str, default: int) -> int:
+    raw = args.get(key, default)
+    return int(raw) if isinstance(raw, (int, str)) else default
+
+
+def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, object]:
+    """Local collected candidates only; disabled without credentials, never raises."""
+    try:
+        from .google_data import signals as _signals
+    except Exception as exc:
+        return _google_import_error("google", exc)
+    try:
+        limit = _arg_int(args, "limit", 20)
+        rows = _signals.query_signals(
+            query=_arg_str(args, "query"), geo=_arg_str(args, "geo"), as_of=_arg_str(args, "as_of"),
+            limit=limit, data_root=get_data_root(),
+        )
+        try:
+            capped = len(rows) >= max(1, limit)
+        except (TypeError, ValueError):
+            capped = False
+        return {"status": "ok", "source": "google", "signals": rows,
+                "count": len(rows),
+                "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"),
+                             "as_of": _arg_str(args, "as_of")},
+                "warnings": [], "continuation": capped}
+    except Exception as exc:
+        logger.exception("find_alternative_signals failed")
+        return {"error": f"Tool 'find_alternative_signals' failed: {exc}", "soft": True, "source": "google"}
+
+
+def _get_trend_evidence(args: dict[str, object], model: str) -> dict[str, object]:
+    try:
+        from .google_data import trends as _trends
+    except Exception as exc:
+        return _google_import_error("trends", exc)
+    try:
+        geo = _arg_str(args, "geo")
+        raw_geos = args.get("geos")
+        str_geos: list[str] = [g for g in raw_geos if isinstance(g, str)] if isinstance(raw_geos, list) else []
+        geos = str_geos or ([geo] if geo else ["US"])
+        start_date = _arg_str(args, "start_date")
+        end_date = _arg_str(args, "end_date")
+        if start_date is None and end_date is None:
+            _today = datetime.now(timezone.utc).date()
+            end_date = _today.isoformat()
+            start_date = (_today - timedelta(days=6)).isoformat()
+        result = _google_soft(_trends.collect_trends(
+            start_date=start_date, end_date=end_date,
+            geos=list(geos), limit=_arg_int(args, "limit", 100),
+            data_root=get_data_root(),
+            week_start=_arg_str(args, "week_start"), week_end=_arg_str(args, "week_end"),
+            term=_arg_str(args, "term"),
+        ))
+        return result
+
+
+    except Exception as exc:
+        logger.exception("get_trend_evidence failed")
+        return {"error": f"Tool 'get_trend_evidence' failed: {exc}", "soft": True, "source": "trends"}
+
+
+def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str) -> dict[str, object]:
+    """Evidence + gaps for one term; corroboration capped, causality never claimed."""
+    term_raw = args.get("term", "")
+    term = term_raw if isinstance(term_raw, str) else str(term_raw or "")
+    geo = _arg_str(args, "geo") or "US"
+    per_source = min(max(_arg_int(args, "limit", 5), 1), 25)
+    evidence: dict[str, object] = {}
+    confirmed: list[object] = []
+    unresolved: list[object] = []
+    gaps: list[str] = []
+    result: dict[str, object] = {"term": term, "geo": geo, "source": "google",
+                     "status": "ok", "evidence": evidence,
+                     "entities": {"confirmed": confirmed, "unresolved": unresolved}, "gaps": gaps}
+    try:
+        from .google_data import signals as _signals
+        evidence["signals"] = _signals.query_signals(
+            query=term, geo=geo, limit=per_source, data_root=get_data_root())
+    except Exception as exc:
+        gaps.append(f"signals unavailable: {exc}")
+    try:
+        from datetime import datetime, timezone
+        from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
+        from .sec.discovery.service import find_sec_entities as _find_sec
+        from .storage.duckdb import ticker_alias_candidates as _alias_cands
+        sec = _find_sec(query=term, max_results=5, data_root=get_data_root())
+        for ent in list(getattr(sec, "entities", None) or []):
+            cik = getattr(ent, "cik", None)
+            entry = {"name": getattr(ent, "name", None) or term,
+                     "cik": cik,
+                     "verification_status": getattr(ent, "verification_status", None)}
+            if getattr(ent, "verification_status", None) == "verified" and cik:
+                confirmed.append(entry)
+            else:
+                unresolved.append(entry)
+        as_of = datetime.now(timezone.utc)
+        resolution = _resolve_alias(term.upper(),
+                                    _alias_cands(term.upper(), as_of, get_data_root()),
+                                    as_of=as_of)
+        if resolution.resolved:
+            confirmed.append(
+                {"ticker": term.upper(), "entity_id": resolution.entity_id,
+                 "security_id": resolution.security_id, "via": "ticker_alias"})
+        elif not confirmed and not unresolved:
+            unresolved.append({"ticker": term.upper(), "reason": "unresolved"})
+    except Exception as exc:
+        gaps.append(f"entity resolution unavailable: {exc}")
+    # ponytail: no YouTube imports/calls/data here — evidence table has no expiry, so API content must not enter tool results
+    gaps.append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
+    if len(gaps) >= 3 and not evidence:
+        result.update({"status": "unavailable", "soft": True, "error": "; ".join(gaps)})
+    return result
+
+
+def _get_macro_context(args: dict[str, object], model: str) -> dict[str, object]:
+    try:
+        from .google_data import datacommons as _dc
+    except Exception as exc:
+        return _google_import_error("datacommons", exc)
+    try:
+        return _google_soft(_dc.get_macro_context(
+            _arg_str_list(args, "geos"), _arg_str_list(args, "variables"),
+            start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
+            limit=_arg_int(args, "limit", 100),
+        ))
+    except Exception as exc:
+        logger.exception("get_macro_context failed")
+        return {"error": f"Tool 'get_macro_context' failed: {exc}", "soft": True, "source": "datacommons"}
+
+
+def _search_company_patents(args: dict[str, object], model: str) -> dict[str, object]:
+    try:
+        from .google_data import patents as _patents
+    except Exception as exc:
+        return _google_import_error("patents", exc)
+    try:
+        company_id = args["company_id"]
+        if not isinstance(company_id, str) or not company_id:
+            raise TypeError(f"company_id must be a non-empty string, got {type(company_id).__name__}")
+        assignees_raw = args.get("assignees")
+        assignees = [a for a in assignees_raw if isinstance(a, str)] if isinstance(assignees_raw, list) else None
+        return _google_soft(_patents.search_company_patents(
+            company_id, start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
+            limit=_arg_int(args, "limit", 20), assignees=assignees,
+        ))
+    except Exception as exc:
+        logger.exception("search_company_patents failed")
+        return {"error": f"Tool 'search_company_patents' failed: {exc}", "soft": True, "source": "patents"}
+
+
+def _wrap_list(identifier: object, records: object, key: str) -> dict[str, object]:
     """SEC list results: identifier echo, count, to_dict records, source."""
-    items = [r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in records or []]
+    if not isinstance(records, (list, tuple)):
+        rec_list: list[object] = []
+    else:
+        rec_list = list(records)
+    items: list[object] = []
+    for r in rec_list:
+        if hasattr(r, "to_dict"):
+            to_dict = getattr(r, "to_dict")
+            if callable(to_dict):
+                items.append(to_dict())
+            else:
+                items.append(r)
+        elif isinstance(r, dict):
+            items.append(dict(r))
+        elif isinstance(r, (list, tuple)):
+            items.append(list(r))
+        else:
+            items.append(r)
     return {"subject": identifier, "count": len(items), key: items, "source": "SEC EDGAR"}
 
 
@@ -1533,6 +2004,11 @@ _SEC_TOOL_TAGS = {
     "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
     "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
     "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
+    "find_alternative_signals": ("alternative", "trends discovery candidate signal persistence diffusion social arbitrage term geography"),
+    "get_trend_evidence": ("alternative", "trends evidence term geography rank list retrieval batch"),
+    "investigate_social_arbitrage_candidate": ("alternative", "social arbitrage candidate evidence entity exposure gap youtube corroboration"),
+    "get_macro_context": ("macro", "datacommons macro census geography statistical variable observation facet provider unit"),
+    "search_company_patents": ("patents", "patents publication assignee classification publication count assignee alias"),
 }
 
 _SEC_DOMAIN_PACKS = {
@@ -1547,39 +2023,57 @@ _SEC_DOMAIN_PACKS = {
 }
 
 
-def _search_tools(args: dict, model: str) -> dict:
+def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Keyword search over tool names, descriptions, and domain tags."""
     del model
-    query = (args.get("query") or "").strip().lower()
-    domain = (args.get("domain") or "").strip().lower()
-    by_name = {tool["function"]["name"]: tool for tool in TOOLS}
+    query = str(args.get("query") or "").strip().lower()
+    domain = str(args.get("domain") or "").strip().lower()
+    by_name: dict[str, dict[str, object]] = {}
+    for tool in TOOLS:
+        fn = _tool_function(tool)
+        raw_name = fn.get("name")
+        if isinstance(raw_name, str):
+            by_name[raw_name] = tool
     if domain and not query:
         names = _SEC_DOMAIN_PACKS.get(domain, [])
         return {"domain": domain, "schemas": [by_name[n] for n in names if n in by_name]}
     tokens = query.split()
-    matches = []
+    matches: list[dict[str, object]] = []
     for name, tool in by_name.items():
         if name == "search_tools":
             continue
         tags = _SEC_TOOL_TAGS.get(name, ("", ""))[1]
-        haystack = f"{name} {tool['function'].get('description', '')} {tags}".lower().replace("_", " ")
+        fn_desc = _tool_function(tool).get("description", "")
+        haystack = f"{name} {str(fn_desc)} {tags}".lower().replace("_", " ")
         if tokens and all(token in haystack for token in tokens):
             matches.append(tool)
     return {"query": args.get("query"), "count": len(matches), "schemas": matches}
 
 
-def _search_envelope(result) -> dict:
+def _search_envelope(result: SECSearchResult) -> dict[str, object]:
     """SECSearchResult -> model packet: roles, ledger, PIT, jobs, evidence."""
     data = result.to_dict()
-    cov = data.get("coverage") or {}
-    attempts = data.get("attempts") or []
-    hits = [
-        {**hit, "match_role": "mention",
-         "subject_cik": None, "subject_name": None}
-        for hit in data.get("text_hits") or []
-    ]
-    bases = [a.get("pit_basis") for a in attempts if a.get("pit_basis")]
-    request = data.get("request") or {}
+    raw_cov = data.get("coverage")
+    cov: dict[str, object] = {str(k): v for k, v in raw_cov.items()} if isinstance(raw_cov, dict) else {}
+    raw_attempts = data.get("attempts")
+    attempts: list[dict[str, object]] = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, (list, tuple)) else []
+    raw_hits = data.get("text_hits")
+    hits: list[dict[str, object]] = []
+    if isinstance(raw_hits, (list, tuple)):
+        for hit in raw_hits:
+            if isinstance(hit, dict):
+                base: dict[str, object] = {str(k): v for k, v in hit.items()}
+                base["match_role"] = "mention"
+                base["subject_cik"] = None
+                base["subject_name"] = None
+                hits.append(base)
+    bases: list[object] = []
+    for a in attempts:
+        raw_basis = a.get("pit_basis")
+        if raw_basis is not None:
+            bases.append(raw_basis)
+    raw_req = data.get("request")
+    request: dict[str, object] = {str(k): v for k, v in raw_req.items()} if isinstance(raw_req, dict) else {}
     return {
         "subject": request.get("query") or request.get("company_name"),
         "query": request.get("query"),
@@ -1596,34 +2090,34 @@ def _search_envelope(result) -> dict:
             "results_reported": cov.get("results_reported", 0),
             "results_retrieved": cov.get("results_retrieved", 0),
             "pages": cov.get("pages", 0),
-            "entities": len(data.get("entities") or []),
-            "filings": len(data.get("filings") or []),
-            "documents": len(data.get("documents") or []),
+            "entities": len(data["entities"]) if isinstance(data.get("entities"), (list, tuple)) else 0,
+            "filings": len(data["filings"]) if isinstance(data.get("filings"), (list, tuple)) else 0,
+            "documents": len(data["documents"]) if isinstance(data.get("documents"), (list, tuple)) else 0,
         },
-        "pit_basis": max(set(bases), key=bases.count) if bases else None,
+        "pit_basis": max(set(str(b) for b in bases), key=_bases_count_key(bases)) if bases else None,
         "warnings": data.get("warnings"),
         "errors": data.get("errors"),
-        "backfill_jobs": list(cov.get("pending_backfill_jobs") or []),
+        "backfill_jobs": list(cov["pending_backfill_jobs"]) if isinstance(cov.get("pending_backfill_jobs"), (list, tuple)) else [],
         "evidence_packet_ids": data.get("evidence_packet_ids"),
         "source": "SEC EDGAR",
     }
 
 
-def _find_sec_entities(args: dict) -> dict:
+def _find_sec_entities(args: dict[str, object]) -> dict[str, object]:
     """Entity discovery -> envelope with candidate verification statuses."""
-    exhaustive = args.get("exhaustive", False)
+    exhaustive = bool(args.get("exhaustive", False))
     if args.get("limit") is not None:
-        max_results = args.get("limit")
+        max_results = _optional_int(args.get("limit"))
     else:
         max_results = None if exhaustive else 20
     return _search_envelope(sec.find_sec_entities(
-        args["query"], as_of=args.get("as_of"),
+        str(args["query"]), as_of=_str_or_none(args.get("as_of")),
         exhaustive=exhaustive, max_results=max_results,
         data_root=get_data_root(),
     ))
 
 
-def _sec_search_result(args: dict) -> dict:
+def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
     """Bounded discovery search -> envelope with jobs + evidence IDs."""
     if not any(args.get(key) for key in (
             "query", "ticker", "cik", "company_name", "person_name",
@@ -1632,20 +2126,27 @@ def _sec_search_result(args: dict) -> dict:
             "search_sec_filings needs one of: query, ticker, cik, "
             "company_name, person_name, domain, accession_no, "
             "security_identifier")
-    exhaustive = args.get("exhaustive", False)
+    exhaustive = bool(args.get("exhaustive", False))
     if args.get("limit") is not None:
-        max_results = args.get("limit")
+        max_results = _optional_int(args.get("limit"))
     else:
         max_results = None if exhaustive else 20
+    raw_forms = args.get("forms")
+    if isinstance(raw_forms, str):
+        forms: tuple[str, ...] | None = (raw_forms,)
+    elif isinstance(raw_forms, (list, tuple)):
+        forms = tuple(str(x) for x in raw_forms)
+    else:
+        forms = None
     request = sec.SECSearchRequest(
-        query=args.get("query"), ticker=args.get("ticker"), cik=args.get("cik"),
-        company_name=args.get("company_name"),
-        person_name=args.get("person_name"), domain=args.get("domain"),
-        accession_no=args.get("accession_no"),
-        security_identifier=args.get("security_identifier"),
-        forms=tuple(args["forms"]) if args.get("forms") else None,
-        start_date=args.get("start_date"), end_date=args.get("end_date"),
-        as_of=args.get("as_of"),
+        query=_str_or_none(args.get("query")), ticker=_str_or_none(args.get("ticker")), cik=_str_or_none(args.get("cik")),
+        company_name=_str_or_none(args.get("company_name")),
+        person_name=_str_or_none(args.get("person_name")), domain=_str_or_none(args.get("domain")),
+        accession_no=_str_or_none(args.get("accession_no")),
+        security_identifier=_str_or_none(args.get("security_identifier")),
+        forms=forms,
+        start_date=_str_or_none(args.get("start_date")), end_date=_str_or_none(args.get("end_date")),
+        as_of=_str_or_none(args.get("as_of")),
         exhaustive=exhaustive,
         max_results=max_results,
     )
@@ -1653,39 +2154,79 @@ def _sec_search_result(args: dict) -> dict:
         sec.SECDiscoveryService(data_root=get_data_root()).search(request))
 
 
-def _get_sec_document(args: dict, model: str) -> dict:
+def _get_sec_document(args: dict[str, object], model: str) -> dict[str, object]:
     """Archive-first document read; model callers always get a bounded window."""
     del model
-    offset = args.get("offset", 0)
-    max_chars = args.get("max_chars", 12_000)
+    raw_offset = args.get("offset", 0)
+    if isinstance(raw_offset, bool):
+        offset = int(raw_offset)
+    elif isinstance(raw_offset, int):
+        offset = raw_offset
+    elif isinstance(raw_offset, float):
+        offset = int(raw_offset)
+    elif isinstance(raw_offset, str):
+        offset = int(raw_offset.strip()) if raw_offset.strip() else 0
+    elif raw_offset is None:
+        offset = 0
+    else:
+        offset = int(str(raw_offset))
+    raw_max = args.get("max_chars", 12_000)
+    if raw_max is None:
+        max_chars: int | None = 12_000
+    elif isinstance(raw_max, bool):
+        max_chars = int(raw_max)
+    elif isinstance(raw_max, int):
+        max_chars = raw_max
+    elif isinstance(raw_max, float):
+        max_chars = int(raw_max)
+    elif isinstance(raw_max, str):
+        max_chars = int(raw_max.strip()) if raw_max.strip() else 12_000
+    else:
+        max_chars = int(str(raw_max))
     try:
         return sec.get_sec_document(
-            args["accession_no"], args.get("document_name"),
-            as_of=args.get("as_of"),
-            offset=0 if offset is None else offset,
-            max_chars=12_000 if max_chars is None else max_chars,
+            str(args["accession_no"]), _str_or_none(args.get("document_name")),
+            as_of=_str_or_none(args.get("as_of")),
+            offset=offset,
+            max_chars=max_chars,
             data_root=get_data_root(),
         )
     except (KeyError, ValueError) as exc:
         return {"error": str(exc), "error_type": "invalid_tool_arguments"}
 
 
-def _sec_relationships_result(args: dict) -> dict:
+def _sec_relationships_result(args: dict[str, object]) -> dict[str, object]:
+    raw_rt = args.get("relationship_types")
+    if raw_rt is None:
+        rel_types: Sequence[str] | None = None
+    elif isinstance(raw_rt, str):
+        rel_types = (raw_rt,)
+    elif isinstance(raw_rt, (list, tuple)):
+        rel_types = tuple(str(x) for x in raw_rt)
+    else:
+        rel_types = None
     result = sec.search_sec_relationships(
-        args["entity"], relationship_types=args.get("relationship_types"),
-        as_of=args.get("as_of"), limit=args.get("limit", 50),
-        exhaustive=args.get("exhaustive", True),
+        str(args["entity"]), relationship_types=rel_types,
+        as_of=_str_or_none(args.get("as_of")), limit=int(str(args.get("limit", 50) or 50)),
+        exhaustive=bool(args.get("exhaustive", True)),
     )
-    found = len(result.get("typed") or []) + len(
-        result.get("relationships") or []) + len(result.get("mentions") or [])
-    errors = result.get("errors") or []
-    attempts = result.get("attempts") or []
-    has_partial = any((a or {}).get("status") in ("partial", "source_limited", "complete_within_source_limits", "retrying") for a in attempts)
-    has_failed = any((a or {}).get("status") == "failed" for a in attempts)
+    raw_typed = result.get("typed")
+    typed_list: list[object] = list(raw_typed) if isinstance(raw_typed, (list, tuple)) else list[object]()
+    raw_rels = result.get("relationships")
+    rels_list: list[object] = list(raw_rels) if isinstance(raw_rels, (list, tuple)) else list[object]()
+    raw_ment = result.get("mentions")
+    ment_list: list[object] = list(raw_ment) if isinstance(raw_ment, (list, tuple)) else list[object]()
+    found = len(typed_list) + len(rels_list) + len(ment_list)
+    raw_errors = result.get("errors")
+    errors: list[object] = list(raw_errors) if isinstance(raw_errors, (list, tuple)) else []
+    raw_attempts = result.get("attempts")
+    attempts: list[dict[str, object]] = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, list) else []
+    has_partial = any(a.get("status") in ("partial", "source_limited", "complete_within_source_limits", "retrying") for a in attempts)
+    has_failed = any(a.get("status") == "failed" for a in attempts)
     return {
         "subject": args.get("entity"),
         "entity": result.get("entity"),
-        "ciks": list(result.get("ciks") or []),
+        "ciks": list(result["ciks"]) if isinstance(result.get("ciks"), (list, tuple)) else [],
         "request": {"entity": args.get("entity"),
                     "relationship_types": args.get("relationship_types"),
                     "as_of": args.get("as_of")},
@@ -1697,171 +2238,195 @@ def _sec_relationships_result(args: dict) -> dict:
         "coverage": {"status": "failed" if (errors and not found) or (has_failed and not found) else (
             "partial" if errors or result.get("warnings") or has_partial or has_failed else "complete")},
         "attempts": result.get("attempts"),
-        "counts": {"typed": len(result.get("typed") or []),
-                   "workflow": len(result.get("relationships") or []),
-                   "mentions": len(result.get("mentions") or [])},
+        "counts": {"typed": len(typed_list),
+                   "workflow": len(rels_list),
+                   "mentions": len(ment_list)},
         "pit_basis": "known_at" if args.get("as_of") else None,
         "warnings": result.get("warnings"),
         "errors": errors,
         "backfill_jobs": [],
         "source": "SEC EDGAR",
     }
+def _list_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
+    """List filings with lenient tool-JSON coercions (forms union narrowed here)."""
+    del model
+    raw_forms = args.get("forms")
+    if raw_forms is None:
+        forms: str | list[str] | tuple[str, ...] | None = None
+    elif isinstance(raw_forms, str):
+        forms = raw_forms
+    elif isinstance(raw_forms, (list, tuple)):
+        forms = tuple(str(x) for x in raw_forms)
+    else:
+        forms = None
+    return _wrap_list(
+        args.get("identifier"),
+        sec.list_sec_filings(
+            str(args["identifier"]),
+            forms=forms,
+            start_date=_str_or_none(args.get("start_date")),
+            end_date=_str_or_none(args.get("end_date")),
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 50)),
+        ),
+        "filings",
+    )
+
+
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
-_DIRECT_HANDLERS = {
+_MODEL_HANDLERS: dict[str, ModelHandler] = {
     "evaluate_mandate": lambda args, model: evaluate_mandate(),
     "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
-        args["ticker"], args["metric"], as_of=args.get("as_of")
+        str(args["ticker"]), str(args["metric"]), as_of=_str_or_none(args.get("as_of"))
     ),
     "find_sec_entities": lambda args, model: _find_sec_entities(args),
     "search_sec_relationships": lambda args, model: _sec_relationships_result(args),
     "get_sec_search_coverage": lambda args, model: sec.get_sec_search_coverage(
-        source=args.get("source"), form=args.get("form"),
-        search_id=args.get("search_id"), limit=args.get("limit", 200),
+        source=_str_or_none(args.get("source")), form=_str_or_none(args.get("form")),
+        search_id=_str_or_none(args.get("search_id")), limit=int(str(args.get("limit", 200))),
     ),
     "search_sec_filings": lambda args, model: _sec_search_result(args),
-    "list_sec_filings": lambda args, model: _wrap_list(
-        args.get("identifier"), sec.list_sec_filings(
-            args["identifier"], forms=args.get("forms"), start_date=args.get("start_date"),
-            end_date=args.get("end_date"), as_of=args.get("as_of"),
-            limit=args.get("limit", 50),
-        ), "filings",
-    ),
+    "list_sec_filings": _list_sec_filings,
     "get_sec_filing": lambda args, model: sec.get_sec_filing(
-        args["accession_no"], as_of=args.get("as_of")).to_dict(),
+        str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))).to_dict(),
     "list_sec_documents": lambda args, model: _wrap_list(
         args.get("accession_no"), sec.list_sec_documents(
-            args["accession_no"], as_of=args.get("as_of")), "documents",
+            str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))), "documents",
     ),
     "get_sec_document": _get_sec_document,
     "diff_sec_filings": lambda args, model: sec.diff_filings(
-        args["current_accession"], args["previous_accession"], section=args.get("section"),
+        str(args["current_accession"]), str(args["previous_accession"]), section=_str_or_none(args.get("section")),
     ),
     "get_material_events": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_material_events(
-            args["ticker"], args["since"], as_of=args.get("as_of"),
-            limit=args.get("limit", 50),
+            str(args["ticker"]), str(args["since"]), as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 50)),
         ), "events",
     ),
     "get_beneficial_ownership": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_beneficial_ownership(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
         ), "records",
     ),
     "get_ownership_changes": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_ownership_changes(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
         ), "changes",
     ),
     "get_insider_activity": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_insider_activity(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 50),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
         ), "transactions",
     ),
     "get_planned_insider_sales": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_planned_insider_sales(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 20),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
         ), "proposed_sales",
     ),
     "get_offering_history": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_offering_history(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 50),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
         ), "offerings",
     ),
     "get_dilution_profile": lambda args, model: sec.get_dilution_profile(
-        args["ticker"], as_of=args.get("as_of"),
+        str(args["ticker"]), as_of=_str_or_none(args.get("as_of")),
     ),
     "get_governance_events": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_governance_events(
-            args["ticker"], since=args.get("since"), as_of=args.get("as_of"),
-            limit=args.get("limit", 10),
+            str(args["ticker"]), since=_str_or_none(args.get("since")), as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 10)),
         ), "events",
     ),
     "get_transaction_status": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_transaction_status(
-            args["ticker"], as_of=args.get("as_of"), limit=args.get("limit", 10),
+            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 10)),
         ), "transactions",
     ),
     "get_short_pressure_profile": lambda args, model: sec.get_short_pressure_context(
-        args["ticker"],
+        str(args["ticker"]),
     ),
     "search_tools": _search_tools,
-    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(args.get("form_type", "both"), args.get("limit", 10)),
-    "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(args["ticker"]),
-    "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(args["ticker"], args["concept"]),
+    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(str(args.get("form_type", "both")), int(str(args.get("limit", 10)))),
+    "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(str(args["ticker"])),
+    "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(str(args["ticker"]), str(args["concept"])),
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
-        args["ticker"], args["statement_type"]
+        str(args["ticker"]), str(args["statement_type"])
     ),
-    "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(args["ticker"]),
-    "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(args["ticker"]),
-    "get_obligations": lambda args, model: obligations.get_obligations(args["ticker"]),
-    "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(args["ticker"]),
+    "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(str(args["ticker"])),
+    "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(str(args["ticker"])),
+    "get_obligations": lambda args, model: obligations.get_obligations(str(args["ticker"])),
+    "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(str(args["ticker"])),
     "search_web": _search_web,
+    "find_alternative_signals": _find_alternative_signals,
+    "get_trend_evidence": _get_trend_evidence,
+    "investigate_social_arbitrage_candidate": _investigate_social_arbitrage_candidate,
+    "get_macro_context": _get_macro_context,
+    "search_company_patents": _search_company_patents,
 }
 
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
 # parity test can prove every FINRA schema has an executable dispatcher.
-_FINRA_HANDLERS = {
-    "get_short_interest_leaderboard": lambda args, model: analytics.screens.get_short_interest_leaderboard(
-        limit=args.get("limit"), settlement_date=args.get("settlement_date"), as_of=args.get("as_of")
+_FINRA_HANDLERS: dict[str, ModelHandler] = {
+    "get_short_interest_leaderboard": lambda args, model: screens.get_short_interest_leaderboard(
+        limit=_optional_int(args.get("limit")), settlement_date=_str_or_none(args.get("settlement_date")), as_of=_str_or_none(args.get("as_of"))
     ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
-        args["ticker"], args.get("settlementDate")
+        str(args["ticker"]), _str_or_none(args.get("settlementDate"))
     ),
     "get_reg_sho_volume": lambda args, model: finra_client.get_reg_sho_volume(
-        args["ticker"], args.get("tradeDate")
+        str(args["ticker"]), _str_or_none(args.get("tradeDate"))
     ),
     "get_threshold_securities": lambda args, model: finra_client.get_threshold_securities(
-        args.get("ticker"), args.get("tradeDate")
+        _str_or_none(args.get("ticker")), _str_or_none(args.get("tradeDate"))
     ),
     "list_finra_datasets": lambda args, model: finra_client.list_datasets(
-        group=args.get("group"), search=args.get("search")
+        group=_str_or_none(args.get("group")), search=_str_or_none(args.get("search"))
     ),
     "describe_finra_dataset": lambda args, model: finra_client.describe_dataset(
-        args.get("dataset_id") or args.get("dataset")
+        str(args.get("dataset_id") or args.get("dataset") or "")
     ),
     "get_finra_datapoints": lambda args, model: finra_client.get_finra_datapoints(
-        args["dataset"],
+        str(args["dataset"]),
         fields=args.get("fields"),
-        ticker=args.get("ticker") or args.get("symbol"),
-        start_date=args.get("start_date"),
-        end_date=args.get("end_date"),
-        limit=args.get("limit"),
+        ticker=_str_or_none(args.get("ticker") or args.get("symbol")),
+        start_date=_str_or_none(args.get("start_date")),
+        end_date=_str_or_none(args.get("end_date")),
+        limit=_optional_int(args.get("limit")),
         filters=args.get("filters"),
         sort_fields=args.get("sort_fields"),
-        sort_order=args.get("sort_order"),
+        sort_order=_str_or_none(args.get("sort_order")),
     ),
     "query_finra": lambda args, model: finra_client.query_dataset(
-        args["dataset"],
-        ticker=args.get("ticker") or args.get("symbol"),
-        start_date=args.get("start_date"),
-        end_date=args.get("end_date"),
-        limit=args.get("limit"),
-        offset=args.get("offset"),
+        str(args["dataset"]),
+        ticker=_str_or_none(args.get("ticker") or args.get("symbol")),
+        start_date=_str_or_none(args.get("start_date")),
+        end_date=_str_or_none(args.get("end_date")),
+        limit=_optional_int(args.get("limit")),
+        offset=_optional_int(args.get("offset")),
         filters=args.get("filters"),
-        analysis_goal=args.get("analysis_goal"),
+        analysis_goal=_str_or_none(args.get("analysis_goal")),
     ),
 }
 
-_ROBINHOOD_HANDLERS = {
-    "get_market_snapshot": lambda args, model: get_market_snapshot(args["ticker"]),
+_ROBINHOOD_HANDLERS: dict[str, ModelHandler] = {
+    "get_market_snapshot": lambda args, model: get_market_snapshot(str(args["ticker"])),
     "get_option_chain": lambda args, model: get_option_chain(
-        args["ticker"], args["option_type"], args.get("min_dte"), args.get("max_dte"),
+        str(args["ticker"]), str(args["option_type"]), args.get("min_dte"), args.get("max_dte"),
         args.get("strike_min"), args.get("strike_max"), args.get("limit", 20)
     ),
     "analyze_option_contract": lambda args, model: analyze_option_contract(
-        args["ticker"], args["expiration"], args["strike"], args["option_type"], args.get("target_price")
+        str(args["ticker"]), str(args["expiration"]), args["strike"], str(args["option_type"]), args.get("target_price")
     ),
     "compare_options": lambda args, model: compare_robinhood_options(
-        args["ticker"], args["option_type"], args["target_price"], args.get("min_dte"), args.get("max_dte"),
+        str(args["ticker"]), str(args["option_type"]), args["target_price"], args.get("min_dte"), args.get("max_dte"),
         args.get("strike_min"), args.get("strike_max"), args.get("limit", 20)
     ),
-    "get_portfolio_snapshot": lambda arguments, model: _get_portfolio_snapshot(arguments, model),
-    "get_scanner_filter_specs": lambda arguments, model: _get_scanner_filter_specs(arguments, model),
-    "get_scans": lambda arguments, model: _get_scans(arguments, model),
-    "run_scan": lambda arguments, model: _run_scan(arguments, model),
+    "get_portfolio_snapshot": _get_portfolio_snapshot,
+    "get_scanner_filter_specs": _get_scanner_filter_specs,
+    "get_scans": _get_scans,
+    "run_scan": _run_scan,
 }
-
 # Every model-visible tool has one application-level capability. This is
 # separate from the Robinhood MCP registry, which governs broker operations.
 # Broker/account-connected market reads (Robinhood quotes/options/scans)
@@ -1903,10 +2468,20 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "get_obligations": Capability.RESEARCH,
     "get_valuation_metrics": Capability.RESEARCH,
     "search_web": Capability.RESEARCH,
+    "find_alternative_signals": Capability.RESEARCH,
+    "get_trend_evidence": Capability.RESEARCH,
+    "investigate_social_arbitrage_candidate": Capability.RESEARCH,
+    "get_macro_context": Capability.RESEARCH,
+    "search_company_patents": Capability.RESEARCH,
     "list_finra_datasets": Capability.RESEARCH,
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,
     "query_finra": Capability.RESEARCH,
+    "thesis_create": Capability.RESEARCH,
+    "thesis_show": Capability.RESEARCH,
+    "thesis_refine": Capability.RESEARCH,
+    "thesis_watch": Capability.RESEARCH,
+    "thesis_journal": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
     "get_option_chain": Capability.BROKER_MARKET_READ,
     "analyze_option_contract": Capability.BROKER_MARKET_READ,
@@ -1922,12 +2497,14 @@ PORTFOLIO_AUTHORIZED_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def tools_for_capabilities(capabilities: frozenset[Capability]) -> list[dict]:
+def tools_for_capabilities(capabilities: frozenset[Capability]) -> list[dict[str, object]]:
     """Return only schemas whose application capability is granted."""
-    return [
-        tool for tool in TOOLS
-        if TOOL_CAPABILITIES.get(tool["function"]["name"]) in capabilities
-    ]
+    out: list[dict[str, object]] = []
+    for tool in TOOLS:
+        raw_name = _tool_function(tool).get("name")
+        if isinstance(raw_name, str) and TOOL_CAPABILITIES.get(raw_name) in capabilities:
+            out.append(tool)
+    return out
 
 
 def tool_is_permitted(name: str, context: RequestContext) -> bool:
@@ -1935,45 +2512,357 @@ def tool_is_permitted(name: str, context: RequestContext) -> bool:
     return capability is not None and capability in context.capabilities
 
 
-def _validate_tool_arguments(name: str, arguments: Any) -> str | None:
+def _validate_tool_arguments(name: str, arguments: object) -> str | None:
     """Schema-level argument check: object-ness plus required keys. Returns
     an error message, or None when the arguments are acceptable. Type
     checking is intentionally out of scope; lenient handler coercions
     (int(...), ...) remain the source of truth for value shapes."""
     if not isinstance(arguments, dict):
         return f"Tool arguments must be a JSON object for tool '{name}'"
-    tool = next((t for t in TOOLS if t["function"]["name"] == name), None)
-    parameters = (tool["function"].get("parameters") or {}) if tool else {}
-    missing = [key for key in (parameters.get("required") or []) if key not in arguments]
+    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
+    fn_dict: dict[str, object] = _tool_function(tool) if tool is not None else {}
+    raw_params = fn_dict.get("parameters")
+    params_dict: dict[str, object] = {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
+    raw_required = params_dict.get("required")
+    required_keys: list[str] = [str(k) for k in raw_required] if isinstance(raw_required, list) else []
+    missing = [key for key in required_keys if key not in arguments]
     if missing:
         return f"Missing required argument(s) for tool '{name}': {', '.join(missing)}"
     return None
 
 
+def _thesis_repo_for(context: RequestContext) -> ThesisRepository:
+    """Thesis repository rooted at the invocation's data root (never CWD)."""
+    from app.thesis.repository import ThesisRepository
+
+    base = getattr(context, "data_root", None) or get_data_root()
+    return ThesisRepository(Path(str(base)) / "thesis")
+
+def _effective_at(context: RequestContext) -> str | None:
+    as_of = getattr(context, "as_of", None)
+    return as_of if isinstance(as_of, str) and as_of else None
+
+
+def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: RequestContext) -> Thesis:
+    """Thesis as seen at the run cutoff; live when the run has none."""
+    cutoff = _effective_at(context)
+    if not cutoff:
+        return repo.load_thesis(id_or_slug)
+    from app.thesis.models import Thesis  # local: avoids a module cycle
+
+    current = repo.load_thesis(id_or_slug)
+    snap = repo.load_state_as_of(current.thesis_id, cutoff)
+    return Thesis.from_dict(dict(snap.thesis), "<as_of>")
+
+
+_PIT_INSTANT_TOOLS = frozenset({"thesis_show"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"})
+
+
+def _pit_day(cutoff: str) -> str | None:
+    from datetime import timezone  # local: keep module import surface minimal
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    dt = _as_dt(cutoff)
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).date().isoformat()
+
+
+def _apply_pit_cutoff(name: str, arguments: object, context: RequestContext) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Default `as_of` to the run cutoff; reject a model value beyond it."""
+    cutoff = _effective_at(context)
+    if not isinstance(arguments, dict):
+        return {}, {"error": f"Tool arguments must be a JSON object for tool '{name}'", "error_type": "invalid_tool_arguments"}
+    args: dict[str, object] = arguments
+    if not cutoff:
+        return args, None
+    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
+    fn = _tool_function(tool) if tool is not None else {}
+    raw_parameters = fn.get("parameters")
+    parameters: dict[str, object] = {str(k): v for k, v in raw_parameters.items()} if isinstance(raw_parameters, dict) else {}
+    raw_props = parameters.get("properties")
+    props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
+    if "as_of" not in props:
+        return args, None
+    supplied = args.get("as_of")
+    if supplied is None or (isinstance(supplied, str) and not supplied):
+        if name in _PIT_INSTANT_TOOLS:
+            return {**args, "as_of": cutoff}, None
+        day = _pit_day(cutoff)
+        if day is None:
+            return args, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+        return {**args, "as_of": day}, None
+    if not isinstance(supplied, str):
+        return args, None  # handler validation owns the message
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
+    if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
+        return args, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+    return args, None
+
+
+def _thesis_proposal(arguments: dict[str, object], user_thesis: str, path: str) -> IntakeProposal:
+    """Structured tool args -> validated IntakeProposal (raises ValueError)."""
+    from app.thesis import intake as thesis_intake
+
+    payload: dict[str, object] = {"user_thesis": user_thesis}
+    for key in _THESIS_PROPOSAL_KEYS:
+        if arguments.get(key) is not None:
+            payload[key] = arguments[key]
+    return thesis_intake.IntakeProposal.from_dict(payload, path)
+
+
+def _thesis_create(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.thesis import intake as thesis_intake
+
+    user_thesis = arguments.get("user_thesis")
+    if not isinstance(user_thesis, str) or not user_thesis.strip():
+        raise ValueError("thesis_create: 'user_thesis' must be a non-empty string")
+    proposal = _thesis_proposal(arguments, user_thesis, "<thesis_create>")
+    return thesis_intake.create_thesis_from_proposal(
+        _thesis_repo_for(context), proposal, effective_at=_effective_at(context))
+
+def _thesis_show(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    repo = _thesis_repo_for(context)
+    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
+    tid = thesis.thesis_id
+    model_as_of = arguments.get("as_of")
+    cutoff = _effective_at(context)
+    if isinstance(model_as_of, str) and model_as_of and cutoff:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+        model_dt, cutoff_dt = _as_dt(model_as_of), _as_dt(cutoff)
+        if model_dt is not None and cutoff_dt is not None and model_dt > cutoff_dt:
+            raise ValueError(f"thesis_show: as_of {model_as_of!r} is beyond the run cutoff {cutoff!r}")
+    as_of = model_as_of if isinstance(model_as_of, str) and model_as_of else cutoff
+    if isinstance(as_of, str) and as_of:
+        snap = repo.load_state_as_of(tid, as_of)
+        t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
+        _rules = watch.get("rules", [])
+        rules = [r for r in (_rules if isinstance(_rules, list) else ()) if isinstance(r, dict)]
+        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+        _qq = questions.get("questions", [])
+        return {
+            "thesis_id": tid,
+            "slug": t.get("slug"),
+            "status": t.get("status"),
+            "user_thesis": t.get("user_thesis"),
+            "scope": t.get("scope"),
+            "claims": list(_claims) if isinstance((_claims := t.get("claims", [])), list) else [],
+            "expressions": list(_exprs) if isinstance((_exprs := t.get("expressions", [])), list) else [],
+            "assessment": state.get("assessment"),
+            "rules": rules,
+            "setup_needed": not live,
+            "open_questions": [q for q in (_qq if isinstance(_qq, list) else ()) if isinstance(q, dict) and q.get("status") == "open"],
+        }
+    rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
+    live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+    return {
+        "thesis_id": tid,
+        "slug": thesis.slug,
+        "status": thesis.status,
+        "user_thesis": thesis.user_thesis,
+        "scope": thesis.scope,
+        "claims": [c.to_dict() for c in thesis.claims],
+        "expressions": [e.to_dict() for e in thesis.expressions],
+        "assessment": repo.load_state(tid).assessment,
+        "rules": rules,
+        "setup_needed": not live,
+        "open_questions": [q.to_dict() for q in repo.load_questions(tid) if q.status == "open"],
+    }
+
+
+def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.thesis import intake as thesis_intake
+
+    repo = _thesis_repo_for(context)
+    thesis_id = arguments.get("id")
+    if not isinstance(thesis_id, str) or not thesis_id.strip():
+        raise ValueError("thesis_refine: 'id' must be a non-empty string")
+    thesis = _thesis_for_context(repo, thesis_id, context)
+    clarification = arguments.get("clarification")
+    if not isinstance(clarification, str) or not clarification.strip():
+        raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
+    proposal = _thesis_proposal(
+        arguments, f"{thesis.user_thesis}\n{clarification.strip()}", "<thesis_refine>")
+    plan = thesis_intake.plan_refinement(thesis, proposal)
+    merged = plan["merged"]
+    merged_thesis = merged.get("user_thesis") if isinstance(merged, dict) else None
+    if (not plan["added_claims"] and not plan["added_expressions"]
+            and merged_thesis == thesis.user_thesis):
+        return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
+    out = thesis_intake.apply_refinement(
+        repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
+    return {"applied": True, **out}
+
+
+def _thesis_watch(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.thesis.models import new_rule_id
+    from app.thesis.monitor import SUPPORTED_HANDLERS
+
+    repo = _thesis_repo_for(context)
+    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
+    tid = thesis.thesis_id
+    if arguments.get("rule_type") is None:
+        cutoff = _effective_at(context)
+        if cutoff:
+            snap = repo.load_state_as_of(tid, cutoff)
+            _wrules = snap.watch.get("rules", [])
+            rules = [r for r in (_wrules if isinstance(_wrules, list) else ()) if isinstance(r, dict)]
+            live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+            return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
+        rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
+        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+        return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
+    rule_type = arguments["rule_type"]
+    if not isinstance(rule_type, str) or not rule_type.strip():
+        raise ValueError("thesis_watch: 'rule_type' must be a non-empty string")
+    if rule_type not in SUPPORTED_HANDLERS:
+        raise ValueError(f"thesis_watch: unsupported rule_type {rule_type!r}; supported: {sorted(SUPPORTED_HANDLERS)}")
+    if thesis.status != "active":
+        raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing watch change")
+    for key in ("claim_ids", "expression_ids"):
+        vals = arguments.get(key, [])
+        if not isinstance(vals, list) or not all(isinstance(v, str) for v in vals):
+            raise ValueError(f"thesis_watch: '{key}' must be a list of IDs")
+    raw_claims = arguments.get("claim_ids", [])
+    claim_ids = list(raw_claims) if isinstance(raw_claims, (list, tuple)) else []
+    raw_exprs = arguments.get("expression_ids", [])
+    expression_ids = list(raw_exprs) if isinstance(raw_exprs, (list, tuple)) else []
+    rule: dict[str, object] = {
+        "rule_id": new_rule_id(),
+        "rule_type": rule_type,
+        "enabled": True,
+        "support_status": "supported",
+        "support_reason": "",
+        "claim_ids": claim_ids,
+        "expression_ids": expression_ids,
+    }
+    repo.apply_research_result(
+        tid, {"watch_add": [rule]}, "", effective_at=_effective_at(context))
+    return {"thesis_id": tid, "added": rule}
+
+
+def _thesis_journal(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    repo = _thesis_repo_for(context)
+    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
+    if thesis.status != "active":
+        raise ValueError(f"thesis {thesis.thesis_id!r} is {thesis.status}; refusing journal append")
+    body = arguments["body"]
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("thesis_journal: 'body' must be a non-empty string")
+    title = arguments.get("title", "Operator note")
+    if title is not None and not isinstance(title, str):
+        raise ValueError("thesis_journal: 'title' must be a string")
+    entry: dict[str, object] = {
+        "title": title or "Operator note",
+        "body": body.strip(),
+    }
+    trigger_id = arguments.get("trigger_id")
+    if trigger_id is not None:
+        if not isinstance(trigger_id, str) or not trigger_id:
+            raise ValueError("thesis_journal: 'trigger_id' must be a non-empty string")
+        if not any(t.trigger_id == trigger_id for t in repo.load_triggers(thesis.thesis_id)):
+            raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis.thesis_id!r}")
+        entry["trigger_id"] = trigger_id
+    run_id = arguments.get("run_id")
+    if run_id is not None:
+        if trigger_id is None:
+            raise ValueError("thesis_journal: 'run_id' requires 'trigger_id'")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("thesis_journal: 'run_id' must be a non-empty string")
+        entry["run_id"] = run_id
+    known_at = arguments.get("known_at")
+    if trigger_id is not None:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+        cutoff = _effective_at(context)
+        if cutoff:
+            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+                raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
+            known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
+            if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
+                raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
+            entry["known_at"] = known_at
+        elif known_at is not None:
+            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+                raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
+            entry["known_at"] = known_at
+    elif known_at is not None:
+        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+        if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+            raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
+        entry["known_at"] = known_at
+    dest = repo.append_journal_entry(thesis.thesis_id, entry)
+    return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
+
+
+_THESIS_HANDLERS: dict[str, ContextHandler] = {
+    "thesis_create": _thesis_create,
+    "thesis_show": _thesis_show,
+    "thesis_refine": _thesis_refine,
+    "thesis_watch": _thesis_watch,
+    "thesis_journal": _thesis_journal,
+}
+
+# Thesis tools are direct local dispatch (no broker) but take
+# (arguments, context) instead of (arguments, model) for data-root scoping.
+# Merged view for backward compat (tests/scripts import _DIRECT_HANDLERS).
+_DIRECT_HANDLERS: dict[str, object] = {**_MODEL_HANDLERS, **_THESIS_HANDLERS}
+_CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS)
+
 def execute_tool(
     name: str,
-    arguments: dict,
+    arguments: dict[str, object],
     model: str,
     *,
     context: RequestContext,
-) -> dict:
+) -> dict[str, object]:
     """Dispatch a tool call by name. Always returns a JSON-serializable dict;
     never raises — errors are returned as {"error": ...} so the model can
     report them honestly (guardrail behavior)."""
     try:
         if not tool_is_permitted(name, context):
             return {"error": f"Tool is not permitted: {name}"}
+        arguments, pit_error = _apply_pit_cutoff(name, arguments, context)
+        if pit_error is not None:
+            return pit_error
+        if _effective_at(context) and name not in _PIT_GOVERNED_MUTATORS:
+            _pit_tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
+            _pit_fn = _tool_function(_pit_tool) if _pit_tool is not None else {}
+            _pit_raw_params = _pit_fn.get("parameters")
+            _pit_params: dict[str, object] = {str(k): v for k, v in _pit_raw_params.items()} if isinstance(_pit_raw_params, dict) else {}
+            _pit_raw_props = _pit_params.get("properties")
+            _pit_props: dict[str, object] = {str(k): v for k, v in _pit_raw_props.items()} if isinstance(_pit_raw_props, dict) else {}
+            if "as_of" not in _pit_props:
+                return {"error": f"Tool '{name}' is not point-in-time safe under this historical run.", "error_type": "pit_unsafe_tool", "soft": True}
         invalid = _validate_tool_arguments(name, arguments)
         if invalid is not None:
             return {"error": invalid, "error_type": "invalid_tool_arguments"}
-        handler = (
-            _DIRECT_HANDLERS.get(name)
+        if name in _CONTEXT_CALL_HANDLERS:
+            ctx_handler = _THESIS_HANDLERS.get(name)
+            if ctx_handler is None:
+                return {"error": f"Unknown tool '{name}'"}
+            return ctx_handler(arguments, context)
+        model_handler = (
+            _MODEL_HANDLERS.get(name)
             or _FINRA_HANDLERS.get(name)
             or _ROBINHOOD_HANDLERS.get(name)
         )
-        if handler is None:
+        if model_handler is None:
             return {"error": f"Unknown tool '{name}'"}
-        return handler(arguments, model)
+        result = model_handler(arguments, model)
+        if _effective_at(context) and isinstance(result, dict):
+            tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
+            fn = _tool_function(tool) if tool is not None else {}
+            raw_parameters = fn.get("parameters")
+            parameters: dict[str, object] = {str(k): v for k, v in raw_parameters.items()} if isinstance(raw_parameters, dict) else {}
+            raw_props = parameters.get("properties")
+            props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
+            if "as_of" not in props and name not in _PIT_GOVERNED_MUTATORS:
+                result.setdefault("pit_safe", False)
+        return result
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
     except RobinhoodAuthRequired:

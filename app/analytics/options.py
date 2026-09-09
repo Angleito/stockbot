@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Iterable
 
 from ..robinhood.options import OptionQuote
 ZERO = Decimal("0")
 CONTRACT_MULTIPLIER = Decimal("100")
 
 def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
-    if numerator is None or denominator in (None, ZERO):
+    if numerator is None or denominator is None or denominator == ZERO:
         return None
     return numerator / denominator
 
@@ -35,7 +35,7 @@ def analyze_option(
     *,
     as_of: date | datetime | None = None,
     target_price: Decimal | int | str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Return observable quote fields plus deterministic derived metrics."""
     today = _as_of(as_of)
     dte = (quote.expiration - today).days
@@ -54,7 +54,7 @@ def analyze_option(
     if mid is not None:
         breakeven = quote.strike - mid if quote.option_type == "put" else quote.strike + mid
     premium_per_contract = mid * CONTRACT_MULTIPLIER if mid is not None else None
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "contract_id": quote.contract_id,
         "ticker": quote.ticker,
         "expiration": quote.expiration.isoformat(),
@@ -93,8 +93,19 @@ def analyze_option(
         pnl = _payoff(quote, target, mid)
         result["target_price"] = str(target)
         result["target_pnl"] = str(pnl)
-        result["target_return_pct"] = str(_ratio(pnl, premium_per_contract) * Decimal("100")) if premium_per_contract else None
+        ratio = _ratio(pnl, premium_per_contract) if premium_per_contract else None
+        result["target_return_pct"] = str(ratio * Decimal("100")) if ratio is not None else None
     return result
+
+
+def _target_pnl_key(row: dict[str, object]) -> Decimal:
+    value = row.get("target_pnl")
+    return Decimal(str(value)) if value is not None else Decimal("-Infinity")
+
+
+def _spread_pct_key(row: dict[str, object]) -> Decimal:
+    value = row.get("spread_pct")
+    return Decimal(str(value)) if value is not None else Decimal("Infinity")
 
 
 def compare_options(
@@ -103,14 +114,14 @@ def compare_options(
     target_price: Decimal | int | str | None = None,
     as_of: date | datetime | None = None,
     limit: int = 20,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Analyze and deterministically rank contracts by target P/L or liquidity."""
     rows = [analyze_option(q, as_of=as_of, target_price=target_price) for q in quotes]
     if target_price is not None:
-        rows.sort(key=lambda row: Decimal(row["target_pnl"]) if row.get("target_pnl") is not None else Decimal("-Infinity"), reverse=True)
+        rows.sort(key=_target_pnl_key, reverse=True)
     else:
-        rows.sort(key=lambda row: Decimal(row["spread_pct"]) if row.get("spread_pct") is not None else Decimal("Infinity"))
-    bounded = max(1, min(int(limit), 30))
+        rows.sort(key=_spread_pct_key)
+    bounded = max(1, min(limit, 30))
     return {
         "contracts": rows[:bounded],
         "returned": min(len(rows), bounded),

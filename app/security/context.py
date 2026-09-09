@@ -89,15 +89,15 @@ class OriginalIntent:
 
 def classify_intent(user_turns: Sequence[str]) -> OriginalIntent:
     """Deterministic classifier: the request is the last user turn; permitted
-    domains are always financial/public-web research. `portfolio_read` is
-    never granted here — only explicit session approval creates a
-    `SessionAuthorization`.
+    domains are always the base research set. Neither `thesis_write` nor
+    `portfolio_read` is ever synthesized here — portfolio authorization lives
+    only in `SessionAuthorization`.
     """
     turns = [t for t in user_turns if isinstance(t, str)]
     request = turns[-1] if turns else ""
     return OriginalIntent(
         request=request,
-        permitted_domains=frozenset({"financial_research", "public_web_research"}),
+        permitted_domains=frozenset({"financial_research", "public_web_research", "thesis_read"}),
     )
 
 
@@ -117,4 +117,4 @@ class RunSecurityContext:
     # gates the portfolio-data usage notice (approval alone is not enough).
     private_ingress: bool = False
     quarantined_items: int = 0
-    security_events: list[dict] = field(default_factory=list)
+    security_events: list[dict[str, object]] = field(default_factory=list)

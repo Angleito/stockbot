@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.analytics import screens  # noqa: E402
 
 
-def _fmt(value) -> str:
+def _fmt(value: object) -> str:  # object: screen rows are untyped app-side dicts; display-only, never flows back
     if value is None:
         return "-"
     if isinstance(value, float):
@@ -48,15 +48,17 @@ def main() -> int:
     print(f"Coverage: {result['coverage']}")
     headers = ("Rank", "Ticker", "Short now", "Short prior", "Short chg %", "SI % now", "SI % prior", "PP chg", "Shares now", "Shares prior", "Shares chg %")
     widths = [len(h) for h in headers]
+    entries_raw = result.get("entries")
+    entries: list[dict[str, object]] = [e for e in entries_raw if isinstance(e, dict)] if isinstance(entries_raw, list) else []
     rows = [
         (
-            str(e["rank"]), e["ticker"], _fmt(e["short_shares_current"]), _fmt(e["short_shares_prior"]),
+            str(e["rank"]), str(e["ticker"]), _fmt(e["short_shares_current"]), _fmt(e["short_shares_prior"]),
             _fmt(e["short_change_pct"]), _fmt(e["short_interest_percent_current"]),
             _fmt(e["short_interest_percent_prior"]), _fmt(e["si_pp_change"]),
             _fmt(e["shares_outstanding_current"]), _fmt(e["shares_outstanding_prior"]),
             _fmt(e["shares_change_pct"]),
         )
-        for e in result["entries"]
+        for e in entries
     ]
     for row in rows:
         for i, cell in enumerate(row):
@@ -66,7 +68,7 @@ def main() -> int:
     for row in rows:
         print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
     print("\nEvidence links:")
-    for e in result["entries"]:
+    for e in entries:
         print(f"  {e['ticker']}:")
         print(f"    FINRA snapshot: {e['finra_source_url']} (settlement {e['settlement_current']})")
         if e["sec_accession_current"]:

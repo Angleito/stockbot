@@ -13,17 +13,24 @@ from app.domain.portfolio.valuation import (
 )
 
 
-def _snapshot(**overrides) -> Quote:
-    values = {
-        "ticker": "AMD",
-        "last": Decimal("100"),
-        "bid": Decimal("99.5"),
-        "ask": Decimal("100.5"),
-        "retrieved_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
-        "source": "robinhood_mcp",
-    }
-    values.update(overrides)
-    return Quote(**values)
+def _snapshot(
+    ticker: str = "AMD",
+    last: Decimal | None = Decimal("100"),
+    bid: Decimal | None = Decimal("99.5"),
+    ask: Decimal | None = Decimal("100.5"),
+    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=timezone.utc),
+    source: str = "robinhood_mcp",
+    security_id: str | None = None,
+) -> Quote:
+    return Quote(
+        ticker=ticker,
+        last=last,
+        bid=bid,
+        ask=ask,
+        retrieved_at=retrieved_at,
+        source=source,
+        security_id=security_id,
+    )
 
 
 def test_valuation_price_prefers_last():

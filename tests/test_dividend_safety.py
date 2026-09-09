@@ -1,10 +1,14 @@
 """Dividend safety tests (Phase 5): FCF-based coverage on SEC inputs only."""
 
+from pathlib import Path
+
 import pytest
 
 from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.services import sec_facts
 from app.services.sec_facts import _assemble_dividend_safety
+from collections.abc import Mapping
+
 from app.storage import parquet
 import app.valuation as valuation
 
@@ -31,12 +35,12 @@ QUARTERS = [
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     return tmp_path
 
 
-def _seed_ticker(tmp_path, cik, ticker):
+def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
         retrieved_at=RETRIEVED_AT, content_hash=f"tickers-{cik}",
@@ -45,12 +49,12 @@ def _seed_ticker(tmp_path, cik, ticker):
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _qfact(val, start, end, fy, fp, filed, accn):
+def _qfact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
     return {"start": start, "end": end, "val": val, "accn": accn,
             "fy": fy, "fp": fp, "filed": filed}
 
 
-def _seed_concepts(tmp_path, cik, concepts, suffix):
+def _seed_concepts(tmp_path: Path, cik: int, concepts: Mapping[str, object], suffix: str) -> None:
     """Seed canonical + per-share facts through normalization (unit-aware)."""
     payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {
         "us-gaap": {tag: {"units": units} for tag, units in concepts.items()},
@@ -64,9 +68,9 @@ def _seed_concepts(tmp_path, cik, concepts, suffix):
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _quarters(tag_values, prefix):
+def _quarters(tag_values: list[tuple[str, str, tuple[float, ...]]], prefix: str) -> dict[str, dict[str, list[dict[str, object]]]]:
     """tag -> unit -> quarterly facts zipped over QUARTERS."""
-    out = {}
+    out: dict[str, dict[str, list[dict[str, object]]]] = {}
     for tag, unit, values in tag_values:
         out[tag] = {unit: [
             _qfact(v, s, e, fy, fp, filed, f"{prefix}-{tag}-{fp}{fy}")
@@ -75,8 +79,15 @@ def _quarters(tag_values, prefix):
     return out
 
 
-def _seed_healthy(tmp_path, *, dps=(0.51,) * 4, eps=(0.80,) * 4,
-                  ocf=(1000.0,) * 4, capx=(-200.0,) * 4, paid=(-260.0,) * 4):
+def _seed_healthy(
+    tmp_path: Path,
+    *,
+    dps: tuple[float, ...] = (0.51,) * 4,
+    eps: tuple[float, ...] = (0.80,) * 4,
+    ocf: tuple[float, ...] = (1000.0,) * 4,
+    capx: tuple[float, ...] = (-200.0,) * 4,
+    paid: tuple[float, ...] = (-260.0,) * 4,
+) -> None:
     _seed_ticker(tmp_path, KO_CIK, "KO")
     _seed_concepts(tmp_path, KO_CIK,
                    _quarters([(DPS_TAG, "USD/shares", dps), (EPS_TAG, "USD/shares", eps),
@@ -120,22 +131,31 @@ def _seed_healthy(tmp_path, *, dps=(0.51,) * 4, eps=(0.80,) * 4,
     }, "fy-div-cash-debt")
 
 
-def _fail_on_price(monkeypatch):
-    def _boom(ticker):
+def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(ticker: str) -> dict[str, object]:
         raise AssertionError("historical dividend query must not call Yahoo")
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
-def _flags(safety):
-    return {f["flag"]: f for f in safety["risk_flags"]}
+def _flags(safety: dict[str, object]) -> dict[str, dict[str, object]]:
+    flags = safety["risk_flags"]
+    assert isinstance(flags, list)
+    out: dict[str, dict[str, object]] = {}
+    for item in flags:
+        assert isinstance(item, dict)
+        key = item["flag"]
+        assert isinstance(key, str)
+        out[key] = item
+    return out
 
 
-def test_healthy_safety_ratios(store, monkeypatch):
+def test_healthy_safety_ratios(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_healthy(store)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["data_source"] == "store"
     safety = result["safety"]
+    assert isinstance(safety, dict)
     assert safety["methodology"] == "common-stock EPS/FCF basis; not AFFO/FFO"
     assert safety["ttm_fcf"] == 3200.0
     assert safety["ttm_dividends_paid"] == 1040.0
@@ -156,10 +176,11 @@ def test_healthy_safety_ratios(store, monkeypatch):
     assert safety["dividend_vs_fcf_growth_5y"]["verdict"] == "insufficient_data"
 
 
-def test_negative_eps_nulls_payout_with_flag(store, monkeypatch):
+def test_negative_eps_nulls_payout_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_healthy(store, eps=(-0.50,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
+    assert isinstance(safety, dict)
     assert safety["earnings_payout_ratio"] is None
     assert safety["earnings_payout_ratio_reason"]
     assert _flags(safety)["negative_eps"]["status"] is True
@@ -168,10 +189,11 @@ def test_negative_eps_nulls_payout_with_flag(store, monkeypatch):
     assert safety["fcf_coverage"] == 3.0769
 
 
-def test_negative_fcf_nulls_payout_and_coverage_with_flag(store, monkeypatch):
+def test_negative_fcf_nulls_payout_and_coverage_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_healthy(store, ocf=(100.0,) * 4, capx=(-500.0,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
+    assert isinstance(safety, dict)
     assert safety["ttm_fcf"] == -1600.0
     assert safety["fcf_payout_ratio"] is None
     assert safety["fcf_coverage"] is None
@@ -179,10 +201,11 @@ def test_negative_fcf_nulls_payout_and_coverage_with_flag(store, monkeypatch):
     assert safety["earnings_payout_ratio"] == 0.6375
 
 
-def test_zero_dividend_nulls_coverage_with_flag(store, monkeypatch):
+def test_zero_dividend_nulls_coverage_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_healthy(store, dps=(0.0,) * 4, paid=(0.0,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
+    assert isinstance(safety, dict)
     assert safety["ttm_dividends_paid"] == 0.0
     assert safety["fcf_payout_ratio"] == 0.0
     assert safety["fcf_coverage"] is None
@@ -190,7 +213,7 @@ def test_zero_dividend_nulls_coverage_with_flag(store, monkeypatch):
     assert safety["cash_to_annual_dividend"] is None
 
 
-def test_payout_expanding_verdict(store, monkeypatch):
+def test_payout_expanding_verdict(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
     _seed_concepts(store, KO_CIK, {
@@ -208,13 +231,14 @@ def test_payout_expanding_verdict(store, monkeypatch):
         ]},
     }, "verdict")
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
+    assert isinstance(safety, dict)
     comp = safety["dividend_vs_fcf_growth_5y"]
     assert comp["dividend_cagr"] == 0.1487
     assert comp["fcf_cagr"] == 0.0033
     assert comp["verdict"] == "payout_expanding"
 
 
-def test_high_absolute_yield_flag_unit():
+def test_high_absolute_yield_flag_unit() -> None:
     base = {"ttm_dividend_per_share": 2.0, "growth_1y": 0.05, "growth_5y_cagr": 0.10}
     assert _flags(_assemble_dividend_safety([], base, ttm_yield=0.068))["high_absolute_yield"]["status"] is True
     assert _flags(_assemble_dividend_safety([], base, ttm_yield=0.03))["high_absolute_yield"]["status"] is False
