@@ -70,3 +70,69 @@ def test_type_ignore_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert len(v.scan(tmp_path)) == 1
     monkeypatch.setattr(v, "ROOT", tmp_path)
     assert v.main([]) == 1
+
+
+def test_aliased_cast_evasion_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path, "app/foo.py", "from typing import " + "cast" + " as narrow\nvalue = narrow(str, x)\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) == 2
+    assert hits[0] != hits[1]
+    assert all("app/foo.py" in h for h in hits)
+    monkeypatch.setattr(v, "ROOT", tmp_path)
+    assert v.main([]) == 1
+
+
+def test_typing_extensions_cast_fails(tmp_path: Path) -> None:
+    _write(tmp_path, "app/foo.py", "from typing_extensions import " + "cast" + "\nv = " + "cast" + "(str, x)\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) == 2
+
+
+def test_star_import_fails(tmp_path: Path) -> None:
+    _write(tmp_path, "app/foo.py", "from typing import *\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) == 1
+    assert "app/foo.py" in hits[0]
+    assert "from typing import *" in hits[0]
+
+def test_module_alias_cast_fails(tmp_path: Path) -> None:
+    _write(tmp_path, "app/foo.py", "import typing as t\nv = t." + "cast" + "(str, x)\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) >= 1
+    assert any("app/foo.py" in h for h in hits)
+
+
+def test_no_type_check_decorator_and_dunder_fail(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "app/foo.py",
+        "from typing import no_type_check\n@no_type_check\ndef f() -> int:\n    return 1\n",
+    )
+    hits = v.scan(tmp_path)
+    assert len(hits) == 2
+    _write(tmp_path, "app/bar.py", "__no_type_check__ = True\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) == 3
+
+
+def test_multiline_any_import_fails(tmp_path: Path) -> None:
+    _write(tmp_path, "app/foo.py", "from typing import (\n    Any,\n)\n")
+    hits = v.scan(tmp_path)
+    assert len(hits) == 1
+
+
+def test_syntax_error_fallback(tmp_path: Path) -> None:
+    _write(tmp_path, "app/foo.py", "def broken(:\n")
+    assert v.scan(tmp_path) == []
+    p = tmp_path / "app" / "foo.py"
+    p.write_text(p.read_text(encoding="utf-8") + "x = None  " + "# " + "type:" + " ignore\n", encoding="utf-8")
+    assert len(v.scan(tmp_path)) == 1
+
+
+def test_scope_parity_with_pyrefly() -> None:
+    import tomllib
+
+    pyrefly_toml = v.ROOT / "pyrefly.toml"
+    includes = set(tomllib.loads(pyrefly_toml.read_text(encoding="utf-8"))["project-includes"])
+    assert set(v.SCAN_FILES) <= includes
+    assert set(v.SCAN_DIRS) <= includes

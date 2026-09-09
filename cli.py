@@ -1,11 +1,17 @@
 """Stockbot admin CLI — runs, data refresh, log server, login (no chat; Pi is the harness)."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
+from types import FrameType
+from typing import TYPE_CHECKING
 
 from app.config import configure_logging
 from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
@@ -19,12 +25,18 @@ from app.tools import authorize_robinhood_browser
 from app.storage.runs import (
     get_events,
     get_evidence,
+    get_model_calls,
     get_run,
     get_security_events,
     get_security_summary,
     get_tool_calls,
     list_runs,
 )
+
+if TYPE_CHECKING:
+    from app.thesis.models import JSONValue, Thesis
+    from app.thesis.monitor import TickResult
+    from app.thesis.repository import ThesisRepository
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
 _SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
@@ -41,12 +53,16 @@ def _cmd_runs(limit: int) -> None:
         f"{'cost':>9}  question"
     )
     for row in rows:
-        duration = row["duration_ms"] if row["duration_ms"] is not None else 0.0
-        cost = row["estimated_total_cost"] if row["estimated_total_cost"] is not None else 0.0
-        question = (row["question"] or "")[:60]
+        duration_raw = row["duration_ms"]
+        duration = duration_raw if isinstance(duration_raw, (int, float)) else 0.0
+        cost_raw = row["estimated_total_cost"]
+        cost = cost_raw if isinstance(cost_raw, (int, float)) else 0.0
+        question_raw = row["question"]
+        question = (question_raw if isinstance(question_raw, str) else "")[:60]
+        started_raw = row["started_at"]
         started_local = (
-            datetime.fromisoformat(row["started_at"]).astimezone().isoformat()
-            if row["started_at"] else ""
+            datetime.fromisoformat(started_raw).astimezone().isoformat()
+            if isinstance(started_raw, str) and started_raw else ""
         )
         print(
             f"{row['run_id']:<38} {started_local[:26]:<26} "
@@ -54,19 +70,25 @@ def _cmd_runs(limit: int) -> None:
         )
 
 
-def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | None = None) -> None:
-    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks, data_root=data_root)
+def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | Path | None = None) -> None:
+    root = Path(data_root) if isinstance(data_root, str) else data_root
+    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks, data_root=root)
     print(json.dumps(summary, indent=2))
     from app.analytics.screens import materialize_short_interest_screen
-    result = materialize_short_interest_screen(settlement_date, data_root=data_root)
+    result = materialize_short_interest_screen(settlement_date, data_root=root)
     if result.get("error"):
         print(f"Leaderboard error: {result['error']}")
         return
-    coverage = result["coverage"]
-    finra_rows = coverage["finra_rows"]
-    mapped = coverage["mapped_rows"]
-    shares_covered = coverage["shares_outstanding_rows"]
-    eligible = coverage["eligible_rows"]
+    coverage_raw = result["coverage"]
+    coverage: dict[str, object] = coverage_raw if isinstance(coverage_raw, dict) else {}
+    finra_raw = coverage.get("finra_rows")
+    finra_rows = finra_raw if isinstance(finra_raw, int) else 0
+    mapped_raw = coverage.get("mapped_rows")
+    mapped = mapped_raw if isinstance(mapped_raw, int) else 0
+    shares_raw = coverage.get("shares_outstanding_rows")
+    shares_covered = shares_raw if isinstance(shares_raw, int) else 0
+    eligible_raw = coverage.get("eligible_rows")
+    eligible = eligible_raw if isinstance(eligible_raw, int) else 0
     pct = 100.0 * eligible / finra_rows if finra_rows else 0.0
     print(f"FINRA securities:             {finra_rows:,}")
     print(f"Ticker mappings:              {mapped:,}")
@@ -76,9 +98,14 @@ def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int],
     print(f"Coverage: {pct:.1f}%")
     if summary["unresolved_tickers"]:
         print(f"Unresolved tickers (no SEC mapping, facts not fetched): {summary['unresolved_tickers']}")
-    for fail in summary["failed_enrichments"]:
-        print(f"Enrichment failed: ticker={fail['ticker']} cik={fail['cik']} error={fail['error']}")
-    print(f"Leaderboard entries: {[e['ticker'] for e in result.get('entries', [])]}")
+    failed_raw = summary.get("failed_enrichments")
+    fails: list[object] = failed_raw if isinstance(failed_raw, list) else []
+    for fail in fails:
+        if isinstance(fail, dict):
+            print(f"Enrichment failed: ticker={fail['ticker']} cik={fail['cik']} error={fail['error']}")
+    entries_raw = result.get("entries", [])
+    entries: list[object] = entries_raw if isinstance(entries_raw, list) else []
+    print(f"Leaderboard entries: {[e['ticker'] for e in entries if isinstance(e, dict)]}")
 
 
 def _cmd_replay_sec_facts() -> None:
@@ -114,13 +141,14 @@ def _cmd_inspect(run_id: str) -> None:
         print(f"error: no run found for {run_id}", file=sys.stderr)
         sys.exit(1)
     for key, value in run.items():
-        if key in ("started_at", "completed_at") and value:
+        if key in ("started_at", "completed_at") and isinstance(value, str) and value:
             value = datetime.fromisoformat(value).astimezone().isoformat()
         print(f"{key}: {value}")
     print()
     print("events (seq type round tool duration_ms summary):")
     for ev in get_events(run_id):
-        summary = (ev.get("result_summary") or "").replace("\n", " ")[:80]
+        result_raw = ev.get("result_summary")
+        summary = (result_raw if isinstance(result_raw, str) else "").replace("\n", " ")[:80]
         duration = ev["duration_ms"] if ev.get("duration_ms") is not None else ""
         print(
             f"{ev['sequence']:>4} {ev['event_type']:<20} {str(ev.get('round')):<6} "
@@ -138,7 +166,8 @@ def _cmd_inspect(run_id: str) -> None:
     print("search_web evidence:")
     for ev in get_evidence(run_id):
         if ev["tool_name"] == "search_web":
-            snippet = (ev.get("rendered_text") or "").replace("\n", " ")[:200]
+            rendered_raw = ev.get("rendered_text")
+            snippet = (rendered_raw if isinstance(rendered_raw, str) else "").replace("\n", " ")[:200]
             print(f"  {ev['evidence_id']} {ev['tool_call_id']} {snippet}")
     print()
     print("model calls:")
@@ -170,10 +199,11 @@ def _cmd_inspect(run_id: str) -> None:
         print(line)
 
 
-def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
+def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | Path | None) -> None:
     """Evaluate a mandate against the latest persisted snapshot; report or exit 1."""
     try:
-        evaluation = evaluate_latest_mandate(mandate_path, data_root=data_root)
+        root = Path(data_root) if isinstance(data_root, str) else data_root
+        evaluation = evaluate_latest_mandate(mandate_path, data_root=root)
         mandate = load_mandate_file(mandate_path)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -183,7 +213,9 @@ def _cmd_evaluate_mandate(mandate_path: Path, data_root: str | None) -> None:
         for limit in mandate.limits
     }
 
-    def fmt(value, metric: str, target: str | None) -> str:
+    def fmt(value: Decimal | str | float | int | None, metric: str, target: str | None) -> str:
+        if value is None:
+            return ""
         if metric == "prohibited_assets" or units.get((metric, target)) == "dollars":
             return str(value)
         return f"{float(value) * 100:.1f}%"
@@ -241,7 +273,7 @@ def _cmd_backfill_sec(source: str | None, forms: list[str], from_date: str,
               "(before 1993 global indexes or current quarter only); "
               "nothing to backfill")
         return
-    ids = []
+    ids: list[str] = []
     for form in forms:
         for year, quarter in quarters:
             qs, qe = _quarter_dates(year, quarter)
@@ -271,7 +303,9 @@ def _cmd_resume_sec_backfill(job_id: str | None,
     else:
         failed = sec_store.list_jobs(status="failed", root=data_root)
         for job in failed:
-            sec_store.requeue_job(job["id"], root=data_root)
+            job_id_raw = job.get("id")
+            if isinstance(job_id_raw, str):
+                sec_store.requeue_job(job_id_raw, root=data_root)
         print(f"requeued {len(failed)} failed job(s)")
     print(json.dumps(drain_backfill_queue(data_root), indent=2))
 
@@ -290,10 +324,13 @@ def _cmd_sec_coverage(source: str | None, form: str | None,
                       file=sys.stderr)
                 raise SystemExit(2)
     rows = sec_store.query_coverage(source=source, form=form, root=data_root)
+    def _coverage_date(r: dict[str, object]) -> str:
+        seen = r.get("coverage_date")
+        return seen[:10] if isinstance(seen, str) else ""
     if from_date:
-        rows = [r for r in rows if (r.get("coverage_date") or "")[:10] >= from_date]
+        rows = [r for r in rows if _coverage_date(r) >= from_date]
     if to_date:
-        rows = [r for r in rows if (r.get("coverage_date") or "")[:10] <= to_date]
+        rows = [r for r in rows if _coverage_date(r) <= to_date]
     for row in rows:
         print(f"{row.get('source')} {row.get('form')} "
               f"{row.get('date_partition')} {row.get('status')} "
@@ -309,23 +346,24 @@ def _cmd_sec_coverage(source: str | None, form: str | None,
 
 
 
-def _thesis_repo(args):
+def _thesis_repo(args: argparse.Namespace) -> ThesisRepository:
     """Thesis root via the existing data-root mechanism (<root>/thesis)."""
     from app.config import get_data_root
     from app.thesis.repository import ThesisRepository
-    override = getattr(args, "data_root", None) or None
+    raw_root = getattr(args, "data_root", None)
+    override = raw_root if isinstance(raw_root, str) else None
     base = Path(override) if override else get_data_root()
     return ThesisRepository(base / "thesis")
 
 
-def _thesis_load(repo, id_or_slug):
+def _thesis_load(repo: ThesisRepository, id_or_slug: str) -> Thesis:
     try:
         return repo.load_thesis(id_or_slug)
     except KeyError as exc:
         raise SystemExit(f"thesis: {exc}") from exc
 
 
-def _thesis_list(args) -> None:
+def _thesis_list(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
     rows = repo.list_theses()
     if not rows:
@@ -336,9 +374,9 @@ def _thesis_list(args) -> None:
         print(f"{t.thesis_id} {t.slug} [{t.status}] {t.updated_at} {one}")
 
 
-def _thesis_show(args) -> None:
+def _thesis_show(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
+    thesis = _thesis_load(repo, str(args.id))
     state = repo.load_state(thesis.thesis_id)
     print(f"{thesis.thesis_id} ({thesis.slug}) [{thesis.status}] updated {thesis.updated_at}")
     print(f"Thesis: {thesis.user_thesis}")
@@ -358,26 +396,26 @@ def _thesis_show(args) -> None:
               f"({e.structure}, {e.horizon}) [{e.status}]")
 
 
-def _thesis_status(args) -> None:
+def _thesis_status(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
     op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis,
           "close": repo.close_thesis}[args.thesis_command]
     try:
-        updated = op(args.id)
+        updated = op(str(args.id))
     except (KeyError, ValueError) as exc:
         raise SystemExit(f"thesis: {exc}") from exc
     print(f"{updated.thesis_id} ({updated.slug}) [{updated.status}]")
 
 
-def _thesis_inspect(args) -> None:
+def _thesis_inspect(args: argparse.Namespace) -> None:
     from app.thesis.models import Checkpoint, Thesis, ThesisMemory, ThesisQuestion, ThesisState, WatchRule
     from app.thesis.yaml import load_raw_yaml, load_yaml
     repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
+    thesis = _thesis_load(repo, str(args.id))
     d = repo.root / thesis.slug
-    problems = []
+    problems: list[str] = []
 
-    def check(name, fn):
+    def check(name: str, fn: Callable[[], object]) -> None:
         try:
             fn()
             print(f"{name}: ok")
@@ -385,22 +423,37 @@ def _thesis_inspect(args) -> None:
             print(f"{name}: INVALID ({exc})")
             problems.append(name)
 
-    def owned(name):
+    def owned(name: str) -> dict[str, JSONValue]:
         raw = load_raw_yaml(d / name)
         if raw.get("thesis_id") != thesis.thesis_id:
             raise ValueError(f"{d / name}: thesis_id mismatch")
         return raw
 
-    def check_questions():
-        for q in owned("questions.yaml").get("questions", []):
+    def check_questions() -> None:
+        items = owned("questions.yaml").get("questions", [])
+        if not isinstance(items, list):
+            raise ValueError(f"{d / 'questions.yaml'}: 'questions' must be a list")
+        for q in items:
+            if not isinstance(q, dict):
+                raise ValueError(f"{d / 'questions.yaml'}: question entry must be a mapping")
             ThesisQuestion.from_dict(q, str(d / "questions.yaml"))
 
-    def check_watch():
-        for r in owned("watch.yaml").get("rules", []):
+    def check_watch() -> None:
+        items = owned("watch.yaml").get("rules", [])
+        if not isinstance(items, list):
+            raise ValueError(f"{d / 'watch.yaml'}: 'rules' must be a list")
+        for r in items:
+            if not isinstance(r, dict):
+                raise ValueError(f"{d / 'watch.yaml'}: rule entry must be a mapping")
             WatchRule.from_dict(r, str(d / "watch.yaml"))
 
-    def check_memory():
-        for m in owned("memory.yaml").get("memories", []):
+    def check_memory() -> None:
+        items = owned("memory.yaml").get("memories", [])
+        if not isinstance(items, list):
+            raise ValueError(f"{d / 'memory.yaml'}: 'memories' must be a list")
+        for m in items:
+            if not isinstance(m, dict):
+                raise ValueError(f"{d / 'memory.yaml'}: memory entry must be a mapping")
             ThesisMemory.from_dict(m, str(d / "memory.yaml"))
 
     check("thesis.yaml", lambda: load_yaml(d / "thesis.yaml", Thesis))
@@ -420,9 +473,9 @@ def _thesis_inspect(args) -> None:
         raise SystemExit(f"thesis inspect: invalid files: {', '.join(problems)}")
 
 
-def _thesis_inbox(args) -> None:
+def _thesis_inbox(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
+    thesis = _thesis_load(repo, str(args.id))
     triggers = repo.load_triggers(thesis.thesis_id)
     if not triggers:
         print("No triggers.")
@@ -433,7 +486,7 @@ def _thesis_inbox(args) -> None:
             print(f"  {t.summary.splitlines()[0][:120]}")
 
 
-def _journal_head(path):
+def _journal_head(path: Path) -> tuple[str, str, str]:
     entry_id, created, title = path.stem, "", ""
     try:
         with open(path, encoding="utf-8") as fh:
@@ -452,13 +505,18 @@ def _journal_head(path):
     return entry_id, created, title
 
 
-def _thesis_journal(args) -> None:
+def _mtime(p: Path) -> float:
+    return p.stat().st_mtime
+
+
+def _thesis_journal(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
+    thesis = _thesis_load(repo, str(args.id))
     jdir = repo.root / thesis.slug / "journal"
-    files = sorted((p for p in jdir.glob("*.md") if p.is_file()),
-                   key=lambda p: p.stat().st_mtime, reverse=True) if jdir.is_dir() else []
-    sel = getattr(args, "entry", None)
+    files: list[Path] = sorted((p for p in jdir.glob("*.md") if p.is_file()),
+                   key=_mtime, reverse=True) if jdir.is_dir() else []
+    sel_raw = getattr(args, "entry", None)
+    sel = sel_raw if isinstance(sel_raw, str) else None
     if sel:
         norm = sel.replace(":", "_")  # filenames store entry IDs with ':' -> '_'
         match = next((p for p in files if p.stem == norm or norm in p.stem or sel in p.stem), None)
@@ -474,12 +532,12 @@ def _thesis_journal(args) -> None:
         print(f"{entry_id} {created} {title}".rstrip())
 
 
-def _thesis_runtime(args, what="thesis tick"):
+def _thesis_runtime(args: argparse.Namespace, what: str = "thesis tick"):
     """Shared tick/monitor wiring: repo, thesis ID, source services."""
     from app.thesis import monitor
 
     repo = _thesis_repo(args)
-    thesis = _thesis_load(repo, args.id)
+    thesis = _thesis_load(repo, str(args.id))
     targets = monitor.targets_for_thesis(thesis)
     services = {
         "sec_filings": monitor.SecFilingsService(targets, since_default=thesis.created_at),
@@ -489,7 +547,7 @@ def _thesis_runtime(args, what="thesis tick"):
     return repo, thesis.thesis_id, services
 
 
-def _thesis_tick(args) -> None:
+def _thesis_tick(args: argparse.Namespace) -> None:
     """One deterministic monitor tick; exit 0 always (pauses/no-ops print a message)."""
     from datetime import datetime, timezone
 
@@ -506,7 +564,7 @@ def _thesis_tick(args) -> None:
     print(f"runs: {len(result.runs)}"
           + (f" ({', '.join(r.run_id for r in result.runs)})" if result.runs else ""))
 
-def _thesis_monitor(args) -> None:
+def _thesis_monitor(args: argparse.Namespace) -> None:
     """Loop ticks until stopped or closed; paused sleeps without querying, closed exits 0."""
     import signal
     import threading
@@ -521,10 +579,10 @@ def _thesis_monitor(args) -> None:
     fixed_known_at = getattr(args, "known_at", None)
     stop = threading.Event()
 
-    def _stop(signum, frame):
+    def _stop(signum: int, frame: FrameType | None) -> None:
         stop.set()
 
-    def _report(outcome):
+    def _report(outcome: TickResult) -> None:
         if outcome.no_op:
             print("no meaningful change" + (f": {outcome.no_op_reason}" if outcome.no_op_reason else ""),
                   flush=True)
@@ -545,7 +603,7 @@ def _thesis_monitor(args) -> None:
 
 
 
-def _cmd_thesis(args) -> None:
+def _cmd_thesis(args: argparse.Namespace) -> None:
     cmd = getattr(args, "thesis_command", None)
     if cmd == "list":
         _thesis_list(args)
@@ -570,13 +628,13 @@ def _cmd_thesis(args) -> None:
         )
 
 
-def _cmd_google_data(args) -> None:
+def _cmd_google_data(args: argparse.Namespace) -> None:
     """Manual Google public-data collection; per-source status, never raises."""
     if getattr(args, "google_data_command", None) != "collect":
         raise SystemExit("google-data: choose 'collect' (e.g. google-data collect --source trends ...)")
     geos = args.geo or ["US"]
     limit = max(1, min(args.limit or 25, 1000))
-    out: dict = {}
+    out: dict[str, object] = {}
     sources = ("trends", "patents", "macro", "geo", "stackoverflow") if args.source == "all" else (args.source,)
     for src in sources:
         try:
