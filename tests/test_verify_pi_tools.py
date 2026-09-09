@@ -233,12 +233,18 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     assert os.environ.get("STOCKBOT_DATA_DIR") == str(durable)
     assert len(captured_cmds) == 2
     for cmd in captured_cmds:
-        assert "--exclude-tools" in cmd
-        assert cmd[cmd.index("--exclude-tools") + 1] == "bash,edit,write,powershell"
-        assert cmd.index("--exclude-tools") < cmd.index("--")
-        assert cmd[-1] == "prompt"
+        assert "--no-builtin-tools" in cmd
+        assert "--no-extensions" in cmd
+        assert "--no-skills" in cmd
+        assert "--no-prompt-templates" in cmd
+        assert "--no-context-files" in cmd
+        assert "--exclude-tools" not in cmd
+        assert cmd.index("--no-context-files") < cmd.index("--")
         assert cmd[-2] == "--"
-        assert cmd[:5] == ["pi", "-p", "--no-session", "--extension", v.EXTENSION]
+        assert cmd[-1] == "prompt"
+        assert cmd[:8] == ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+                          "--no-prompt-templates", "--no-context-files"]
+        assert cmd[8:10] == ["--extension", v.EXTENSION]
 
 
 def test_get_concurrency_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:

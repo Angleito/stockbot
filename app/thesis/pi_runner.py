@@ -74,7 +74,7 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     provider = os.environ.get("STOCKBOT_PI_PROVIDER", "").strip()
     model = os.environ.get("STOCKBOT_PI_MODEL", "").strip()
     flags = ([ "--provider", provider ] if provider else []) + ([ "--model", model ] if model else [])
-    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--extension", _EXTENSION, *flags, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--extension", _EXTENSION, *flags, "--", prompt]
     env = dict(os.environ)
     if data_root is not None and str(data_root):
         env["STOCKBOT_DATA_DIR"] = str(data_root)
