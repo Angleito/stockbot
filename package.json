@@ -18,7 +18,7 @@
     "verify-integrity": "venv/bin/python scripts/verify_type_escape_hatches.py",
     "update-tool-inventory": "venv/bin/python scripts/update_tool_inventory.py",
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run typecheck-ts && bun run verify-integrity && bun run verify-tools && bun run verify-pi",
-    "stockbot": "pi --no-session --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --extension .pi/extensions/stockbot.ts"
+    "stockbot": "pi --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --extension .pi/extensions/stockbot.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.85.0"
