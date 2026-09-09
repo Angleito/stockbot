@@ -16,7 +16,7 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None) -> Path:
+def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     now = "2026-01-01T00:00:00+00:00"
@@ -53,6 +53,11 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_failed',?,?)",
             (now, tool),
         )
+    if rejected_other is not None:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_failed',?,?)",
+            (now, rejected_other),
+        )
     if tool != "search_tools" and other_tool != "search_tools":
         conn.execute(
             "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
@@ -79,9 +84,10 @@ def _ok(
     tool_error: str | None = None,
     event: str = "completed",
     other_tool: str | None = None,
+    rejected_other: str | None = None,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool)
+    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool, rejected_other=rejected_other)
     return p
 
 
@@ -169,6 +175,17 @@ def test_harness_rejection_fails_attempt_1(tmp_path: Path):
 
 def test_harness_rejection_without_execution_passes(tmp_path: Path):
     ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "harness-rejected" in reason
+
+
+def test_rejected_wrong_tool_passes_attempt_3(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
     assert ok
 
 

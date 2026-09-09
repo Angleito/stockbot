@@ -905,7 +905,7 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
                 matching = df[stripped.str.contains(compact, na=False, regex=False)]
         
         if matching.empty:
-            # Last resort: any significant query token inside a concept
+            # Last resort: all significant query tokens inside one concept
             # ("Total Revenues" -> Revenues, "TotalRevenue" -> Revenues).
             # Only runs when nothing matched.
             words: list[str] = []
