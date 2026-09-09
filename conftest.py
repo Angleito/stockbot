@@ -9,6 +9,6 @@ import pytest
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_runs_db(tmp_path_factory):
+def _isolate_runs_db(tmp_path_factory: pytest.TempPathFactory) -> None:
     """Point RUNS_DB_PATH at a temp DB so offline tests never touch data/runs.sqlite."""
     os.environ["RUNS_DB_PATH"] = str(tmp_path_factory.mktemp("runs") / "runs.sqlite")

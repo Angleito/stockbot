@@ -1,4 +1,10 @@
-project-includes = ["app", "scripts", "tests"]
+project-includes = [
+    "app",
+    "scripts",
+    "tests",
+    "cli.py",
+    "conftest.py",
+]
 project-excludes = ["venv", "data"]
 search-path = ["."]
 python-platform = "linux"
