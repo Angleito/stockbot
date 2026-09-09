@@ -266,6 +266,7 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
     A rejection with no `tool_calls` error row means the harness refused the
     call before dispatch (e.g. schema validation of a probe); a genuine
     execution failure always leaves an errored call row and is excluded here.
+    Built-in Pi tools (read, grep, …) never appear in tool_calls and are excluded via the schema set.
     """
     rows = conn.execute(
         "SELECT DISTINCT e.tool_name FROM agent_events e "
@@ -273,7 +274,19 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
         "(SELECT 1 FROM tool_calls c WHERE c.tool_name = e.tool_name "
         "AND c.error_type IS NOT NULL)"
     ).fetchall()
-    return sorted(r[0] for r in rows if r[0])
+    allowed_names = get_registry_sets()["schemas"]
+    return sorted(r[0] for r in rows if r[0] in allowed_names)
+
+
+def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]:
+    """Dispatched Stockbot tools other than search_tools and the required target.
+
+    tool_calls rows are written only by execute_pi_tool (app/pi_gateway.py:399),
+    so every name here is a Stockbot-dispatched call; Pi built-ins never appear.
+    """
+    names = get_registry_sets()["schemas"]
+    rows = conn.execute("SELECT DISTINCT tool_name FROM tool_calls").fetchall()
+    return sorted(r[0] for r in rows if r[0] in names and r[0] not in ("search_tools", required_tool))
 
 
 def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
@@ -299,11 +312,12 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Routing benchmark: a pass requires BOTH a clean search_tools call AND a
-    # clean required-target call. Attempts 1-2 use natural routing prompts;
-    # attempt 3 uses an explicit recovery prompt under the same presence
-    # checks, exempt only from the harness-rejection gate. All three attempts
-    # must pass (see the all-ok gate in main).
+    # Routing benchmark: attempts 1-2 allow exactly two Stockbot calls — a clean
+    # search_tools call AND a clean required-target call. Any other Stockbot tool
+    # fails, whether harness-rejected pre-dispatch, dispatched-and-errored, or
+    # dispatched-and-successful. Attempt 3 uses an explicit recovery prompt under
+    # the same presence checks, exempt from both stray-tool gates. All three
+    # attempts must pass (see the all-ok gate in main).
     if timed_out and not completed_override:
         return False, "pi timeout"
     if exit_code != 0 and not completed_override:
@@ -317,6 +331,9 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
                 stray = _rejected_tools(conn)
                 if stray:
                     return False, f"routing failed: harness-rejected call to {', '.join(stray)}"
+                extra = _unexpected_tools(conn, required_tool)
+                if extra:
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(extra)}"
             if required_tool != "search_tools":
                 search_problem = _tool_success(conn, "search_tools", attempt=attempt)
                 if search_problem is not None:

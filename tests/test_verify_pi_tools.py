@@ -16,7 +16,7 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None) -> Path:
+def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     now = "2026-01-01T00:00:00+00:00"
@@ -58,6 +58,15 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_failed',?,?)",
             (now, rejected_other),
         )
+    if extra_tool is not None:
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,?,?)",
+            (extra_tool, now, extra_error),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,?,?,?)",
+            ("tool_completed" if extra_error is None else "tool_failed", now, extra_tool),
+        )
     if tool != "search_tools" and other_tool != "search_tools":
         conn.execute(
             "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
@@ -85,9 +94,11 @@ def _ok(
     event: str = "completed",
     other_tool: str | None = None,
     rejected_other: str | None = None,
+    extra_tool: str | None = None,
+    extra_error: str | None = None,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool, rejected_other=rejected_other)
+    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error)
     return p
 
 
@@ -187,6 +198,27 @@ def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
 def test_rejected_wrong_tool_passes_attempt_3(tmp_path: Path):
     ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
     assert ok
+def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "unexpected" in reason
+
+
+def test_dispatched_wrong_tool_success_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "unexpected" in reason
+
+
+def test_dispatched_wrong_tool_passes_attempt_3(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_failed_builtin_ignored_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="read"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
 
 
 def test_two_of_three_is_not_pass():
