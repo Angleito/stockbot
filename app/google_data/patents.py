@@ -11,17 +11,12 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 import re
 from datetime import datetime, timedelta, timezone
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
+from ._guards import as_int, result_rows
+from ._lazy_config import google_data_enabled
 
 SOURCE = "patents"
 _TEMPLATE = "patents_assignee"
@@ -39,41 +34,15 @@ class _Submitter(Protocol):
 _Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
 
 
-def _env_flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
-
-
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return _env_flag("GOOGLE_DATA_ENABLED")
-
-
-def _setting(fn_name: str, env_name: str, default: object = None) -> object:
-    fn = getattr(_config, fn_name, None)
-    if callable(fn):
-        try:
-            value = fn()
-            if value is not None:
-                return value
-        except Exception:
-            pass
-    value = (os.getenv(env_name) or "").strip()
-    return value or default
+    return google_data_enabled()
 
 
 def _submit(template: str, params: dict[str, object], executor: _Executor | None,
             data_root: Path | None) -> dict[str, object]:
     if executor is None:
         try:
-            try:
-                from . import bigquery_client as _bq
-            except ImportError:
-                from app.google_data import bigquery_client as _bq  # type: ignore
+            from . import bigquery_client as _bq
         except ImportError:
             return {"error": "bigquery client unavailable",
                     "error_type": "source_unavailable", "source": "bigquery"}
@@ -156,7 +125,22 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
         return {"status": "unavailable", "source": SOURCE,
                 "reason": "documented assignee aliases required; never inferred",
                 "error": "assignees required", "error_type": "source_unavailable"}
-    if not _data_enabled() or not _setting("get_google_cloud_project", "GOOGLE_CLOUD_PROJECT"):
+    if not _data_enabled():
+        return {"status": "disabled", "source": SOURCE,
+                "reason": "google data disabled or no BigQuery project"}
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        _cfg = None
+    _project: str | None = None
+    if _cfg is not None:
+        try:
+            _project = _cfg.get_google_cloud_project()
+        except Exception:
+            _project = None
+    if _project is None:
+        _project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+    if not _project:
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     try:
@@ -183,7 +167,7 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
     publications: list[dict[str, object]] = []
-    rows = cast(list[object], result.get("rows", []) or [])
+    rows = result_rows(result)
     for row in rows[:limit]:
         if not isinstance(row, dict):
             continue
@@ -224,7 +208,22 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
         return {"status": "unavailable", "source": SOURCE,
                 "reason": "documented assignee aliases required; never inferred",
                 "error": "assignees required", "error_type": "source_unavailable"}
-    if not _data_enabled() or not _setting("get_google_cloud_project", "GOOGLE_CLOUD_PROJECT"):
+    if not _data_enabled():
+        return {"status": "disabled", "source": SOURCE,
+                "reason": "google data disabled or no BigQuery project"}
+    try:
+        from .. import config as _cfg2
+    except ImportError:
+        _cfg2 = None
+    _project2: str | None = None
+    if _cfg2 is not None:
+        try:
+            _project2 = _cfg2.get_google_cloud_project()
+        except Exception:
+            _project2 = None
+    if _project2 is None:
+        _project2 = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+    if not _project2:
         return {"status": "disabled", "source": SOURCE,
                 "reason": "google data disabled or no BigQuery project"}
     date_error, start_date, end_date = _check_dates(start_date, end_date)
@@ -247,7 +246,7 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
     by_year: dict[int, dict[str, object]] = {}
     gaps = 0
-    rows = cast(list[object], result.get("rows", []) or [])
+    rows = result_rows(result)
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -265,18 +264,31 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
         for key, field in (("pub_count", "pub_count"), ("family_count", "family_count"),
                            ("total_citations", "total_citations")):
             try:
-                bucket[field] = cast(int, bucket.get(field, 0)) + int(row.get(key) or 0)
+                bucket[field] = as_int(bucket.get(field, 0), what=field) + as_int(row.get(key) or 0, what=key)
             except (TypeError, ValueError):
                 pass
-        cpc_counts = cast(dict[str, int], bucket["cpc_counts"])
+        _cpc = bucket.get("cpc_counts")
+        if not isinstance(_cpc, dict):
+            _cpc = dict[str, object]()
+            bucket["cpc_counts"] = _cpc
+        cpc_counts: dict[str, int] = {}
+        for _ck, _cv in _cpc.items():
+            if isinstance(_ck, str) and isinstance(_cv, int) and not isinstance(_cv, bool):
+                cpc_counts[_ck] = _cv
         for code in row.get("cpc_bag") or []:
             code_key = str(code)
             cpc_counts[code_key] = cpc_counts.get(code_key, 0) + 1
+        bucket["cpc_counts"] = cpc_counts
     years: list[dict[str, object]] = []
     for year in sorted(by_year):
         bucket = by_year[year]
-        cpc_counts = cast(dict[str, int], bucket["cpc_counts"])
-        ranked = sorted(((n, c) for c, n in cpc_counts.items() if c != "__NONE__"),
+        _cpc2 = bucket.get("cpc_counts")
+        cpc_counts2: dict[str, int] = {}
+        if isinstance(_cpc2, dict):
+            for _ck2, _cv2 in _cpc2.items():
+                if isinstance(_ck2, str) and isinstance(_cv2, int) and not isinstance(_cv2, bool):
+                    cpc_counts2[_ck2] = _cv2
+        ranked = sorted(((n, c) for c, n in cpc_counts2.items() if c != "__NONE__"),
                         reverse=True)
         years.append({"pub_year": year, "pub_count": bucket["pub_count"],
                       "family_count": bucket["family_count"],

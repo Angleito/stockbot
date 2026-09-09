@@ -30,6 +30,7 @@ from app.google_data import (
     trends,
     youtube,
 )
+from app.storage import parquet as parquet_backend
 
 GOOGLE_ENV = (
     "GOOGLE_DATA_ENABLED", "GOOGLE_CLOUD_PROJECT",
@@ -579,16 +580,14 @@ def test_national_sentinel_fires_post_aggregation(monkeypatch: pytest.MonkeyPatc
         assert result["reason"] == "query_scope_too_large"
         assert result["error_type"] == "missing_coverage"
         assert template in {t for t, _ in seen}
-    assert trends._parquet is not None
     try:
-        observations: list[_Row] = trends._parquet.read_table(
+        observations: list[_Row] = parquet_backend.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
     except Exception:
         observations = []
     assert observations == []
-    assert trends._parquet is not None
     try:
-        stored: list[_Row] = trends._parquet.read_table(
+        stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
@@ -717,15 +716,14 @@ def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_
             return []
         return _three_dma_rows()
 
-    assert trends._parquet is not None
-    orig_write = trends._parquet.write_rows
+    orig_write = parquet_backend.write_rows
 
     def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: object) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
 
-    monkeypatch.setattr(trends._parquet, "write_rows", _drop_one)
+    monkeypatch.setattr(parquet_backend, "write_rows", _drop_one)
     result = trends.collect_trends(
         start_date="2026-09-02", end_date="2026-09-02",
         geos=["Chicago", "Los Angeles", "New York"],
@@ -733,9 +731,8 @@ def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen))
     assert result["status"] in ("unavailable", "error")
     assert "warehouse verify failed" in str(result.get("error", ""))
-    assert trends._parquet is not None
     try:
-        stored: list[_Row] = trends._parquet.read_table(
+        stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
@@ -804,15 +801,14 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch: pyt
         return {"status": "ok", "cached": True, "job_id": job_id, "rows": list[_Row](),
                 "source": "bigquery"}
 
-    assert trends._parquet is not None
-    orig_write = trends._parquet.write_rows
+    orig_write = parquet_backend.write_rows
 
     def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: object) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
 
-    monkeypatch.setattr(trends._parquet, "write_rows", _drop_one)
+    monkeypatch.setattr(parquet_backend, "write_rows", _drop_one)
 
     def _collect() -> _Row:
         return trends.collect_trends(
@@ -825,9 +821,8 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch: pyt
     for result in (first, second):
         assert result["status"] in ("unavailable", "error")
         assert "warehouse verify failed" in str(result.get("error", ""))
-    assert trends._parquet is not None
     try:
-        stored: list[_Row] = trends._parquet.read_table(
+        stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []
@@ -874,16 +869,14 @@ def test_query_scope_over_1000_never_checkpoints(monkeypatch: pytest.MonkeyPatch
         assert result["status"] == "unavailable"
         assert result["error_type"] == "missing_coverage"
         assert result["reason"] == "query_scope_too_large"
-    assert trends._parquet is not None
     try:
-        observations: list[_Row] = trends._parquet.read_table(
+        observations: list[_Row] = parquet_backend.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
     except Exception:
         observations = []
     assert observations == []
-    assert trends._parquet is not None
     try:
-        stored: list[_Row] = trends._parquet.read_table(
+        stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
     except Exception:
         stored = []

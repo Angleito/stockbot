@@ -16,33 +16,24 @@ import os
 from collections.abc import Sequence
 from typing import Optional
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
+from ._lazy_config import google_data_enabled
 
 SOURCE = "google_trends_api"
 _INTERVALS = ("daily", "weekly", "monthly", "yearly")
 
 
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    return google_data_enabled()
 
 
 def _api_enabled() -> bool:
-    fn = getattr(_config, "google_trends_api_enabled", None)
-    if callable(fn):
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        _cfg = None
+    if _cfg is not None:
         try:
-            return bool(fn())
+            return bool(_cfg.google_trends_api_enabled())
         except Exception:
             return False
     return os.getenv("GOOGLE_TRENDS_API_ENABLED", "").strip().lower() in ("1", "true", "yes")
