@@ -157,12 +157,18 @@ def test_empty_model_telemetry_fails(tmp_path: Path):
 
 
 def test_tool_failed_event_fails(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False, attempt=1)
     assert not ok
 
 
+def test_harness_rejection_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "harness-rejected" in reason
+
+
 def test_harness_rejection_without_execution_passes(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=3)
     assert ok
 
 
@@ -376,7 +382,7 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
         prompts.append(prompt)
         return (0, False, "", "", True)
 
-    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
+    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
         return (True, "pass")
 
     monkeypatch.setattr(v, "ensure_thesis_fixture", fake_fixture)

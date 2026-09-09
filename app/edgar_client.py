@@ -926,11 +926,13 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
                 lowered = df["concept"].str.lower()
                 mask = lowered.str.contains(tokens[0], na=False, regex=False)
                 for token in tokens[1:]:
-                    mask = mask | lowered.str.contains(token, na=False, regex=False)
+                    mask = mask & lowered.str.contains(token, na=False, regex=False)
                 matching = df[mask]
-        
+
         if matching.empty:
             return _no_data(ticker, f"no XBRL facts found for concept '{concept}'")
+        if matching["concept"].nunique() > 1:
+            return _no_data(ticker, f"ambiguous XBRL concept for '{concept}': {sorted(matching['concept'].unique().tolist())[:8]}")
         
         # Return recent values (most recent 5)
         recent = matching.sort_values("period_end").tail(5)
