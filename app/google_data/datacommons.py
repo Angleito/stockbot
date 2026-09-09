@@ -12,18 +12,11 @@ the request stays one bounded call.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 
 import requests
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
+from ._lazy_config import get_datacommons_api_key, google_data_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -37,25 +30,11 @@ _MAX_NODES = 50
 
 
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    return google_data_enabled()
 
 
 def _dc_key() -> str | None:
-    fn = getattr(_config, "get_datacommons_api_key", None)
-    if callable(fn):
-        try:
-            value = fn()
-            if value:
-                return str(value)
-        except Exception:
-            pass
-    return (os.getenv("DATACOMMONS_API_KEY") or "").strip() or None
+    return get_datacommons_api_key()
 
 
 def _key_headers() -> dict[str, str] | None:

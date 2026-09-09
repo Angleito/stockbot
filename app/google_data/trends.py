@@ -21,44 +21,10 @@ import re
 from collections.abc import Callable
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Protocol, cast
+from typing import Optional, Protocol
 
-try:
-    from .. import config as _config
-except ImportError:  # pragma: no cover
-    try:
-        from app import config as _config  # type: ignore
-    except ImportError:
-        _config = None  # type: ignore
-
-try:
-    from . import signals as _signals
-except ImportError:  # pragma: no cover
-    from app.google_data import signals as _signals  # type: ignore
-
-try:
-    from ..storage import parquet as _parquet
-except ImportError:  # pragma: no cover
-    try:
-        from app.storage import parquet as _parquet  # type: ignore
-    except ImportError:
-        _parquet = None  # type: ignore
-
-try:
-    from ..storage import raw_archive as _raw_archive
-except ImportError:  # pragma: no cover
-    try:
-        from app.storage import raw_archive as _raw_archive  # type: ignore
-    except ImportError:
-        _raw_archive = None  # type: ignore
-
-try:
-    from . import bigquery_client as _bq
-except ImportError:  # pragma: no cover
-    try:
-        from app.google_data import bigquery_client as _bq  # type: ignore
-    except ImportError:
-        _bq = None  # type: ignore
+from ._guards import as_dict, as_list, as_str_list, json_from_text, result_rows
+from ._lazy_config import google_data_enabled
 
 SOURCE = "trends"
 _US_TEMPLATES = ("trends_us_top", "trends_us_rising")
@@ -92,45 +58,57 @@ _MAX_SPAN_DAYS = 31
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _env_flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
-
-
 def _data_enabled() -> bool:
-    fn = getattr(_config, "google_data_enabled", None)
-    if callable(fn):
-        try:
-            return bool(fn())
-        except Exception:
-            return False
-    return _env_flag("GOOGLE_DATA_ENABLED")
-
-
-def _setting(fn_name: str, env_name: str, default: Optional[str | int] = None):
-    fn = getattr(_config, fn_name, None)
-    if callable(fn):
-        try:
-            value = fn()
-            if value is not None:
-                return value
-        except Exception:
-            pass
-    value = (os.getenv(env_name) or "").strip()
-    return value or default
+    return google_data_enabled()
 
 
 def _bq_ready() -> bool:
-    return bool(_data_enabled() and _setting("get_google_cloud_project", "GOOGLE_CLOUD_PROJECT"))
+    if not google_data_enabled():
+        return False
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        _cfg = None
+    _project: str | None = None
+    if _cfg is not None:
+        try:
+            _project = _cfg.get_google_cloud_project()
+        except Exception:
+            _project = None
+    if _project is None:
+        _project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+    return bool(_project)
 
 
 def _check_bq_limits() -> Optional[dict[str, object]]:
     try:
-        per_q = int(_setting("get_bq_max_bytes_per_query", "BIGQUERY_MAX_BYTES_PER_QUERY", 1073741824))
-        per_m = int(_setting("get_bq_monthly_bytes_limit", "BIGQUERY_MONTHLY_BYTES_LIMIT", 536870912000))
-        per_d = int(_setting("get_bq_daily_bytes_limit", "BIGQUERY_DAILY_BYTES_LIMIT", 10737418240))
-    except (TypeError, ValueError):
-        return {"status": "error", "source": SOURCE,
-                "error": "invalid BigQuery byte limit", "error_type": "invalid_config"}
+        from .. import config as _cfg2
+    except ImportError:
+        _cfg2 = None
+    if _cfg2 is not None:
+        try:
+            per_q = int(_cfg2.get_bq_max_bytes_per_query())
+            per_m = int(_cfg2.get_bq_monthly_bytes_limit())
+            per_d = int(_cfg2.get_bq_daily_bytes_limit())
+        except (TypeError, ValueError):
+            return {"status": "error", "source": SOURCE,
+                    "error": "invalid BigQuery byte limit", "error_type": "invalid_config"}
+        except Exception:
+            try:
+                per_q = int((os.getenv("BIGQUERY_MAX_BYTES_PER_QUERY") or "").strip() or 1073741824)
+                per_m = int((os.getenv("BIGQUERY_MONTHLY_BYTES_LIMIT") or "").strip() or 536870912000)
+                per_d = int((os.getenv("BIGQUERY_DAILY_BYTES_LIMIT") or "").strip() or 10737418240)
+            except (TypeError, ValueError):
+                return {"status": "error", "source": SOURCE,
+                        "error": "invalid BigQuery byte limit", "error_type": "invalid_config"}
+    else:
+        try:
+            per_q = int((os.getenv("BIGQUERY_MAX_BYTES_PER_QUERY") or "").strip() or 1073741824)
+            per_m = int((os.getenv("BIGQUERY_MONTHLY_BYTES_LIMIT") or "").strip() or 536870912000)
+            per_d = int((os.getenv("BIGQUERY_DAILY_BYTES_LIMIT") or "").strip() or 10737418240)
+        except (TypeError, ValueError):
+            return {"status": "error", "source": SOURCE,
+                    "error": "invalid BigQuery byte limit", "error_type": "invalid_config"}
     if per_q <= 0 or per_m <= 0 or per_d <= 0:
         return {"status": "error", "source": SOURCE,
                 "error": "non-positive BigQuery byte limit", "error_type": "invalid_config"}
@@ -141,7 +119,6 @@ class _Submitter(Protocol):
     """Anything submit_template-compatible: the real client or a test double."""
     def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
 
-
 _Executor = Callable[[str, dict[str, object]], dict[str, object]] | _Submitter
 
 
@@ -151,11 +128,8 @@ def _submit(template: str, params: dict[str, object], executor: _Executor | None
         try:
             from . import bigquery_client as _client
         except ImportError:
-            try:
-                from app.google_data import bigquery_client as _client  # type: ignore
-            except ImportError:
-                return {"error": "bigquery client unavailable",
-                        "error_type": "source_unavailable", "source": "bigquery"}
+            return {"error": "bigquery client unavailable",
+                    "error_type": "source_unavailable", "source": "bigquery"}
         try:
             narrowed_root: Optional[Path] = Path(data_root) if isinstance(data_root, str) else data_root
             return _client.submit_template(template, params, data_root=narrowed_root)
@@ -191,14 +165,17 @@ def _wrap_error(result: dict[str, object]) -> dict[str, object]:
 
 
 def _template_table(template: str) -> str:
-    if _bq is not None:
-        try:
-            spec = _bq.TEMPLATES.get(template, {})
-            table: object = spec.get("table")
-            if isinstance(table, str) and table:
-                return table
-        except Exception:
-            pass
+    try:
+        from . import bigquery_client as _bq
+    except ImportError:
+        return _FALLBACK_TABLES.get(template, "trends")
+    try:
+        spec = _bq.TEMPLATES.get(template, {})
+        table: object = spec.get("table")
+        if isinstance(table, str) and table:
+            return table
+    except Exception:
+        pass
     return _FALLBACK_TABLES.get(template, "trends")
 
 
@@ -212,18 +189,22 @@ def _plan_groups(geos: list[str]) -> list[dict[str, object]]:
     countries = [g for g in geos if g != "US" and _is_country_code(g)]
     groups: list[dict[str, object]] = []
     if "US" in geos:
-        groups.append({"kind": "us", "national": True, "dmas": cast("list[str]", [])})
+        groups.append({"kind": "us", "national": True, "dmas": []})
     if dmas:
         groups.append({"kind": "us", "national": False, "dmas": dmas})
     for country in countries:
         groups.append({"kind": "intl", "country": country})
     if not groups:  # e.g. geos == [] handled earlier; defensive: treat as national
-        groups.append({"kind": "us", "national": True, "dmas": cast("list[str]", [])})
+        groups.append({"kind": "us", "national": True, "dmas": []})
     return groups
 
 
 def _parquet_root(data_root: Optional[Path | str]) -> Optional[Path]:
-    if data_root is None or _parquet is None:
+    if data_root is None:
+        return None
+    try:
+        from ..storage import parquet as _parquet
+    except ImportError:
         return None
     return Path(data_root) / "parquet"
 
@@ -276,7 +257,7 @@ def _series_basis(staged_row: dict[str, object]) -> str:
 def expected_inputs_hash(scope: dict[str, object], term: str, table: str, list_kind: str,
                           basis: str, geo: str, candidates: list[dict[str, object]]) -> str:
     """Scope-complete input identity shared by writes and PIT reads."""
-    geos: list[str] = cast("list[str]", scope.get("geos") or [])
+    geos: list[str] = as_str_list(scope.get("geos"), what="geos")
     week_start = str(scope.get("week_start") or "")
     week_end = str(scope.get("week_end") or "")
     scope_table = str(scope.get("table") or "")
@@ -328,7 +309,7 @@ def expected_inputs_hash(scope: dict[str, object], term: str, table: str, list_k
     elif target_geo:
         geos_covered = [target_geo]
     else:
-        geos_covered = cast("list[str]", [])
+        geos_covered: list[str] = []
     payload = {"source_pairs": sorted(pairs), "periods_covered": periods_covered,
                "geos_covered": geos_covered}
     return hashlib.sha256(
@@ -341,7 +322,9 @@ def _completed_refreshes(data_root: Optional[Path | str], templates: list[str]) 
     proot = _parquet_root(data_root)
     if proot is None:
         return done
-    if _parquet is None:
+    try:
+        from ..storage import parquet as _parquet
+    except ImportError:
         return done
     try:
         table = _parquet.read_table("ingestion_checkpoints", proot)
@@ -371,7 +354,9 @@ def _warehouse_rows(data_root: Optional[Path | str], table: str, refresh: str) -
     proot = _parquet_root(data_root)
     if proot is None:
         return []
-    if _parquet is None:
+    try:
+        from ..storage import parquet as _parquet
+    except ImportError:
         return []
     try:
         rows = _parquet.read_table("google_observations", proot).to_pylist()
@@ -384,11 +369,8 @@ def _warehouse_rows(data_root: Optional[Path | str], table: str, refresh: str) -
             continue
         if not str(row.get("source_record_id") or "").startswith(prefix):
             continue
-        try:
-            metrics = json.loads(cast("str", row.get("metrics_json") or "{}"))
-            evidence = json.loads(cast("str", row.get("evidence_json") or "[]"))
-        except ValueError:
-            continue
+        metrics = as_dict(json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
+        evidence = as_list(json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
         try:
             metrics_canon = json.dumps(metrics, sort_keys=True, separators=(",", ":"),
                                        default=str)
@@ -419,7 +401,11 @@ def _warehouse_rows(data_root: Optional[Path | str], table: str, refresh: str) -
 
 
 def backfill_legacy_feature_rows(data_root: Optional[Path | str]) -> int:
-    if data_root is None or _parquet is None:
+    if data_root is None:
+        return 0
+    try:
+        from ..storage import parquet as _parquet_b
+    except ImportError:
         return 0
     proot = _parquet_root(data_root)
     if proot is None:
@@ -432,7 +418,7 @@ def backfill_legacy_feature_rows(data_root: Optional[Path | str]) -> int:
         pass
     rows: list[dict[str, object]] = []
     try:
-        rows = _parquet.read_table("google_observations", proot).to_pylist()
+        rows = _parquet_b.read_table("google_observations", proot).to_pylist()
     except Exception:
         rows = []
     feature_rows: list[dict[str, object]] = []
@@ -442,10 +428,7 @@ def backfill_legacy_feature_rows(data_root: Optional[Path | str]) -> int:
         raw = row.get("features_json")
         if raw is None or raw == "":
             continue
-        try:
-            decoded = json.loads(cast("str", raw))
-        except ValueError:
-            continue
+        decoded = json_from_text(raw, what="features_json")
         if not isinstance(decoded, dict):
             continue
         feature_rows.append({
@@ -461,7 +444,7 @@ def backfill_legacy_feature_rows(data_root: Optional[Path | str]) -> int:
     written = 0
     if feature_rows:
         try:
-            written = _parquet.write_rows("google_signal_features", feature_rows, root=proot)
+            written = _parquet_b.write_rows("google_signal_features", feature_rows, root=proot)
         except Exception:
             return 0
     try:
@@ -485,7 +468,7 @@ def _cache_in_scope(cached: dict[str, object], params: dict[str, object]) -> boo
     if "all_dmas" in params:
         if params.get("all_dmas"):
             return geo == "US"
-        return geo in set(cast("list[str]", params.get("dmas") or []))
+        return geo in set(as_str_list(params.get("dmas"), what="dmas"))
     if "country_code" in params:
         country = str(params.get("country_code") or "")
         return geo == country or geo.startswith(country + ":")
@@ -507,7 +490,11 @@ def _store_observations(data_root: Optional[Path | str], observations: list[dict
                         retrieved_at: str) -> dict[tuple[object, str], set[tuple[str, str]]]:
     """Write normalized observations; return expected identities per (table, refresh)."""
     proot = _parquet_root(data_root)
-    if proot is None or _parquet is None:
+    if proot is None:
+        return {}
+    try:
+        from ..storage import parquet as _parquet_s
+    except ImportError:
         return {}
     try:
         backfill_legacy_feature_rows(data_root)
@@ -515,7 +502,7 @@ def _store_observations(data_root: Optional[Path | str], observations: list[dict
         pass
     stored: list[dict[str, object]] = []
     try:
-        stored = _parquet.read_table("google_observations", proot).to_pylist()
+        stored = _parquet_s.read_table("google_observations", proot).to_pylist()
     except Exception:
         stored = []
     first_known: dict[tuple[str, str], str] = {}
@@ -529,8 +516,8 @@ def _store_observations(data_root: Optional[Path | str], observations: list[dict
     warehouse_rows: list[dict[str, object]] = []
     expected: dict[tuple[object, str], set[tuple[str, str]]] = {}
     for obs in observations:
-        metrics = dict(cast("dict[str, object]", obs.get("metrics") or {}))
-        evidence = list(cast("list[object]", obs.get("evidence") or []))
+        metrics = dict(as_dict(obs.get("metrics"), what="metrics"))
+        evidence = list(as_list(obs.get("evidence"), what="evidence"))
         observation_id, content_hash = _observation_identity(
             obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"],
             metrics, evidence)
@@ -555,13 +542,17 @@ def _store_observations(data_root: Optional[Path | str], observations: list[dict
             "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
             "source_url": f"bq://{obs['table']}",
         })
-    _parquet.write_rows("google_observations", warehouse_rows, root=proot)
+    _parquet_s.write_rows("google_observations", warehouse_rows, root=proot)
     return expected
 
 
 def _archive_raw(data_root: Optional[Path | str], template: str, job_id: str, table: str,
                  params: dict[str, object], rows: list[object]) -> None:
-    if data_root is None or _raw_archive is None:
+    if data_root is None:
+        return
+    try:
+        from ..storage import raw_archive as _raw_archive
+    except ImportError:
         return
     try:
         payload = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -574,11 +565,15 @@ def _archive_raw(data_root: Optional[Path | str], template: str, job_id: str, ta
 
 def _archived_rows(data_root: Optional[Path | str], template: str, job_id: str,
                    params: dict[str, object]) -> Optional[list[object]]:
-    if data_root is None or _raw_archive is None:
+    if data_root is None:
+        return None
+    try:
+        from ..storage import raw_archive as _raw_archive_a
+    except ImportError:
         return None
     best: Optional[list[object]] = None
     try:
-        records = _raw_archive.iter_archive(
+        records = _raw_archive_a.iter_archive(
             "google", template, job_id, root=Path(data_root) / "raw")
         for record in records:
             try:
@@ -599,10 +594,14 @@ def _archived_rows(data_root: Optional[Path | str], template: str, job_id: str,
 def _mark_complete(data_root: Optional[Path | str], checkpoint_key: str, refresh: str,
                    payload_hash: str, count: int) -> None:
     proot = _parquet_root(data_root)
-    if proot is None or _parquet is None:
+    if proot is None:
+        return
+    try:
+        from ..storage import parquet as _parquet_m
+    except ImportError:
         return
     now = datetime.now(timezone.utc).isoformat()
-    _parquet.write_rows("ingestion_checkpoints", [{
+    _parquet_m.write_rows("ingestion_checkpoints", [{
         "pipeline": _CHECKPOINT_PIPELINE, "source": "bigquery",
         "key": checkpoint_key, "payload_hash": payload_hash,
         "status": "complete", "record_count": count,
@@ -620,7 +619,7 @@ def _enumerate_refreshes(table: str, start_date: str, end_date: str, executor: _
         "sql_version": _SQL_VERSION}, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return None
-    refreshes = sorted({str(r.get("refresh_date")) for r in cast("list[object]", result.get("rows") or [])
+    refreshes = sorted({str(r.get("refresh_date")) for r in result_rows(result)
                         if isinstance(r, dict) and r.get("refresh_date")})
     return refreshes
 
@@ -692,6 +691,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
             return _US_NATIONAL_TEMPLATES if group.get("national") else _US_TEMPLATES
         return _INTL_NATIONAL_TEMPLATES
     groups = _plan_groups(geos)
+    from . import signals as _signals
     templates = [t for g in groups for t in _pair_for(g)]
     completed: set[str] = (_completed_refreshes(data_root, templates)
                            if data_root is not None else set())
@@ -721,7 +721,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                               "sql_version": _SQL_VERSION, "national": "US"}
                 elif group["kind"] == "us":
                     params = {"start_date": refresh, "end_date": refresh,
-                              "dmas": sorted(cast("list[str]", group["dmas"])),
+                              "dmas": sorted(as_str_list(group.get("dmas"), what="dmas")),
                               "all_dmas": False,
                               "week_start": week_start, "week_end": week_end,
                               "limit": _FETCH_LIMIT, "collector_version": _COLLECTOR_VERSION,
@@ -747,7 +747,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                     cached_rows = cached_rows[:_MAX_LIMIT]
                     if cached_rows:
                         for cached in cached_rows:
-                            crefresh = str(cast("dict[str, object]", cached.get("metrics") or {}).get("refresh_date") or "")
+                            crefresh = str(as_dict(cached.get("metrics"), what="metrics").get("refresh_date") or "")
                             if not crefresh:
                                 parts = str(cached.get("source_record_id") or "").split("|")
                                 if len(parts) >= 2 and parts[0] == cached.get("table"):
@@ -766,14 +766,14 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                 if not isinstance(result, dict) or "error" in result:
                     return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
                 cached = bool(result.get("cached"))
-                rows: list[object] = cast("list[object]", result.get("rows", []) or [])
+                rows: list[object] = result_rows(result)
                 job_id = result.get("job_id")
                 if cached and not rows:
                     recovered = _archived_rows(data_root, template, str(job_id or template), params)
                     if recovered is None:
                         return _wrap_error({"error": f"cached Trends result unavailable for {template}|{refresh}; refusing to checkpoint",
                                             "error_type": "source_unavailable", "source": "bigquery"})
-                    rows = recovered
+                    rows = list(recovered)
                 if data_root is not None and not cached:
                     _archive_raw(data_root, template, str(job_id or template), table, params, rows)
                 payload_hash = ""
@@ -830,7 +830,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
             staged_row["_week"] = str(staged_row.get("week") or staged_row.get("period"))
             _parts = str(staged_row.get("source_record_id") or "").split("|")
             _id_refresh = _parts[1] if len(_parts) >= 2 and _parts[0] == staged_row.get("table") else ""
-            staged_row["_refresh"] = str(cast("dict[str, object]", staged_row.get("metrics") or {}).get("refresh_date")
+            staged_row["_refresh"] = str(as_dict(staged_row.get("metrics"), what="metrics").get("refresh_date")
                                          or _id_refresh or staged_row.get("period"))
             staged_row["_kind"] = staged_row.get("list_kind")
             staged_row["_geo"] = staged_row.get("geo")
@@ -842,7 +842,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
     intl_tables = {_template_table("trends_intl_top"), _template_table("trends_intl_rising")}
     national = any(g.get("kind") == "us" and g.get("national") for g in groups)
     dma_set = {d for g in groups if g.get("kind") == "us" and not g.get("national")
-               for d in cast("list[str]", g.get("dmas") or [])}
+               for d in as_str_list(g.get("dmas"), what="dmas")}
     national_templates = _US_NATIONAL_TEMPLATES + _INTL_NATIONAL_TEMPLATES
     national_rows: list[dict[str, object]] = []
     dma_rows: list[dict[str, object]] = []
@@ -935,13 +935,13 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                     _diff_rules: object = diff.get("rules", {})
                     _diff_entry: object = (_diff_rules.get("diffusion", {})
                                            if isinstance(_diff_rules, dict) else {})
-                    _rules["diffusion"] = dict(cast("dict[str, object]", _diff_entry))
+                    _rules["diffusion"] = dict(as_dict(_diff_entry, what="diffusion"))
                 _cov: object = feat.get("coverage")
                 if isinstance(_cov, dict):
                     _cov_diff: object = diff.get("coverage", {})
                     _cov_geos: object = (_cov_diff.get("geos_covered", [])
                                          if isinstance(_cov_diff, dict) else [])
-                    _cov["geos_covered"] = list(cast("list[object]", _cov_geos))
+                    _cov["geos_covered"] = as_list(_cov_geos, what="geos_covered")
     observations: list[dict[str, object]] = []
     effective_observations: list[dict[str, object]] = []
     winner_ids = {id(_w) for _w in winners.values()}
@@ -977,15 +977,19 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
     if data_root is not None and (observations or fetched):
         try:
             expected = _store_observations(data_root, observations, retrieved_at)
+            try:
+                from ..storage import parquet as _parquet_c
+            except ImportError:
+                _parquet_c = None
             proot = _parquet_root(data_root)
-            if proot is not None and _parquet is not None:
+            if proot is not None and _parquet_c is not None:
                 infos: list[tuple[dict[str, object], str, str, dict[str, object], str, str, dict[str, object]]] = []
                 for _obs in observations:
                     _feats = _obs.get("features")
                     if not isinstance(_feats, dict):
                         continue
-                    _metrics = dict(cast("dict[str, object]", _obs.get("metrics") or {}))
-                    _evidence = list(cast("list[object]", _obs.get("evidence") or []))
+                    _metrics = dict(as_dict(_obs.get("metrics"), what="metrics"))
+                    _evidence = list(as_list(_obs.get("evidence"), what="evidence"))
                     _oid, _ch = _observation_identity(
                         _obs["table"], _obs["period"], _obs["geo"], _obs["term"],
                         _obs["list_kind"], _metrics, _evidence)
@@ -1004,19 +1008,19 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                     infos.append((_obs, _oid, _ch, _scope, _shash, _series_basis(_obs), _feats))
                 if infos:
                     _effective_ids = {id(_o) for _o in effective_observations}
-                    _candidates = [{
+                    _candidates: list[dict[str, object]] = [{
                         "observation_id": _oid, "content_hash": _ch,
                         "table": str(_obs.get("table") or ""),
                         "period": str(_obs.get("period") or ""),
                         "geo": str(_obs.get("geo") or ""),
                         "term": str(_obs.get("term") or ""),
                         "list_kind": str(_obs.get("list_kind") or ""),
-                        "metrics": cast("dict[str, object]", _obs.get("metrics") or {}),
+                        "metrics": as_dict(_obs.get("metrics"), what="metrics"),
                     } for _obs, _oid, _ch, _, _, _, _ in infos if id(_obs) in _effective_ids]
                     _empty_hash = expected_inputs_hash({}, "", "", "", "", "", [])
                     _existing: list[dict[str, object]] = []
                     try:
-                        _existing = _parquet.read_table(
+                        _existing = _parquet_c.read_table(
                             "google_signal_features", proot).to_pylist()
                     except Exception:
                         _existing = []
@@ -1037,7 +1041,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                             _scope, str(_obs.get("term") or ""),
                             str(_obs.get("table") or ""),
                             str(_obs.get("list_kind") or ""), _basis, str(_obs.get("geo") or ""),
-                            cast("list[dict[str, object]]", _candidates))
+                            _candidates)
                         if _expected == _empty_hash:
                             continue
                         _k = (_oid, _shash, _signals.CALC_VERSION, _expected)
@@ -1053,13 +1057,13 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
                             "calculated_at": _calc_at,
                             "inputs_hash": _expected,
                         })
-                    _parquet.write_rows("google_signal_features", _feature_rows, root=proot)
+                    _parquet_c.write_rows("google_signal_features", _feature_rows, root=proot)
             for _key, _template, _refresh, _hash, _count, _tables in fetched:
                 for _table in _tables:
                     actual: set[tuple[str, str]] = set()
                     for _cached in _warehouse_rows(data_root, _table, _refresh):
-                        _metrics = cast("dict[str, object]", _cached.get("metrics") or {})
-                        _evidence = cast("list[object]", _cached.get("evidence") or [])
+                        _metrics = as_dict(_cached.get("metrics"), what="metrics")
+                        _evidence = as_list(_cached.get("evidence"), what="evidence")
                         actual.add(_observation_identity(
                             _cached.get("table") or _table,
                             str(_cached.get("period") or _cached.get("week") or ""),
@@ -1092,6 +1096,7 @@ def collect_trends(*, start_date: Optional[str], end_date: Optional[str], geos: 
 def _normalize_row(row: dict[str, object], retrieved_at: str, data_root: Optional[Path | str],
                    features: object = None) -> dict[str, object]:
     """Map one merged row to a persisted candidate observation."""
+    from . import signals as _signals_n
     table = row.get("_table") or row.get("table") or "trends"
     week = str(row.get("_week") or row.get("week") or row.get("period"))
     geo = str(row.get("_geo") if row.get("_geo") is not None else row.get("geo"))
@@ -1103,8 +1108,8 @@ def _normalize_row(row: dict[str, object], retrieved_at: str, data_root: Optiona
     if row.get("_cached") and isinstance(row.get("metrics"), dict):
         # Warehouse roundtrip: reuse stored metrics/evidence verbatim so a
         # recollect re-hashes identically (durable dedup, first known_at kept).
-        metrics = dict(cast("dict[str, object]", row["metrics"]))
-        evidence = list(cast("list[object]", row.get("evidence") or []))
+        metrics = dict(as_dict(row.get("metrics"), what="metrics"))
+        evidence = list(as_list(row.get("evidence"), what="evidence"))
     else:
         metrics = {"rank": row.get("rank"), "score": row.get("score"),
                    "percent_gain": row.get("percent_gain"),
@@ -1123,7 +1128,7 @@ def _normalize_row(row: dict[str, object], retrieved_at: str, data_root: Optiona
             metrics["score_basis"] = "mean_list_score_where_listed"
         evidence = [{"table": table, "row": {k: v for k, v in row.items() if not k.startswith("_")},
                      "job_id": row.get("job_id"), "template": row.get("_template")}]
-    return _signals.normalize_candidate(
+    return _signals_n.normalize_candidate(
         table=table, period=week, geo=geo, term=term,
         list_kind=kind, rank=row.get("rank"), source=SOURCE,
         source_record_id=f"{table}|{refresh}|{geo}|{term}|{kind}",

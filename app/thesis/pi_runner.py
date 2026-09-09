@@ -69,7 +69,7 @@ def run_thesis_pi(*, thesis_id: str, trigger_id: str, prompt: str,
     out_p = tmp / "out.log"
     err_p = tmp / "err.log"
     done_p = tmp / "done.json"
-    cmd = ["pi", "-p", "--no-session", "--extension", _EXTENSION, "--", prompt]
+    cmd = ["pi", "-p", "--no-session", "--extension", _EXTENSION, "--exclude-tools", "bash,edit,write,powershell", "--", prompt]
     env = dict(os.environ)
     if data_root is not None and str(data_root):
         env["STOCKBOT_DATA_DIR"] = str(data_root)

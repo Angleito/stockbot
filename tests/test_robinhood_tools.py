@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -137,7 +138,8 @@ def test_execution_rechecks_application_capability() -> None:
 
 def test_execute_tool_requires_explicit_context() -> None:
     with pytest.raises(TypeError, match="context"):
-        tools.execute_tool("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")  # type: ignore[missing-argument]  # verifies context is a required keyword-only argument
+        _exec: Callable[..., object] = tools.execute_tool
+        _exec("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")  # verifies context is a required keyword-only argument
 
 
 def test_scan_read_handlers_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -16,7 +16,6 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from typing import cast
 
 import requests
 
@@ -30,10 +29,6 @@ from ..security.action_policy import private_pattern_hit
 from ..thesis.models import Thesis
 from ..thesis.repository import ThesisRepository
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
 
 SOURCE = "youtube"
 _SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
@@ -143,8 +138,10 @@ def _validate_days(days: dict[str, object]) -> dict[str, object]:
 
 def _reserve(root: Path, kind: str, ceiling: int) -> None:
     """Consume one quota unit under an flock-held lock; raises _QuotaRefused."""
-    if fcntl is None:
-        raise _QuotaRefused("quota_state_invalid")
+    try:
+        import fcntl as _fcntl
+    except ImportError:  # pragma: no cover
+        raise _QuotaRefused("quota_state_invalid") from None
     try:
         today = _pacific_today()
     except Exception:
@@ -158,7 +155,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
         raise _QuotaRefused("quota_state_invalid") from None
     with fh:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
             try:
                 if not qpath.exists():
                     raw = None
@@ -203,7 +200,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
             bucket[kind] += 1
             _store_ledger(qpath, days)
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
 
 
 def _http_get(url: str, params: dict[str, str | int]) -> tuple[dict[str, object] | None, str | None]:
@@ -302,7 +299,11 @@ def _apply_details(rows: list[dict[str, object]], body: dict[str, object]) -> st
              if isinstance(e, dict) and isinstance(e.get("id"), str)}
     missing = False
     for row in rows:
-        entry = by_id.get(cast(str, row["video_id"]))
+        vid = row["video_id"]
+        if not isinstance(vid, str):
+            missing = True
+            continue
+        entry = by_id.get(vid)
         if entry is None:
             missing = True
             continue
