@@ -501,7 +501,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
  });
 
- // Normal Pi: built-in tools pass through; Stockbot tool auth stays in bridge/policy.
+ // Built-in tool availability is constrained by Pi launch/config; Stockbot custom-tool authorization remains in bridge/policy.
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
