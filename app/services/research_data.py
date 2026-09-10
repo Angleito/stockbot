@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Sequence
@@ -336,7 +338,14 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
     ``retrieved_at``; reruns return 0.
     """
     root = Path(data_root) if data_root else get_data_root()
-    table = parquet.read_table("short_interest", root=root / "parquet")
+    parquet_root = root / "parquet"
+    dataset_dir = parquet_root / "short_interest"
+    backup_dir = parquet_root / "short_interest-backfill-bak"
+    if backup_dir.exists() and not dataset_dir.exists():
+        backup_dir.rename(dataset_dir)
+    elif backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    table = parquet.read_table("short_interest", root=parquet_root)
     rows = table.to_pylist()
     fixed: list[dict[str, object]] = []
     for row in rows:
@@ -351,11 +360,42 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
             fixed.append(row)
     if not fixed:
         return {"rewritten": 0}
-    dataset_dir = root / "parquet" / "short_interest"
-    for path in sorted(dataset_dir.rglob("*.parquet")):
-        path.unlink()
     by_id = {str(r.get("row_id")): r for r in rows if isinstance(r, dict)}
     for row in fixed:
         by_id[str(row.get("row_id"))] = row
-    parquet.write_rows("short_interest", list(by_id.values()), root=root / "parquet")
+    corrected = list(by_id.values())
+    staging = Path(tempfile.mkdtemp(prefix="short_interest-backfill-", dir=parquet_root))
+    try:
+        parquet.write_rows("short_interest", corrected, root=staging)
+        staged = parquet.read_table("short_interest", root=staging).to_pylist()
+        if len(staged) != len(corrected):
+            raise RuntimeError(
+                f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}"
+            )
+        staged_by_id = {str(r.get("row_id")): r for r in staged if isinstance(r, dict)}
+        for row in fixed:
+            row_id = str(row.get("row_id"))
+            staged_row = staged_by_id.get(row_id)
+            if staged_row is None:
+                raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing from staged copy")
+            if str(staged_row.get("known_at")) != str(staged_row.get("retrieved_at")):
+                raise RuntimeError(f"backfill validation failed: fixed row {row_id} known_at != retrieved_at")
+        for staged_row in staged:
+            if not isinstance(staged_row, dict):
+                continue
+            settlement = str(staged_row.get("settlement_date") or "")
+            known = str(staged_row.get("known_at") or "")
+            retrieved = str(staged_row.get("retrieved_at") or "")
+            if settlement and known and retrieved and known == settlement:
+                raise RuntimeError(
+                    f"backfill validation failed: staged row {staged_row.get('row_id')} still settlement-stamped"
+                )
+        # ponytail: single-writer per data root, add a file lock if concurrent refreshes ever share one
+        if dataset_dir.exists():
+            os.replace(dataset_dir, backup_dir)
+        os.replace(staging / "short_interest", dataset_dir)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return {"rewritten": len(fixed)}

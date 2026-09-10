@@ -6,6 +6,7 @@ Network-free and agent-free: raw payloads in, normalized rows out.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from .domain.market import ids
@@ -573,6 +574,18 @@ def _to_float(value: object) -> Optional[float]:
         return float(text)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_iso_instant(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{field} {value!r} is not a parseable ISO-8601 timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def normalize_finra_short_interest(
     rows: list[dict[str, object]],
     *,
@@ -584,9 +597,15 @@ def normalize_finra_short_interest(
     source_record_id: str,
 ) -> dict[str, list[dict[str, object]]]:
     if known_at:
-        if known_at[:10] < settlement_date:
+        try:
+            settlement_day = date.fromisoformat(settlement_date)
+        except ValueError:
+            raise ValueError(f"settlement_date {settlement_date!r} is not a parseable date")
+        known_instant = _parse_iso_instant(known_at, "known_at")
+        retrieved_instant = _parse_iso_instant(retrieved_at, "retrieved_at")
+        if known_instant.date() < settlement_day:
             raise ValueError(f"known_at {known_at} precedes settlement_date {settlement_date}")
-        if known_at > retrieved_at:
+        if known_instant > retrieved_instant:
             raise ValueError(f"known_at {known_at} exceeds retrieved_at {retrieved_at}")
     short_interest: list[dict[str, object]] = []
     for row in rows:

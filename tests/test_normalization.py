@@ -204,21 +204,53 @@ def test_short_interest_explicit_known_at_wins_with_bounds():
 def test_short_interest_explicit_known_at_rejects_out_of_bounds():
     import pytest
 
-    kw: dict[str, object] = {
-        "settlement_date": "2025-12-15",
-        "retrieved_at": "2025-12-24T12:00:00Z",
-        "content_hash": "h1",
-        "source_url": "u",
-        "source_record_id": "r",
-    }
     with pytest.raises(ValueError, match="precedes settlement_date"):
         normalize_finra_short_interest(
-            [{"symbolCode": "AAA"}], known_at="2025-12-14T23:00:00Z", **kw,  # type: ignore[arg-type]
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-14T23:00:00Z",
+            retrieved_at="2025-12-24T12:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
         )
     with pytest.raises(ValueError, match="exceeds retrieved_at"):
         normalize_finra_short_interest(
-            [{"symbolCode": "AAA"}], known_at="2025-12-25T00:00:00Z", **kw,  # type: ignore[arg-type]
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-25T00:00:00Z",
+            retrieved_at="2025-12-24T12:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
         )
+
+
+def test_short_interest_known_at_compares_instants_not_strings():
+    import pytest
+
+    with pytest.raises(ValueError, match="exceeds retrieved_at"):
+        normalize_finra_short_interest(
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-24T10:00:00-08:00",
+            retrieved_at="2025-12-24T17:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
+        )
+    datasets = normalize_finra_short_interest(
+        [{"symbolCode": "AAA"}],
+        settlement_date="2025-12-15",
+        known_at="2025-12-24T01:00:00-08:00",
+        retrieved_at="2025-12-24T12:00:00Z",
+        content_hash="h1",
+        source_url="u",
+        source_record_id="r",
+    )
+    (row,) = datasets["short_interest"]
+    assert row["known_at"] == "2025-12-24T01:00:00-08:00"
+
 
 def test_eps_facts_normalized_with_period_metadata():
     diluted: list[dict[str, object]] = [{

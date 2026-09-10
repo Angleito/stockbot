@@ -514,3 +514,44 @@ def test_refresh_repairs_settlement_stamped_row_on_same_snapshot(
     assert stored["retrieved_at"] == "2026-08-30T12:00:00Z"
     assert stored["known_at"] == stored["retrieved_at"]
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+
+
+def test_backfill_recovers_interrupted_swap(tmp_path: Path) -> None:
+    from app.services.research_data import backfill_finra_known_at
+
+    parquet.write_rows("short_interest", [{
+        "row_id": "finra:row:2026-08-14:AAA:oldhash1234", "entity_id": None, "security_id": None,
+        "symbol_code": "AAA", "issue_name": "Alpha", "settlement_date": "2026-08-14",
+        "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+        "source_url": "u", "source_record_id": "r",
+        "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
+        "content_hash": "old", "parser_version": "t",
+    }], root=tmp_path / "parquet")
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 1}
+    dataset_dir = tmp_path / "parquet" / "short_interest"
+    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
+    dataset_dir.rename(backup_dir)
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+    assert dataset_dir.exists()
+    assert not backup_dir.exists()
+    (row,) = parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()
+    assert row["symbol_code"] == "AAA"
+    assert row["known_at"] == "2026-08-30T12:00:00Z"
+
+
+def test_backfill_clears_stale_backup(tmp_path: Path) -> None:
+    from app.services.research_data import backfill_finra_known_at
+
+    parquet.write_rows("short_interest", [{
+        "row_id": "finra:row:2026-08-14:AAA:oldhash1234", "entity_id": None, "security_id": None,
+        "symbol_code": "AAA", "issue_name": "Alpha", "settlement_date": "2026-08-14",
+        "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+        "source_url": "u", "source_record_id": "r",
+        "known_at": "2026-08-30T12:00:00Z", "retrieved_at": "2026-08-30T12:00:00Z",
+        "content_hash": "old", "parser_version": "t",
+    }], root=tmp_path / "parquet")
+    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "junk.parquet").write_bytes(b"junk")
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+    assert not backup_dir.exists()
