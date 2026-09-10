@@ -55,19 +55,25 @@ def check_policy() -> None:
     proc = run(["sbx", "policy", "ls", SANDBOX_NAME])
     if proc.returncode != 0:
         fail(name, f"'sbx policy ls {SANDBOX_NAME}' failed (exit {proc.returncode}): {proc.stderr.strip()}")
-    if "locked down" not in proc.stdout.lower():
-        fail(name, f"'sbx policy ls {SANDBOX_NAME}' does not report Locked Down")
+    if "locked down" in proc.stdout.lower():
+        ok(name)
+        return
+    # Newer sbx prints rules without a profile name; prove default-deny
+    # behaviorally: a kit host allows, a non-kit host denies.
+    allow = run(["sbx", "policy", "check", "network", "--sandbox", SANDBOX_NAME, "opencode.ai:443"])
+    deny = run(["sbx", "policy", "check", "network", "--sandbox", SANDBOX_NAME, "github.com:443"])
+    if allow.returncode != 0 or deny.returncode == 0:
+        fail(name, "effective policy is not default-deny with kit allows")
     ok(name)
 
 
 def check_credentials() -> None:
-    name = "openai + opencode-go host credentials configured"
+    name = "opencode-go host credential configured"
     proc = run(["sbx", "secret", "ls"])
     if proc.returncode != 0:
         fail(name, f"'sbx secret ls' failed (exit {proc.returncode}): {proc.stderr.strip()}")
-    missing = [svc for svc in ("openai", "opencode-go") if svc not in proc.stdout]
-    if missing:
-        fail(name, f"missing host credentials: {', '.join(missing)}")
+    if "opencode-go" not in proc.stdout:
+        fail(name, "missing host credential: opencode-go")
     ok(name)
 
 
