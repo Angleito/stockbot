@@ -2026,7 +2026,7 @@ _SEC_DOMAIN_PACKS = {
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Keyword search over tool names, descriptions, and domain tags."""
     del model
-    query = str(args.get("query") or "").strip().lower()
+    query = str(args.get("query") or "").strip().lower().replace("_", " ")
     domain = str(args.get("domain") or "").strip().lower()
     by_name: dict[str, dict[str, object]] = {}
     for tool in TOOLS:

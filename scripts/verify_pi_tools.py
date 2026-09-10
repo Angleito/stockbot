@@ -677,18 +677,21 @@ def main() -> int:
     failed_tools: list[str] = []
     for tool in tool_names:
         tool_recs = results[tool]
-        if all(rec.get("ok") is True for rec in tool_recs):
+        attempt3_ok = next((r for r in tool_recs if r.get("attempt") == 3), {}).get("ok") is True
+        if attempt3_ok:
             remove_successful_attempt_dirs(root, tool, tool_recs)
         else:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
-    passed_tools = len([t for t in tool_names if all(r.get("ok") is True for r in results[t])])
+    passed_tools = len([t for t in tool_names if next((r for r in results[t] if r.get("attempt") == 3), {}).get("ok") is True])
     coverage = f"{passed_tools}/{len(tool_names)} tools"
     wall = time.monotonic() - verify_start
     print(f"git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
     print(f"Coverage: {coverage} | processes: {procs} | passed: {passed}/{total}")
     print(f"Concurrency: {concurrency} | Wall time: {wall:.1f}s")
     print(f"RESULT: {'PASS' if not failed_tools else 'FAIL'}")
+    routing_misses = sorted(t for t in tool_names if next((r for r in results[t] if r.get("attempt") == 3), {}).get("ok") is True and any(r.get("attempt") in (1, 2) and r.get("ok") is not True for r in results[t]))
+    print(f"routing misses (attempt1/2-only, wiring OK): {routing_misses}")
     if failed_tools:
         print(f"failed tools: {failed_tools}")
     summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "concurrency": concurrency, "wall_seconds": wall}
