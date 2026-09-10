@@ -31,7 +31,14 @@ from app.config import get_data_root  # noqa: E402
 from app.policy import Capability, RequestContext  # noqa: E402
 from scripts.verify_tool_registry import get_registry_sets, registry_errors, tool_schema_function, tool_schema_name  # noqa: E402
 EXTENSION = ".pi/extensions/stockbot.ts"
-TIMEOUT_S = 180
+# Duration evidence (2026-09-09 matrix): every recorded tool handler completes
+# in seconds (slowest singles: search_sec_filings 39s, search_sec_relationships
+# 25s; SEC per-filing sweeps ~0.6s each warm). The 180s kills all landed
+# mid-run with clean target calls and no failed events (e.g.
+# get_ownership_changes attempt-2: 9 fast calls, run still open) — time goes
+# to small-model rounds (~5-10s each), not tools. 300s fits ~30 rounds; the
+# 120s per-tool-call cliff still bounds any single hung handler.
+TIMEOUT_S = 300
 DEFAULT_REPETITIONS = 3
 DEFAULT_CONCURRENCY = 6
 POLL_S = 2
@@ -83,8 +90,6 @@ def ensure_thesis_fixture(store: Path) -> str:
 
 
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
-
-
 FINRA_SETTLEMENT_ENV = "PI_VERIFY_SETTLEMENT_DATE"
 FETCH_TOP_SYMBOLS_SQL = (
     "SELECT symbol_code, MAX(short_position) AS pos FROM short_interest "
@@ -163,6 +168,8 @@ def ensure_finra_fixture(durable: Path, tool_names: list[str]) -> int:
     return 0
 
 
+
+
 def seed_finra_fixture(store: Path, durable: Path) -> None:
     """Copy leaderboard inputs from the durable store into the batch store.
 
@@ -190,19 +197,19 @@ class _VerifyCase(TypedDict):
 
 
 VERIFY_CASES: dict[str, _VerifyCase] = {
-    "get_fundamentals": {"arguments": {"ticker": "AAPL", "metric": "eps"}, "natural_question": "What is Apple's EPS?"},
-    "find_sec_entities": {"arguments": {"query": "Apple"}, "natural_question": "Find SEC entities matching Apple."},
-    "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "Full-text search SEC filing documents for Apple risk factor language."},
+    "get_fundamentals": {"arguments": {"ticker": "AAPL", "metric": "eps"}, "natural_question": "What does Apple earn per share, basic and diluted, including trailing-twelve-month figures?"},
+    "find_sec_entities": {"arguments": {"query": "Apple"}, "natural_question": "Which SEC-registered entities correspond to Apple?"},
+    "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "What risk-factor language appears in Apple's SEC filing documents?"},
     "search_sec_relationships": {"arguments": {"entity": "Apple"}, "natural_question": "What relationships does Apple disclose?"},
-    "get_sec_search_coverage": {"arguments": {}, "natural_question": "Show SEC search coverage for 10-K filings."},
+    "get_sec_search_coverage": {"arguments": {}, "natural_question": "Which filing types and years does SEC full-text search cover?"},
     "list_sec_filings": {"arguments": {"identifier": "AAPL", "limit": 5}, "natural_question": "List Apple's recent SEC filings."},
-    "get_sec_filing": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Get Apple filing 0000320193-25-000079."},
-    "list_sec_documents": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "List documents in Apple filing 0000320193-25-000079."},
-    "get_sec_document": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Get the primary document of Apple filing 0000320193-25-000079."},
-    "diff_sec_filings": {"arguments": {"current_accession": "0000320193-25-000079", "previous_accession": "0000320193-24-000123"}, "natural_question": "What changed between Apple filing versions?"},
-    "get_financial_statements": {"arguments": {"ticker": "MSFT", "statement_type": "income_statement"}, "natural_question": "Show Microsoft's income statement."},
-    "get_xbrl_facts": {"arguments": {"ticker": "AAPL", "concept": "Revenue"}, "natural_question": "What is Apple's revenue?"},
-    "get_material_events": {"arguments": {"ticker": "AAPL", "since": "2024-01-01"}, "natural_question": "What material events has Apple disclosed since 2024?"},
+    "get_sec_filing": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "What does Apple's most recent annual report filing contain?"},
+    "list_sec_documents": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Which documents make up Apple's most recent annual report filing?"},
+    "get_sec_document": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Show me the main document text of Apple's most recent annual report filing."},
+    "diff_sec_filings": {"arguments": {"current_accession": "0000320193-25-000079", "previous_accession": "0000320193-24-000123"}, "natural_question": "What changed between Apple's two most recent annual report filings?"},
+    "get_financial_statements": {"arguments": {"ticker": "MSFT", "statement_type": "income_statement"}, "natural_question": "Show Microsoft's revenue, expenses, and profit breakdown."},
+    "get_xbrl_facts": {"arguments": {"ticker": "AAPL", "concept": "Revenue"}, "natural_question": "How much money did Apple bring in last year?"},
+    "get_material_events": {"arguments": {"ticker": "AAPL", "since": "2024-01-01"}, "natural_question": "What material events has Apple disclosed recently?"},
     "get_beneficial_ownership": {"arguments": {"ticker": "AAPL"}, "natural_question": "Who are Apple's large beneficial owners?"},
     "get_ownership_changes": {"arguments": {"ticker": "AAPL"}, "natural_question": "Have Apple's ownership stakes changed?"},
     "get_insider_activity": {"arguments": {"ticker": "AAPL"}, "natural_question": "What insider activity has Apple had?"},
@@ -212,27 +219,27 @@ VERIFY_CASES: dict[str, _VerifyCase] = {
     "get_governance_events": {"arguments": {"ticker": "AAPL"}, "natural_question": "What governance events has Apple had?"},
     "get_transaction_status": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is the status of Apple's transactions?"},
     "get_short_pressure_profile": {"arguments": {"ticker": "AAPL"}, "natural_question": "Is Apple under short pressure?"},
-    "search_tools": {"arguments": {"query": "short interest"}, "natural_question": "Which tools handle short interest questions?"},
+    "search_tools": {"arguments": {"query": "short interest"}, "natural_question": "Which tools tell me what short sellers are doing in a stock?"},
     "diff_risk_factors": {"arguments": {"ticker": "GOOGL"}, "natural_question": "What changed in Google's risk factors?"},
     "get_recent_ownership_filings": {"arguments": {}, "natural_question": "Show the most recent SC 13D/G filings."},
     "get_threshold_securities": {"arguments": {}, "natural_question": "Which securities are on the FINRA threshold list?"},
-    "get_short_interest": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's short interest?"},
-    "get_short_interest_leaderboard": {"arguments": {"limit": 5}, "natural_question": "Which stocks lead short interest?"},
+    "get_short_interest": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's most recent consolidated short interest?"},
+    "get_short_interest_leaderboard": {"arguments": {"limit": 5}, "natural_question": "Which stocks have the highest short interest as a share of total shares?"},
     "get_reg_sho_volume": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's Reg SHO volume?"},
     "get_analyst_estimates": {"arguments": {"ticker": "AAPL"}, "natural_question": "What are analysts estimating for Apple?"},
     "get_sp500_weight": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's S&P 500 weight?"},
     "get_obligations": {"arguments": {"ticker": "AAPL"}, "natural_question": "What are Apple's obligations?"},
-    "get_valuation_metrics": {"arguments": {"ticker": "AAPL"}, "natural_question": "What are Apple's valuation metrics?"},
-    "search_web": {"arguments": {"query": "Apple 10-K risk factors"}, "natural_question": "Search the web for Apple 10-K risk factors."},
-    "list_finra_datasets": {"arguments": {}, "natural_question": "List FINRA datasets."},
-    "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "Describe the FINRA consolidated short interest dataset."},
-    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show recent FINRA short interest datapoints for Apple."},
-    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "Query the FINRA weekly summary dataset for Apple."},
+    "get_valuation_metrics": {"arguments": {"ticker": "AAPL"}, "natural_question": "Is Apple stock cheap or expensive on earnings multiples?"},
+    "search_web": {"arguments": {"query": "Apple 10-K risk factors"}, "natural_question": "What are outside commentators saying this week about risks to Apple's business?"},
+    "list_finra_datasets": {"arguments": {}, "natural_question": "What FINRA datasets can I pull?"},
+    "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "What FINRA data is available about bets against stocks, and what fields and update schedule does it have?"},
+    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show recent FINRA short position figures for Apple."},
+    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "How has Apple's short position changed week to week according to FINRA records?"},
     "find_alternative_signals": {"arguments": {}, "natural_question": "What alternative signals have been collected?"},
-    "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_question": "Show collected trend evidence for early September 2026."},
-    "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Investigate the Stanley discovery candidate."},
-    "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "Show macro context for California."},
-    "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "Show recent Apple patent publications."},
+    "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_question": "What internet trends were collected recently in the United States?"},
+    "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Is the Stanley online buzz backed by real demand?"},
+    "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "What is the economic backdrop in California?"},
+    "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "What has Apple patented recently?"},
     "thesis_create": {"arguments": {"user_thesis": "I think NVDA AI demand will stay strong."}, "natural_question": "Record my thesis that NVDA AI demand will stay strong."},
     "thesis_show": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "Show thesis thesis-placeholder with its assessment and watch rules."},
     "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_question": "Refine thesis thesis-placeholder: AI datacenter capex keeps growing."},
@@ -280,17 +287,24 @@ def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
     )
 
 
+def _natural_prompt(tool: str, args: Mapping[str, object]) -> str:
+    """Natural question for attempts 1-2; never names the tool or dumps args."""
+    case = VERIFY_CASES.get(tool)
+    natural = case["natural_question"] if case is not None else ""
+    if natural and THESIS_ID_PLACEHOLDER in natural and "id" in args:
+        thesis_id = str(args["id"])
+        natural = natural.replace(THESIS_ID_PLACEHOLDER, thesis_id)
+        natural += f" Use thesis ID `{thesis_id}` exactly for the `id` argument."
+    return natural
+
+
 def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
-    if attempt == 2:
-        case = VERIFY_CASES.get(tool)
-        natural = case["natural_question"] if case is not None else ""
+    # Attempts 1-2 are natural routing prompts (search_tools -> target); only
+    # they can pass. Attempt 3+ is an explicit diagnostic fallback.
+    if attempt in (1, 2):
+        natural = _natural_prompt(tool, args)
         if natural:
-            if THESIS_ID_PLACEHOLDER in natural and "id" in args:
-                thesis_id = str(args["id"])
-                natural = natural.replace(THESIS_ID_PLACEHOLDER, thesis_id)
-                natural += f" Use thesis ID `{thesis_id}` exactly for the `id` argument."
             return natural
-        return f"Please answer this (you may need the `{tool}` tool with {json.dumps(args, sort_keys=True)}): rephrase and fulfill the request using `{tool}`."
     return build_explicit_prompt(tool, args)
 
 
@@ -324,9 +338,64 @@ def check_pre_pi(describe_names: list[str]) -> str | None:
     return None
 
 
-def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
+def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
+    """Tool names with a `tool_failed` event but no errored execution.
+
+    A rejection with no `tool_calls` error row means the harness refused the
+    call before dispatch (e.g. schema validation of a probe); a genuine
+    execution failure always leaves an errored call row and is excluded here.
+    Built-in Pi tools (read, grep, …) never appear in tool_calls and are excluded via the schema set.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT e.tool_name FROM agent_events e "
+        "WHERE e.event_type = 'tool_failed' AND NOT EXISTS "
+        "(SELECT 1 FROM tool_calls c WHERE c.tool_name = e.tool_name "
+        "AND c.error_type IS NOT NULL)"
+    ).fetchall()
+    allowed_names = get_registry_sets()["schemas"]
+    return sorted(r[0] for r in rows if r[0] in allowed_names)
+
+
+def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]:
+    """Dispatched Stockbot tools other than search_tools and the required target.
+
+    tool_calls rows are written only by execute_pi_tool (app/pi_gateway.py:399),
+    so every name here is a Stockbot-dispatched call; Pi built-ins never appear.
+    """
+    names = get_registry_sets()["schemas"]
+    rows = conn.execute("SELECT DISTINCT tool_name FROM tool_calls").fetchall()
+    return sorted(r[0] for r in rows if r[0] in names and r[0] not in ("search_tools", required_tool))
+
+
+def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
+    """None when `name` has a clean success; otherwise a short failure reason."""
+    ok_calls = conn.execute(
+        "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (name,)
+    ).fetchone()[0]
+    if ok_calls < 1:
+        return "absent"
+    completed = conn.execute(
+        "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)
+    ).fetchone()[0]
+    if completed < 1:
+        return "no completed event"
+    failed = conn.execute(
+        "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)
+    ).fetchone()[0]
+    if failed > 0:
+        return "failed execution present"
+    return None
+
+
+def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
+    # Routing benchmark: attempts 1-2 allow exactly two Stockbot calls — a clean
+    # search_tools call AND a clean required-target call. Any other Stockbot tool
+    # fails, whether harness-rejected pre-dispatch, dispatched-and-errored, or
+    # dispatched-and-successful. Attempt 3 uses an explicit recovery prompt under
+    # the same presence checks, exempt from both stray-tool gates. All three
+    # attempts must pass (see the all-ok gate in main).
     if timed_out and not completed_override:
         return False, "pi timeout"
     if exit_code != 0 and not completed_override:
@@ -336,27 +405,20 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
     try:
         conn = sqlite3.connect(str(db_path))
         try:
-            ok_tools = conn.execute(
-                "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (required_tool,)
-            ).fetchone()[0]
-            if ok_tools < 1:
-                # distinguish wrong-tool vs error-envelope for clearer logs
-                any_ok = conn.execute(
-                    "SELECT COUNT(*) FROM tool_calls WHERE error_type IS NULL"
-                ).fetchone()[0]
-                if any_ok >= 1:
-                    return False, f"required tool '{required_tool}' absent (other tools called)"
-                return False, f"required tool '{required_tool}' has no successful call"
-            completed = conn.execute(
-                "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (required_tool,)
-            ).fetchone()[0]
-            failed = conn.execute(
-                "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_failed' AND tool_name = ?", (required_tool,)
-            ).fetchone()[0]
-            if completed < 1:
-                return False, "no TOOL_COMPLETED for required tool"
-            if failed > 0:
-                return False, "TOOL_FAILED present for required tool"
+            if attempt in (1, 2):
+                stray = _rejected_tools(conn)
+                if stray:
+                    return False, f"routing failed: harness-rejected call to {', '.join(stray)}"
+                extra = _unexpected_tools(conn, required_tool)
+                if extra:
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(extra)}"
+            if required_tool != "search_tools":
+                search_problem = _tool_success(conn, "search_tools", attempt=attempt)
+                if search_problem is not None:
+                    return False, f"routing failed: search_tools absent ({search_problem})"
+            target_problem = _tool_success(conn, required_tool, attempt=attempt)
+            if target_problem is not None:
+                return False, f"target '{required_tool}' absent ({target_problem})"
             # Pi configuration is authoritative for which model runs; assert presence only, never an exact ID.
             models = conn.execute("SELECT model FROM model_calls").fetchall()
             if not any((r[0] or "").strip() for r in models):
@@ -518,7 +580,7 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
         prompt = build_attempt_prompt(tool, args, attempt)
         code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
         model_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
-        ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete)
+        ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
         duration_seconds = time.monotonic() - start
         return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
     except Exception as exc:

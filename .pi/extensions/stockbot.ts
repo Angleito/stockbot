@@ -47,6 +47,10 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
+export function nextActiveTools(active: string[], matches: string[], research: Set<string>): string[] {
+ const base = active.filter((n) => !research.has(n) || n === "search_tools");
+ return [...new Set([...base, ...matches.slice(0, 4)])];
+}
 
 // Absolute bridge paths derived from this file's location: Pi's extension
 // host cwd is not the repo root, so relative venv/scripts paths ENOENT.
@@ -405,20 +409,65 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   }
  }
  const research = new Set<string>();
+ const requiredOf: Record<string, string[]> = {};
 
  for (const entry of bridgeDown ? [] : entries) {
   const fn = describeFn(entry);
   if (!fn) continue;
   research.add(fn.name);
+  const params: unknown = fn.parameters;
+  const rawRequired = params && typeof params === "object" && "required" in params ? params.required : undefined;
+  requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [];
   const cardSpec = CARD_TOOLS[fn.name];
+  // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
+  // the system prompt when an active tool carries it) and activates matches.
+  const isSearch = fn.name === "search_tools";
   pi.registerTool({
    name: fn.name,
    label: fn.name,
    description: fn.description,
    parameters: Type.Unsafe(fn.parameters),
+   ...(isSearch
+    ? {
+     promptSnippet: "Search for additional tools when the active tools cannot perform the task",
+     promptGuidelines: ["Use search_tools when a task requires a capability that is not currently available."],
+    }
+    : {}),
    async execute(toolCallId, params) {
     toolCalls++;
     const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    if (isSearch) {
+     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
+     const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
+     const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
+     const matches = (Array.isArray(raw) ? raw : [])
+      .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
+      .filter((n) => research.has(n))
+      .slice(0, 4);
+     const active = pi.getActiveTools();
+     const next = nextActiveTools(active, matches, research);
+     const added = next.filter((n) => !active.includes(n));
+     const dropped = active.filter((n) => n !== "search_tools" && research.has(n) && !next.includes(n));
+     if (added.length || dropped.length) pi.setActiveTools(next);
+     const nowActive = next.filter((n) => n !== "search_tools" && research.has(n));
+     const need = (n: string) => {
+      const req = requiredOf[n] ?? [];
+      return req.length ? `${n} (needs: ${req.join(", ")})` : n;
+     };
+     const suffix = dropped.length ? `; now active: ${nowActive.map(need).join(", ") || "(none)"}` : "";
+     const query = (params as Json).query;
+     const text =
+      matches.length === 0
+       ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}${suffix}`
+       : added.length
+        ? `Activated ${added.length} tools: ${added.map(need).join(", ")}${suffix}`
+        : `Matching tools already active: ${matches.map(need).join(", ")}${suffix}`;
+     refreshStatus(lastCtx);
+     return {
+      content: [{ type: "text", text }],
+      details: bridge,
+     };
+    }
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text: bridgeModelText(bridge) }],
@@ -536,11 +585,17 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  function refreshStatus(ctx: ExtensionContext | null) {
   if (!ctx) return;
   try {
+   let activeResearch = 0;
+   try {
+    activeResearch = pi.getActiveTools().filter((n) => research.has(n)).length;
+   } catch {
+    activeResearch = 0;
+   }
    ctx.ui.setStatus(
     "stockbot",
     bridgeDown
      ? "stockbot · bridge unavailable (0 tools)"
-     : `stockbot · ${research.size} tools · ${turns} turns · ${toolCalls} calls · ${blocks} blocked`,
+     : `stockbot · ${research.size} registered · ${activeResearch} research active · ${toolCalls} calls · ${blocks} blocked`,
    );
   } catch {
    // non-TUI modes without status: ignore
@@ -549,6 +604,9 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
+  // Deferred loading: start with built-ins + search_tools only; searches
+  // rotate matches (cap 4). research.size still counts registered tools.
+  pi.setActiveTools(nextActiveTools(pi.getActiveTools(), [], research));
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {

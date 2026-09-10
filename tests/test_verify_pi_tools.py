@@ -16,7 +16,7 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None) -> Path:
+def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     now = "2026-01-01T00:00:00+00:00"
@@ -29,7 +29,7 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1',?,?,?)",
         (name, now, tool_error),
     )
-    if event in ("completed", "both"):
+    if event in ("completed", "both", "harness-rejected"):
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
             (now, tool if other_tool is None else other_tool if False else tool if event == 'both' else name),
@@ -39,10 +39,42 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
             (now, tool),
         )
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1',?,'2026-01-01T00:00:00+00:00','tool_error')",
+            (tool,),
+        )
+    if event == "harness-rejected":
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
+            (now, tool),
+        )
     if event == "failed-only":
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_failed',?,?)",
             (now, tool),
+        )
+    if rejected_other is not None:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_failed',?,?)",
+            (now, rejected_other),
+        )
+    if extra_tool is not None:
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,?,?)",
+            (extra_tool, now, extra_error),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,?,?,?)",
+            ("tool_completed" if extra_error is None else "tool_failed", now, extra_tool),
+        )
+    if tool != "search_tools" and other_tool != "search_tools":
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
+            (now,),
         )
     conn.execute(
         "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
@@ -61,9 +93,12 @@ def _ok(
     tool_error: str | None = None,
     event: str = "completed",
     other_tool: str | None = None,
+    rejected_other: str | None = None,
+    extra_tool: str | None = None,
+    extra_error: str | None = None,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool)
+    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error)
     return p
 
 
@@ -139,8 +174,52 @@ def test_empty_model_telemetry_fails(tmp_path: Path):
 
 
 def test_tool_failed_event_fails(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="both"), "get_fundamentals", 0, False, attempt=1)
     assert not ok
+
+
+def test_harness_rejection_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "harness-rejected" in reason
+
+
+def test_harness_rejection_without_execution_passes(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "harness-rejected" in reason
+
+
+def test_rejected_wrong_tool_passes_attempt_3(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "unexpected" in reason
+
+
+def test_dispatched_wrong_tool_success_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "unexpected" in reason
+
+
+def test_dispatched_wrong_tool_passes_attempt_3(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_failed_builtin_ignored_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="read"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
 
 
 def test_two_of_three_is_not_pass():
@@ -359,7 +438,7 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
         prompts.append(prompt)
         return (0, False, "", "", True)
 
-    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False) -> tuple[bool, str]:
+    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
         return (True, "pass")
 
     monkeypatch.setattr(v, "ensure_thesis_fixture", fake_fixture)
