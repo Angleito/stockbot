@@ -2,7 +2,7 @@
 
 Domain: finra
 
-Short-interest values and figures from FINRA (exact source values). Use this instead of get_short_interest when values are asked for.
+Short-position values and figures from FINRA (exact source values for explicit requests).
 
 ## Use when
 

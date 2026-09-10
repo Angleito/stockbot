@@ -85,7 +85,7 @@ tools:
     summary: "One FINRA dataset's fields, types, filter values, and supported methods."
   - name: get_finra_datapoints
     domain: finra
-    summary: "Short-interest values and figures from FINRA (exact source values). Use this instead of get_short_interest when values are asked for."
+    summary: "Short-position values and figures from FINRA (exact source values for explicit requests)."
   - name: get_reg_sho_volume
     domain: finra
     summary: "FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rolling 12 months."

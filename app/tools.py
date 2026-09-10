@@ -2282,7 +2282,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         domain="filings",
         summary="What was disclosed about risk factors in recent filings: full-text EDGAR SEC search and retrieval across entity, EFTS, and 10-K/10-Q routes, with disclosure language and mentions.",
         use_when=("Searching filing text or mentions when the exact accession number is unknown.", "Risk-factor language used in recent SEC filings.", "Risk-factor language in SEC filings."),
-        avoid_when=("Do not use to list filings for a known ticker; use list_sec_filings instead.",),
+        avoid_when=("Do not use to list filings for a known ticker; use list_sec_filings instead.", "Use the given ticker directly; no entity lookup is needed."),
         related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities"),
     ),
     "search_sec_relationships": ToolDiscovery(
@@ -2399,7 +2399,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         domain="transactions",
         summary="M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies.",
         use_when=("Checking merger, acquisition, or tender-offer filing context for a ticker.",),
-        avoid_when=("Do not use for governance or proxy votes; use get_governance_events instead.",),
+        avoid_when=("Do not use for governance or proxy votes; use get_governance_events instead.", "Use the given ticker directly; no entity lookup is needed."),
         related_tools=("get_governance_events", "get_sec_document"),
     ),
     "get_short_pressure_profile": ToolDiscovery(
@@ -2511,7 +2511,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         domain="alternative",
         summary="Discovery scan for rising search-term and diffusion signals worth investigating.",
         use_when=("Screening for emerging trend or attention signals across terms.",),
-        avoid_when=("Do not use for evidence on one known trend; use get_trend_evidence instead.",),
+        avoid_when=("Do not use for evidence on one known trend; use get_trend_evidence instead.", "Do not use for a dated, geography-specific trend question; use get_trend_evidence."),
         related_tools=("get_trend_evidence", "investigate_social_arbitrage_candidate"),
     ),
     "get_trend_evidence": ToolDiscovery(
@@ -2558,7 +2558,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_finra_datapoints": ToolDiscovery(
         domain="finra",
-        summary="Short-interest values and figures from FINRA (exact source values). Use this instead of get_short_interest when values are asked for.",
+        summary="Short-position values and figures from FINRA (exact source values for explicit requests).",
         use_when=("Showing exact settlement-date values when the user asks to see figures.", "Recent short-interest values.", "Short-position figures."),
         avoid_when=("Do not use for ordinary analysis; use query_finra or the helper tools.",),
         related_tools=("describe_finra_dataset", "query_finra"),
@@ -2721,9 +2721,18 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
         return {"query": query, "domain": domain, "matches": matches, "count": len(matches)}
     query_norm = " ".join(_normalize_discovery_text(query))
     query_tokens = _discovery_keywords(query)
+    # ponytail: data-shape preconditions; a values-tool needs values-words and a
+    # diff-tool needs change-words, else generic/discovery queries drift to them.
+    _query_words = set(_normalize_discovery_text(query))
+    _VALUE_WORDS = frozenset({"value", "figure", "exact", "show"})
+    _CHANGE_WORDS = frozenset({"change", "changed", "changes", "new", "diff", "differ", "difference", "compare", "versus", "prior", "year", "amendment", "restatement"})
     scored: list[tuple[int, str]] = []
     for name, meta in TOOL_DISCOVERY_REGISTRY.items():
         score = 0
+        if name == "get_finra_datapoints" and not (_query_words & _VALUE_WORDS):
+            continue
+        if name in ("diff_risk_factors", "diff_sec_filings") and not (_query_words & _CHANGE_WORDS):
+            continue
         if query_norm and query_norm == " ".join(_normalize_discovery_text(name.replace("_", " "))):
             score += 10
         for text in (meta.summary, *meta.use_when):
