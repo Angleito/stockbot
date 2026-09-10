@@ -436,7 +436,7 @@ def test_backfill_finra_known_at_rewrites_only_settlement_stamped(tmp_path: Path
         "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
         "source_url": "u", "source_record_id": "r",
         "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
-        "content_hash": "old", "parser_version": "t",
+        "content_hash": "old", "parser_version": "finra-short-interest-v1",
     }], root=tmp_path / "parquet")
     datasets = normalize_finra_short_interest(
         [{"symbolCode": "BBB", "currentShortPositionQuantity": 5}],
@@ -525,7 +525,7 @@ def test_backfill_recovers_interrupted_swap(tmp_path: Path) -> None:
         "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
         "source_url": "u", "source_record_id": "r",
         "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
-        "content_hash": "old", "parser_version": "t",
+        "content_hash": "old", "parser_version": "finra-short-interest-v1",
     }], root=tmp_path / "parquet")
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 1}
     dataset_dir = tmp_path / "parquet" / "short_interest"
@@ -555,3 +555,54 @@ def test_backfill_clears_stale_backup(tmp_path: Path) -> None:
     (backup_dir / "junk.parquet").write_bytes(b"junk")
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
     assert not backup_dir.exists()
+
+
+def test_backfill_targets_only_legacy_v1_rows(tmp_path: Path) -> None:
+    from app.services.research_data import backfill_finra_known_at
+
+    parquet.write_rows("short_interest", [
+        {
+            "row_id": "finra:row:2026-08-14:AAA:oldhash1234", "entity_id": None, "security_id": None,
+            "symbol_code": "AAA", "issue_name": "Alpha", "settlement_date": "2026-08-14",
+            "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+            "source_url": "u", "source_record_id": "r",
+            "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
+            "content_hash": "old", "parser_version": "finra-short-interest-v1",
+        },
+        {
+            "row_id": "finra:row:2026-08-14:BBB:newhash5678", "entity_id": None, "security_id": None,
+            "symbol_code": "BBB", "issue_name": "Beta", "settlement_date": "2026-08-14",
+            "short_position": 5.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+            "source_url": "u", "source_record_id": "r",
+            "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
+            "content_hash": "new", "parser_version": "finra-short-interest-v2",
+        },
+    ], root=tmp_path / "parquet")
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 1}
+    rows = {str(r.get("symbol_code")): r for r in parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist() if isinstance(r, dict)}
+    assert str(rows["AAA"].get("known_at")) == "2026-08-30T12:00:00Z"
+    assert str(rows["AAA"].get("parser_version")) == "finra-short-interest-v2"
+    assert str(rows["BBB"].get("known_at")) == "2026-08-14"
+    assert str(rows["BBB"].get("parser_version")) == "finra-short-interest-v2"
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+
+
+def test_finra_short_interest_lock_excludes(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from app.services.research_data import _finra_short_interest_lock
+
+    parquet_root = tmp_path / "parquet"
+    lock_path = parquet_root / "short_interest.lock"
+    probe = (
+        "import fcntl, sys; "
+        "fh = open(sys.argv[1], 'a+b'); "
+        "fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
+    )
+    with _finra_short_interest_lock(parquet_root):
+        held = subprocess.run([sys.executable, "-c", probe, str(lock_path)], capture_output=True, text=True)
+        assert held.returncode != 0
+        assert "BlockingIOError" in held.stderr
+    free = subprocess.run([sys.executable, "-c", probe, str(lock_path)], capture_output=True, text=True)
+    assert free.returncode == 0

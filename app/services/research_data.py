@@ -9,20 +9,29 @@ Parquet unique-key dedup.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 from typing import Optional, Sequence
+
+try:
+    import fcntl  # Linux-only; short-interest locking is explicitly Linux-only.
+except ImportError:  # pragma: no cover
+    fcntl: ModuleType | None = None
 
 import requests
 
 from .. import finra_client
 from ..config import finra_use_mock, get_data_root
 from ..normalization import (
+    SHORT_INTEREST_PARSER_VERSION,
     normalize_sec_tickers,
     normalize_sec_company_facts,
     normalize_finra_short_interest,
@@ -30,6 +39,32 @@ from ..normalization import (
 from ..storage import parquet, raw_archive
 
 DEFAULT_DATA_ROOT = get_data_root()
+
+_LEGACY_SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
+
+
+@contextlib.contextmanager
+def _finra_short_interest_lock(parquet_root: Path) -> Iterator[None]:
+    """Hold one blocking ``fcntl.flock`` across short_interest parquet mutations."""
+    if fcntl is None:  # pragma: no cover
+        raise RuntimeError("finra short-interest lock requires fcntl.flock")
+    lock_path = parquet_root / "short_interest.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
+    settlement = str(row.get("settlement_date") or "")
+    known = str(row.get("known_at") or "")
+    retrieved = str(row.get("retrieved_at") or "")
+    if not (settlement and known and retrieved and known == settlement):
+        return False
+    return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -255,16 +290,17 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
         json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     retrieved_at = _utc_now()
-    datasets = normalize_finra_short_interest(
-        all_rows, settlement_date=settlement_date, retrieved_at=retrieved_at,
-        content_hash=snapshot_hash, source_url=url,
-        source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
-    )
-    written = sum(
-        parquet.write_rows(name, rows, root=data_root / "parquet")
-        for name, rows in datasets.items()
-    )
-    backfilled = backfill_finra_known_at(data_root=data_root)["rewritten"]
+    with _finra_short_interest_lock(data_root / "parquet"):
+        datasets = normalize_finra_short_interest(
+            all_rows, settlement_date=settlement_date, retrieved_at=retrieved_at,
+            content_hash=snapshot_hash, source_url=url,
+            source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
+        )
+        written = sum(
+            parquet.write_rows(name, rows, root=data_root / "parquet")
+            for name, rows in datasets.items()
+        )
+        backfilled = _backfill_finra_known_at_locked(data_root)["rewritten"]
     return {
         "source": "finra:consolidatedShortInterest",
         "settlement_date": settlement_date,
@@ -328,16 +364,19 @@ def prepare_short_interest_data(
         "failed_enrichments": failed_enrichments,
     }
 
-
 def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, object]:
-    """Rewrite settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
+    """Rewrite legacy v1 settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
 
-    Rows written when the normalizer stamped ``known_at`` = settlement_date
-    were visible before publication (lookahead). Only rows with
-    ``known_at == settlement_date`` are rewritten to their own
-    ``retrieved_at``; reruns return 0.
+    Only legacy v1 settlement-stamped rows gain their own ``retrieved_at`` and
+    the v2 stamp; reruns return 0.
     """
     root = Path(data_root) if data_root else get_data_root()
+    with _finra_short_interest_lock(root / "parquet"):
+        return _backfill_finra_known_at_locked(root)
+
+
+def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
+    root = data_root
     parquet_root = root / "parquet"
     dataset_dir = parquet_root / "short_interest"
     backup_dir = parquet_root / "short_interest-backfill-bak"
@@ -351,12 +390,10 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
     for row in rows:
         if not isinstance(row, dict):
             continue
-        settlement = str(row.get("settlement_date") or "")
-        known = str(row.get("known_at") or "")
-        retrieved = str(row.get("retrieved_at") or "")
-        if settlement and known and retrieved and known == settlement:
+        if _is_legacy_settlement_stamped(row):
             row = dict(row)
-            row["known_at"] = retrieved
+            row["known_at"] = str(row.get("retrieved_at") or "")
+            row["parser_version"] = SHORT_INTEREST_PARSER_VERSION
             fixed.append(row)
     if not fixed:
         return {"rewritten": 0}
@@ -380,17 +417,16 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
                 raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing from staged copy")
             if str(staged_row.get("known_at")) != str(staged_row.get("retrieved_at")):
                 raise RuntimeError(f"backfill validation failed: fixed row {row_id} known_at != retrieved_at")
+            if str(staged_row.get("parser_version") or "") != SHORT_INTEREST_PARSER_VERSION:
+                raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing v2 stamp")
         for staged_row in staged:
             if not isinstance(staged_row, dict):
                 continue
-            settlement = str(staged_row.get("settlement_date") or "")
-            known = str(staged_row.get("known_at") or "")
-            retrieved = str(staged_row.get("retrieved_at") or "")
-            if settlement and known and retrieved and known == settlement:
+            if _is_legacy_settlement_stamped(staged_row):
                 raise RuntimeError(
                     f"backfill validation failed: staged row {staged_row.get('row_id')} still settlement-stamped"
                 )
-        # ponytail: single-writer per data root, add a file lock if concurrent refreshes ever share one
+        # short_interest parquet mutations hold _finra_short_interest_lock; network fetch stays outside
         if dataset_dir.exists():
             os.replace(dataset_dir, backup_dir)
         os.replace(staging / "short_interest", dataset_dir)

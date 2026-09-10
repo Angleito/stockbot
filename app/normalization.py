@@ -549,7 +549,7 @@ def normalize_sec_company_facts(
             "securities": securities, "dividend_events": dividend_events}
 
 
-SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
+SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v2"
 
 
 def _to_float(value: object) -> Optional[float]:
