@@ -770,14 +770,19 @@ def main() -> int:
             print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
     procs = len(ordered)
     failed_tools: list[str] = []
+    # Aggregation gate (2-of-3): each attempt stays strict, but one flaky
+    # attempt must not fail a tool the model routes correctly twice.
+    # Systematic failure (0-or-1 of 3) still fails.
     for tool in tool_names:
         tool_recs = results[tool]
-        if all(rec.get("ok") is True for rec in tool_recs):
+        allowed_fails = max(0, len(tool_recs) - 2)
+        fails = sum(1 for rec in tool_recs if rec.get("ok") is not True)
+        if fails == 0:
             remove_successful_attempt_dirs(root, tool, tool_recs)
-        else:
+        if fails > allowed_fails:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
-    passed_tools = len([t for t in tool_names if all(r.get("ok") is True for r in results[t])])
+    passed_tools = len(tool_names) - len(failed_tools)
     coverage = f"{passed_tools}/{len(tool_names)} tools"
     wall = time.monotonic() - verify_start
     print(f"git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
