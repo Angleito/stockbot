@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -119,7 +120,7 @@ def _coerce_expression(item: TradeExpression | Mapping[str, object], _path: str 
 
 class ThesisRepository:
     def __init__(self, root: Path | str) -> None:
-        self.root = Path(root)
+        self.root = Path(os.path.realpath(root))
 
     # -- internal helpers -------------------------------------------------
 
@@ -137,6 +138,11 @@ class ThesisRepository:
             return found, bad_dirs, bad_ids
         loaded: list[tuple[Path, Thesis]] = []
         for child in sorted(self.root.iterdir()):
+            if child.is_symlink():
+                if child.is_file() and not child.is_dir():
+                    continue  # symlink to a regular file: ignore like any non-dir file
+                bad_dirs[child.name] = f"{child}: symlinked thesis directories are not allowed"
+                continue
             thesis_file = child / "thesis.yaml"
             if not child.is_dir() or not thesis_file.is_file():
                 continue
@@ -382,8 +388,10 @@ class ThesisRepository:
             earliest = min(s.effective_at for s in snaps)
             raise HistoricalStateUnavailable(
                 f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})")
-        def _snapshot_order(snap: ThesisStateSnapshot) -> tuple[str, int]:
-            return (snap.effective_at, snap.version)
+        def _snapshot_order(snap: ThesisStateSnapshot) -> tuple[datetime, int]:
+            d = _as_dt(snap.effective_at)
+            assert d is not None
+            return (d, snap.version)
         eligible.sort(key=_snapshot_order)
         return eligible[-1]
 

@@ -556,7 +556,15 @@ requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is 
   if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
  });
 
- // Built-in tool availability is constrained by Pi launch/config; Stockbot custom-tool authorization remains in bridge/policy.
+ // --- RESEARCH gate: block anything the bridge did not register ---
+ // (portfolio/broker shapes + builtins when --no-builtin-tools is dropped)
+ pi.on("tool_call", (event) => {
+  if (!research.has(event.toolName)) {
+   emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
+   blocks++;
+   return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
+  }
+ });
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
@@ -568,6 +576,7 @@ requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is 
  let seq = 0;
  let turns = 0;
  let toolCalls = 0;
+ let blocks = 0;
  let lastCtx: ExtensionContext | null = null;
  const toolStartedAt = new Map<string, string>();
  function emit(payload: Json): Promise<Json> {
@@ -592,7 +601,7 @@ requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is 
     "stockbot",
     bridgeDown
      ? "stockbot · bridge unavailable (0 tools)"
-     : `stockbot · ${research.size} registered · ${activeResearch} research active · ${toolCalls} calls`,
+     : `stockbot · ${research.size} registered · ${activeResearch} research active · ${toolCalls} calls · ${blocks} blocked`,
    );
   } catch {
    // non-TUI modes without status: ignore

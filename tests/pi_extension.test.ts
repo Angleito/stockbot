@@ -1014,3 +1014,12 @@ test("session_start then searches rotate research tools via the real bridge", as
 	expect(secondText).toContain("; now active:");
 	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });
+
+test("tool_call blocks non-RESEARCH tools", async () => {
+	const { handlers, pi } = fakePiHost();
+	await stockbotExtension(pi);
+	expect(typeof handlers["tool_call"]).toBe("function");
+	const result = (await handlers["tool_call"]({ toolName: "bash" })) as unknown as Record<string, unknown>;
+	expect(result.block).toBe(true);
+	expect(String(result.reason)).toMatch(/RESEARCH-only/);
+});
