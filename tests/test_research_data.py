@@ -465,3 +465,52 @@ def test_backfill_finra_known_at_rewrites_only_settlement_stamped(tmp_path: Path
     versions = sorted([r for r in all_rows if r["symbol_code"] == "AAA"], key=_retrieved)
     assert [str(r["known_at"]) for r in versions] == ["2026-08-30T12:00:00Z", "2026-09-03T12:00:00Z"]
     assert versions[-1]["short_position"] == 25.0  # late-fetched correction wins newest-wins
+
+
+def test_refresh_repairs_settlement_stamped_row_on_same_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-snapshot re-ingest writes 0 rows (row_id dedupe) but backfills known_at."""
+    import hashlib
+
+    from app.normalization import normalize_finra_short_interest
+    from app.services.research_data import backfill_finra_known_at, refresh_finra_short_interest
+
+    settlement = "2026-08-14"
+    payload: list[dict[str, object]] = [{"symbolCode": "AAA", "issueName": "Alpha",
+                "settlementDate": settlement, "currentShortPositionQuantity": 20}]
+    snapshot_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    parquet.write_rows("short_interest", [{
+        "row_id": f"finra:row:{settlement}:AAA:{snapshot_hash[:12]}", "entity_id": None, "security_id": None,
+        "symbol_code": "AAA", "issue_name": "Alpha", "settlement_date": settlement,
+        "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+        "source_url": "u", "source_record_id": "r",
+        "known_at": settlement, "retrieved_at": "2026-08-30T12:00:00Z",
+        "content_hash": snapshot_hash, "parser_version": "finra-short-interest-v1",
+    }], root=tmp_path / "parquet")
+
+    datasets = normalize_finra_short_interest(
+        payload, settlement_date=settlement, retrieved_at="2026-08-30T12:00:00Z",
+        content_hash=snapshot_hash, source_url="u", source_record_id="r")
+    assert sum(parquet.write_rows(n, r, root=tmp_path / "parquet") for n, r in datasets.items()) == 0
+
+    content = json.dumps(payload).encode()
+
+    def _fake_query(group: str, name: str, req: dict[str, object]) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        return (content, payload, {"record-total": str(len(payload))})
+
+    monkeypatch.setattr(research_data.finra_client, "ingestion_post_query", _fake_query)
+    def _fake_sleep(seconds: float) -> None:
+        return None
+    monkeypatch.setattr(research_data.time, "sleep", _fake_sleep)
+    result = refresh_finra_short_interest(settlement, data_root=tmp_path)
+    assert result["written"] == 0
+    assert result["backfilled"] == 1
+    (stored,) = parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()
+    # Backfill is conservative: known_at becomes the row's own retrieved_at
+    # (its original fetch), not the re-ingest wall-clock.
+    assert stored["retrieved_at"] == "2026-08-30T12:00:00Z"
+    assert stored["known_at"] == stored["retrieved_at"]
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}

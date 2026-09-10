@@ -583,6 +583,11 @@ def normalize_finra_short_interest(
     source_url: str,
     source_record_id: str,
 ) -> dict[str, list[dict[str, object]]]:
+    if known_at:
+        if known_at[:10] < settlement_date:
+            raise ValueError(f"known_at {known_at} precedes settlement_date {settlement_date}")
+        if known_at > retrieved_at:
+            raise ValueError(f"known_at {known_at} exceeds retrieved_at {retrieved_at}")
     short_interest: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict):

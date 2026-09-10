@@ -262,11 +262,13 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
         parquet.write_rows(name, rows, root=data_root / "parquet")
         for name, rows in datasets.items()
     )
+    backfilled = backfill_finra_known_at(data_root=data_root)["rewritten"]
     return {
         "source": "finra:consolidatedShortInterest",
         "settlement_date": settlement_date,
         "rows": len(all_rows),
         "written": written,
+        "backfilled": backfilled,
         "content_hash": snapshot_hash,
         "retrieved_at": retrieved_at,
     }
