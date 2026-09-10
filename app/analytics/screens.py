@@ -564,8 +564,8 @@ def get_short_interest_leaderboard(
     usable cycle: with no ``settlement_date`` it discovers the newest
     published cycle and fetches it; with an explicit ``settlement_date``
     missing from the store it fetches exactly that date.  A historical
-    screen (explicit ``as_of``) never fetches. Fetched rows carry the public
-    settlement date as ``known_at``, so a later ``as_of >=`` the public date
+    screen (explicit ``as_of``) never fetches. Fetched rows carry ``retrieved_at``
+    as ``known_at`` (publication unknown), so a later ``as_of >=`` retrieval
     sees them; a past ``as_of`` still sees nothing new. Fetch failures
     surface as ``{"error": ...}``, never raise.
     """

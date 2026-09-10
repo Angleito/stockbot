@@ -436,6 +436,12 @@ requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is 
   async execute(toolCallId, params) {
    toolCalls++;
    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+   if (isSearch && typeof bridge.error === "string") {
+    return {
+     content: [{ type: "text", text: `Bridge error: ${bridge.error}` }],
+     details: bridge,
+    };
+   }
    if (isSearch) {
    const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
    const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};

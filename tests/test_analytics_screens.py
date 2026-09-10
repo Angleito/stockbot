@@ -465,7 +465,7 @@ def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
     """A settlement after as_of is invisible to that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
 
     result = screens.materialize_short_interest_screen("2026-08-29", as_of="2026-08-14", data_root=data_root)
 
@@ -476,19 +476,40 @@ def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
 
 
 def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
-    """Fetched late but public early: settlement 08-14 retrieved 08-30 is
-    visible at as_of 08-20, still gated before settlement day."""
+    """Retrieval-gated: settlement 08-14 retrieved 08-30 is invisible at
+    as_of 08-20, visible once as_of reaches retrieval."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
 
-    visible = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    assert "error" in early
+
+    visible = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
     entries = visible["entries"]
     assert isinstance(entries, list)
     assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
 
-    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-10", data_root=data_root)
-    assert "error" in early
+    pre = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-10", data_root=data_root)
+    assert "error" in pre
+
+def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
+    """FINRA Dec-15-2025 settlement published Dec-24: invisible at 12-20, visible at 12-24."""
+    _seed_tickers(data_root, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_facts(data_root, {
+        1: [{"end": "2025-09-30", "val": 100, "accn": "a1", "filed": "2025-11-01"}],
+        2: [{"end": "2025-09-30", "val": 200, "accn": "b1", "filed": "2025-11-01"}],
+        3: [{"end": "2025-09-30", "val": 10, "accn": "c1", "filed": "2025-11-01"}],
+    }, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_cycle(data_root, "2025-12-15", _default_rows(), retrieved_at="2025-12-24T12:00:00Z")
+
+    hidden = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-20", data_root=data_root)
+    assert "error" in hidden
+
+    shown = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-24", data_root=data_root)
+    shown_entries = shown["entries"]
+    assert isinstance(shown_entries, list)
+    assert [e["ticker"] for e in shown_entries] == ["CCC", "AAA", "BBB"]
 
 
 def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
@@ -517,8 +538,8 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
 
 
 def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path) -> None:
-    """Same public date, two source versions: newest retrieved_at wins at
-    every as_of >= settlement (PIT cannot version same-day revisions)."""
+    """Two source versions: only versions retrieved on/before as_of are
+    knowable; the newest knowable retrieved_at wins per symbol."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
@@ -533,7 +554,7 @@ def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path)
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
-    assert early_entries[1]["short_shares"] == 25  # correction wins everywhere
+    assert early_entries[1]["short_shares"] == 20  # correction not yet knowable at 08-14
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     later_entries = later["entries"]
@@ -823,8 +844,8 @@ def test_change_slice_later_settlement_invisible_at_as_of(data_root: Path) -> No
 
 
 def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
-    """Fetched late but public early: the change slice sees a 08-14 cycle
-    retrieved 08-30 once as_of passes settlement day."""
+    """Retrieval-gated: the change slice sees a 08-14 cycle retrieved 08-30
+    once as_of reaches retrieval."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
     _seed_cycle(data_root, "2026-08-07", [
@@ -834,7 +855,7 @@ def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) 
     ])
     _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
 
-    result = screens.short_interest_change_screen("2026-08-20", data_root=data_root)
+    result = screens.short_interest_change_screen("2026-08-30", data_root=data_root)
     assert result["settlement_current"] == SETTLEMENT
 
 # ---------------------------------------------------------------------------

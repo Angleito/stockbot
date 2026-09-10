@@ -173,7 +173,7 @@ def test_short_interest_normalization():
     assert row["days_to_cover"] is None   # missing -> None
     assert row["parser_version"] == SHORT_INTEREST_PARSER_VERSION
     assert row["row_id"] == "finra:row:2026-08-14:AAA:h1"
-    assert row["known_at"] == "2026-08-14"  # global public date, not fetch time
+    assert row["known_at"] == RETRIEVED_AT  # conservative: publication unknown, retrieval is known_at
     assert row["retrieved_at"] == RETRIEVED_AT
 
 

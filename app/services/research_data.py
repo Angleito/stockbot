@@ -326,11 +326,12 @@ def prepare_short_interest_data(
 
 
 def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, object]:
-    """Rewrite fetch-stamped FINRA ``known_at`` to the settlement date.
+    """Rewrite settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
 
-    Rows written before the global-date cutover carry ``known_at`` = fetch
-    time, which outranks corrected rows in newest-wins ordering. Only rows
-    with ``known_at[:10] > settlement_date`` are rewritten; reruns return 0.
+    Rows written when the normalizer stamped ``known_at`` = settlement_date
+    were visible before publication (lookahead). Only rows with
+    ``known_at == settlement_date`` are rewritten to their own
+    ``retrieved_at``; reruns return 0.
     """
     root = Path(data_root) if data_root else get_data_root()
     table = parquet.read_table("short_interest", root=root / "parquet")
@@ -341,9 +342,10 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
             continue
         settlement = str(row.get("settlement_date") or "")
         known = str(row.get("known_at") or "")
-        if settlement and known and known[:10] > settlement:
+        retrieved = str(row.get("retrieved_at") or "")
+        if settlement and known and retrieved and known == settlement:
             row = dict(row)
-            row["known_at"] = settlement
+            row["known_at"] = retrieved
             fixed.append(row)
     if not fixed:
         return {"rewritten": 0}

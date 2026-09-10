@@ -44,6 +44,14 @@ POLL_S = 2
 THESIS_ID_PLACEHOLDER = "thesis-placeholder"
 THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
 FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
+# Documented prerequisite chains (app/tools.py docstrings): a target may be
+# preceded by its stated prerequisites on attempts 1-2 without failing routing.
+PREREQ_CHAINS: dict[str, frozenset[str]] = {
+    "get_finra_datapoints": frozenset({"describe_finra_dataset"}),
+    "query_finra": frozenset({"list_finra_datasets", "describe_finra_dataset"}),
+    "describe_finra_dataset": frozenset({"list_finra_datasets"}),
+    "get_sec_document": frozenset({"get_material_events"}),
+}
 
 
 def get_concurrency() -> int:
@@ -312,8 +320,9 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Routing benchmark: attempts 1-2 allow exactly two Stockbot calls — a clean
-    # search_tools call AND a clean required-target call. Any other Stockbot tool
+    # Routing benchmark: attempts 1-2 allow a clean search_tools call, a clean
+    # required-target call, and the target's documented prerequisites
+    # (PREREQ_CHAINS from app/tools.py docstrings). Any other Stockbot tool
     # fails, whether harness-rejected pre-dispatch, dispatched-and-errored, or
     # dispatched-and-successful. Attempt 3 uses an explicit recovery prompt under
     # the same presence checks, exempt from both stray-tool gates. All three
@@ -328,10 +337,11 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
         conn = sqlite3.connect(str(db_path))
         try:
             if attempt in (1, 2):
-                stray = _rejected_tools(conn)
+                allowed = set(PREREQ_CHAINS.get(required_tool, frozenset()))
+                stray = [t for t in _rejected_tools(conn) if t not in allowed]
                 if stray:
                     return False, f"routing failed: harness-rejected call to {', '.join(stray)}"
-                extra = _unexpected_tools(conn, required_tool)
+                extra = [t for t in _unexpected_tools(conn, required_tool) if t not in allowed]
                 if extra:
                     return False, f"routing failed: unexpected research tool call(s): {', '.join(extra)}"
             if required_tool != "search_tools":
