@@ -212,6 +212,27 @@ def test_dispatched_wrong_tool_success_fails_attempt_1(tmp_path: Path):
     assert "unexpected" in reason
 
 
+def test_allowed_prereq_passes_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="find_sec_entities"), "list_sec_filings", 0, False, attempt=1)
+    assert ok
+
+
+def test_allowed_prereq_rejection_passes_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", rejected_other="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
+    assert ok
+
+
+def test_prereq_chains_are_documented_in_descriptions():
+    from app.tools import TOOLS
+    from scripts.verify_tool_registry import tool_schema_function, tool_schema_name
+    descriptions = {tool_schema_name(raw): str(tool_schema_function(raw).get("description", "")) for raw in TOOLS}
+    assert set(v.PREREQ_CHAINS) <= set(descriptions)
+    for target, prereqs in v.PREREQ_CHAINS.items():
+        for edge in prereqs:
+            assert edge in descriptions, f"unknown prereq tool: {edge}"
+            assert edge.lower() in descriptions[target].lower(), f"{edge} not named in {target} description"
+
+
 def test_dispatched_wrong_tool_passes_attempt_3(tmp_path: Path):
     ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
     assert ok

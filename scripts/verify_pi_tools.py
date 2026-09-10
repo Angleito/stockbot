@@ -48,10 +48,11 @@ FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
 # Documented prerequisite chains (app/tools.py docstrings): a target may be
 # preceded by its stated prerequisites on attempts 1-2 without failing routing.
 PREREQ_CHAINS: dict[str, frozenset[str]] = {
-    "get_finra_datapoints": frozenset({"describe_finra_dataset"}),
-    "query_finra": frozenset({"list_finra_datasets", "describe_finra_dataset"}),
-    "describe_finra_dataset": frozenset({"list_finra_datasets"}),
-    "get_sec_document": frozenset({"get_material_events"}),
+    "get_finra_datapoints": frozenset({"describe_finra_dataset"}),  # app/tools.py:693 "call describe_finra_dataset FIRST"
+    "query_finra": frozenset({"list_finra_datasets", "describe_finra_dataset"}),  # app/tools.py:796-797 "list_finra_datasets → describe_finra_dataset → query_finra"
+    "describe_finra_dataset": frozenset({"list_finra_datasets"}),  # app/tools.py:666 "Call after list_finra_datasets"
+    "get_sec_document": frozenset({"get_material_events"}),  # app/tools.py:245 "call get_material_events first"
+    "list_sec_filings": frozenset({"find_sec_entities", "search_sec_filings"}),  # app/tools.py:160 "call find_sec_entities or search_sec_filings first"
 }
 
 
@@ -207,52 +208,52 @@ class _VerifyCase(TypedDict):
 VERIFY_CASES: dict[str, _VerifyCase] = {
     "get_fundamentals": {"arguments": {"ticker": "AAPL", "metric": "eps"}, "natural_question": "What does Apple earn per share, basic and diluted, including trailing-twelve-month figures?"},
     "find_sec_entities": {"arguments": {"query": "Apple"}, "natural_question": "Which SEC-registered entities correspond to Apple?"},
-    "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "What risk-factor language appears in Apple's SEC filing documents?"},
-    "search_sec_relationships": {"arguments": {"entity": "Apple"}, "natural_question": "What relationships does Apple disclose?"},
-    "get_sec_search_coverage": {"arguments": {}, "natural_question": "Which filing types and years does SEC full-text search cover?"},
-    "list_sec_filings": {"arguments": {"identifier": "AAPL", "limit": 5}, "natural_question": "List Apple's recent SEC filings."},
-    "get_sec_filing": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "What does Apple's most recent annual report filing contain?"},
-    "list_sec_documents": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Which documents make up Apple's most recent annual report filing?"},
-    "get_sec_document": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Show me the main document text of Apple's most recent annual report filing."},
-    "diff_sec_filings": {"arguments": {"current_accession": "0000320193-25-000079", "previous_accession": "0000320193-24-000123"}, "natural_question": "What changed between Apple's two most recent annual report filings?"},
-    "get_financial_statements": {"arguments": {"ticker": "MSFT", "statement_type": "income_statement"}, "natural_question": "Show Microsoft's revenue, expenses, and profit breakdown."},
-    "get_xbrl_facts": {"arguments": {"ticker": "AAPL", "concept": "Revenue"}, "natural_question": "How much money did Apple bring in last year?"},
-    "get_material_events": {"arguments": {"ticker": "AAPL", "since": "2024-01-01"}, "natural_question": "What material events has Apple disclosed recently?"},
-    "get_beneficial_ownership": {"arguments": {"ticker": "AAPL"}, "natural_question": "Who are Apple's large beneficial owners?"},
-    "get_ownership_changes": {"arguments": {"ticker": "AAPL"}, "natural_question": "Have Apple's ownership stakes changed?"},
-    "get_insider_activity": {"arguments": {"ticker": "AAPL"}, "natural_question": "What insider activity has Apple had?"},
-    "get_planned_insider_sales": {"arguments": {"ticker": "AAPL"}, "natural_question": "Are Apple insiders planning sales?"},
+    "search_sec_filings": {"arguments": {"query": "Apple", "limit": 5}, "natural_question": "Search Apple's SEC filings for risk-factor language (limit 5) and return the search hits with evidence IDs — the search results only, no fetching of filings or documents."},
+    "search_sec_relationships": {"arguments": {"entity": "AAPL"}, "natural_question": "Search ticker AAPL's disclosed ownership and transaction relationships — the relationship search results only, no entity lookup and no fetching of underlying filings or documents."},
+    "get_sec_search_coverage": {"arguments": {}, "natural_question": "Read the persisted SEC ingestion coverage ledger: which filing types and years are covered — the coverage ledger only, do not run a filing search."},
+    "list_sec_filings": {"arguments": {"identifier": "AAPL", "limit": 5}, "natural_question": "List recent SEC filings for identifier AAPL (limit 5) — the filing list for that exact identifier."},
+    "get_sec_filing": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Return the filing record (filer, form, filed and accepted dates, period, primary document) for accession number 0000320193-25-000079 — the record itself, no document text or attachment lists."},
+    "list_sec_documents": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "List the documents and exhibits attached to filing accession number 0000320193-25-000079 — the attachment index only, no filing record or full-text search."},
+    "get_sec_document": {"arguments": {"accession_no": "0000320193-25-000079"}, "natural_question": "Return a bounded window of the main document text for filing accession number 0000320193-25-000079 — the document excerpt only, no filing search."},
+    "diff_sec_filings": {"arguments": {"current_accession": "0000320193-25-000079", "previous_accession": "0000320193-24-000123"}, "natural_question": "Compute the deterministic numbers-first diff between filings 0000320193-25-000079 (current) and 0000320193-24-000123 (previous) — the diff output only, no separate risk-factor, financial, or document lookups."},
+    "get_financial_statements": {"arguments": {"ticker": "MSFT", "statement_type": "income_statement"}, "natural_question": "Show Microsoft's full income statement breakdown of revenue, expenses, and profit from parsed 10-K/10-Q statements for ticker MSFT — the statement breakdown, not a single XBRL concept value."},
+    "get_xbrl_facts": {"arguments": {"ticker": "AAPL", "concept": "NetIncomeLoss"}, "natural_question": "Report the single XBRL concept value for net income (concept NetIncomeLoss) for ticker AAPL — one tagged concept value, not the full income statement."},
+    "get_material_events": {"arguments": {"ticker": "AAPL", "since": "2024-01-01"}, "natural_question": "What deterministic 8-K-derived material events has Apple (ticker AAPL) disclosed since 2024-01-01 — the events list with accession citations, no raw filing loads."},
+    "get_beneficial_ownership": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's current 5 percent-plus beneficial-ownership records (SC 13D/G holder, shares, percent) for ticker AAPL — deterministic ownership records, not the relationship search."},
+    "get_ownership_changes": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report the deterministic diffs between holders' consecutive 13D/G filings for ticker AAPL (share and percent changes) — stake-change diffs only, not current stakes, the recent-filings feed, the relationship search, or insider activity."},
+    "get_insider_activity": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's actual insider transactions (Forms 3/4/5 purchases and sales) for ticker AAPL — executed transactions only, not planned Form 144 sales, no filing fetches."},
+    "get_planned_insider_sales": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's planned insider sales from Form 144 notices (proposed, not yet executed) for ticker AAPL — planned sales only, not executed insider transactions, no document fetches."},
     "get_offering_history": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's offering history?"},
-    "get_dilution_profile": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's dilution profile?"},
+    "get_dilution_profile": {"arguments": {"ticker": "AAPL"}, "natural_question": "Compute Apple's deterministic dilution math (inputs, formula, source accessions) for ticker AAPL — the dilution calculation only, no offering history, fundamentals, or short-pressure lookups."},
     "get_governance_events": {"arguments": {"ticker": "AAPL"}, "natural_question": "What governance events has Apple had?"},
-    "get_transaction_status": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is the status of Apple's transactions?"},
-    "get_short_pressure_profile": {"arguments": {"ticker": "AAPL"}, "natural_question": "Is Apple under short pressure?"},
+    "get_transaction_status": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's M&A filing context (tender offers, 14D-9, S-4, merger proxies) for ticker AAPL — deal filing context only, not insider activity, planned sales, or filing-text fetches."},
+    "get_short_pressure_profile": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's short-pressure positioning context for ticker AAPL (FINRA positioning plus SEC shares-outstanding ratio) — the positioning context, not the raw short-interest figure or leaderboard."},
     "search_tools": {"arguments": {"query": "short interest"}, "natural_question": "Which tools tell me what short sellers are doing in a stock?"},
-    "diff_risk_factors": {"arguments": {"ticker": "GOOGL"}, "natural_question": "What changed in Google's risk factors?"},
-    "get_recent_ownership_filings": {"arguments": {}, "natural_question": "Show the most recent SC 13D/G filings."},
-    "get_threshold_securities": {"arguments": {}, "natural_question": "Which securities are on the FINRA threshold list?"},
+    "diff_risk_factors": {"arguments": {"ticker": "GOOGL"}, "natural_question": "Report what changed in Risk Factors language versus the prior filing for ticker GOOGL — the deterministic risk-factor diff, no filing search or document fetching."},
+    "get_recent_ownership_filings": {"arguments": {}, "natural_question": "List the most recent market-wide SC 13D/G filings from the current-filings feed — the feed listing only, no filing full-text search."},
+    "get_threshold_securities": {"arguments": {}, "natural_question": "Return the FINRA OTC Regulation SHO / Rule 4320 threshold securities list — the threshold list itself, no dataset catalog or query operations."},
     "get_short_interest": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's most recent consolidated short interest?"},
     "get_short_interest_leaderboard": {"arguments": {"limit": 5}, "natural_question": "Which stocks have the highest short interest as a share of total shares?"},
     "get_reg_sho_volume": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's Reg SHO volume?"},
     "get_analyst_estimates": {"arguments": {"ticker": "AAPL"}, "natural_question": "What are analysts estimating for Apple?"},
     "get_sp500_weight": {"arguments": {"ticker": "AAPL"}, "natural_question": "What is Apple's S&P 500 weight?"},
-    "get_obligations": {"arguments": {"ticker": "AAPL"}, "natural_question": "What are Apple's obligations?"},
-    "get_valuation_metrics": {"arguments": {"ticker": "AAPL"}, "natural_question": "Is Apple stock cheap or expensive on earnings multiples?"},
+    "get_obligations": {"arguments": {"ticker": "AAPL"}, "natural_question": "Report Apple's quantified contractual obligations and commitments from the latest 10-Q/10-K notes for ticker AAPL — answer from the obligations notes only; no filing search or listing, no financial statements, no fundamentals."},
+    "get_valuation_metrics": {"arguments": {"ticker": "AAPL"}, "natural_question": "Is Apple stock cheap or expensive on trailing and forward earnings multiples for ticker AAPL — the valuation multiples answer only, no analyst price targets or estimate lookups."},
     "search_web": {"arguments": {"query": "Apple 10-K risk factors"}, "natural_question": "What are outside commentators saying this week about risks to Apple's business?"},
     "list_finra_datasets": {"arguments": {}, "natural_question": "What FINRA datasets can I pull?"},
-    "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "What FINRA data is available about bets against stocks, and what fields and update schedule does it have?"},
-    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show recent FINRA short position figures for Apple."},
-    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "How has Apple's short position changed week to week according to FINRA records?"},
+    "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_question": "Describe the FINRA dataset otcMarket/consolidatedShortInterest: its fields, ticker and date support, and update schedule — the dataset description only, no data query."},
+    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_question": "Show the exact source values of fields settlementDate and currentShortPositionQuantity from the FINRA otcMarket/consolidatedShortInterest dataset for ticker AAPL, newest five first — named-field datapoints only, not the short-interest helper."},
+    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_question": "Run an analyzed FINRA dataset query over otcMarket/consolidatedShortInterest for ticker AAPL (limit 5) and brief the week-to-week change with deterministic metrics — the analyzed briefing, not raw datapoint values or the short-interest helper."},
     "find_alternative_signals": {"arguments": {}, "natural_question": "What alternative signals have been collected?"},
-    "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_question": "What internet trends were collected recently in the United States?"},
-    "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Is the Stanley online buzz backed by real demand?"},
-    "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "What is the economic backdrop in California?"},
-    "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "What has Apple patented recently?"},
-    "thesis_create": {"arguments": {"user_thesis": "I think NVDA AI demand will stay strong."}, "natural_question": "Record my thesis that NVDA AI demand will stay strong."},
-    "thesis_show": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "Show thesis thesis-placeholder with its assessment and watch rules."},
-    "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_question": "Refine thesis thesis-placeholder: AI datacenter capex keeps growing."},
+    "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_question": "List the collected Google Trends discovery records for 2026-09-01 to 2026-09-02 in geos [US] (limit 25) — stored collection rows, not a web search."},
+    "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_question": "Run the bounded social-arbitrage enrichment for discovery term 'Stanley': local signal evidence, entity mappings, and explicit gaps — the single enrichment operation, no separate trend, filing, financial, or web lookups and no thesis."},
+    "get_macro_context": {"arguments": {"geos": ["geoId/06"], "variables": ["Count_Person"]}, "natural_question": "Report the Data Commons statistical observations for California geography geoId/06 and variable Count_Person — measured observations with provenance, not web commentary."},
+    "search_company_patents": {"arguments": {"company_id": "Apple Inc.", "assignees": ["Apple Inc."], "limit": 5}, "natural_question": "Search the documented patent-publication records for company assignee Apple Inc. (assignees [Apple Inc.], limit 5) — publication counts from the patent records, not web results."},
+    "thesis_create": {"arguments": {"user_thesis": "I think NVDA AI demand will stay strong."}, "natural_question": "Create a brand-new thesis record from this proposal: 'I think NVDA AI demand will stay strong' — a new record only, never a revision of any existing thesis."},
+    "thesis_show": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "Display thesis thesis-placeholder with its assessment and open questions — display only, no changes and no separate watch-rule listing."},
+    "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_question": "Revise thesis thesis-placeholder with new information that AI datacenter capex keeps growing — a revision of that thesis, not a display."},
     "thesis_watch": {"arguments": {"id": "thesis-placeholder"}, "natural_question": "List the watch rules for thesis thesis-placeholder."},
-    "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_question": "Journal on thesis thesis-placeholder: still watching NVDA datacenter demand."},
+    "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_question": "Append this operator note to the journal of thesis thesis-placeholder: 'Operator note: still watching NVDA datacenter demand' — a journal append only, do not display the thesis."},
 }
 
 def tool_schemas() -> dict[str, dict[str, object]]:
@@ -400,11 +401,12 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
     # Routing benchmark: attempts 1-2 allow a clean search_tools call, a clean
     # required-target call, and the target's documented prerequisites
-    # (PREREQ_CHAINS from app/tools.py docstrings). Any other Stockbot tool
-    # fails, whether harness-rejected pre-dispatch, dispatched-and-errored, or
-    # dispatched-and-successful. Attempt 3 uses an explicit recovery prompt under
-    # the same presence checks, exempt from both stray-tool gates. All three
-    # attempts must pass (see the all-ok gate in main).
+    # (PREREQ_CHAINS, hardcoded below with per-edge app/tools.py docstring
+    # citations enforced by tests/test_verify_pi_tools.py::test_prereq_chains_are_documented_in_descriptions).
+    # Any other Stockbot tool fails, whether harness-rejected pre-dispatch,
+    # dispatched-and-errored, or dispatched-and-successful. Attempt 3 uses an
+    # explicit recovery prompt under the same presence checks, exempt from both
+    # stray-tool gates. All three attempts must pass (see the all-ok gate in main).
     if timed_out and not completed_override:
         return False, "pi timeout"
     if exit_code != 0 and not completed_override:
