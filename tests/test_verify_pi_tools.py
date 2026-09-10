@@ -198,6 +198,8 @@ def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
 def test_rejected_wrong_tool_passes_attempt_3(tmp_path: Path):
     ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
     assert ok
+
+
 def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
     ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=1)
     assert not ok

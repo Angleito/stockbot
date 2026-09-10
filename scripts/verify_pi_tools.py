@@ -98,8 +98,6 @@ def ensure_thesis_fixture(store: Path) -> str:
 
 
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
-
-
 FINRA_SETTLEMENT_ENV = "PI_VERIFY_SETTLEMENT_DATE"
 FETCH_TOP_SYMBOLS_SQL = (
     "SELECT symbol_code, MAX(short_position) AS pos FROM short_interest "
@@ -176,6 +174,8 @@ def ensure_finra_fixture(durable: Path, tool_names: list[str]) -> int:
         print(f"verify fetch failed for settlement {settlement}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
 
 
 def seed_finra_fixture(store: Path, durable: Path) -> None:

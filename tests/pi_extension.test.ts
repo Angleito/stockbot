@@ -474,6 +474,7 @@ test("tool data root binds explicitly, never from prompt text", () => {
 
 type PiHandler = (event: Json, ctx?: unknown) => unknown;
 type FakeCommand = { description?: string; handler: (args: string, ctx: unknown) => Promise<void> };
+
 function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<string, FakeCommand>; pi: ExtensionAPI; tools: unknown[]; active: string[] } {
 	const handlers: Record<string, PiHandler> = {};
 	const commands: Record<string, FakeCommand> = {};
@@ -1022,4 +1023,58 @@ test("tool_call blocks non-RESEARCH tools", async () => {
 	const result = (await handlers["tool_call"]({ toolName: "bash" })) as unknown as Record<string, unknown>;
 	expect(result.block).toBe(true);
 	expect(String(result.reason)).toMatch(/RESEARCH-only/);
+});
+
+test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", () => {
+	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"b",
+		"c",
+	]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools"]);
+	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"a",
+		"b",
+		"c",
+		"d",
+	]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"a",
+		"b",
+	]);
+});
+
+test("session_start then searches rotate research tools via the real bridge", async () => {
+	const { handlers, pi, tools, active } = fakePiHost();
+	await stockbotExtension(pi);
+	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
+	const registered = tools as unknown as Registered[];
+	const stale = registered.find((t) => t.name !== "search_tools")?.name;
+	if (!stale) throw new Error("no research tool registered");
+	const search = registered.find((t) => t.name === "search_tools");
+	if (!search) throw new Error("search_tools not registered");
+	const statuses: string[] = [];
+	const ctx = { ui: { setStatus: (_k: string, v: string) => void statuses.push(v) } };
+	active.push("builtin-tool", "search_tools", stale);
+	await handlers["session_start"]({}, ctx);
+	expect(active).toContain("builtin-tool");
+	expect(active).toContain("search_tools");
+	expect(active).not.toContain(stale);
+	await handlers["agent_start"]({});
+	const first = await search.execute("call-1", { query: "insider sale" });
+	const firstText = first.content[0].text;
+	expect(firstText).toContain("Activated");
+	expect(active).toContain("search_tools");
+	expect(active).toContain("get_insider_activity");
+	const second = await search.execute("call-2", { query: "short interest" });
+	const secondText = second.content[0].text;
+	expect(secondText).toContain("Activated");
+	expect(secondText).toContain("; now active:");
+	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });

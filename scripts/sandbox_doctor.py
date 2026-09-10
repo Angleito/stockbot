@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_BRANCH = "fix/stockbot-security-fixes"
 SANDBOX_NAME = "stockbot-runtime"
 REQUIRED_ENV_ABSENT = ("OPENAI_API_KEY", "OPENCODE_API_KEY", "PI_AGENT_DIR")
 # Denied hosts are checked with the :443 port to match the allowlist format.
@@ -42,16 +41,6 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         fail(" ".join(cmd[1:]), f"'{cmd[0]}' not found on PATH")
     except subprocess.TimeoutExpired:
         fail(" ".join(cmd[1:]), f"'{' '.join(cmd)}' timed out after 60s")
-
-
-def check_git_branch() -> None:
-    name = "git branch is fix/stockbot-security-fixes"
-    proc = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    if proc.returncode != 0:
-        fail(name, f"git lookup failed (exit {proc.returncode}): {proc.stderr.strip()}")
-    if proc.stdout.strip() != EXPECTED_BRANCH:
-        fail(name, f"expected '{EXPECTED_BRANCH}', got '{proc.stdout.strip()}'")
-    ok(name)
 
 
 def check_sbx() -> None:
@@ -135,7 +124,6 @@ def check_network() -> None:
 
 
 def main() -> None:
-    check_git_branch()
     check_sbx()
     check_policy()
     check_credentials()

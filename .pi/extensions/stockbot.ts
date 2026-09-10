@@ -408,78 +408,78 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
   }
  }
-const research = new Set<string>();
-const requiredOf: Record<string, string[]> = {};
+ const research = new Set<string>();
+ const requiredOf: Record<string, string[]> = {};
 
-for (const entry of bridgeDown ? [] : entries) {
- const fn = describeFn(entry);
- if (!fn) continue;
-research.add(fn.name);
-const params: unknown = fn.parameters;
-const rawRequired = params && typeof params === "object" && "required" in params ? params.required : undefined;
-requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [];
- const cardSpec = CARD_TOOLS[fn.name];
- // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
- // the system prompt when an active tool carries it) and activates matches.
- const isSearch = fn.name === "search_tools";
- pi.registerTool({
-  name: fn.name,
-  label: fn.name,
-  description: fn.description,
-  parameters: Type.Unsafe(fn.parameters),
-  ...(isSearch
-   ? {
+ for (const entry of bridgeDown ? [] : entries) {
+  const fn = describeFn(entry);
+  if (!fn) continue;
+  research.add(fn.name);
+  const params: unknown = fn.parameters;
+  const rawRequired = params && typeof params === "object" && "required" in params ? params.required : undefined;
+  requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [];
+  const cardSpec = CARD_TOOLS[fn.name];
+  // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
+  // the system prompt when an active tool carries it) and activates matches.
+  const isSearch = fn.name === "search_tools";
+  pi.registerTool({
+   name: fn.name,
+   label: fn.name,
+   description: fn.description,
+   parameters: Type.Unsafe(fn.parameters),
+   ...(isSearch
+    ? {
      promptSnippet: "Search for additional tools when the active tools cannot perform the task",
      promptGuidelines: ["Use search_tools when a task requires a capability that is not currently available."],
     }
-   : {}),
-  async execute(toolCallId, params) {
-   toolCalls++;
-   const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
-   if (isSearch && typeof bridge.error === "string") {
-    return {
-     content: [{ type: "text", text: `Bridge error: ${bridge.error}` }],
-     details: bridge,
-    };
-   }
-   if (isSearch) {
-   const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
-   const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
-   const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
-   const matches = (Array.isArray(raw) ? raw : [])
-    .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
-    .filter((n) => research.has(n))
-    .slice(0, 4);
-    const active = pi.getActiveTools();
-    const next = nextActiveTools(active, matches, research);
-    const added = next.filter((n) => !active.includes(n));
-    const dropped = active.filter((n) => n !== "search_tools" && research.has(n) && !next.includes(n));
-    if (added.length || dropped.length) pi.setActiveTools(next);
-    const nowActive = next.filter((n) => n !== "search_tools" && research.has(n));
-    const need = (n: string) => {
-        const req = requiredOf[n] ?? [];
-        return req.length ? `${n} (needs: ${req.join(", ")})` : n;
-    };
-    const suffix = dropped.length ? `; now active: ${nowActive.map(need).join(", ") || "(none)"}` : "";
-    const query = (params as Json).query;
-    const text =
-     matches.length === 0
-      ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}${suffix}`
-      : added.length
+    : {}),
+   async execute(toolCallId, params) {
+    toolCalls++;
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    if (isSearch && typeof bridge.error === "string") {
+     return {
+      content: [{ type: "text", text: `Bridge error: ${bridge.error}` }],
+      details: bridge,
+     };
+    }
+    if (isSearch) {
+     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
+     const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
+     const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
+     const matches = (Array.isArray(raw) ? raw : [])
+      .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
+      .filter((n) => research.has(n))
+      .slice(0, 4);
+     const active = pi.getActiveTools();
+     const next = nextActiveTools(active, matches, research);
+     const added = next.filter((n) => !active.includes(n));
+     const dropped = active.filter((n) => n !== "search_tools" && research.has(n) && !next.includes(n));
+     if (added.length || dropped.length) pi.setActiveTools(next);
+     const nowActive = next.filter((n) => n !== "search_tools" && research.has(n));
+     const need = (n: string) => {
+      const req = requiredOf[n] ?? [];
+      return req.length ? `${n} (needs: ${req.join(", ")})` : n;
+     };
+     const suffix = dropped.length ? `; now active: ${nowActive.map(need).join(", ") || "(none)"}` : "";
+     const query = (params as Json).query;
+     const text =
+      matches.length === 0
+       ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}${suffix}`
+       : added.length
         ? `Activated ${added.length} tools: ${added.map(need).join(", ")}${suffix}`
         : `Matching tools already active: ${matches.map(need).join(", ")}${suffix}`;
+     refreshStatus(lastCtx);
+     return {
+      content: [{ type: "text", text }],
+      details: bridge,
+     };
+    }
     refreshStatus(lastCtx);
     return {
-     content: [{ type: "text", text }],
+     content: [{ type: "text", text: bridgeModelText(bridge) }],
      details: bridge,
     };
-   }
-   refreshStatus(lastCtx);
-   return {
-    content: [{ type: "text", text: bridgeModelText(bridge) }],
-    details: bridge,
-   };
-  },
+   },
    renderCall: cardSpec
     ? (args, theme) => {
      // Pi validates params against the schema before render.

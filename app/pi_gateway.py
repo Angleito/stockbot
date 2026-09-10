@@ -521,4 +521,17 @@ def _execute_pi_tool(
                 m.get("name") for m in raw_matches
                 if isinstance(m, dict) and isinstance(m.get("name"), str)
             ]
+
+        else:
+            # Pre-discovery search shape: full schemas under "schemas".
+            raw_schemas = result.get("schemas")
+            if isinstance(raw_schemas, list):
+                names: list[str] = []
+                for schema in raw_schemas:
+                    fn = schema.get("function") if isinstance(schema, dict) else None
+                    tool_name = fn.get("name") if isinstance(fn, dict) else None
+                    if isinstance(tool_name, str):
+                        names.append(tool_name)
+                safe_meta["matches"] = names
+
     return {"content": final_text, "meta": safe_meta}
