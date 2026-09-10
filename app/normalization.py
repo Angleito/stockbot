@@ -578,6 +578,7 @@ def normalize_finra_short_interest(
     *,
     settlement_date: str,
     retrieved_at: str,
+    known_at: Optional[str] = None,
     content_hash: str,
     source_url: str,
     source_record_id: str,
@@ -609,8 +610,9 @@ def normalize_finra_short_interest(
             "days_to_cover": _to_float(row.get("daysToCoverQuantity")),
             "source_url": source_url,
             "source_record_id": source_record_id,
-            # Publication date unknown: retrieved_at is the conservative known_at (no FINRA calendar lookup in-repo).
-            "known_at": retrieved_at,
+            # Explicit publication date wins when provided; otherwise retrieved_at
+            # is the conservative known_at (no FINRA calendar lookup in-repo).
+            "known_at": known_at if known_at else retrieved_at,
             "retrieved_at": retrieved_at,
             "content_hash": content_hash,
             "parser_version": SHORT_INTEREST_PARSER_VERSION,
