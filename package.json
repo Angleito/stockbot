@@ -17,6 +17,7 @@
     "verify-pi-one": "venv/bin/python scripts/verify_pi_tools.py --tool",
     "verify-integrity": "venv/bin/python scripts/verify_type_escape_hatches.py",
     "update-tool-inventory": "venv/bin/python scripts/update_tool_inventory.py",
+    "update-tool-catalog": "venv/bin/python scripts/update_tool_catalog.py",
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run typecheck-ts && bun run verify-integrity && bun run verify-tools && bun run verify-pi",
     "sandbox-doctor": "venv/bin/python scripts/sandbox_doctor.py",
     "stockbot": "pi --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --extension .pi/extensions/stockbot.ts"

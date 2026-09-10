@@ -47,9 +47,14 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
+// Permanent discovery triple: never evicted by rotation. Filtered to
+// research.has, so sets lacking list/describe reduce exactly to old behavior.
+export const DISCOVERY_TOOLS = ["list_tool_domains", "search_tools", "describe_tool"];
 export function nextActiveTools(active: string[], matches: string[], research: Set<string>): string[] {
- const base = active.filter((n) => !research.has(n) || n === "search_tools");
- return [...new Set([...base, ...matches.slice(0, 4)])];
+ const permanent = DISCOVERY_TOOLS.filter((n) => research.has(n));
+ const base = active.filter((n) => !research.has(n) || permanent.includes(n));
+ const temp = matches.filter((n) => research.has(n) && !permanent.includes(n)).slice(0, 4);
+ return [...new Set([...base, ...permanent, ...temp])];
 }
 
 // Absolute bridge paths derived from this file's location: Pi's extension
@@ -453,9 +458,9 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      const active = pi.getActiveTools();
      const next = nextActiveTools(active, matches, research);
      const added = next.filter((n) => !active.includes(n));
-     const dropped = active.filter((n) => n !== "search_tools" && research.has(n) && !next.includes(n));
+     const dropped = active.filter((n) => !DISCOVERY_TOOLS.includes(n) && research.has(n) && !next.includes(n));
      if (added.length || dropped.length) pi.setActiveTools(next);
-     const nowActive = next.filter((n) => n !== "search_tools" && research.has(n));
+     const nowActive = next.filter((n) => !DISCOVERY_TOOLS.includes(n) && research.has(n));
      const need = (n: string) => {
       const req = requiredOf[n] ?? [];
       return req.length ? `${n} (needs: ${req.join(", ")})` : n;
@@ -610,7 +615,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
-  // Deferred loading: start with built-ins + search_tools only; searches
+  // Deferred loading: start with built-ins + discovery triple only; searches
   // rotate matches (cap 4). research.size still counts registered tools.
   pi.setActiveTools(nextActiveTools(pi.getActiveTools(), [], research));
   refreshStatus(ctx);

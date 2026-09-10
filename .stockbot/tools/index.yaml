@@ -1,0 +1,178 @@
+version: 1
+domains:
+  alternative:
+    description: "Alternative and non-filing signals outside standard SEC and market feeds."
+  analyst:
+    description: "Analyst estimates and expectations for earnings, revenue, and price targets."
+  events:
+    description: "Material company events derived from 8-K and filing activity."
+  filings:
+    description: "SEC filing discovery, retrieval, and document reading via EDGAR."
+  finra:
+    description: "FINRA short interest, short volume, and threshold-securities data."
+  fundamentals:
+    description: "Reported numeric fundamentals such as EPS, dividends, and balance-sheet items."
+  governance:
+    description: "Proxy, meeting, vote, and board-compensation records."
+  insider:
+    description: "Insider transactions and planned sales from Forms 3/4/5 and 144."
+  macro:
+    description: "Macroeconomic context such as employment, inflation, and rates."
+  market:
+    description: "Market data such as index weights, option contracts, and trend evidence."
+  offerings:
+    description: "Financing history, offering terms, and dilution math."
+  ownership:
+    description: "Beneficial ownership stakes, holder changes, and relationship links."
+  patents:
+    description: "Patent records and innovation activity."
+  thesis:
+    description: "Thesis tracking, refinement, obligations, and operator notes."
+  transactions:
+    description: "Transaction status and mandate evaluation for deals."
+  valuation:
+    description: "Valuation multiples and financial-statement analysis."
+  web:
+    description: "General web search for facts outside structured financial sources."
+tools:
+  - name: find_alternative_signals
+    domain: alternative
+    summary: "Discovery scan for rising search-term and diffusion signals worth investigating."
+  - name: get_trend_evidence
+    domain: alternative
+    summary: "Evidence for one known trend: search interest, rising queries, and geography."
+  - name: investigate_social_arbitrage_candidate
+    domain: alternative
+    summary: "Enrichment of one social-arbitrage candidate with corroboration and exposure gap. Social signals vetting."
+  - name: get_analyst_estimates
+    domain: analyst
+    summary: "Sell-side consensus: price targets, ratings, forward EPS and revenue estimates, revision trends."
+  - name: get_material_events
+    domain: events
+    summary: "Deterministic 8-K-derived recent event feed with accession citations for what changed since a date."
+  - name: get_recent_ownership_filings
+    domain: events
+    summary: "Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours."
+  - name: diff_risk_factors
+    domain: filings
+    summary: "What changed in the Risk Factors section versus the prior filing: year-over-year diff for a ticker."
+  - name: diff_sec_filings
+    domain: filings
+    summary: "Deterministic diff between two filings by accession numbers: whether one filing differs from another, e.g. amendment versus prior version."
+  - name: find_sec_entities
+    domain: filings
+    summary: "Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers."
+  - name: get_sec_document
+    domain: filings
+    summary: "Bounded text window of one filing document by accession number for targeted excerpt reading."
+  - name: get_sec_filing
+    domain: filings
+    summary: "One filing's record by accession number: filer, form, dates, primary document, source URL."
+  - name: get_sec_search_coverage
+    domain: filings
+    summary: "Persisted SEC ingestion coverage and backfill-job status for a form, source, or date partition."
+  - name: list_sec_documents
+    domain: filings
+    summary: "Index of documents and exhibits attached to one filing, looked up by accession number."
+  - name: list_sec_filings
+    domain: filings
+    summary: "List EDGAR filings for an exact ticker or CIK, filterable by form and date range."
+  - name: search_sec_filings
+    domain: filings
+    summary: "What was disclosed about risk factors in recent filings: full-text EDGAR SEC search and retrieval across entity, EFTS, and 10-K/10-Q routes, with disclosure language and mentions."
+  - name: describe_finra_dataset
+    domain: finra
+    summary: "One FINRA dataset's fields, types, filter values, and supported methods."
+  - name: get_finra_datapoints
+    domain: finra
+    summary: "Short-interest values and figures from FINRA (exact source values). Use this instead of get_short_interest when values are asked for."
+  - name: get_reg_sho_volume
+    domain: finra
+    summary: "FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rolling 12 months."
+  - name: get_short_interest
+    domain: finra
+    summary: "FINRA consolidated short interest amounts sold short for a ticker: position, days to cover, and percent change."
+  - name: get_short_interest_leaderboard
+    domain: finra
+    summary: "Ranked most-shorted stocks by short interest as a percent of SEC shares outstanding."
+  - name: get_threshold_securities
+    domain: finra
+    summary: "FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and date."
+  - name: list_finra_datasets
+    domain: finra
+    summary: "Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support."
+  - name: query_finra
+    domain: finra
+    summary: "Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends, prose. Dataset IDs look like otcMarket/consolidatedShortInterest."
+  - name: get_financial_statements
+    domain: fundamentals
+    summary: "Parsed income statement, balance sheet, and cash flow from 10-K or 10-Q filings: revenue, expenses, profit."
+  - name: get_fundamentals
+    domain: fundamentals
+    summary: "Reported EPS including diluted EPS, dividends, balance-sheet items, or shares outstanding for a ticker from SEC filings."
+  - name: get_obligations
+    domain: fundamentals
+    summary: "Future payment obligations from 10-Q/10-K notes: amounts, horizons, certainty language."
+  - name: get_xbrl_facts
+    domain: fundamentals
+    summary: "XBRL-tagged financial facts such as revenue, net income, cash, debt, or equity for a ticker. Concept names look like NetIncomeLoss."
+  - name: get_governance_events
+    domain: governance
+    summary: "Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval pointers."
+  - name: get_insider_activity
+    domain: insider
+    summary: "Executed insider transactions from Forms 3/4/5 with SEC codes mapped to buy, sell, or grant."
+  - name: get_planned_insider_sales
+    domain: insider
+    summary: "Planned insider sales from Form 144 notices: proposed sales not yet executed."
+  - name: get_macro_context
+    domain: macro
+    summary: "Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates."
+  - name: get_short_pressure_profile
+    domain: market
+    summary: "Short-positioning context combining FINRA data with SEC shares outstanding and their ratio."
+  - name: get_sp500_weight
+    domain: market
+    summary: "A company's current weight and rank in the S&P 500 index from the constituent list."
+  - name: get_dilution_profile
+    domain: offerings
+    summary: "Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown."
+  - name: get_offering_history
+    domain: offerings
+    summary: "Financing history from S-1/S-3/424B filings: offering terms with source-registration links."
+  - name: get_beneficial_ownership
+    domain: ownership
+    summary: "Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers."
+  - name: get_ownership_changes
+    domain: ownership
+    summary: "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions."
+  - name: search_sec_relationships
+    domain: ownership
+    summary: "Ownership and transaction relationships an entity must disclose: 13D/G owners, 13F holdings, insider links, deal parties."
+  - name: search_company_patents
+    domain: patents
+    summary: "Company patent search: publications, assignees, counts, and classifications."
+  - name: thesis_create
+    domain: thesis
+    summary: "Start a new investment thesis proposal with scope, claims, and open questions."
+  - name: thesis_journal
+    domain: thesis
+    summary: "Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>."
+  - name: thesis_refine
+    domain: thesis
+    summary: "Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uuid>."
+  - name: thesis_show
+    domain: thesis
+    summary: "Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>."
+  - name: thesis_watch
+    domain: thesis
+    summary: "Add a monitoring rule that alerts when a thesis condition triggers."
+  - name: get_transaction_status
+    domain: transactions
+    summary: "M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies."
+  - name: get_valuation_metrics
+    domain: valuation
+    summary: "Whether a stock is cheap or expensive: valuation anchored to live price with trailing P/E plus consensus and obligation-adjusted forward P/E."
+  - name: search_web
+    domain: web
+    summary: "External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks."
