@@ -159,3 +159,23 @@ def test_deterministic_trigger_still_gates_hostile_evidence(tmp_path: Path) -> N
     assert "ignore previous instructions" not in prompt
     assert "evil.example" not in prompt
     assert "[recycled content withheld ref=evidence:ev:hostile]" in prompt
+
+
+def test_deterministic_hostile_summary_never_reaches_prompt(tmp_path: Path) -> None:
+    from app.thesis.context import build_live_context
+    from app.thesis.runner import _build_prompt
+
+    r, t = _make(tmp_path)
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["seed:1"], summary=HOSTILE,
+                            summary_origin="deterministic")
+    ctx = build_live_context(r, t.thesis_id, trig, data_cutoff=T2)
+    prompt = _build_prompt(thesis_id=t.thesis_id, trigger=trig, data_cutoff=T2, ctx=ctx, run_id="run:test")
+    assert "ignore previous instructions" not in prompt
+    assert "evil.example" not in prompt
+    assert "[recycled content withheld ref=trigger:" in prompt
+    benign = r.create_trigger(t.thesis_id, canonical_refs=["seed:1"], summary="routine check",
+                              summary_origin="deterministic")
+    benign_ctx = build_live_context(r, t.thesis_id, benign, data_cutoff=T2)
+    benign_prompt = _build_prompt(thesis_id=t.thesis_id, trigger=benign, data_cutoff=T2, ctx=benign_ctx,
+                                  run_id="run:test")
+    assert "routine check" in benign_prompt

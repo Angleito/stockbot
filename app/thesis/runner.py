@@ -56,7 +56,7 @@ def _utcnow() -> str:
 
 
 def _safe_prompt_text(text: str, ref: str) -> str:
-    """Gate recycled-origin free text via the shared injection scanner."""
+    """Gate stored free text via the shared injection scanner; provenance labels never bypass it."""
     if text is None or text == "":
         return ""
     if not isinstance(text, str):
@@ -80,24 +80,17 @@ def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: Re
     refs = ", ".join(trigger.canonical_refs) or "(none)"
     packet = dict(ctx.thesis_packet)
     trig = packet.pop("trigger", {})
-    origin = trigger.metadata.get("summary_origin") if isinstance(trigger.metadata, dict) else None
     tid_ref = trigger.trigger_id or "unknown"
-    if origin == "deterministic":
-        # scan-on-write already covers new deterministic writes (trigger summary only).
-        summary_line = (trigger.summary or "")[:500]
-        if isinstance(trig, dict):
-            trig = dict(trig)
-    else:
-        summary_line = _safe_prompt_text(trigger.summary or "", ref=f"trigger:{tid_ref}")[:500]
-        if isinstance(trig, dict):
-            trig = dict(trig)
-            if "summary" in trig:
-                raw = trig.get("summary", "")
-                if raw is None or raw == "":
-                    trig["summary"] = ""
-                else:
-                    s = raw if isinstance(raw, str) else str(raw)
-                    trig["summary"] = _safe_prompt_text(s, ref=f"trigger:{tid_ref}")
+    summary_line = _safe_prompt_text(trigger.summary or "", ref=f"trigger:{tid_ref}")[:500]
+    if isinstance(trig, dict):
+        trig = dict(trig)
+        if "summary" in trig:
+            raw = trig.get("summary", "")
+            if raw is None or raw == "":
+                trig["summary"] = ""
+            else:
+                s = raw if isinstance(raw, str) else str(raw)
+                trig["summary"] = _safe_prompt_text(s, ref=f"trigger:{tid_ref}")
     trig_out = trig
     safe_evidence: list[object] = []
     for e in ctx.evidence_refs:
