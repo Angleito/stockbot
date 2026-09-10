@@ -63,6 +63,19 @@ _FORBIDDEN_EVIDENCE_KEYS = frozenset({
     "provenance", "publication", "published_at", "retrieved_at", "retrieval", "origin",
 })
 
+def _reject_hostile_summary(summary: object, where: str) -> None:
+    """Scan-on-write gate for Pi-authored prompt-bound text (evidence/journals)."""
+    from app.security.prompt_injection import assess  # local: keep thesis import graph acyclic
+    text = summary if isinstance(summary, str) else ("" if summary is None else str(summary))
+    found = assess(text)
+    if found.verdict in ("BLOCK", "QUARANTINE"):
+        raise ValueError(f"{where}: hostile text rejected ({found.verdict} {','.join(found.matched_rules)})")
+
+
+def _reject_hostile_journal(title: object, body: object, where: str) -> None:
+    _reject_hostile_summary(title, f"{where} journal title")
+    _reject_hostile_summary(body, f"{where} journal body")
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -833,6 +846,7 @@ class ThesisRepository:
             title = _title_raw if isinstance(_title_raw, str) else str(_title_raw)
             _body_raw = d.get("body", d.get("summary", ""))
             body = _body_raw if isinstance(_body_raw, str) else ("" if _body_raw is None else str(_body_raw))
+            _reject_hostile_journal(title, body, f"{thesis_dir}/journal")
             dest = thesis_dir / "journal" / f"{_safe_name(entry_id)}.md"
             atomic_write_text(
                 dest,
@@ -882,6 +896,8 @@ class ThesisRepository:
         canonical_refs: Sequence[str] = (),
         summary: str = "",
         metadata: dict[str, JSONValue] | None = None,
+        *,
+        summary_origin: str,
     ) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
@@ -896,6 +912,10 @@ class ThesisRepository:
             for eid in expression_ids or []:
                 if eid not in known_exprs:
                     raise ValueError(f"{thesis_dir}: trigger references absent expression {eid!r}")
+            if summary_origin not in ("deterministic", "recycled"):
+                raise ValueError(f"{thesis_dir}: bad summary_origin {summary_origin!r}")
+            meta = dict(metadata or {})
+            meta["summary_origin"] = summary_origin
             trigger = Trigger(
                 trigger_id=new_trigger_id(),
                 thesis_id=thesis_id,
@@ -907,7 +927,7 @@ class ThesisRepository:
                 expression_ids=tuple(expression_ids or []),
                 canonical_refs=tuple(canonical_refs or []),
                 summary=summary,
-                metadata=dict(metadata or {}),
+                metadata=meta,
             )
             # Validate enums before persisting.
             Trigger.from_dict(trigger.to_dict(), str(thesis_dir / "inbox"))
@@ -1262,6 +1282,7 @@ class ThesisRepository:
                 for ref in _evidence_refs_raw:
                     if not isinstance(ref, dict):
                         raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
+                    _reject_hostile_summary(ref.get("summary", ""), f"{thesis_dir}/evidence")
                     d = dict(ref)
                     d.setdefault("evidence_id", new_evidence_id())
                     d["thesis_id"] = thesis_id
@@ -1391,6 +1412,7 @@ class ThesisRepository:
                         _jtitle_s = _jtitle if isinstance(_jtitle, str) else str(_jtitle)
                         _jbody = jd.get('body', jd.get('summary', ''))
                         _jbody_s = _jbody if isinstance(_jbody, str) else ("" if _jbody is None else str(_jbody))
+                        _reject_hostile_journal(_jtitle_s, _jbody_s, f"{thesis_dir}/journal")
                         atomic_write_text(
                             dest,
                             _journal_front_matter(entry_id, thesis_id, _utcnow(), jd)
@@ -1533,6 +1555,7 @@ class ThesisRepository:
             for ref in _evidence_refs_raw:
                 if not isinstance(ref, dict):
                     raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")
+                _reject_hostile_summary(ref.get("summary", ""), f"{thesis_dir}/evidence")
                 d = dict(ref)
                 d.setdefault("evidence_id", new_evidence_id())
                 d["thesis_id"] = thesis_id
@@ -1688,6 +1711,7 @@ class ThesisRepository:
                     _jt2s = _jt2 if isinstance(_jt2, str) else str(_jt2)
                     _jb2 = jd.get('body', jd.get('summary', ''))
                     _jb2s = _jb2 if isinstance(_jb2, str) else ("" if _jb2 is None else str(_jb2))
+                    _reject_hostile_journal(_jt2s, _jb2s, f"{thesis_dir}/journal")
                     atomic_write_text(
                         dest,
                         _journal_front_matter(entry_id, thesis_id, _utcnow(), jd)
