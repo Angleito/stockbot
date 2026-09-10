@@ -102,3 +102,60 @@ def test_sec_builder_ignores_hostile_fields(monkeypatch: pytest.MonkeyPatch) -> 
     assert "ignore previous instructions" not in evs[0].summary
     assert "evil.example" not in evs[0].summary
     assert assess(evs[0].summary).verdict == "ALLOW"
+
+
+def test_recycled_hostile_text_never_reaches_prompt(tmp_path: Path) -> None:
+    from app.thesis.context import build_live_context
+    from app.thesis.runner import _build_prompt
+
+    r, t = _make(tmp_path, invalidators=["demand collapse scenario"])
+    full = r.load_thesis(t.thesis_id)
+    cid = full.claims[0].claim_id
+    r.apply_research_result(t.thesis_id, {"watch_add": [{"rule_id": "rule:1",
+        "rule_type": "explicit_thesis_invalidator", "enabled": True, "support_status": "supported",
+        "support_reason": "", "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
+    evdir = tmp_path / "theses" / t.slug / "evidence"
+    atomic_write_yaml(evdir / "ev_hostile.yaml",
+                      {"schema_version": 1, "evidence_id": "ev:hostile", "thesis_id": t.thesis_id,
+                       "canonical_ref": "seed:1",
+                       "summary": "demand collapse scenario unfolding; " + HOSTILE,
+                       "known_at": T1}, tmp_path / "theses")
+    jdir = tmp_path / "theses" / t.slug / "journal"
+    jdir.mkdir(parents=True, exist_ok=True)
+    (jdir / "hostile.md").write_text(
+        f"---\nentry_id: journal:hostile\nthesis_id: {t.thesis_id}\ncreated_at: {T1}\n"
+        f"known_at: {T1}\nrun_id: \ntrigger_id: \n---\n# note\n\n{HOSTILE}\n",
+        encoding="utf-8")
+    res = tick(r, t.thesis_id, {}, known_at=T2)
+    assert len(res.triggers_created) == 1
+    trig = next(x for x in r.load_triggers(t.thesis_id) if x.trigger_id == res.triggers_created[0])
+    assert trig.metadata["summary_origin"] == "recycled"
+    ctx = build_live_context(r, t.thesis_id, trig, data_cutoff=T2)
+    prompt = _build_prompt(thesis_id=t.thesis_id, trigger=trig, data_cutoff=T2, ctx=ctx, run_id="run:test")
+    assert "ignore previous instructions" not in prompt
+    assert "evil.example" not in prompt
+    assert "[recycled content withheld ref=trigger:" in prompt
+    assert "[recycled content withheld ref=evidence:ev:hostile]" in prompt
+    assert "[recycled content withheld ref=journal:hostile]" in prompt
+    assert "ignore previous instructions" in (evdir / "ev_hostile.yaml").read_text(encoding="utf-8")
+
+
+def test_deterministic_trigger_still_gates_hostile_evidence(tmp_path: Path) -> None:
+    from app.thesis.context import build_live_context
+    from app.thesis.runner import _build_prompt
+
+    r, t = _make(tmp_path)
+    evdir = tmp_path / "theses" / t.slug / "evidence"
+    evdir.mkdir(parents=True, exist_ok=True)
+    atomic_write_yaml(evdir / "ev_hostile.yaml",
+                      {"schema_version": 1, "evidence_id": "ev:hostile", "thesis_id": t.thesis_id,
+                       "canonical_ref": "seed:1", "summary": HOSTILE, "known_at": T1},
+                      tmp_path / "theses")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["seed:1"], summary="routine check",
+                            summary_origin="deterministic")
+    ctx = build_live_context(r, t.thesis_id, trig, data_cutoff=T2)
+    prompt = _build_prompt(thesis_id=t.thesis_id, trigger=trig, data_cutoff=T2, ctx=ctx, run_id="run:test")
+    assert "routine check" in prompt
+    assert "ignore previous instructions" not in prompt
+    assert "evil.example" not in prompt
+    assert "[recycled content withheld ref=evidence:ev:hostile]" in prompt
