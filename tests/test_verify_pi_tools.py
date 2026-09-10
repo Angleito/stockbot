@@ -217,9 +217,20 @@ def test_allowed_prereq_passes_attempt_1(tmp_path: Path):
     assert ok
 
 
-def test_allowed_prereq_rejection_passes_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", rejected_other="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
+def test_rejected_prereq_fails_attempt_1(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", rejected_other="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
+    assert not ok
+    assert "harness-rejected" in reason
+
+
+def test_dispatched_prereq_passes_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
     assert ok
+
+
+def test_errored_prereq_fails_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="search_sec_filings", extra_error="tool_error"), "list_sec_filings", 0, False, attempt=1)
+    assert not ok
 
 
 def test_prereq_chains_are_documented_in_descriptions():
