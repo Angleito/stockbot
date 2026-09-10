@@ -606,3 +606,68 @@ def test_finra_short_interest_lock_excludes(tmp_path: Path) -> None:
         assert "BlockingIOError" in held.stderr
     free = subprocess.run([sys.executable, "-c", probe, str(lock_path)], capture_output=True, text=True)
     assert free.returncode == 0
+
+def test_short_interest_has_legacy_v1_probe(tmp_path: Path) -> None:
+    from app.services.research_data import _short_interest_has_legacy_v1
+
+    parquet_root = tmp_path / "parquet"
+    assert _short_interest_has_legacy_v1(parquet_root) is False
+    v2_rows: list[dict[str, object]] = [
+        {
+            "row_id": f"finra:row:2026-08-14:{sym}:v2hash{i:04d}", "entity_id": None, "security_id": None,
+            "symbol_code": sym, "issue_name": sym, "settlement_date": "2026-08-14",
+            "short_position": 5.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+            "source_url": "u", "source_record_id": "r",
+            "known_at": "2026-08-30T12:00:00Z", "retrieved_at": "2026-08-30T12:00:00Z",
+            "content_hash": f"v2-{i}", "parser_version": "finra-short-interest-v2",
+        }
+        for i, sym in enumerate(["AAA", "BBB", "CCC"])
+    ]
+    parquet.write_rows("short_interest", v2_rows, root=parquet_root)
+    assert _short_interest_has_legacy_v1(parquet_root) is False
+    parquet.write_rows("short_interest", [
+        {
+            "row_id": "finra:row:2026-08-14:DDD:oldhash1234", "entity_id": None, "security_id": None,
+            "symbol_code": "DDD", "issue_name": "Delta", "settlement_date": "2026-08-14",
+            "short_position": 20.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+            "source_url": "u", "source_record_id": "r",
+            "known_at": "2026-08-14", "retrieved_at": "2026-08-30T12:00:00Z",
+            "content_hash": "old", "parser_version": "finra-short-interest-v1",
+        },
+    ], root=parquet_root)
+    assert _short_interest_has_legacy_v1(parquet_root) is True
+
+
+def test_backfill_skips_clean_table_without_rewrite(tmp_path: Path) -> None:
+    from app.services.research_data import backfill_finra_known_at
+
+    rows: list[dict[str, object]] = []
+    for i, sym in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE"]):
+        known_at = "2026-08-14" if sym == "AAA" else "2026-08-30T12:00:00Z"
+        rows.append(
+            {
+                "row_id": f"finra:row:2026-08-14:{sym}:v2hash{i:04d}", "entity_id": None, "security_id": None,
+                "symbol_code": sym, "issue_name": sym, "settlement_date": "2026-08-14",
+                "short_position": 5.0, "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
+                "source_url": "u", "source_record_id": "r",
+                "known_at": known_at, "retrieved_at": "2026-08-30T12:00:00Z",
+                "content_hash": f"v2-{i}", "parser_version": "finra-short-interest-v2",
+            }
+        )
+    parquet.write_rows("short_interest", rows, root=tmp_path / "parquet")
+    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "junk.parquet").write_bytes(b"junk")
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
+    assert not backup_dir.exists()
+    stored = {
+        str(r.get("symbol_code")): r
+        for r in parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()
+        if isinstance(r, dict)
+    }
+    assert len(stored) == 5
+    for sym in ["AAA", "BBB", "CCC", "DDD", "EEE"]:
+        assert str(stored[sym].get("parser_version")) == "finra-short-interest-v2"
+    assert str(stored["AAA"].get("known_at")) == "2026-08-14"
+    for sym in ["BBB", "CCC", "DDD", "EEE"]:
+        assert str(stored[sym].get("known_at")) == "2026-08-30T12:00:00Z"

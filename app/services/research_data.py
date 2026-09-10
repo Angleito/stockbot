@@ -66,6 +66,24 @@ def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
         return False
     return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
 
+def _short_interest_has_legacy_v1(parquet_root: Path) -> bool:
+    try:
+        table = parquet.read_table("short_interest", root=parquet_root, columns=["parser_version"])
+    except Exception:
+        return True
+    try:
+        for batch in table.to_batches():
+            try:
+                values = batch.column("parser_version").to_pylist()
+            except Exception:
+                return True
+            for v in values:
+                if str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION:
+                    return True
+        return False
+    except Exception:
+        return True
+
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
@@ -384,6 +402,8 @@ def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
         backup_dir.rename(dataset_dir)
     elif backup_dir.exists():
         shutil.rmtree(backup_dir)
+    if not _short_interest_has_legacy_v1(parquet_root):
+        return {"rewritten": 0}
     table = parquet.read_table("short_interest", root=parquet_root)
     rows = table.to_pylist()
     fixed: list[dict[str, object]] = []
