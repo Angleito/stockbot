@@ -2018,7 +2018,7 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "list_sec_filings": {
         "domain": "filings",
-        "aliases": ["ticker cik lookup", "recent 10k 10q", "8k list", "accession list", "edgar list"],
+        "aliases": ["ticker cik lookup", "recent 10k 10q", "8k list", "accession list", "edgar list", "latest 10k"],
     },
     "get_sec_filing": {
         "domain": "filings",
@@ -2038,11 +2038,11 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "get_material_events": {
         "domain": "events",
-        "aliases": ["8k events", "what changed", "whats new company", "bankruptcy event", "earnings event", "material change"],
+        "aliases": ["8k events", "what changed", "whats new company", "bankruptcy event", "earnings event", "material change", "recent company events", "recent corporate events", "recent disclosures", "company catalyst", "recent SEC catalyst", "what happened recently", "material catalyst", "company changed", "after earnings"],
     },
     "get_beneficial_ownership": {
         "domain": "ownership",
-        "aliases": ["5 percent holder", "activist stake", "13d holder", "passive 13g", "block holder", "percent owned"],
+        "aliases": ["5 percent holder", "activist stake", "13d holder", "passive 13g", "block holder", "percent owned", "owns more than 5 percent"],
     },
     "get_ownership_changes": {
         "domain": "ownership",
@@ -2122,11 +2122,11 @@ TOOL_DISCOVERY: dict[str, dict[str, object]] = {
     },
     "get_valuation_metrics": {
         "domain": "valuation",
-        "aliases": ["pe ratio", "trailing pe", "forward pe", "cheap stock", "undervalued stock", "earnings multiple", "price earnings", "obligation adjusted eps", "is the stock cheap"],
+        "aliases": ["pe ratio", "trailing pe", "forward pe", "cheap stock", "undervalued stock", "earnings multiple", "price earnings", "obligation adjusted eps", "is the stock cheap", "expensive"],
     },
     "search_web": {
         "domain": "web",
-        "aliases": ["breaking news", "press announcements", "management commentary", "industry developments", "competitive news", "web evidence", "recent headlines"],
+        "aliases": ["breaking news", "press announcements", "management commentary", "industry developments", "competitive news", "web evidence", "recent headlines", "stock move", "stock price move", "price move", "stock surge", "stock rally", "stock drop", "stock crash", "recent catalyst", "recent catalysts", "company news", "recent company news", "why stock went up", "why stock went down", "why shares rose", "why shares fell", "market reaction", "after earnings"],
     },
     "find_alternative_signals": {
         "domain": "alternative",
@@ -2203,6 +2203,32 @@ def _normalize_discovery_text(value: str) -> list[str]:
     return tokens
 
 
+REASON_WORDS = frozenset({"why", "reason", "reasons", "cause", "caused", "causes", "catalyst", "catalysts", "driving", "behind", "what happened", "what's happening", "whats happening", "explain the move"})
+MOVE_WORDS = frozenset({"up", "down", "jump", "jumped", "jumps", "surge", "surged", "surging", "rally", "rallied", "rallying", "drop", "dropped", "dropping", "fall", "fell", "fallen", "falling", "crash", "crashed", "crashing", "spike", "spiked", "spiking", "shot up", "shoot up", "moves", "moved", "moving", "move", "gain", "gained", "gaining", "gains", "decline", "declined", "declining", "soar", "soared", "plunge", "plunged", "pop", "popped", "tank", "tanked", "skyrocket"})
+RECENT_WORDS = frozenset({"today", "yesterday", "recent", "recently", "days", "day", "week", "weeks", "weekly", "month", "months", "monthly", "past", "since", "last", "this week", "this month", "lately", "overnight"})
+MOVE_CATALYST_BOOST = 1000
+
+
+def _normalize_intent_query(value: str) -> str:
+    """Lowercase, de-punctuate, collapse whitespace (no de-pluralization)."""
+    return " ".join("".join(c if c.isalnum() or c == " " else " " for c in value.lower()).split())
+
+
+def _detect_move_catalyst_intent(normalized_query: str) -> bool:
+    """True only when reason + move + recent groups each hit once."""
+    if not normalized_query.strip():
+        return False
+    tokens = set(normalized_query.split())
+    def _hit(term: str) -> bool:
+        norm = _normalize_intent_query(term)
+        if not norm:
+            return False
+        if " " in norm:
+            return norm in normalized_query
+        return norm in tokens
+    return any(_hit(t) for t in REASON_WORDS) and any(_hit(t) for t in MOVE_WORDS) and any(_hit(t) for t in RECENT_WORDS)
+
+
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """OR/scored ranking over tool names, aliases, and descriptions."""
     del model
@@ -2271,6 +2297,15 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
             if contained:
                 hit = max(contained, key=len)
         reasons[name] = hit or " ".join(descriptions.get(name, "").split()[:12])
+    if _detect_move_catalyst_intent(_normalize_intent_query(query)):
+        by_name = {name: score for score, name in scored}
+        for target in ("search_web", "get_material_events"):
+            if target in by_name:
+                by_name[target] += MOVE_CATALYST_BOOST
+            else:
+                by_name[target] = MOVE_CATALYST_BOOST
+                reasons[target] = " ".join(descriptions.get(target, "").split()[:12])
+        scored = [(score, name) for name, score in by_name.items()]
     def _rank_key(hit: tuple[float, str]) -> tuple[float, str]:
         return (-hit[0], hit[1])
     scored.sort(key=_rank_key)

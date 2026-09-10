@@ -429,8 +429,8 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    parameters: Type.Unsafe(fn.parameters),
    ...(isSearch
     ? {
-     promptSnippet: "Search for additional tools when the active tools cannot perform the task",
-     promptGuidelines: ["Use search_tools when a task requires a capability that is not currently available."],
+     promptSnippet: "Search for the missing capability or operation when the active tools cannot perform the task — not a company or ticker",
+     promptGuidelines: ["Describe the missing capability (e.g. recent company news and stock-move catalysts, not why did GPRO go up?)."],
     }
     : {}),
    async execute(toolCallId, params) {

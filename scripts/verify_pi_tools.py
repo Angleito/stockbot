@@ -256,6 +256,69 @@ VERIFY_CASES: dict[str, _VerifyCase] = {
     "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_v1": "Still watching NVDA datacenter demand. Add that to thesis thesis-placeholder.", "natural_v2": "Please note for thesis thesis-placeholder: still watching NVDA datacenter demand."},
 }
 
+class _RoutingCase(TypedDict):
+    question: str
+    expected_first_search_any: list[str]
+    forbidden_before_expected: list[str]
+
+# Natural routing benchmark (initial-routing gate only; deep-research turns may
+# search again). Deterministic: one _search_tools call per case counts as the
+# first search; resolving there with no forbidden tool ranked above the first
+# expected tool = 1 search. Missing expected = 3 (fails the <3 gate).
+# ponytail: deterministic scorer check, not live-Pi sessions; the live per-tool
+# wiring suite above already covers Pi dispatch. Graduate to session capture if
+# first-search routing passes here but live traces still cycle.
+ROUTING_CASES: list[_RoutingCase] = [
+    {"question": "why did GPRO shoot up the past 30 days?", "expected_first_search_any": ["search_web", "get_material_events"], "forbidden_before_expected": ["get_valuation_metrics", "get_offering_history", "get_recent_ownership_filings"]},
+    {"question": "What does Apple earn per share?", "expected_first_search_any": ["get_fundamentals"], "forbidden_before_expected": ["search_web", "get_beneficial_ownership"]},
+    {"question": "Is Apple stock cheap or expensive right now?", "expected_first_search_any": ["get_valuation_metrics"], "forbidden_before_expected": ["get_offering_history", "get_recent_ownership_filings"]},
+    {"question": "Who owns more than 5% of Apple?", "expected_first_search_any": ["get_beneficial_ownership"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "What insider purchases and sales has Apple reported?", "expected_first_search_any": ["get_insider_activity"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "What big events has Apple disclosed since 2024-01-01?", "expected_first_search_any": ["get_material_events"], "forbidden_before_expected": ["get_valuation_metrics", "get_offering_history"]},
+    {"question": "List Apple recent SEC filings.", "expected_first_search_any": ["list_sec_filings"], "forbidden_before_expected": ["get_valuation_metrics", "thesis_show"]},
+    {"question": "What is Apple current short interest?", "expected_first_search_any": ["get_short_interest"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "Track my investment thesis on NVDA AI demand staying strong.", "expected_first_search_any": ["thesis_create"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "What trends were picked up in the US around September 1st?", "expected_first_search_any": ["get_trend_evidence"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "What patents has Apple filed lately?", "expected_first_search_any": ["search_company_patents"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+    {"question": "What is California unemployment rate?", "expected_first_search_any": ["get_macro_context"], "forbidden_before_expected": ["get_valuation_metrics", "get_xbrl_facts"]},
+    {"question": "Has Apple had any board or governance changes?", "expected_first_search_any": ["get_governance_events"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
+]
+
+
+def run_routing_benchmark(question_filter: str | None = None) -> int:
+    """First-search routing gate over ROUTING_CASES. Returns 0 when every case
+    resolves on the first search with no forbidden tool ranked above the first
+    expected tool; 1 otherwise. Fails any case needing 3+ searches."""
+    from app.tools import _search_tools
+
+    failed = 0
+    ran = 0
+    for case in ROUTING_CASES:
+        if question_filter and question_filter.lower() not in case["question"].lower():
+            continue
+        ran += 1
+        result = _search_tools({"query": case["question"]}, "benchmark")
+        matches = result.get("matches")
+        names = [m["name"] for m in matches if isinstance(m, dict) and isinstance(m.get("name"), str)] if isinstance(matches, list) else []
+        expected_ranks = [names.index(e) for e in case["expected_first_search_any"] if e in names]
+        if not expected_ranks:
+            print(f"FAIL {case['question'][:60]!r} -> {names} (expected {case['expected_first_search_any']} absent; searches_needed=3)")
+            failed += 1
+            continue
+        first_expected = min(expected_ranks)
+        stray = [n for n in names[:first_expected] if n in case["forbidden_before_expected"]]
+        searches_needed = 1
+        if stray:
+            print(f"FAIL {case['question'][:60]!r} -> {names} (forbidden {stray} before expected; searches_needed=3)")
+            failed += 1
+        else:
+            print(f"PASS {case['question'][:60]!r} -> {names} (searches_needed={searches_needed})")
+    if not ran:
+        print("routing benchmark: no cases matched filter", file=sys.stderr)
+        return 1
+    print(f"routing benchmark: {ran - failed}/{ran} cases resolve on first search")
+    return 0 if not failed else 1
+
 def tool_schemas() -> dict[str, dict[str, object]]:
     schemas: dict[str, dict[str, object]] = {}
     for raw in TOOLS:
@@ -619,7 +682,11 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tool", default=None, help="verify one tool only (debug mode)")
+    parser.add_argument("--routing", action="store_true", help="run the natural routing benchmark only (no live Pi)")
+    parser.add_argument("--routing-filter", default=None, help="run only routing cases containing this substring")
     args = parser.parse_args()
+    if args.routing:
+        return run_routing_benchmark(args.routing_filter)
     debug = args.tool is not None
     if debug:
         print("DEBUG MODE — partial verification")
