@@ -60,6 +60,75 @@ DISCOVERY_TOOLS = frozenset({"browse_tools", "call_tool", "list_tool_domains", "
 # construction. None are ever live-matrix targets.
 _DISPATCH_PRIMITIVES = frozenset({"browse_tools", "call_tool"})
 _MATRIX_EXCLUDED = _DISPATCH_PRIMITIVES | frozenset({"list_tool_domains", "describe_tool"})
+# Routing vs reachability split: routing is intentional dispatch (strict),
+# reachability is eventual navigation (relaxed). Caps: 4-6 meaningful
+# wandering threshold on 47 research tools; 12 is egregious-loop backstop only.
+ROUTING_DISCOVERY_CAP = 6
+REACHABILITY_DISCOVERY_CAP = 12
+# PREREQ_CHAINS is currently empty (no explicit map); routing therefore allows
+# only the expected tool itself (zero prerequisites).
+
+
+def _normalize_args(raw: object) -> str:
+    """Canonical args key: sorted-keys JSON so whitespace/key order never fails."""
+    if raw is None or raw == "":
+        return "{}"
+    if isinstance(raw, dict):
+        try:
+            return json.dumps(raw, sort_keys=True, default=str)
+        except Exception:
+            return str(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return raw.strip()
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, sort_keys=True, default=str)
+        return json.dumps(parsed, sort_keys=True, default=str)
+    try:
+        return json.dumps(raw, sort_keys=True, default=str)
+    except Exception:
+        return str(raw)
+
+
+def _call_tool_start_count(conn: sqlite3.Connection) -> int:
+    """Outer call_tool dispatches in this trace (agent_events lifecycle)."""
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_started' AND tool_name = 'call_tool'").fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row else 0
+
+
+def _trace_metrics(conn: sqlite3.Connection, expected_tool: str) -> dict[str, object]:
+    """Efficiency accounting, always logged even on pass."""
+    try:
+        disc = _discovery_attempt_count(conn)
+    except sqlite3.Error:
+        disc = 0
+    try:
+        failed_disc = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains') AND error_type IS NOT NULL").fetchone()[0]
+    except sqlite3.Error:
+        failed_disc = 0
+    try:
+        names = get_registry_sets()["schemas"]
+    except Exception:
+        names = set()
+    research_names = [n for n in names if n not in DISCOVERY_TOOLS]
+    research_calls = failed_research = 0
+    if research_names:
+        ph = ",".join("?" for _ in research_names)
+        try:
+            research_calls = int(conn.execute(f"SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ({ph})", tuple(research_names)).fetchone()[0] or 0)
+            failed_research = int(conn.execute(f"SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ({ph}) AND error_type IS NOT NULL", tuple(research_names)).fetchone()[0] or 0)
+        except sqlite3.Error:
+            pass
+    try:
+        rejected_disc = conn.execute("SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_failed' AND tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains')").fetchone()[0]
+    except sqlite3.Error:
+        rejected_disc = 0
+    return {"discovery_calls": int(disc or 0), "failed_discovery_calls": int(failed_disc or 0), "rejected_discovery_calls": int(rejected_disc or 0), "research_calls": int(research_calls or 0), "failed_research_calls": int(failed_research or 0), "target_dispatched": expected_tool in _call_tool_dispatched_names(conn), "call_tool_count": _call_tool_start_count(conn)}
 
 
 def get_concurrency() -> int:
@@ -351,6 +420,26 @@ def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) ->
         return _natural_prompt_v2(tool, args)
     return build_explicit_prompt(tool, args)
 
+def build_routing_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
+    """Strict attempt-3: exact direct dispatch, no discovery."""
+    payload = json.dumps(args, sort_keys=True)
+    if tool == "search_tools":
+        return build_explicit_prompt(tool, args)
+    return (
+        f"Do not call browse_tools, search_tools, describe_tool, or list_tool_domains. "
+        f"Call call_tool exactly once with name=\"{tool}\" and arguments={payload}. "
+        f"Then summarize the result in one sentence. End your reply with TOOL_CHECK: PASS if that call completed, or TOOL_CHECK: FAIL otherwise."
+    )
+
+
+def build_routing_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
+    """Routing prompts: attempts 1-2 share natural traces; attempt 3+ is strict direct dispatch."""
+    if attempt == 1:
+        return _natural_prompt_v1(tool, args)
+    if attempt == 2:
+        return _natural_prompt_v2(tool, args)
+    return build_routing_explicit_prompt(tool, args)
+
 
 def check_discovery(describe: Mapping[str, object], doctor: Mapping[str, object]) -> str | None:
     if doctor.get("bridge_ok") is not True:
@@ -505,6 +594,32 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
             return None
     return "no completed event"
 
+def _reachability_tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
+    """Relaxed: same-tool different-args probe forgiven; same-args failure still fails."""
+    try:
+        rows = conn.execute("SELECT arguments_json, error_type FROM tool_calls WHERE tool_name = ?", (name,)).fetchall()
+    except sqlite3.Error:
+        return "absent"
+    clean = {_normalize_args(r[0]) for r in rows if r[1] is None}
+    if not clean:
+        return "absent"
+    failed = [_normalize_args(r[0]) for r in rows if r[1] is not None]
+    if any(f in clean for f in failed):
+        return "failed execution present"
+    completed = conn.execute("SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)).fetchone()[0]
+    if completed >= 1:
+        return None
+    if name in _call_tool_dispatched_names(conn):
+        outer_completed = conn.execute("SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = 'call_tool'").fetchone()[0]
+        if outer_completed >= 1:
+            return None
+    return "no completed event"
+
+
+def _routing_tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
+    """Strict alias: any errored execution fails, even with different arguments."""
+    return _tool_success(conn, name, attempt=attempt)
+
 
 def _row_errors_transient(conn: sqlite3.Connection, names: Collection[str]) -> bool:
     """True iff `names` have errored calls and every one is transient evidence."""
@@ -572,21 +687,8 @@ def _search_queries_for_db(db_path_str: str) -> list[str]:
     except sqlite3.Error:
         return []
 
-def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
-    # Pi 0.85.0 -p does not exit after answering in this environment; when the
-    # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Strict routing bar: the model may explore discovery primitives freely
-    # (browse_tools, search_tools, describe_tool, list_tool_domains), but must
-    # dispatch the expected tool via call_tool. Attempts 1-2 require one clean
-    # discovery call strictly before the expected inner dispatch. Attempt 3
-    # allows discovery but still requires call_tool dispatch. Discovery
-    # errors/rejections never fail; only a tight total discovery cap (>3
-    # attempts) fails as a loop guard. Any non-target research dispatch (clean
-    # or errored) fails; all-transient errored strays retry. search_tools
-    # itself executes directly because app/pi_gateway.py forbids dispatching
-    # discovery via call_tool. Transient (rate_limited / timeout-message-only)
-    # never passes: it returns ok=False with a "transient: " reason for bounded
-    # same-prompt retry.
+def evaluate_reachability_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
+    """Relaxed reachability: can the model eventually navigate catalog and dispatch target via call_tool."""
     if not db_path.is_file():
         if timed_out and not completed_override:
             return False, "transient: pi timeout before terminal state"
@@ -595,7 +697,7 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
         conn = sqlite3.connect(str(db_path))
         try:
             discovery_count = _discovery_attempt_count(conn)
-            if required_tool != "search_tools" and discovery_count > 3:
+            if required_tool != "search_tools" and discovery_count > REACHABILITY_DISCOVERY_CAP:
                 return False, f"too-many-discovery:{discovery_count}"
             rejected = list(_rejected_tools(conn))
             if rejected:
@@ -604,23 +706,17 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
                 return False, "routing failed: unparseable call_tool dispatch args"
             unexpected = _unexpected_tools(conn, required_tool)
             if unexpected:
-                clean_strays = [t for t in unexpected if _tool_success(conn, t, attempt=attempt) is None]
-                if clean_strays:
-                    return False, f"routing failed: unexpected research tool call(s): {', '.join(clean_strays)}"
-                if _row_errors_transient(conn, unexpected):
-                    return False, f"transient: stray tool(s) transient error: {', '.join(unexpected)}"
-                return False, f"routing failed: unexpected research tool call(s): {', '.join(unexpected)}"
-            # Discovery never fails: errored discovery calls are free exploration.
-            # Transient target errors retry before discovery-ordering gates (no clean inner yet).
-            _early_target = _tool_success(conn, required_tool, attempt=attempt)
+                errored = [t for t in unexpected if _reachability_tool_success(conn, t, attempt=attempt) is not None]
+                if errored and _row_errors_transient(conn, errored):
+                    return False, f"transient: stray tool(s) transient error: {', '.join(errored)}"
+                if errored:
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(errored)}"
+            _early_target = _reachability_tool_success(conn, required_tool, attempt=attempt)
             if _early_target is not None and _row_errors_transient(conn, [required_tool]):
                 return False, f"transient: target '{required_tool}' {_early_target} (transient error)"
             if required_tool != "search_tools":
                 if attempt in (1, 2):
-                    discovery_ok = any(
-                        _tool_success(conn, t, attempt=attempt) is None
-                        for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains")
-                    )
+                    discovery_ok = any(_reachability_tool_success(conn, t, attempt=attempt) is None for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"))
                     if not discovery_ok:
                         return False, "routing failed: no clean discovery before call_tool"
                     if required_tool not in _call_tool_dispatched_names(conn):
@@ -634,12 +730,11 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
                 return False, "transient: pi timeout before terminal state"
             if exit_code != 0 and not completed_override:
                 return False, f"pi exit {exit_code}"
-            target_problem = _tool_success(conn, required_tool, attempt=attempt)
+            target_problem = _reachability_tool_success(conn, required_tool, attempt=attempt)
             if target_problem is not None:
                 if _row_errors_transient(conn, [required_tool]):
                     return False, f"transient: target '{required_tool}' {target_problem} (transient error)"
                 return False, f"target '{required_tool}' absent ({target_problem})"
-            # Pi configuration is authoritative for which model runs; assert presence only, never an exact ID.
             models = conn.execute("SELECT model FROM model_calls").fetchall()
             if not any((r[0] or "").strip() for r in models):
                 return False, "no model telemetry: model_calls has no non-empty model ID"
@@ -651,6 +746,129 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
             conn.close()
     except sqlite3.Error as exc:
         return False, f"DB read failed: {exc}"
+
+
+def evaluate_routing_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3, expected_args: Mapping[str, object] | None = None) -> tuple[bool, str]:
+    """Strict routing precision: intentional dispatch without unrelated research execution."""
+    if not db_path.is_file():
+        if timed_out and not completed_override:
+            return False, "transient: pi timeout before terminal state"
+        return False, f"missing recorder DB: {db_path}"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            discovery_count = _discovery_attempt_count(conn)
+            if required_tool != "search_tools" and discovery_count > ROUTING_DISCOVERY_CAP:
+                return False, f"too-many-discovery:{discovery_count}"
+            rejected = list(_rejected_tools(conn))
+            if rejected:
+                return False, f"routing failed: harness-rejected call to {', '.join(rejected)}"
+            if _call_tool_has_unparseable(conn):
+                return False, "routing failed: unparseable call_tool dispatch args"
+            unexpected = _unexpected_tools(conn, required_tool)
+            if unexpected:
+                allowed = set(PREREQ_CHAINS.get(required_tool, frozenset()))
+                clean_strays = [t for t in unexpected if t not in allowed and _routing_tool_success(conn, t, attempt=attempt) is None]
+                if clean_strays:
+                    return False, f"routing failed: unrelated-research-success: unexpected research tool call(s): {', '.join(clean_strays)}"
+                errored_strays = [t for t in unexpected if t not in allowed]
+                if errored_strays:
+                    if _row_errors_transient(conn, errored_strays):
+                        return False, f"transient: stray tool(s) transient error: {', '.join(errored_strays)}"
+                    return False, f"routing failed: failed-research-call: unexpected research tool call(s): {', '.join(errored_strays)}"
+            _early_target = _routing_tool_success(conn, required_tool, attempt=attempt)
+            if _early_target is not None and _row_errors_transient(conn, [required_tool]):
+                return False, f"transient: target '{required_tool}' {_early_target} (transient error)"
+            if _early_target is not None and "failed execution present" in _early_target:
+                return False, f"routing failed: failed-research-call for '{required_tool}' (failed execution present)"
+            if required_tool != "search_tools":
+                if attempt in (1, 2):
+                    discovery_ok = any(_routing_tool_success(conn, t, attempt=attempt) is None for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"))
+                    if not discovery_ok:
+                        return False, "routing failed: no clean discovery before call_tool"
+                    if required_tool not in _call_tool_dispatched_names(conn):
+                        return False, f"routing failed: target-never-dispatched: '{required_tool}' not dispatched via call_tool"
+                    if not _discovery_before_dispatch(conn, required_tool):
+                        return False, f"routing failed: discovery did not precede call_tool dispatch of '{required_tool}'"
+                else:
+                    if discovery_count > 0:
+                        return False, f"routing failed: attempt 3 must not browse/search/describe; call call_tool exactly once (discovery_calls={discovery_count})"
+                    n_call = _call_tool_start_count(conn)
+                    if n_call != 1:
+                        return False, f"routing failed: attempt 3 must call call_tool exactly once (got {n_call})"
+                    if required_tool not in _call_tool_dispatched_names(conn):
+                        return False, f"routing failed: target-never-dispatched: '{required_tool}' not dispatched via call_tool"
+                    if expected_args is not None:
+                        try:
+                            want = _normalize_args(dict(expected_args))
+                        except Exception:
+                            want = ""
+                        try:
+                            have_rows: list[tuple[object]] = conn.execute("SELECT arguments_json FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (required_tool,)).fetchall()
+                        except sqlite3.Error:
+                            have_rows = []
+                        have = {_normalize_args(r[0]) for r in have_rows}
+                        if want not in have:
+                            return False, f"routing failed: attempt 3 args mismatch for '{required_tool}'"
+            if timed_out and not completed_override:
+                return False, "transient: pi timeout before terminal state"
+            if exit_code != 0 and not completed_override:
+                return False, f"pi exit {exit_code}"
+            target_problem = _routing_tool_success(conn, required_tool, attempt=attempt)
+            if target_problem is not None:
+                if _row_errors_transient(conn, [required_tool]):
+                    return False, f"transient: target '{required_tool}' {target_problem} (transient error)"
+                if "failed execution present" in target_problem:
+                    return False, f"routing failed: failed-research-call for '{required_tool}' (failed execution present)"
+                return False, f"target '{required_tool}' absent ({target_problem})"
+            models = conn.execute("SELECT model FROM model_calls").fetchall()
+            if not any((r[0] or "").strip() for r in models):
+                return False, "no model telemetry: model_calls has no non-empty model ID"
+            rows = conn.execute("SELECT status FROM agent_runs").fetchall()
+            if not rows or any((r[0] or "") != "completed" for r in rows):
+                return False, f"agent_runs not completed: {[r[0] for r in rows]}"
+            return True, "pass"
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return False, f"DB read failed: {exc}"
+
+
+def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
+    """Back-compat alias: strict routing verdict."""
+    return evaluate_routing_attempt(db_path, required_tool, exit_code, timed_out, completed_override=completed_override, attempt=attempt)
+
+
+def evaluate_reachability_tool(attempt_results: Collection[object]) -> bool:
+    """Reachability 3/3: every attempt passed under reachability rules."""
+    for a in attempt_results:
+        if isinstance(a, dict):
+            ok = a.get("reach_ok", a.get("ok"))
+            if ok is None:
+                ok = a.get("ok")
+        else:
+            ok = getattr(a, "reach_ok", None)
+            if ok is None:
+                ok = getattr(a, "ok", None)
+        if ok is not True:
+            return False
+    return True
+
+
+def evaluate_routing_tool(attempt_results: Collection[object]) -> bool:
+    """Routing 3/3: every attempt passed under routing rules."""
+    for a in attempt_results:
+        if isinstance(a, dict):
+            ok = a.get("routing_ok", a.get("ok"))
+            if ok is None:
+                ok = a.get("ok")
+        else:
+            ok = getattr(a, "routing_ok", None)
+            if ok is None:
+                ok = getattr(a, "ok", None)
+        if ok is not True:
+            return False
+    return True
 
 
 def discover() -> tuple[dict[str, object], dict[str, object]]:
@@ -763,11 +981,17 @@ class AttemptResult:
     db: str
     duration_seconds: float
     model_config_failed: bool = False
+    reach_ok: bool | None = None
+    reach_reason: str = ""
+    routing_ok: bool | None = None
+    routing_reason: str = ""
+    discovery_calls: int = 0
+    research_calls: int = 0
 
 _INFRA_RE = re.compile(r"ratelimit|rate-limit|rate limit|429|timeout|timed out|latency|deadline exceeded|drain.?timeout", re.IGNORECASE)
 # Explicit routing-failure markers from evaluate_attempt; these take precedence
 # over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
-_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|too-many-discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
+_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|unrelated-research-success|failed-research-call|target-never-dispatched|errored discovery|too-many-searches|too-many-discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
 
 
 def is_routing_failure(reason: str) -> bool:
@@ -783,12 +1007,8 @@ def is_infra_failure(reason: str) -> bool:
 
 
 def tool_passes(attempts: Collection[object]) -> bool:
-    """Strict 3/3: tool passes iff every strict attempt passed."""
-    for a in attempts:
-        ok = a.get("ok") if isinstance(a, dict) else getattr(a, "ok", None)
-        if ok is not True:
-            return False
-    return True
+    """Strict 3/3 routing: tool passes iff every routing attempt passed."""
+    return evaluate_routing_tool(attempts)
 
 
 def run_matrix(jobs: list[tuple[str, int]], worker: Callable[[str, int], AttemptResult], concurrency: int) -> list[AttemptResult]:
@@ -810,8 +1030,23 @@ def run_matrix(jobs: list[tuple[str, int]], worker: Callable[[str, int], Attempt
     return results
 
 
+def _metrics_for_db(db_path: Path, tool: str) -> tuple[int, int]:
+    """Best-effort efficiency counts for AttemptResult; (0, 0) when DB unreadable."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            m = _trace_metrics(conn, tool)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0, 0
+    disc = m.get("discovery_calls", 0)
+    resc = m.get("research_calls", 0)
+    return (disc if isinstance(disc, int) else 0), (resc if isinstance(resc, int) else 0)
+
+
 def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, object], batch_root: Path, cwd: Path, durable: Path, repetitions: int, *, prompt_override: str | None = None) -> AttemptResult:
-    """Own one Pi attempt end to end: isolated store/DB/fixture, then evaluate. Bounded same-prompt transient retries."""
+    """Own one Pi attempt end to end: isolated store/DB/fixture, then dual-evaluate. Bounded same-prompt transient retries."""
     start = time.monotonic()
     try:
         for retry in range(TRANSIENT_RETRY_CAP + 1):
@@ -824,20 +1059,33 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
                 fixture_id = ensure_thesis_fixture(store_dir.resolve())
                 if args.get("id") == THESIS_ID_PLACEHOLDER:
                     args["id"] = fixture_id
-            prompt = prompt_override if prompt_override is not None else build_attempt_prompt(tool, args, attempt)
+            if prompt_override is not None:
+                prompt = prompt_override
+            elif attempt >= 3:
+                prompt = build_routing_attempt_prompt(tool, args, attempt)
+            else:
+                prompt = build_attempt_prompt(tool, args, attempt)
             code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
             base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
-            ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
-            # Routing reasons take precedence over every infra signal, including "model" in stderr.
-            model_config_failed = (not is_routing_failure(reason)) and (base_config_failed or is_infra_failure(reason) or is_infra_failure(err_text))
+            reach_ok, reach_reason = evaluate_reachability_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
+            routing_ok, routing_reason = evaluate_routing_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt, expected_args=args)
+            ok, reason = routing_ok, routing_reason
+            model_config_failed = (not is_routing_failure(reason)) and (base_config_failed or is_infra_failure(reason) or is_infra_failure(err_text) or is_infra_failure(reach_reason))
             duration_seconds = time.monotonic() - start
-            if reason.startswith("transient: "):
-                TRANSIENT_RETRIES.append({"tool": tool, "attempt": attempt, "retry": retry, "reason": reason, "db": str(db_path)})
+            transient_reason = ""
+            if routing_reason.startswith("transient: "):
+                transient_reason = routing_reason
+            elif reach_reason.startswith("transient: ") and not is_routing_failure(routing_reason):
+                transient_reason = reach_reason
+            if transient_reason:
+                TRANSIENT_RETRIES.append({"tool": tool, "attempt": attempt, "retry": retry, "reason": transient_reason, "db": str(db_path)})
                 if retry < TRANSIENT_RETRY_CAP:
                     continue
-                return AttemptResult(tool, attempt, False, f"transient budget exhausted: {reason}", code, str(db_path), duration_seconds, model_config_failed)
-            return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
-        return AttemptResult(tool, attempt, False, "transient budget exhausted: retry loop fell through", 124, "", time.monotonic() - start)
+                disc, resc = _metrics_for_db(db_path, tool)
+                return AttemptResult(tool, attempt, False, f"transient budget exhausted: {transient_reason}", code, str(db_path), duration_seconds, model_config_failed, False, transient_reason, False, transient_reason, disc, resc)
+            disc, resc = _metrics_for_db(db_path, tool)
+            return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed, reach_ok, reach_reason, routing_ok, routing_reason, disc, resc)
+        return AttemptResult(tool, attempt, False, "transient budget exhausted: retry loop fell through", 124, "", time.monotonic() - start, False, False, "transient budget exhausted", False, "transient budget exhausted")
     except Exception as exc:
         elapsed = time.monotonic() - start
         try:
@@ -861,13 +1109,17 @@ def _discovery_before_dispatch(conn: sqlite3.Connection, expected_tool: str) -> 
 
 
 def evaluate_holdout_attempt(db_path: Path, expected_tool: str) -> tuple[bool, str]:
-    """Holdout-only verdict: delegates to the attempt-1 branch of evaluate_attempt."""
-    return evaluate_attempt(db_path, expected_tool, 0, False, attempt=1)
+    """Holdout routing verdict: attempt-1 routing branch."""
+    return evaluate_routing_attempt(db_path, expected_tool, 0, False, attempt=1)
+
+
+def evaluate_holdout_reachability_attempt(db_path: Path, expected_tool: str) -> tuple[bool, str]:
+    """Holdout reachability verdict: attempt-1 reachability branch."""
+    return evaluate_reachability_attempt(db_path, expected_tool, 0, False, attempt=1)
 
 
 def run_holdout(holdout_path: str) -> int:
-    """Discovery holdout: every unseen prompt must browse-or-search then call_tool
-    its expected canonical tool with no stray research calls (attempt-1 gates)."""
+    """Frozen 20-prompt holdout, dual-reported: reachability + routing precision."""
     try:
         raw = json.loads(Path(holdout_path).read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -881,27 +1133,37 @@ def run_holdout(holdout_path: str) -> int:
     root = Path("data/verify") / batch / "holdout"
     cwd = Path.cwd()
     durable = get_data_root()
-    failed = 0
+    failed_reach = failed_routing = 0
     for i, case in enumerate(raw):
         if not isinstance(case, dict) or not isinstance(case.get("prompt"), str) or not isinstance(case.get("expected_tool"), str):
             print(f"FAIL case {i}: needs string prompt + expected_tool", file=sys.stderr)
-            failed += 1
+            failed_reach += 1
+            failed_routing += 1
             continue
         tool = str(case["expected_tool"])
         try:
             base_args = dict(case["arguments"]) if isinstance(case.get("arguments"), dict) else resolve_arguments(tool, schemas)
         except LookupError as exc:
             print(f"FAIL {case['prompt']!r}: {exc}", file=sys.stderr)
-            failed += 1
+            failed_reach += 1
+            failed_routing += 1
             continue
         result = run_verification_attempt(tool, 1, base_args, root, cwd, durable, 1, prompt_override=str(case["prompt"]))
         db_path = Path(result.db) if result.db else root / tool / "attempt-1" / "runs.sqlite"
-        holdout_ok, holdout_reason = evaluate_holdout_attempt(db_path, tool)
-        print(f"{'PASS' if holdout_ok else 'FAIL'} {case['prompt']!r} -> {tool} ({holdout_reason}) [{result.duration_seconds:.1f}s]")
-        if not holdout_ok:
-            failed += 1
-    print(f"holdout: {len(raw) - failed}/{len(raw)} prompts discover-then-dispatch cleanly")
-    return 0 if not failed else 1
+        if result.reach_ok is None or result.routing_ok is None:
+            holdout_reach_ok, holdout_reach_reason = evaluate_holdout_reachability_attempt(db_path, tool)
+            holdout_routing_ok, holdout_routing_reason = evaluate_holdout_attempt(db_path, tool)
+        else:
+            holdout_reach_ok, holdout_reach_reason = bool(result.reach_ok), result.reach_reason
+            holdout_routing_ok, holdout_routing_reason = bool(result.routing_ok), result.routing_reason
+        print(f"{'PASS' if holdout_reach_ok else 'FAIL'}[reach] {'PASS' if holdout_routing_ok else 'FAIL'}[route] {case['prompt']!r} -> {tool} (reach: {holdout_reach_reason}; route: {holdout_routing_reason}) [{result.duration_seconds:.1f}s]")
+        if not holdout_reach_ok:
+            failed_reach += 1
+        if not holdout_routing_ok:
+            failed_routing += 1
+    print(f"holdout reachability: {len(raw) - failed_reach}/{len(raw)} prompts discover-then-dispatch cleanly")
+    print(f"holdout routing precision: {len(raw) - failed_routing}/{len(raw)} prompts dispatch intentionally")
+    return 0 if (failed_reach == 0 and failed_routing == 0) else 1
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -981,43 +1243,54 @@ def main() -> int:
     ordered = run_matrix(jobs, _worker, concurrency)
     results: dict[str, list[dict[str, object]]] = {t: [] for t in tool_names}
     total = 0
-    passed = 0
+    passed_routing = 0
+    passed_reach = 0
     for r in ordered:
         total += 1
-        if r.ok:
-            passed += 1
-        rec: dict[str, object] = {"attempt": r.attempt, "ok": r.ok, "reason": r.reason, "exit": r.exit, "db": r.db, "duration_seconds": r.duration_seconds}
+        r_reach = r.reach_ok if r.reach_ok is not None else r.ok
+        r_route = r.routing_ok if r.routing_ok is not None else r.ok
+        if r_route:
+            passed_routing += 1
+        if r_reach:
+            passed_reach += 1
+        rec: dict[str, object] = {"attempt": r.attempt, "ok": r.ok, "reason": r.reason, "reach_ok": r_reach, "reach_reason": r.reach_reason, "routing_ok": r_route, "routing_reason": r.routing_reason, "exit": r.exit, "db": r.db, "duration_seconds": r.duration_seconds, "discovery_calls": r.discovery_calls, "research_calls": r.research_calls}
         if not r.ok:
             rec["searchQueries"] = _search_queries_for_db(r.db)
         results[r.tool].append(rec)
-        print(f"{r.tool} attempt {r.attempt}/{repetitions}: {'PASS' if r.ok else 'FAIL'} ({r.reason}) [{r.duration_seconds:.1f}s]")
+        print(f"{r.tool} attempt {r.attempt}/{repetitions}: routing {'PASS' if r_route else 'FAIL'} ({r.routing_reason or r.reason}) | reachability {'PASS' if r_reach else 'FAIL'} ({r.reach_reason or r.reason}) [{r.duration_seconds:.1f}s]")
         if r.model_config_failed:
             print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
     procs = len(ordered)
-    failed_tools: list[str] = []
-    # Strict 3/3: tool passes iff all strict attempts pass; any single
-    # routing failure fails the tool. Infra (ratelimit/latency) still fails
-    # the gate but reports as infra, never as pass.
+    failed_routing_tools: list[str] = []
+    failed_reach_tools: list[str] = []
     for tool in tool_names:
         tool_recs = results[tool]
-        if tool_passes(tool_recs):
+        reach_pass = evaluate_reachability_tool([{"reach_ok": rec.get("reach_ok", rec.get("ok"))} for rec in tool_recs])
+        route_pass = evaluate_routing_tool([{"routing_ok": rec.get("routing_ok", rec.get("ok"))} for rec in tool_recs])
+        if reach_pass and route_pass:
             remove_successful_attempt_dirs(root, tool, tool_recs)
         else:
-            failed_tools.append(tool)
+            if not reach_pass:
+                failed_reach_tools.append(tool)
+            if not route_pass:
+                failed_routing_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
             by_tool = [r for r in ordered if r.tool == tool and not r.ok]
             if by_tool and not any(is_routing_failure(r.reason) for r in by_tool) and all(r.model_config_failed or is_infra_failure(r.reason) for r in by_tool):
                 print(f"infra-only failure for {tool} (still FAIL)")
-    passed_tools = len(tool_names) - len(failed_tools)
-    coverage = f"{passed_tools}/{len(tool_names)} tools"
+    passed_reach_tools = len(tool_names) - len(failed_reach_tools)
+    passed_routing_tools = len(tool_names) - len(failed_routing_tools)
     wall = time.monotonic() - verify_start
     print(f"git: {sha} | tools {len(tool_names)} x {repetitions} = {total}")
-    print(f"Coverage: {coverage} | processes: {procs} | passed: {passed}/{total}")
+    print(f"Reachability: {passed_reach_tools}/{len(tool_names)} tools 3/3")
+    print(f"Routing precision: {passed_routing_tools}/{len(tool_names)} tools 3/3")
+    print(f"Coverage: {passed_routing_tools}/{len(tool_names)} tools | processes: {procs} | routing passed: {passed_routing}/{total} | reachability passed: {passed_reach}/{total}")
     print(f"Concurrency: {concurrency} | Wall time: {wall:.1f}s")
+    failed_tools = sorted(set(failed_reach_tools) | set(failed_routing_tools))
     print(f"RESULT: {'PASS' if not failed_tools else 'FAIL'}")
     if failed_tools:
         print(f"failed tools: {failed_tools}")
-    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "transient_retries": list(TRANSIENT_RETRIES), "concurrency": concurrency, "wall_seconds": wall}
+    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "reachability": {"passed_tools": passed_reach_tools, "tool_count": len(tool_names), "failed_tools": failed_reach_tools}, "routing_precision": {"passed_tools": passed_routing_tools, "tool_count": len(tool_names), "failed_tools": failed_routing_tools}, "transient_retries": list(TRANSIENT_RETRIES), "concurrency": concurrency, "wall_seconds": wall}
     (root / "summary.json").parent.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     return 0 if not failed_tools else 1

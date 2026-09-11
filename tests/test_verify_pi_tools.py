@@ -282,8 +282,12 @@ def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
 
 
 def test_dispatched_wrong_tool_success_passes_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
-    assert ok
+    p = _ok(tmp_path, event="completed", extra_tool="get_xbrl_facts")
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not routing_ok
+    assert "unrelated-research-success" in routing_reason
+    reach_ok, _ = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert reach_ok
 
 
 
@@ -508,11 +512,10 @@ def test_two_pass_one_fail_is_tool_failure() -> None:
     assert not v.tool_passes(trio)
     assert v.tool_passes([v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
 
-
 def test_infra_only_still_fails_but_reports_infra() -> None:
     assert v.is_infra_failure("ratelimit 429 quota exceeded")
     assert v.is_infra_failure("pi timeout before terminal state")
-    assert v.is_infra_failure("Overloaded 503 try again")
+    assert not v.is_infra_failure("Overloaded 503 try again")
     assert not v.is_infra_failure("routing failed: unexpected research tool call(s): foo")
     assert not v.is_infra_failure("target 'x' absent (ok)")
     infra_trio = [v.AttemptResult("t", n, False, "transient: pi timeout before terminal state", 124, "", 0.0) for n in (1, 2, 3)]
@@ -597,6 +600,8 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
     monkeypatch.setattr(v, "ensure_thesis_fixture", fake_fixture)
     monkeypatch.setattr(v, "run_pi", fake_run_pi)
     monkeypatch.setattr(v, "evaluate_attempt", fake_eval)
+    monkeypatch.setattr(v, "evaluate_reachability_attempt", fake_eval)
+    monkeypatch.setattr(v, "evaluate_routing_attempt", lambda db_path, tool, code, timed_out, **k: fake_eval(db_path, tool, code, timed_out, **{x: y for x, y in k.items() if x != "expected_args"}))
     base: dict[str, object] = {"id": v.THESIS_ID_PLACEHOLDER}
     batch = tmp_path / "batch"
     durable = tmp_path / "durable"
@@ -860,8 +865,11 @@ def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> 
     assert ok
 def test_attempt3_clean_stray_passes_and_harness_rejected_fails(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery=None, extra_tool="get_xbrl_facts")
-    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
-    assert ok
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not routing_ok
+    assert "unrelated-research-success" in routing_reason
+    reach_ok, _ = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert reach_ok
     epath = tmp_path / "err.sqlite"
     _db(epath, discovery=None, extra_tool="get_xbrl_facts", extra_error="tool_error")
     ok_err, reason_err = v.evaluate_attempt(epath, "get_fundamentals", 0, False, attempt=3)
@@ -930,20 +938,26 @@ def _add_discovery_rows(path: Path, n: int) -> None:
 def test_discovery_cap_trips_at_thirteen(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery="browse_tools")
     _add_discovery_rows(p, 11)
-    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
-    assert ok
+    reach_ok, _ = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert reach_ok
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not routing_ok
+    assert "too-many-discovery:12" in routing_reason
     q = tmp_path / "cap.sqlite"
     _db(q, discovery="browse_tools")
     _add_discovery_rows(q, 12)
-    ok2, reason2 = v.evaluate_attempt(q, "get_fundamentals", 0, False, attempt=1)
+    ok2, reason2 = v.evaluate_reachability_attempt(q, "get_fundamentals", 0, False, attempt=1)
     assert not ok2
     assert "too-many-discovery:13" in reason2
 
 
 def test_attempt3_with_discovery_passes_when_dispatched(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery="browse_tools", via_call_tool=True)
-    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
-    assert ok
+    reach_ok, _ = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert reach_ok
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not routing_ok
+    assert "must not browse" in routing_reason
 
 
 def test_attempt3_missing_dispatch_still_fails(tmp_path: Path) -> None:
@@ -1011,8 +1025,11 @@ def _probe_db(path: Path, *, clean_args: str | None, failed_args: str | None) ->
 
 def test_same_tool_different_args_probe_forgiven(tmp_path: Path) -> None:
     p = _probe_db(tmp_path / "runs.sqlite", clean_args='{"ticker": "AAPL"}', failed_args='{"ticker": "AAPL", "tradeDate": "2026-09-11"}')
-    ok, _ = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
-    assert ok
+    reach_ok, _ = v.evaluate_reachability_attempt(p, "get_threshold_securities", 0, False, attempt=1)
+    assert reach_ok
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_threshold_securities", 0, False, attempt=1)
+    assert not routing_ok
+    assert "failed-research-call" in routing_reason
 
 
 def test_same_tool_same_args_failure_still_fails(tmp_path: Path) -> None:
