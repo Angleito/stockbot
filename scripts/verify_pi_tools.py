@@ -698,8 +698,8 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
         code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
         base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
         ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
-        # Routing reasons take precedence: stderr infra keywords never reclassify a routing failure.
-        model_config_failed = base_config_failed or is_infra_failure(reason) or (not is_routing_failure(reason) and is_infra_failure(err_text))
+        # Routing reasons take precedence over every infra signal, including "model" in stderr.
+        model_config_failed = (not is_routing_failure(reason)) and (base_config_failed or is_infra_failure(reason) or is_infra_failure(err_text))
         duration_seconds = time.monotonic() - start
         return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
     except Exception as exc:

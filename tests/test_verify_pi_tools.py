@@ -460,9 +460,10 @@ def test_routing_reasons_win_over_mixed_infra_keywords() -> None:
     assert v.is_infra_failure("ratelimit 429 quota exceeded")
 
 
-def test_stderr_429_does_not_reclassify_routing_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("stderr", ["Error 429 Too Many Requests", "model request failed: 429 Too Many Requests"])
+def test_stderr_429_does_not_reclassify_routing_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
     def rate_limited(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
-        return (1, False, "", "Error 429 Too Many Requests", False)
+        return (1, False, "", stderr, False)
 
     monkeypatch.setattr(v, "run_pi", rate_limited)
     batch = tmp_path / "batch"
