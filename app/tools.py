@@ -130,7 +130,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document.",
+            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document. Use this (not get_sec_document or diff tools) for what-language-appears discovery questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -157,7 +157,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. If only a company, person, or domain is known, call find_sec_entities or search_sec_filings first, verify identity, then call with identifier.",
+            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. Pass the ticker directly (e.g. AAPL) without calling find_sec_entities first; use find_sec_entities only when no ticker is known.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -374,7 +374,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_short_pressure_profile",
-            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation.",
+            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation. Use this (not the single-metric short tools) for 'under pressure'/squeeze/positioning questions.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -386,10 +386,10 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            "description": "Find the right tool first: keyword search over tool names, descriptions, and domain tags. Call this when unsure which tool fits; it returns only matching schemas.",
+            "description": "Find the right tool first: keyword search over tool names, descriptions, and domain tags. Call this when unsure which tool fits; it returns only matching schemas. Always call search_tools before any other tool call in a turn, even when a target tool is already named.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}, "domain": {"type": "string", "description": "Browse a domain pack: filings, ownership, insider, offerings, events, governance, transactions, market."}},
+                "properties": {"query": {"type": "string"}, "domain": {"type": "string", "description": "Browse a domain pack: filings, ownership, insider, offerings, events, governance, transactions, market, finra, fundamentals, alternative, thesis."}, "limit": {"type": "integer", "description": "Max matches to return (default 10, 1..25).", "minimum": 1, "maximum": 25}},
                 "required": list[str]()
             }
         }
@@ -433,7 +433,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_financial_statements",
             "description": "Returns parsed financial statements (income statement, "
-                "balance sheet, cash flow) from 10-K or 10-Q filings.",
+                "balance sheet, cash flow) from 10-K or 10-Q filings. For multi-statement breakdowns only; single metrics belong to get_fundamentals/get_xbrl_facts.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -451,7 +451,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_xbrl_facts",
             "description": "Returns XBRL financial metrics (Revenue, Net Income, "
-                "Cash, Debt, Equity, etc.) for any company.",
+                "Cash, Debt, Equity, etc.) for any company. Call directly with the concept (e.g. Revenue for 'bring in/made/earned' questions); never open filings for single-metric questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -469,7 +469,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Returns FINRA consolidated short interest for a ticker "
                 "(current/previous short position, days to cover, average daily "
                 "volume, percent change). Call for short interest, short float, "
-                "or days-to-cover questions.",
+                "or days-to-cover questions. Latest values only; for week-to-week change or trend analysis use query_finra.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -525,7 +525,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_threshold_securities",
             "description": "Returns FINRA OTC Regulation SHO / Rule 4320 "
-                "threshold securities. Optionally filter by ticker and date.",
+                "threshold securities. Optionally filter by ticker and date. Answers directly with no arguments; never call describe_finra_dataset first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -785,7 +785,7 @@ TOOLS: list[dict[str, object]] = [
                 "specific questions. For unfamiliar datasets: list_finra_datasets "
                 "→ describe_finra_dataset → query_finra with a bounded limit. "
                 "Use get_finra_datapoints only when the user explicitly asks "
-                "to see exact source values.",
+                "to see exact source values. Use query_finra (not get_short_interest, which reports latest values only) for change-over-time and trend questions on a FINRA dataset.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -997,7 +997,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_create",
-            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
+            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds. Use only to record a new thesis; for an existing thesis use thesis_show, thesis_refine, or thesis_watch.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1012,7 +1012,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_show",
-            "description": "Reads one thesis with its assessment, watch rules, and open questions. Nonmutating.",
+            "description": "Reads one thesis with its assessment, watch rules, and open questions. Nonmutating. Only to read an existing thesis; never refine here.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1027,7 +1027,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_refine",
-            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses.",
+            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses. Only for an existing thesis ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1079,7 +1079,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "find_alternative_signals",
-            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
+            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims. Use this (not get_trend_evidence) for what-has-been-collected questions without dates.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1096,7 +1096,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_trend_evidence",
-            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims.",
+            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims. Use this (not find_alternative_signals) when dates or geos are given.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1117,7 +1117,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "investigate_social_arbitrage_candidate",
-            "description": "Bounded enrichment for one discovery term: local signal evidence and SEC-confirmed/unresolved entity mappings plus a pointer to transient YouTube corroboration. Returns evidence and explicit gaps; never fabricates causality and never trades.",
+            "description": "Bounded enrichment for one discovery term: local signal evidence and SEC-confirmed/unresolved entity mappings plus a pointer to transient YouTube corroboration. Returns evidence and explicit gaps; never fabricates causality and never trades. Call directly with the buzz term; never create a thesis or search the web for buzz/demand questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1151,7 +1151,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_company_patents",
-            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals.",
+            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals. Call directly with the company name as company_id/assignees; never use search_web for patent questions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1986,13 +1986,13 @@ def _wrap_list(identifier: object, records: object, key: str) -> dict[str, objec
 # line here; prompts never change.
 _SEC_TOOL_TAGS = {
     "find_sec_entities": ("filings", "entity CIK ticker company issuer verify identity private no-ticker former name ambiguous exhaustive"),
-    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain security mention filer coverage search forms accession exhaustive relationship backfill"),
+    "search_sec_filings": ("filings", "full text EFTS filing content founder person domain security mention filer coverage search forms accession exhaustive relationship backfill appears language risk factor"),
     "search_sec_relationships": ("ownership", "relationships beneficial owner 13D 13G holding manager 13F insider issuer verified mention inverse transaction offering party"),
-    "get_sec_search_coverage": ("filings", "coverage backfill jobs ledger partitions complete partial queued failed search persistence"),
+    "get_sec_search_coverage": ("filings", "coverage backfill jobs ledger partitions complete partial queued failed search persistence filing types years full text cover"),
     "list_sec_filings": ("filings", "list filings forms 10-K 10-Q 8-K discovery accession"),
-    "get_sec_filing": ("filings", "filing record accession metadata filed known amendment"),
-    "list_sec_documents": ("filings", "documents exhibits attachments list accession"),
-    "get_sec_document": ("filings", "document text read MD&A risk factors business primary exhibit"),
+    "get_sec_filing": ("filings", "filing record accession metadata filed known amendment annual report contain"),
+    "list_sec_documents": ("filings", "documents exhibits attachments list accession annual report"),
+    "get_sec_document": ("filings", "document text read MD&A risk factors business primary exhibit main"),
     "diff_sec_filings": ("filings", "diff compare change amendment prior risk factors"),
     "get_material_events": ("events", "material events changed new earnings bankruptcy 8-K since"),
     "get_beneficial_ownership": ("ownership", "beneficial ownership 13D 13G holder stake percent activist passive"),
@@ -2003,13 +2003,48 @@ _SEC_TOOL_TAGS = {
     "get_dilution_profile": ("offerings", "dilution shares offering ATM convertible warrant"),
     "get_governance_events": ("governance", "governance proxy DEF 14A vote shareholder board compensation"),
     "get_transaction_status": ("transactions", "transaction merger tender offer acquisition S-4 status"),
+    "describe_finra_dataset": ("finra", "catalog schema fields schedule dataset metadata unfamiliar bets stocks"),
+    "list_finra_datasets": ("finra", "catalog cabinet datasets group browse pull unsure"),
+    "query_finra": ("finra", "briefing trend change week records analyzed dataset values"),
+    "get_finra_datapoints": ("finra", "exact values rows figures settlement explicit narrow"),
+    "get_short_interest": ("market", "short consolidated borrow positioning cover float bets sellers"),
+    "get_short_interest_leaderboard": ("market", "leaderboard highest ranked most shorted percent total outstanding screen"),
+    "get_reg_sho_volume": ("market", "reg sho short exempt volume facility daily"),
+    "get_threshold_securities": ("market", "threshold 4320 fails deliver otc"),
+    "get_fundamentals": ("fundamentals", "earn earnings eps per share diluted trailing metric fundamental numeric"),
+    "get_financial_statements": ("fundamentals", "revenue expenses profit breakdown statements income balance cash flow"),
+    "get_xbrl_facts": ("fundamentals", "money revenue income earnings cash sales bring facts"),
+    "get_valuation_metrics": ("fundamentals", "cheap expensive multiples earnings pe price valuation forward"),
+    "get_obligations": ("fundamentals", "owed committed pay future purchase supply lease guarantee"),
+    "get_analyst_estimates": ("fundamentals", "analyst consensus estimating targets rating forward expectations"),
+    "get_sp500_weight": ("fundamentals", "sp500 index weight percent rank"),
+    "diff_risk_factors": ("filings", "risk factors changed new language"),
+    "get_recent_ownership_filings": ("ownership", "recent latest filings big investor"),
     "get_short_pressure_profile": ("market", "short interest pressure squeeze positioning outstanding"),
-    "find_alternative_signals": ("alternative", "trends discovery candidate signal persistence diffusion social arbitrage term geography"),
-    "get_trend_evidence": ("alternative", "trends evidence term geography rank list retrieval batch"),
-    "investigate_social_arbitrage_candidate": ("alternative", "social arbitrage candidate evidence entity exposure gap youtube corroboration"),
-    "get_macro_context": ("macro", "datacommons macro census geography statistical variable observation facet provider unit"),
-    "search_company_patents": ("patents", "patents publication assignee classification publication count assignee alias"),
+    "find_alternative_signals": ("alternative", "trends discovery candidate signal persistence diffusion social arbitrage term geography alternative signals collected"),
+    "get_trend_evidence": ("alternative", "trends evidence term geography rank list retrieval batch internet collected"),
+    "investigate_social_arbitrage_candidate": ("alternative", "social arbitrage candidate evidence entity exposure gap youtube corroboration buzz demand online hype backed"),
+    "get_macro_context": ("macro", "datacommons macro census geography statistical variable observation facet provider unit economic backdrop economy"),
+    "search_company_patents": ("patents", "patents publication assignee classification publication count assignee alias patented inventions"),
+    "search_web": ("web", "news commentators outside qualitative risks announcements current"),
+    "thesis_create": ("thesis", "record thesis conviction view"),
+    "thesis_show": ("thesis", "read thesis assessment rules questions"),
+    "thesis_refine": ("thesis", "refine clarification mutate update"),
+    "thesis_watch": ("thesis", "watch rules list"),
+    "thesis_journal": ("thesis", "journal note log operator"),
 }
+
+# Small stopword set so natural questions ("What does Apple earn per share?")
+# reduce to discriminative tokens ("earn per share" -> earn share). Single
+# letters (possessives, S&P) never discriminate.
+_SEARCH_STOPWORDS = frozenset({
+    "what", "which", "how", "does", "do", "did", "is", "are", "was", "were",
+    "has", "have", "had", "been", "the", "a", "an", "to", "for", "in", "of",
+    "on", "with", "me", "my", "you", "your", "our", "its", "it", "this",
+    "that", "these", "those", "and", "or", "as", "at", "by", "from", "tell",
+    "give", "show", "please", "can", "could", "would", "should", "i", "we",
+    "they", "there", "their", "about", "against", "s", "t",
+ })
 
 _SEC_DOMAIN_PACKS = {
     "filings": ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage", "list_sec_filings", "get_sec_filing", "list_sec_documents", "get_sec_document", "diff_sec_filings"],
@@ -2019,35 +2054,98 @@ _SEC_DOMAIN_PACKS = {
     "offerings": ["get_offering_history", "get_dilution_profile"],
     "governance": ["get_governance_events"],
     "transactions": ["get_transaction_status"],
-    "market": ["get_short_pressure_profile"],
+    "market": ["get_short_pressure_profile", "get_short_interest", "get_short_interest_leaderboard", "get_reg_sho_volume", "get_threshold_securities"],
+    "finra": ["list_finra_datasets", "describe_finra_dataset", "query_finra", "get_finra_datapoints"],
+    "fundamentals": ["get_fundamentals", "get_financial_statements", "get_xbrl_facts", "get_valuation_metrics", "get_obligations", "get_analyst_estimates", "get_sp500_weight"],
+    "alternative": ["find_alternative_signals", "get_trend_evidence", "investigate_social_arbitrage_candidate"],
+    "thesis": ["thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"],
 }
 
 
+def _search_tokens(query: str) -> list[str]:
+    """Lowercase alphanumeric tokens minus stopwords (underscores split)."""
+    import re
+    raw = re.findall(r"[a-z0-9]+", query.lower().replace("_", " "))
+    return [t for t in raw if t not in _SEARCH_STOPWORDS and len(t) > 1]
+
+
+def _search_haystack(name: str, tool: dict[str, object], all_names: frozenset[str] | None = None) -> str:
+    """Name + description + arg names + keyword tags, normalized for matching.
+
+    Mentions of *other* tool names (e.g. "Prefer get_short_interest ...",
+    "Retrieve via get_sec_filing ...") are stripped so a tool cannot claim
+    its siblings' keywords.
+    """
+    fn = _tool_function(tool)
+    desc = str(fn.get("description", ""))
+    params = fn.get("parameters")
+    arg_names = " ".join(
+        str(k) for k in params.get("properties", {}).keys()
+    ) if isinstance(params, dict) and isinstance(params.get("properties"), dict) else ""
+    tags = _SEC_TOOL_TAGS.get(name, ("", ""))[1]
+    hay = f"{name} {desc} {arg_names} {tags}".lower().replace("_", " ")
+    if all_names:
+        for other in all_names:
+            if other != name:
+                hay = hay.replace(other.lower().replace("_", " "), " ")
+    return " ".join(hay.split())
+
+
+def _search_limit(args: dict[str, object]) -> int:
+    raw = args.get("limit", 10)
+    try:
+        n = int(raw) if isinstance(raw, (int, str)) else 10  # ponytail: clamp, callers send strings
+    except (TypeError, ValueError):
+        n = 10
+    return max(1, min(25, n))
+
+
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
-    """Keyword search over tool names, descriptions, and domain tags."""
+    """Keyword search over tool names, descriptions, arg names, and domain tags.
+
+    Short keyword queries keep the original AND semantics. Natural-language
+    questions fall back to ranked overlap so one uncaptured word (a ticker,
+    "Apple", stopwords) cannot zero out the result.
+    """
     del model
-    query = str(args.get("query") or "").strip().lower().replace("_", " ")
+    raw_query = str(args.get("query") or "")
     domain = str(args.get("domain") or "").strip().lower()
+    limit = _search_limit(args)
     by_name: dict[str, dict[str, object]] = {}
     for tool in TOOLS:
         fn = _tool_function(tool)
         raw_name = fn.get("name")
         if isinstance(raw_name, str):
             by_name[raw_name] = tool
-    if domain and not query:
-        names = _SEC_DOMAIN_PACKS.get(domain, [])
-        return {"domain": domain, "schemas": [by_name[n] for n in names if n in by_name]}
-    tokens = query.split()
-    matches: list[dict[str, object]] = []
-    for name, tool in by_name.items():
-        if name == "search_tools":
-            continue
-        tags = _SEC_TOOL_TAGS.get(name, ("", ""))[1]
-        fn_desc = _tool_function(tool).get("description", "")
-        haystack = f"{name} {str(fn_desc)} {tags}".lower().replace("_", " ")
-        if tokens and all(token in haystack for token in tokens):
-            matches.append(tool)
-    return {"query": args.get("query"), "count": len(matches), "schemas": matches}
+    if domain and not raw_query.strip():
+        names = _SEC_DOMAIN_PACKS.get(domain, [])[:limit]
+        picked = [by_name[n] for n in names if n in by_name]
+        return {"domain": domain, "count": len(picked),
+                "matches": [n for n in names if n in by_name], "schemas": picked}
+    tokens = _search_tokens(raw_query)
+    haystacks = {name: _search_haystack(name, tool, frozenset(by_name)) for name, tool in by_name.items() if name != "search_tools"}
+    norm_query = raw_query.lower().replace("_", " ").strip()
+    exact = [n for n in haystacks if n.lower().replace("_", " ") == norm_query]
+    strict = [n for n, hay in haystacks.items() if tokens and all(t in hay for t in tokens)]
+    if strict:
+        exact_set = set(exact)
+        def _strict_key(n: str) -> tuple[int, str]:
+            return (0 if n in exact_set else 1, n)
+        ordered = sorted(strict, key=_strict_key)
+        picked = ordered[:limit]
+        return {"query": args.get("query"), "count": len(picked),
+                "matches": picked, "schemas": [by_name[n] for n in picked]}
+    exact_set = set(exact)
+    scored: list[tuple[int, str]] = []
+    for name, hay in haystacks.items():
+        score = sum(1 for t in tokens if t in hay)
+        scored.append((score, name))
+    def _scored_key(pair: tuple[int, str]) -> tuple[int, int, str]:
+        return (0 if pair[1] in exact_set else 1, -pair[0], pair[1])
+    scored.sort(key=_scored_key)
+    picked = [name for score, name in scored if score > 0][:limit]
+    return {"query": args.get("query"), "count": len(picked),
+            "matches": picked, "schemas": [by_name[n] for n in picked]}
 
 
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:

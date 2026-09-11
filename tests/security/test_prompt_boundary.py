@@ -30,10 +30,10 @@ def test_create_trigger_rejects_unknown_origin(tmp_path: Path) -> None:
     r, t = _make(tmp_path)
     with pytest.raises(ValueError):
         r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s",
-                         summary_origin="external-raw")  # type: ignore[arg-type]
+                         summary_origin="external-raw")
     with pytest.raises(ValueError):
         r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s",
-                         summary_origin="anything-else")  # type: ignore[arg-type]
+                         summary_origin="anything-else")
 
 
 def test_create_trigger_persists_origin_roundtrip(tmp_path: Path) -> None:
@@ -41,7 +41,7 @@ def test_create_trigger_persists_origin_roundtrip(tmp_path: Path) -> None:
     r, t = _make(tmp_path)
     for origin in ("deterministic", "recycled"):
         trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s",
-                                summary_origin=origin)  # type: ignore[arg-type]
+                                summary_origin=origin)
         assert trig.metadata["summary_origin"] == origin
         assert Trigger.from_dict(trig.to_dict(), "<test>").metadata["summary_origin"] == origin
 
@@ -134,9 +134,9 @@ def test_recycled_hostile_text_never_reaches_prompt(tmp_path: Path) -> None:
     prompt = _build_prompt(thesis_id=t.thesis_id, trigger=trig, data_cutoff=T2, ctx=ctx, run_id="run:test")
     assert "ignore previous instructions" not in prompt
     assert "evil.example" not in prompt
-    assert "[recycled content withheld ref=trigger:" in prompt
-    assert "[recycled content withheld ref=evidence:ev:hostile]" in prompt
-    assert "[recycled content withheld ref=journal:hostile]" in prompt
+    assert "[unsafe content withheld ref=trigger:" in prompt
+    assert "[unsafe content withheld ref=evidence:ev:hostile]" in prompt
+    assert "[unsafe content withheld ref=journal:hostile]" in prompt
     assert "ignore previous instructions" in (evdir / "ev_hostile.yaml").read_text(encoding="utf-8")
 
 
@@ -158,7 +158,7 @@ def test_deterministic_trigger_still_gates_hostile_evidence(tmp_path: Path) -> N
     assert "routine check" in prompt
     assert "ignore previous instructions" not in prompt
     assert "evil.example" not in prompt
-    assert "[recycled content withheld ref=evidence:ev:hostile]" in prompt
+    assert "[unsafe content withheld ref=evidence:ev:hostile]" in prompt
 
 
 def test_deterministic_hostile_summary_never_reaches_prompt(tmp_path: Path) -> None:
@@ -172,7 +172,7 @@ def test_deterministic_hostile_summary_never_reaches_prompt(tmp_path: Path) -> N
     prompt = _build_prompt(thesis_id=t.thesis_id, trigger=trig, data_cutoff=T2, ctx=ctx, run_id="run:test")
     assert "ignore previous instructions" not in prompt
     assert "evil.example" not in prompt
-    assert "[recycled content withheld ref=trigger:" in prompt
+    assert "[unsafe content withheld ref=trigger:" in prompt
     benign = r.create_trigger(t.thesis_id, canonical_refs=["seed:1"], summary="routine check",
                               summary_origin="deterministic")
     benign_ctx = build_live_context(r, t.thesis_id, benign, data_cutoff=T2)

@@ -517,10 +517,15 @@ def _execute_pi_tool(
         # Names are already model-visible in content; meta carries them structured.
         raw_matches = result.get("matches")
         if isinstance(raw_matches, list):
-            safe_meta["matches"] = [
-                m.get("name") for m in raw_matches
-                if isinstance(m, dict) and isinstance(m.get("name"), str)
-            ]
+            found: list[str] = []
+            for m in raw_matches:
+                if isinstance(m, str) and m:
+                    found.append(m)
+                elif isinstance(m, dict):
+                    inner_name = m.get("name")
+                    if isinstance(inner_name, str) and inner_name:
+                        found.append(inner_name)
+            safe_meta["matches"] = found
         else:
             # Pre-discovery search shape: full schemas under "schemas".
             raw_schemas = result.get("schemas")

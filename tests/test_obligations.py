@@ -195,6 +195,9 @@ def test_get_obligations_nvda_full(monkeypatch: pytest.MonkeyPatch):
 
 def test_get_obligations_requires_quantified_data(monkeypatch: pytest.MonkeyPatch):
     _install(monkeypatch, {"Notes": "no dollar figures here"})
+    def _fake_empty_facts(ticker: str) -> list[dict[str, object]]:
+        return []
+    monkeypatch.setattr(obligations, "_xbrl_store_facts", _fake_empty_facts)
     result = obligations.get_obligations("NVDA")
     assert "error" in result or not result.get("obligations")
 

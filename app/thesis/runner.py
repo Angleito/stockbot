@@ -63,16 +63,16 @@ def _safe_prompt_text(text: str, ref: str) -> str:
         try:
             text = str(text)
         except Exception:
-            return f"[recycled content withheld ref={ref}]"
+            return f"[unsafe content withheld ref={ref}]"
         if text == "":
             return ""
     try:
         from app.security.prompt_injection import assess  # local: keep thesis import graph acyclic
         found = assess(text)
     except Exception:
-        return f"[recycled content withheld ref={ref}]"
+        return f"[unsafe content withheld ref={ref}]"
     if found.verdict in ("BLOCK", "QUARANTINE"):
-        return f"[recycled content withheld ref={ref}]"
+        return f"[unsafe content withheld ref={ref}]"
     return text
 
 

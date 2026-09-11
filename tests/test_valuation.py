@@ -151,7 +151,7 @@ def fake_deps(monkeypatch: pytest.MonkeyPatch) -> None:
         valuation.analyst_client, "get_analyst_estimates", _fake_estimates
     )
     monkeypatch.setattr(
-        valuation.edgar_client, "get_fundamentals", _fake_fundamentals
+        valuation.sec_facts, "get_fundamentals", _fake_fundamentals
     )
     monkeypatch.setattr(
         valuation.obligations, "get_obligations", _fake_obligations
@@ -350,7 +350,7 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
             valuation.analyst_client, "get_analyst_estimates", _run_estimates
         )
         monkeypatch.setattr(
-            valuation.edgar_client, "get_fundamentals", _run_fundamentals
+            valuation.sec_facts, "get_fundamentals", _run_fundamentals
         )
         monkeypatch.setattr(
             valuation.obligations, "get_obligations", _run_obligations
