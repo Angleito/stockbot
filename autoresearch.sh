@@ -8,4 +8,5 @@ export BROKER_ENABLED=0
 TMPDIR_HARNESS="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_HARNESS"' EXIT
 export RUNS_DB_PATH="$TMPDIR_HARNESS/runs.sqlite"
-python3 scripts/strict_routing_harness.py
+if [[ -x venv/bin/python ]]; then PYBIN="venv/bin/python"; else PYBIN="python3"; fi
+"$PYBIN" scripts/strict_routing_harness.py
