@@ -256,8 +256,9 @@ def test_failed_builtin_ignored_attempt_1(tmp_path: Path):
 
 
 def test_two_of_three_is_not_pass():
-    assert not all([True, True, False])
-    assert all([True, True, True])
+    trio = [v.AttemptResult("t", 1, True, "pass", 0, "", 0.0), v.AttemptResult("t", 2, True, "pass", 0, "", 0.0), v.AttemptResult("t", 3, False, "routing failed: x", 1, "", 0.0)]
+    assert not v.tool_passes(trio)
+    assert v.tool_passes([v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
 
 
 def test_doctor_describe_skew_fails():
@@ -435,8 +436,18 @@ def test_run_matrix_failure_does_not_cancel_siblings() -> None:
 
 def test_two_pass_one_fail_is_tool_failure() -> None:
     trio = [v.AttemptResult("t", 1, True, "pass", 0, "", 0.0), v.AttemptResult("t", 2, True, "pass", 0, "", 0.0), v.AttemptResult("t", 3, False, "x", 1, "", 0.0)]
-    assert not all(r.ok for r in trio)
-    assert all(r.ok for r in [v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
+    assert not v.tool_passes(trio)
+    assert v.tool_passes([v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
+
+
+def test_infra_only_still_fails_but_reports_infra() -> None:
+    assert v.is_infra_failure("ratelimit 429 quota exceeded")
+    assert v.is_infra_failure("pi timeout before terminal state")
+    assert v.is_infra_failure("Overloaded 503 try again")
+    assert not v.is_infra_failure("routing failed: unexpected research tool call(s): foo")
+    assert not v.is_infra_failure("target 'x' absent (ok)")
+    infra_trio = [v.AttemptResult("t", n, False, "transient: pi timeout before terminal state", 124, "", 0.0) for n in (1, 2, 3)]
+    assert not v.tool_passes(infra_trio)
 
 
 def test_run_matrix_returns_sorted_order() -> None:

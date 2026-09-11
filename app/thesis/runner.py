@@ -55,25 +55,90 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _safe_prompt_text(text: str, ref: str) -> str:
+    """Gate stored free text via the shared injection scanner; provenance labels never bypass it."""
+    if text is None or text == "":
+        return ""
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return f"[unsafe content withheld ref={ref}]"
+        if text == "":
+            return ""
+    try:
+        from app.security.prompt_injection import assess  # local: keep thesis import graph acyclic
+        found = assess(text)
+    except Exception:
+        return f"[unsafe content withheld ref={ref}]"
+    if found.verdict in ("BLOCK", "QUARANTINE"):
+        return f"[unsafe content withheld ref={ref}]"
+    return text
+
+
 def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: ResearchContext, run_id: str) -> str:
     refs = ", ".join(trigger.canonical_refs) or "(none)"
     packet = dict(ctx.thesis_packet)
     trig = packet.pop("trigger", {})
+    tid_ref = trigger.trigger_id or "unknown"
+    summary_line = _safe_prompt_text(trigger.summary or "", ref=f"trigger:{tid_ref}")[:500]
+    if isinstance(trig, dict):
+        trig = dict(trig)
+        if "summary" in trig:
+            raw = trig.get("summary", "")
+            if raw is None or raw == "":
+                trig["summary"] = ""
+            else:
+                s = raw if isinstance(raw, str) else str(raw)
+                trig["summary"] = _safe_prompt_text(s, ref=f"trigger:{tid_ref}")
+    trig_out = trig
+    safe_evidence: list[object] = []
+    for e in ctx.evidence_refs:
+        if not isinstance(e, dict):
+            safe_evidence.append(e)
+            continue
+        ed = dict(e)
+        raw = ed.get("summary", "")
+        if raw is None or raw == "":
+            ed["summary"] = ""
+        else:
+            s = raw if isinstance(raw, str) else str(raw)
+            eid = ed.get("evidence_id")
+            eid_str = eid if isinstance(eid, str) and eid else "unknown"
+            ed["summary"] = _safe_prompt_text(s, ref=f"evidence:{eid_str}")
+        safe_evidence.append(ed)
+    evidence_out = safe_evidence
+    safe_journals: list[object] = []
+    for j in ctx.journal_excerpts:
+        if not isinstance(j, dict):
+            safe_journals.append(j)
+            continue
+        jd = dict(j)
+        raw = jd.get("excerpt", "")
+        if raw is None or raw == "":
+            jd["excerpt"] = ""
+        else:
+            s = raw if isinstance(raw, str) else str(raw)
+            jid = jd.get("journal")
+            jid_str = jid if isinstance(jid, str) and jid else "unknown"
+            jd["excerpt"] = _safe_prompt_text(s, ref=f"journal:{jid_str}")
+        safe_journals.append(jd)
+    journals_out = safe_journals
     return "\n".join(
         [
             f"thesis_id: {thesis_id}",
             f"trigger_id: {trigger.trigger_id}",
             f"run_id: {run_id}",
             f"TRIGGER DATA CUTOFF: {data_cutoff}",
-            f"trigger summary: {(trigger.summary or '')[:500]}",
+            f"trigger summary: {summary_line}",
             f"trigger canonical refs: {refs[:500]}",
             "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
             "CURRENT THESIS STATE:",
             json.dumps(packet, sort_keys=True),
             "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
-            json.dumps({"trigger": trig, "evidence": ctx.evidence_refs}, sort_keys=True),
+            json.dumps({"trigger": trig_out, "evidence": evidence_out}, sort_keys=True),
             "CURRENT PRIOR JOURNAL CONTEXT:",
-            json.dumps(ctx.journal_excerpts, sort_keys=True),
+            json.dumps(journals_out, sort_keys=True),
             "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
             "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
             "Before completing, write a material thesis_journal entry using"

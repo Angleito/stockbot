@@ -11,6 +11,8 @@ import {
 	createBridgeClient,
 	bridgeModelText,
 	nextActiveTools,
+	MAX_ACTIVE_RESEARCH_TOOLS,
+	DISCOVERY_TOOLS,
 	payloadMeta,
 	toolCallRequest,
 	type Json,
@@ -958,34 +960,37 @@ test("every registered bridge tool carries its parameter schema", async () => {
 	}
 });
 
-test("nextActiveTools accumulates active tools without caps", () => {
+test("nextActiveTools replaces the research set capped at three", () => {
+	expect(MAX_ACTIVE_RESEARCH_TOOLS).toBe(3);
 	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
-		"builtin",
-		"search_tools",
-		"a",
-		"b",
-		"c",
-	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools", "a"]);
+	// More matches than the cap: the first three in rank order win.
 	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
 		"builtin",
 		"search_tools",
 		"a",
 		"b",
 		"c",
-		"d",
-		"e",
 	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
+	// Replace semantics: stale research is evicted even when absent from matches.
+	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
+		"builtin",
+		"search_tools",
+		"b",
+		"c",
+	]);
+	// Empty result clears research back to the permanent base.
+	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools"]);
+	// Duplicates, unknown names, and permanent tools never consume the cap.
+	expect(nextActiveTools(["builtin", "search_tools"], ["a", "a", "nope", "search_tools", "b", "c", "d"], research)).toEqual([
 		"builtin",
 		"search_tools",
 		"a",
 		"b",
+		"c",
 	]);
 });
 
-test("session_start resets to triple, then searches accumulate via the real bridge", async () => {
+test("session_start resets to triple, then disjoint searches replace via the real bridge", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
@@ -1003,18 +1008,17 @@ test("session_start resets to triple, then searches accumulate via the real brid
 	expect(active).not.toContain(stale);
 	await handlers["agent_start"]({});
 	const first = await search.execute("call-1", { query: "insider sale" });
-	const firstText = first.content[0].text;
-	expect(firstText).toContain("Activated");
+	expect(first.content[0].text).toMatch(/ctivated/);
 	expect(active).toContain("search_tools");
 	expect(active).toContain("get_insider_activity");
+	expect(active.filter((n) => n !== "builtin-tool" && !DISCOVERY_TOOLS.includes(n)).length).toBeLessThanOrEqual(MAX_ACTIVE_RESEARCH_TOOLS);
 	const second = await search.execute("call-2", { query: "short interest" });
-	const secondText = second.content[0].text;
-	expect(secondText).toContain("Activated");
+	expect(second.content[0].text).toMatch(/ctivated/);
 	expect(active).toContain("get_short_interest");
-	expect(active).toContain("get_insider_activity");
+	expect(active).not.toContain("get_insider_activity");
 	expect(active).toContain("builtin-tool");
 	expect(active).toContain("search_tools");
-	expect(secondText).not.toContain("; now active:");
+	expect(active.filter((n) => n !== "builtin-tool" && !DISCOVERY_TOOLS.includes(n)).length).toBeLessThanOrEqual(MAX_ACTIVE_RESEARCH_TOOLS);
 	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });
 
@@ -1027,58 +1031,56 @@ test("tool_call blocks non-RESEARCH tools", async () => {
 	expect(String(result.reason)).toMatch(/RESEARCH-only/);
 });
 
-test("nextActiveTools accumulates active tools without caps", () => {
-	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
-		"builtin",
-		"search_tools",
-		"a",
-		"b",
-		"c",
-	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools", "a"]);
-	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
-		"builtin",
-		"search_tools",
-		"a",
-		"b",
-		"c",
-		"d",
-		"e",
-	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
-		"builtin",
-		"search_tools",
-		"a",
-		"b",
-	]);
-});
-
-test("session_start resets to triple, then searches accumulate via the real bridge", async () => {
+test("empty search clears research and failed search preserves active with a visible error", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
 	const registered = tools as unknown as Registered[];
-	const stale = registered.find((t) => t.name !== "search_tools")?.name;
-	if (!stale) throw new Error("no research tool registered");
 	const search = registered.find((t) => t.name === "search_tools");
 	if (!search) throw new Error("search_tools not registered");
-	const statuses: string[] = [];
-	const ctx = { ui: { setStatus: (_k: string, v: string) => void statuses.push(v) } };
-	active.push("builtin-tool", "search_tools", stale);
+	const ctx = { ui: { setStatus: () => { } } };
 	await handlers["session_start"]({}, ctx);
-	expect(active).toContain("builtin-tool");
-	expect(active).toContain("search_tools");
-	expect(active).not.toContain(stale);
 	await handlers["agent_start"]({});
-	const first = await search.execute("call-1", { query: "insider sale" });
-	const firstText = first.content[0].text;
-	expect(firstText).toContain("Activated");
+	const hit = await search.execute("call-1", { query: "short interest" });
+	expect(hit.content[0].text).toMatch(/ctivated/);
+	expect(active).toContain("get_short_interest");
+	const empty = await search.execute("call-2", { query: "zxqj qwxz kvvk" });
+	expect(empty.content[0].text).toContain("No tools found for:");
 	expect(active).toContain("search_tools");
-	expect(active).toContain("get_insider_activity");
-	const second = await search.execute("call-2", { query: "short interest" });
-	const secondText = second.content[0].text;
-	expect(secondText).toContain("Activated");
-	expect(secondText).not.toContain("; now active:");
-	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
+	expect(active).not.toContain("get_short_interest");
+	// Failed search: a host that never ran agent_start has no bridge run, so the
+	// bridge errors and the active set is left untouched with a visible error.
+	const failed = fakePiHost();
+	await stockbotExtension(failed.pi);
+	const failedTools = failed.tools as unknown as Registered[];
+	const failedSearch = failedTools.find((t) => t.name === "search_tools");
+	if (!failedSearch) throw new Error("search_tools not registered");
+	await failed.handlers["session_start"]({}, ctx);
+	const before = [...failed.active];
+	const err = await failedSearch.execute("call-err", { query: "short interest" });
+	expect(err.content[0].text).toContain("Bridge error");
+	expect(failed.active).toEqual(before);
+});
+
+test("snake_case discovery query finds the same target as natural language", async () => {
+	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
+	const ctx = { ui: { setStatus: () => { } } };
+	const naturalHost = fakePiHost();
+	await stockbotExtension(naturalHost.pi);
+	await naturalHost.handlers["session_start"]({}, ctx);
+	await naturalHost.handlers["agent_start"]({});
+	const naturalSearch = (naturalHost.tools as unknown as Registered[]).find((t) => t.name === "search_tools");
+	if (!naturalSearch) throw new Error("search_tools not registered");
+	const natural = await naturalSearch.execute("call-1", { query: "short interest" });
+	expect(natural.content[0].text).toMatch(/ctivated/);
+	expect(naturalHost.active).toContain("get_short_interest");
+	const snakeHost = fakePiHost();
+	await stockbotExtension(snakeHost.pi);
+	await snakeHost.handlers["session_start"]({}, ctx);
+	await snakeHost.handlers["agent_start"]({});
+	const snakeSearch = (snakeHost.tools as unknown as Registered[]).find((t) => t.name === "search_tools");
+	if (!snakeSearch) throw new Error("search_tools not registered");
+	const snake = await snakeSearch.execute("call-1", { query: "get_short_interest" });
+	expect(snake.content[0].text).toMatch(/ctivated/);
+	expect(snakeHost.active).toContain("get_short_interest");
 });

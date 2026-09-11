@@ -182,7 +182,7 @@ def test_cross_thesis_refs_rejected(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     with pytest.raises(ValueError):
-        r.create_trigger(t.thesis_id, claim_ids=["claim:absent"], canonical_refs=["x"], summary="s")
+        r.create_trigger(t.thesis_id, claim_ids=["claim:absent"], canonical_refs=["x"], summary="s", summary_origin="deterministic")
     with pytest.raises(ValueError):
         r.apply_research_result(t.thesis_id, {"watch_add": [{
             "rule_id": "rule:x", "rule_type": "new_external_evidence",
@@ -200,7 +200,7 @@ def test_pause_resume_close_transitions_enforced(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         r.resume_thesis(t.thesis_id)
     with pytest.raises(ValueError):
-        r.create_trigger(t.thesis_id, canonical_refs=["x"], summary="s")
+        r.create_trigger(t.thesis_id, canonical_refs=["x"], summary="s", summary_origin="deterministic")
 
 
 def test_quarantine_lists_corrupt_child_while_healthy_ids_proceed(tmp_path: Path) -> None:
@@ -292,7 +292,7 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path: 
          "known_at": "2026-01-01T09:00:00+00:00"},
         {"evidence_id": "ev:future", "canonical_ref": "F", "summary": "f",
          "known_at": "2026-02-01T00:00:00+00:00"}]}, "run:seed")
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["V"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["V"], summary="s", summary_origin="deterministic")
     with pytest.raises(ValueError, match="foreign canonical_ref"):
         r.apply_research_result(t.thesis_id, {"trigger_id": trig.trigger_id,
             "evidence_refs": [{"evidence_id": "ev:forged", "canonical_ref": "F",

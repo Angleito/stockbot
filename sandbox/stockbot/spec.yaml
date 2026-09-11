@@ -1,45 +1,39 @@
 # Stockbot Docker Sandbox kit. Runtime is default-deny; only these hosts/ports.
+schemaVersion: "2"
 kind: sandbox
 name: stockbot-runtime
-build:
-  dockerfile: Dockerfile
+sandbox:
+  # operator: build + push the image (HOST_SETUP step 4) then replace with <registry>/stockbot-sandbox:<tag>@sha256:<digest>; digest pin mandatory.
+  image: docker.io/arainey555/stockbot-sandbox:local@sha256:79994ef67f041f05dfb65bfd64a39482782b034314c4d9c3be4796a69704ff35
+permissions:
+  network:
+    allow:
+      - opencode.ai:443
+      - www.sec.gov:443
+      - data.sec.gov:443
+      - efts.sec.gov:443
+      - api.finra.org:443
+      - ews.fip.finra.org:443
+      - api.exa.ai:443
+      - agent.robinhood.com:443
+      - query2.finance.yahoo.com:443
+      - fc.yahoo.com:443
+      - www.slickcharts.com:443
+      - api.datacommons.org:443
+      - bigquery.googleapis.com:443
+      - cloudbilling.googleapis.com:443
+      - oauth2.googleapis.com:443
+      - www.googleapis.com:443
+environment:
+  variables:
+    STOCKBOT_DATA_DIR: /data
 credentials:
-  - name: OPENCODE_API_KEY
-    service: opencode-go
-    proxyManaged: true
-    destination: opencode.ai
-    header: "Authorization: Bearer <credential>"
-  - name: openai
-    oauth: true
-env:
-  STOCKBOT_CODEX_ACCOUNT_ID: ""
-  THESIS_ID: ""
-  STOCKBOT_DATA_DIR: /data
-network:
-  mode: deny-all
-  allow:
-    - chatgpt.com:443
-    - opencode.ai:443
-    - www.sec.gov:443
-    - data.sec.gov:443
-    - efts.sec.gov:443
-    - api.finra.org:443
-    - ews.fip.finra.org:443
-    - api.exa.ai:443
-    - agent.robinhood.com:443
-    - query2.finance.yahoo.com:443
-    - fc.yahoo.com:443
-    - www.slickcharts.com:443
-    - api.datacommons.org:443
-    - bigquery.googleapis.com:443
-    - cloudbilling.googleapis.com:443
-    - oauth2.googleapis.com:443
-    - www.googleapis.com:443
-mounts:
-  - type: clone
-    source: .
-    target: /app
-  - type: volume
-    source: stockbot-data
-    target: /data
+  - service: opencode-go
+    required: true
+    apiKey:
+      name: OPENCODE_API_KEY
+      proxyManaged: true
+      inject:
+        - domain: opencode.ai
+          scheme: bearer
 # Never mount: $HOME, ~/.ssh, ~/.pi, ~/.config, Docker socket, browser profiles.

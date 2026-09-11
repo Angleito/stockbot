@@ -4,6 +4,7 @@ import base64
 import urllib.parse
 
 from app.security.prompt_injection import (
+    MAX_SCAN_BYTES,
     InjectionAssessment,
     assess,
     normalize_text,
@@ -139,11 +140,27 @@ def test_normalize_text_cases():
     assert normalize_text("A\u200dB\u200cC\u200bD\ufeffE") == "A B C D E"
 
 
-def test_scan_window_is_8192_chars():
-    payload = ("x " * 8200) + ATTACK
-    normalized = normalize_text(payload)
-    assert len(normalized) == 8192
-    # The attack sits beyond the 8 KB window: not detected.
-    assert assess(payload).verdict == "ALLOW"
-    # Inside the window it is detected.
+def test_oversize_fails_closed():
+    payload = "x" * (MAX_SCAN_BYTES + 1)
+    assessment = assess(payload)
+    assert assessment.verdict == "QUARANTINE"
+    assert assessment.score == 100
+    assert assessment.matched_rules == ("size_limit:oversized_input",)
+    assert "2 MiB" in assessment.reasons[0]
+
+
+def test_limit_is_byte_boundary_not_char_boundary():
+    assert assess("é" * (MAX_SCAN_BYTES // 2 + 1)).verdict == "QUARANTINE"
+    exact = assess("x" * MAX_SCAN_BYTES)
+    assert exact.verdict == "ALLOW"
+    assert exact.score == 0
+
+
+def test_no_blind_spot_past_old_window():
+    assert assess(("x " * 8200) + ATTACK).verdict == "BLOCK"
     assert assess(ATTACK + ("x " * 8200)).verdict == "BLOCK"
+
+
+def test_normalize_text_no_longer_truncates():
+    assert len(normalize_text("x " * 9000)) > 8192
+    assert normalize_text("x " * 9000) == ("x " * 9000).strip()

@@ -172,7 +172,7 @@ def test_journal_known_at_gates_context(tmp_path: Path) -> None:
     root = tmp_path / "theses"
     r = ThesisRepository(root)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
     r.append_journal_entry(t.thesis_id, {"entry_id": "past", "title": "past", "body": "b",
                                          "trigger_id": trig.trigger_id, "known_at": T3})
     r.append_journal_entry(t.thesis_id, {"entry_id": "future", "title": "future", "body": "b",

@@ -5,15 +5,14 @@ inside the sandbox. Requires `sbx` installed; static-only machines (no `sbx`)
 stop here — `bun run sandbox-doctor` failing at "`sbx` available" is expected
 there and proves fail-loud.
 
-Prereqs: host `~/.pi/agent/auth.json` holds working `openai-codex` (OAuth) and
-`opencode-go` (API key) entries. Real secrets never enter the sandbox: the
-Codex entry arrives as the `DOCKER_SANDBOX_MANAGED` sentinel (entrypoint
-writes it), the OpenCode key stays Docker-proxy-managed.
+Prereqs: host `~/.pi/agent/auth.json` holds a working `opencode-go` (API key)
+entry. Real secrets never enter the sandbox: the OpenCode key stays
+Docker-proxy-managed. Local models live in host `~/.pi/agent/models.json`
+(`liquid-local`, `qwen-local`, `minicpm-local`, `local-qwen`) and need no sandbox egress.
 
 ## 1. Register host credentials
 
 ```sh
-sbx secret set openai --oauth
 sbx secret set opencode-go --command "$PWD/scripts/host/pi-opencode-go-secret"
 ```
 
@@ -43,29 +42,30 @@ writable from inside and no GitHub access is needed at runtime (github.com
 stays off the allowlist by design):
 
 ```sh
-sbx create --kit sandbox/stockbot/spec.yaml --name stockbot-runtime \
-  --clone --no-share-skills
+sbx create --name stockbot-runtime --clone --no-share-skills ./sandbox/stockbot/ .
 ```
 
-## 5. Launch (account ID only, never tokens)
+Pass the data volume at create (`stockbot-data` → `/data`; see
+`sbx create --help` — the kit declares no volumes). Before create, build,
+push, and pin the image (`docker build -t <registry>/stockbot-sandbox:<tag> .`,
+push, write the digest into `spec.yaml` `sandbox.image`); tag alone is not
+accepted.
+
+## 5. Launch (thesis ID only, never tokens)
 
 ```sh
-export STOCKBOT_CODEX_ACCOUNT_ID="$("./scripts/host/pi-codex-account-id")"
 export THESIS_ID="<thesis-id>"
-sbx run --sandbox stockbot-runtime -- bun run stockbot
+sbx exec -e THESIS_ID="$THESIS_ID" stockbot-runtime -- bun run stockbot
 ```
 
-`STOCKBOT_CODEX_ACCOUNT_ID` is the only host-derived value and is
-non-authenticating (Pi's `chatgpt-account-id` header). `OPENAI_API_KEY`,
-`OPENCODE_API_KEY`, and `PI_AGENT_DIR` must never be set in this shell nor in
-`.env`. If `sbx secret set --command` snapshots at set-time instead of
-re-resolving per use, re-run the step-1 `opencode-go` command after every host
-key rotation.
+`THESIS_ID` is the only host-derived value. `OPENCODE_API_KEY` and
+`PI_AGENT_DIR` must never be set in this shell nor in `.env`. If
+`sbx secret set --command` snapshots at set-time instead of re-resolving per
+use, re-run the step-1 `opencode-go` command after every host key rotation.
 
 ## 6. Verify: policy matrix
 
 ```sh
-sbx policy check network --sandbox stockbot-runtime chatgpt.com:443
 sbx policy check network --sandbox stockbot-runtime opencode.ai:443
 sbx policy check network --sandbox stockbot-runtime www.sec.gov:443
 sbx policy check network --sandbox stockbot-runtime data.sec.gov:443
@@ -91,12 +91,10 @@ sbx policy check network --sandbox stockbot-runtime pypi.org:443
 ## 7. Verify: curl matrix (inside the sandbox)
 
 First group connects (HTTP 2xx/4xx from the host, not a policy error); second
-group is policy-blocked. `auth.openai.com` stays blocked by design — Pi's own
-refresh lives there, and the far-future sentinel expiry means Pi never calls
-it; Docker owns refresh on the host.
+group is policy-blocked.
 
 ```sh
-for h in chatgpt.com opencode.ai www.sec.gov data.sec.gov efts.sec.gov \
+for h in opencode.ai www.sec.gov data.sec.gov efts.sec.gov \
     api.finra.org ews.fip.finra.org api.exa.ai agent.robinhood.com \
     query2.finance.yahoo.com fc.yahoo.com www.slickcharts.com \
     api.datacommons.org bigquery.googleapis.com cloudbilling.googleapis.com \
@@ -109,19 +107,18 @@ for h in github.com raw.githubusercontent.com example.com pypi.org \
 done
 ```
 
-## 8. Verify: isolation + both providers in one session
+## 8. Verify: isolation + opencode turn
 
 ```sh
 mount | grep -Ei 'pi|stockbot' || true
 env | grep -Ei 'OPENAI_API_KEY|OPENCODE_API_KEY|PI_AGENT_DIR' || true
 echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-<empty>}"
-cat /root/.pi/agent/auth.json   # access/refresh must be DOCKER_SANDBOX_MANAGED only
+test ! -s /home/agent/.pi/agent/auth.json   # absent or empty: nothing writes credentials anymore
 bun run sandbox-doctor
 ```
 
-Then `bun run stockbot`: use both providers in one Pi session (a Codex turn
-and an OpenCode turn) plus one Stockbot research tool. Restart the sandbox and
-repeat this section to prove host-owned refresh survives.
+Then `bun run stockbot`: switch to an `opencode-go/*` model (Ctrl+P),
+complete a turn plus one Stockbot research tool.
 
 ## Never
 

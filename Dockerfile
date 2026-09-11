@@ -1,8 +1,9 @@
-FROM python:3.14-slim
+FROM docker/sandbox-templates:shell-docker
+USER root
 ARG BUN_VERSION=1.4.2
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl unzip nodejs \
+    ca-certificates curl unzip nodejs python3-venv python-is-python3 \
  && rm -rf /var/lib/apt/lists/* \
  && case "${TARGETARCH}" in \
       amd64) BUN_ARCH=x64; BUN_SHA256=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913;; \
@@ -24,8 +25,13 @@ RUN python -m venv /app/venv \
  && printf '#!/bin/sh\nexec /usr/local/bin/bun /app/node_modules/.bin/pi "$@"\n' > /usr/local/bin/pi \
  && chmod +x /usr/local/bin/pi
 COPY . .
-COPY sandbox/stockbot/synthetic-pi-auth.sh /usr/local/bin/synthetic-pi-auth.sh
-ENTRYPOINT ["/usr/local/bin/synthetic-pi-auth.sh"]
+RUN id -u agent >/dev/null 2>&1 || useradd -m -u 1000 -d /home/agent -s /bin/bash agent \
+ && mkdir -p /home/agent /data \
+ && chown -R agent:agent /app /data /home/agent \
+ && mkdir -p /etc/sudoers.d \
+ && printf 'Defaults env_keep += "http_proxy https_proxy HTTP_PROXY HTTPS_PROXY DOCKER_SANDBOX_*"\n' > /etc/sudoers.d/10-sandbox-proxy \
+ && chmod 440 /etc/sudoers.d/10-sandbox-proxy
+USER agent
 ENV STOCKBOT_DATA_DIR=/data
 ENV PATH="/app/venv/bin:$PATH"
 RUN pi --help | grep -i builtin

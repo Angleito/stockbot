@@ -17,7 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -635,6 +635,22 @@ class AttemptResult:
     duration_seconds: float
     model_config_failed: bool = False
 
+_INFRA_RE = re.compile(r"ratelimit|rate limit|rate-limit|429|quota|too many requests|timeout|timed out|latency|deadline|temporarily|try again|overloaded|503|502|504", re.IGNORECASE)
+
+
+def is_infra_failure(reason: str) -> bool:
+    """True iff reason looks like ratelimit/latency infra (still a gate failure, never a pass)."""
+    return bool(_INFRA_RE.search(reason or ""))
+
+
+def tool_passes(attempts: Collection[object]) -> bool:
+    """Strict 3/3: tool passes iff every strict attempt passed."""
+    for a in attempts:
+        ok = a.get("ok") if isinstance(a, dict) else getattr(a, "ok", None)
+        if ok is not True:
+            return False
+    return True
+
 
 def run_matrix(jobs: list[tuple[str, int]], worker: Callable[[str, int], AttemptResult], concurrency: int) -> list[AttemptResult]:
     """Run every (tool, attempt) through the worker with bounded parallelism."""
@@ -670,8 +686,9 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
                 args["id"] = fixture_id
         prompt = build_attempt_prompt(tool, args, attempt)
         code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
-        model_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
+        base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
         ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
+        model_config_failed = base_config_failed or is_infra_failure(reason) or is_infra_failure(err_text)
         duration_seconds = time.monotonic() - start
         return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
     except Exception as exc:
@@ -770,18 +787,19 @@ def main() -> int:
             print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
     procs = len(ordered)
     failed_tools: list[str] = []
-    # Aggregation gate (2-of-3): each attempt stays strict, but one flaky
-    # attempt must not fail a tool the model routes correctly twice.
-    # Systematic failure (0-or-1 of 3) still fails.
+    # Strict 3/3: tool passes iff all strict attempts pass; any single
+    # routing failure fails the tool. Infra (ratelimit/latency) still fails
+    # the gate but reports as infra, never as pass.
     for tool in tool_names:
         tool_recs = results[tool]
-        allowed_fails = max(0, len(tool_recs) - 2)
-        fails = sum(1 for rec in tool_recs if rec.get("ok") is not True)
-        if fails == 0:
+        if tool_passes(tool_recs):
             remove_successful_attempt_dirs(root, tool, tool_recs)
-        if fails > allowed_fails:
+        else:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
+            by_tool = [r for r in ordered if r.tool == tool and not r.ok]
+            if by_tool and all(r.model_config_failed or is_infra_failure(r.reason) for r in by_tool):
+                print(f"infra-only failure for {tool} (still FAIL)")
     passed_tools = len(tool_names) - len(failed_tools)
     coverage = f"{passed_tools}/{len(tool_names)} tools"
     wall = time.monotonic() - verify_start

@@ -1,4 +1,3 @@
-chatgpt.com:443
 opencode.ai:443
 www.sec.gov:443
 data.sec.gov:443
