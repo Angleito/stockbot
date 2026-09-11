@@ -10,7 +10,7 @@ Ownership and transaction relationships an entity must disclose: 13D/G owners, 1
 
 ## Avoid when
 
-- Do not use for current 5%+ stake sizes; use get_beneficial_ownership instead.
+- Not for current 5%+ stake sizes.
 
 ## Related tools
 

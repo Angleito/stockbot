@@ -11,8 +11,7 @@ Start a new investment thesis proposal with scope, claims, and open questions.
 
 ## Avoid when
 
-- Do not use to read an existing thesis; use thesis_show instead.
-- Create directly; do not call thesis_show or thesis_refine first.
+- Not for reading an existing thesis.
 
 ## Related tools
 

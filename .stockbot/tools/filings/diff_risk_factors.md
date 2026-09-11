@@ -10,8 +10,8 @@ What changed in the Risk Factors section versus the prior filing: year-over-year
 
 ## Avoid when
 
-- Do not use for full-filing diffs; use diff_sec_filings instead.
-- Do not use to search filing text for risk-factor mentions; use search_sec_filings.
+- Not for full-filing diffs.
+- Not for searching filing text for risk-factor mentions.
 
 ## Related tools
 

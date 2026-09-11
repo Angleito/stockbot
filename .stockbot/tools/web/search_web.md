@@ -11,7 +11,7 @@ External web news and commentary for price moves, headlines, and industry develo
 
 ## Avoid when
 
-- Do not use for FINRA short data; use query_finra or get_short_interest instead.
+- Not for FINRA short data.
 
 ## Related tools
 

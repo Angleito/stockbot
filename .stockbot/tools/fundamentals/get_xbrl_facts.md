@@ -10,7 +10,7 @@ XBRL-tagged financial facts such as revenue, net income, cash, debt, or equity f
 
 ## Avoid when
 
-- Do not use for EPS; use get_fundamentals with metric eps instead.
+- Not for EPS.
 
 ## Related tools
 

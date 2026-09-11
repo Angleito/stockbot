@@ -10,7 +10,7 @@ Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, vot
 
 ## Avoid when
 
-- Do not use for stake changes over time; use get_ownership_changes instead.
+- Not for stake changes over time.
 - Answer from these records; do not open filings or pull changes unless asked.
 
 ## Related tools

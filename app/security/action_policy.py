@@ -40,6 +40,8 @@ TOOL_DOMAINS: dict[str, str] = {
     "search_tools": "financial_research",
     "list_tool_domains": "financial_research",
     "describe_tool": "financial_research",
+    "browse_tools": "financial_research",
+    "call_tool": "financial_research",
     "get_recent_ownership_filings": "financial_research",
     "diff_risk_factors": "financial_research",
     "get_financial_statements": "financial_research",

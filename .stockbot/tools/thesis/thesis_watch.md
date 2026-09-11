@@ -11,7 +11,7 @@ Add a monitoring rule that alerts when a thesis condition triggers.
 
 ## Avoid when
 
-- Do not use to log notes; use thesis_journal instead.
+- Not for logging notes.
 
 ## Related tools
 

@@ -12,8 +12,7 @@ What was disclosed about risk factors in recent filings: full-text EDGAR SEC sea
 
 ## Avoid when
 
-- Do not use to list filings for a known ticker; use list_sec_filings instead.
-- Use the given ticker directly; no entity lookup is needed.
+- Not a filing lister for a known ticker.
 
 ## Related tools
 

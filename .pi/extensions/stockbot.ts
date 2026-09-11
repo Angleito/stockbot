@@ -47,24 +47,10 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
-// Permanent discovery triple: never evicted by rotation. Filtered to
-// research.has, so sets lacking list/describe reduce exactly to old behavior.
-export const DISCOVERY_TOOLS = ["list_tool_domains", "search_tools", "describe_tool"];
-// Cap on activated research schemas; discovery metadata itself stays uncapped.
-export const MAX_ACTIVE_RESEARCH_TOOLS = 3;
-export function nextActiveTools(active: string[], matches: string[], research: Set<string>): string[] {
- const permanent = DISCOVERY_TOOLS.filter((n) => research.has(n));
- const base = active.filter((n) => !research.has(n) || permanent.includes(n));
- const seen = new Set(base);
- const selected: string[] = [];
- for (const n of matches) {
-  if (selected.length >= MAX_ACTIVE_RESEARCH_TOOLS) break;
-  if (!research.has(n) || permanent.includes(n) || seen.has(n)) continue;
-  seen.add(n);
-  selected.push(n);
- }
- return [...base, ...selected];
-}
+// Permanent discovery set: the only research schemas ever model-visible.
+// Every other research tool stays registered server-side and dispatchable
+// via call_tool, but is never registerTool-visible.
+export const DISCOVERY_TOOLS = ["browse_tools", "call_tool", "search_tools"];
 
 // Absolute bridge paths derived from this file's location: Pi's extension
 // host cwd is not the repo root, so relative venv/scripts paths ENOENT.
@@ -423,74 +409,22 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   }
  }
  const research = new Set<string>();
- const requiredOf: Record<string, string[]> = {};
 
  for (const entry of bridgeDown ? [] : entries) {
   const fn = describeFn(entry);
-  if (!fn) continue;
+  // Only the permanent discovery set is ever model-visible; every other
+  // research schema stays server-side and dispatchable via call_tool.
+  if (!fn || !DISCOVERY_TOOLS.includes(fn.name)) continue;
   research.add(fn.name);
-  const params: unknown = fn.parameters;
-  const rawRequired = params && typeof params === "object" && "required" in params ? params.required : undefined;
-  requiredOf[fn.name] = Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [];
   const cardSpec = CARD_TOOLS[fn.name];
-  // Deferred loading: only search_tools carries prompt metadata (Pi rebuilds
-  // the system prompt when an active tool carries it) and activates matches.
-  const isSearch = fn.name === "search_tools";
   pi.registerTool({
    name: fn.name,
    label: fn.name,
    description: fn.description,
    parameters: Type.Unsafe(fn.parameters),
-   ...(isSearch
-    ? {
-     promptSnippet: "Search for the missing capability or operation when the active tools cannot perform the task — not a company or ticker",
-     promptGuidelines: ["Describe the missing capability (e.g. recent company news and stock-move catalysts, not why did GPRO go up?)."],
-    }
-    : {}),
    async execute(toolCallId, params) {
     toolCalls++;
     const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
-    if (isSearch && typeof bridge.error === "string") {
-     return {
-      content: [{ type: "text", text: `Bridge error: ${bridge.error}` }],
-      details: bridge,
-     };
-    }
-    if (isSearch) {
-     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
-     const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
-     const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
-     const topMatches = (Array.isArray(raw) ? raw : [])
-      .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
-      .filter((n) => research.has(n))
-      .slice(0, MAX_ACTIVE_RESEARCH_TOOLS);
-     const matches = topMatches;
-     // Uncapped pages carry total through the same envelope; page length when absent.
-     const totalRaw = meta.total ?? inner.total ?? bridge.total ?? matches.length;
-     const total = typeof totalRaw === "number" ? totalRaw : matches.length;
-     const active = pi.getActiveTools();
-     const next = nextActiveTools(active, matches, research);
-     const added = next.filter((n) => !active.includes(n));
-     if (added.length || next.length !== active.length) pi.setActiveTools(next);
-     const need = (n: string) => {
-      const req = requiredOf[n] ?? [];
-      return req.length ? `${n} (needs: ${req.join(", ")})` : n;
-     };
-     const query = (params as Json).query;
-     const text =
-      matches.length === 0
-       ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}`
-       : added.length > 0 && total > added.length
-        ? `Found ${total} tools, activated ${added.length}: ${added.map(need).join(", ")}. Call the top-ranked match now, then stop.`
-        : added.length
-         ? `Activated ${added.length} tools in rank order: ${added.map(need).join(", ")}. Call the top-ranked match now, then stop.`
-         : `Matching tools already active, ranked: ${matches.map(need).join(", ")}. Call the top-ranked match now, then stop.`;
-     refreshStatus(lastCtx);
-     return {
-      content: [{ type: "text", text }],
-      details: bridge,
-     };
-    }
     refreshStatus(lastCtx);
     return {
      content: [{ type: "text", text: bridgeModelText(bridge) }],
@@ -627,8 +561,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
-  // Deferred loading: reset to built-ins + discovery triple; searches
-  // replace the research set from here. research.size still counts registered tools.
+  // Pin built-ins + the permanent discovery set; nothing rotates or evicts.
   const booted = pi.getActiveTools();
   const permanent = DISCOVERY_TOOLS.filter((n) => research.has(n));
   pi.setActiveTools([...new Set([...booted.filter((n) => !research.has(n) || permanent.includes(n)), ...permanent])]);

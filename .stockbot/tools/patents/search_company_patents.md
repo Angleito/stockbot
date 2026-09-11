@@ -10,9 +10,8 @@ Company patent search: publications, assignees, counts, and classifications.
 
 ## Avoid when
 
-- Do not use for financial or filing questions; use the matching fundamentals tool.
-- Answer from patent records; do not run a web search for fresher filings.
-- Use company names directly; no entity lookup is needed.
+- Not for financial or filing questions.
+- Answer from patent records.
 
 ## Related tools
 

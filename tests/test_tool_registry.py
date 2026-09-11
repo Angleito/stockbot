@@ -20,7 +20,7 @@ def _schema_functions() -> dict[str, Mapping[str, object]]:
 
 def test_tool_registry_five_way_parity():
     schemas = set(_schema_functions())
-    handlers = set(tools._DIRECT_HANDLERS) | set(tools._FINRA_HANDLERS) | set(tools._ROBINHOOD_HANDLERS)
+    handlers = set(tools._DIRECT_HANDLERS) | set(tools._FINRA_HANDLERS) | set(tools._ROBINHOOD_HANDLERS) | {"call_tool"}  # gateway dispatch is call_tool's canonical handler; it has no _MODEL_HANDLERS entry by design
     assert schemas == handlers, f"Schemas without handlers: {sorted(schemas - handlers)}"
     assert schemas == set(tools.TOOL_CAPABILITIES), f"Missing capability: {sorted(schemas - set(tools.TOOL_CAPABILITIES))}"
     assert schemas == set(TOOL_DOMAINS), f"Missing security domain: {sorted(schemas - set(TOOL_DOMAINS))}"

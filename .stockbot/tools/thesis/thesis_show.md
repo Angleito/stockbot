@@ -14,7 +14,7 @@ Read a thesis: its status, assessment, and current state. Pass the thesis ID as 
 
 ## Avoid when
 
-- Do not use to change a thesis; use thesis_refine instead.
+- Not for changing a thesis.
 
 ## Related tools
 

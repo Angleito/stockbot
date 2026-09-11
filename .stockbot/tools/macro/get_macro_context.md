@@ -11,7 +11,7 @@ Macro statistics for a geography such as California: population (how many people
 
 ## Avoid when
 
-- Do not use for company-specific facts; use the company tool for that domain.
+- Not for company-specific facts.
 
 ## Related tools
 

@@ -11,7 +11,7 @@ Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uu
 
 ## Avoid when
 
-- Do not use for routine notes; use thesis_journal instead.
+- Not for routine notes.
 
 ## Related tools
 

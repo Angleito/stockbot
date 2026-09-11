@@ -11,7 +11,7 @@ Deterministic diff between two filings by accession numbers: whether one filing 
 
 ## Avoid when
 
-- Do not use for risk-factor-only changes; use diff_risk_factors instead.
+- Not for risk-factor-only changes.
 
 ## Related tools
 

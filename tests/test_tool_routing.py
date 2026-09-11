@@ -1,70 +1,89 @@
-"""Deterministic search_tools ranking over the discovery catalog."""
+"""Behavioral dispatch checks over the discovery catalog (no rank asserts)."""
 
-from app.tools import _search_tools
+import pytest
 
-SHORT_INTEREST_FAMILY = frozenset({
-    "query_finra",
-    "get_short_interest",
-    "get_reg_sho_volume",
-    "get_short_pressure_profile",
-    "get_short_interest_leaderboard",
-    "get_finra_datapoints",
-})
+from app import tools as tools_mod
+from app.policy import Capability, RequestContext
+from app.tools import (
+    TOOLS,
+    TOOL_DISCOVERY_REGISTRY,
+    _tool_function,
+    execute_tool,
+)
+
+_CTX = RequestContext("test", frozenset({Capability.RESEARCH}))
 
 
-def _names(query: str, limit: int = 4) -> list[str]:
-    result = _search_tools({"query": query}, "test")
-    matches = result.get("matches")
+def _browse(args: dict[str, object]) -> dict[str, object]:
+    result = execute_tool("browse_tools", args, "test", context=_CTX)
+    assert "error" not in result, result
+    return result
+
+
+def test_browse_all_covers_every_registry_name() -> None:
+    result = _browse({})
+    assert result["total"] == len(TOOL_DISCOVERY_REGISTRY)
+    listed = next(
+        (
+            v
+            for v in result.values()
+            if isinstance(v, list)
+            and v
+            and all(isinstance(i, dict) and "name" in i and ("summary" in i or "domain" in i) for i in v)
+        ),
+        None,
+    )
+    assert listed is not None
+    pairs = [(i.get("domain"), i.get("name")) for i in listed if isinstance(i, dict)]
+    assert pairs == sorted(pairs)
+    assert {n for _, n in pairs} == set(TOOL_DISCOVERY_REGISTRY)
+
+
+def test_browse_domain_slice_equals_registry_slice() -> None:
+    domain = TOOL_DISCOVERY_REGISTRY["get_short_interest"].domain
+    result = _browse({"domain": domain})
+    expected = sorted(n for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain)
+    matches = result["matches"]
     assert isinstance(matches, list)
-    names = [m["name"] for m in matches if isinstance(m, dict) and isinstance(m.get("name"), str)]
-    return names[:limit]
+    assert [m["name"] for m in matches if isinstance(m, dict)] == expected
+    assert result["total"] == len(expected)
 
 
-def test_eps_routes_to_fundamentals() -> None:
-    assert _names("What does Apple earn per share?", 1) == ["get_fundamentals"]
-    assert _names("What is Apple's EPS, basic and diluted, including trailing twelve months?", 1) == ["get_fundamentals"]
+def test_browse_name_returns_summary_plus_canonical_parameters() -> None:
+    result = _browse({"name": "get_short_interest"})
+    assert result["summary"] == TOOL_DISCOVERY_REGISTRY["get_short_interest"].summary
+    canonical = next(t for t in TOOLS if _tool_function(t).get("name") == "get_short_interest")
+    assert result["parameters"] == _tool_function(canonical)["parameters"]
+    required = result.get("required", result.get("required_arguments"))
+    assert isinstance(required, list) and "ticker" in required
 
 
-def test_short_interest_change_routes_to_finra_family() -> None:
-    top4 = _names("How has Apple's short interest changed over time?")
-    assert top4[0] in SHORT_INTEREST_FAMILY
-    assert "query_finra" in top4 or "get_short_interest" in top4
+def test_invalid_arguments_return_repairable_shape_and_execute_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _canary(args: dict[str, object], model: str) -> dict[str, object]:
+        calls.append(dict(args))
+        return {"unexpected": True}
+
+    for handlers in (
+        tools_mod._MODEL_HANDLERS,
+        tools_mod._FINRA_HANDLERS,
+        tools_mod._ROBINHOOD_HANDLERS,
+        tools_mod._THESIS_HANDLERS,
+    ):
+        if "get_short_interest" in handlers:
+            monkeypatch.setitem(handlers, "get_short_interest", _canary)
+    result = execute_tool("get_short_interest", {}, "test", context=_CTX)
+    assert result["error_type"] == "invalid_tool_arguments"
+    assert result["tool"] == "get_short_interest"
+    required = result["required"]
+    assert isinstance(required, list) and "ticker" in required
+    assert calls == []
 
 
-def test_large_owner_routes_to_beneficial_ownership() -> None:
-    assert _names("Who owns more than 5% of Apple?", 1) == ["get_beneficial_ownership"]
-
-
-def test_analyst_expectations_routes_to_analyst_estimates() -> None:
-    assert _names("What do analysts expect from Apple going forward?", 1) == ["get_analyst_estimates"]
-    assert _names("What are analysts estimating for Apple?", 1) == ["get_analyst_estimates"]
-
-
-def test_unemployment_routes_to_macro() -> None:
-    assert _names("What is the unemployment rate in California?", 1) == ["get_macro_context"]
-
-
-def test_ambiguous_short_interest_accepts_any_family_member() -> None:
-    assert any(n in SHORT_INTEREST_FAMILY for n in _names("What is Apple's current short interest?", 2))
-
-
-def test_short_interest_move_ranks_finra_above_web() -> None:
-    top4 = _names("why did short interest move up?")
-    assert "search_web" in top4
-    assert min(top4.index(n) for n in top4 if n in SHORT_INTEREST_FAMILY) < top4.index("search_web")
-
-
-def test_falling_eps_estimates_routes_to_analyst() -> None:
-    assert _names("EPS estimates fell for Apple", 1) == ["get_analyst_estimates"]
-
-
-def test_insider_selling_jump_routes_to_insider() -> None:
-    assert _names("insider selling jump at Apple", 1) == ["get_insider_activity"]
-
-
-def test_unemployment_move_routes_to_macro() -> None:
-    assert _names("unemployment moved up last month", 1) == ["get_macro_context"]
-
-
-def test_stock_price_jump_routes_to_web_or_events() -> None:
-    assert _names("why did Apple stock jump today?", 1)[0] in {"search_web", "get_material_events"}
+def test_unknown_tool_executes_nothing() -> None:
+    result = execute_tool("no_such_tool", {}, "test", context=_CTX)
+    assert "error" in result
+    assert "no_such_tool" in str(result["error"])

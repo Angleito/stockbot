@@ -11,7 +11,7 @@ Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends,
 
 ## Avoid when
 
-- Do not use when exact source values are requested; use get_finra_datapoints.
+- Not for exact source values.
 
 ## Related tools
 

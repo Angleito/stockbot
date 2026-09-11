@@ -10,8 +10,7 @@ M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxi
 
 ## Avoid when
 
-- Do not use for governance or proxy votes; use get_governance_events instead.
-- Use the given ticker directly; no entity lookup is needed.
+- Not for governance or proxy votes.
 
 ## Related tools
 

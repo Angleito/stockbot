@@ -702,3 +702,106 @@ def test_remove_successful_attempt_dirs_prunes_empty_tool_dir(tmp_path: Path) ->
         assert (attempt_dir / "store" / "seed.txt").is_file()
         assert (attempt_dir / f"attempt-{attempt}.pi.log").is_file()
         assert (attempt_dir / f"attempt-{attempt}.stderr.log").is_file()
+
+
+def test_tool_success_via_call_tool_dispatch(tmp_path: Path) -> None:
+    """Inner success + outer call_tool lifecycle counts (no inner event row)."""
+    p = tmp_path / "runs.sqlite"
+    conn = sqlite3.connect(str(p))
+    conn.executescript(_SCHEMA)
+    now = "2026-01-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)",
+        (now, "q", "completed"),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1','get_short_interest',?,NULL)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
+        (now, json.dumps({"name": "get_short_interest", "arguments": {"ticker": "AAPL"}})),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,?)",
+        (now, "call_tool"),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+        (MODEL, now),
+    )
+    conn.commit()
+    assert v._tool_success(conn, "get_short_interest", attempt=1) is None
+    assert v._tool_success(conn, "get_xbrl_facts", attempt=1) == "absent"
+    conn.close()
+    ok, _ = v.evaluate_attempt(p, "get_short_interest", 0, False, attempt=1)
+    assert ok
+
+
+def _holdout_db(path: Path, *, discovery: str = "browse_tools", disc_at: str = "2026-01-01T00:00:00+00:00", inner_at: str = "2026-01-01T00:00:01+00:00", via_call_tool: bool = True) -> Path:
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_SCHEMA)
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)",
+        (disc_at, "q", "completed"),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1',?,?,NULL)",
+        (discovery, disc_at),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,?)",
+        (disc_at, discovery),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1','get_short_interest',?,NULL)",
+        (inner_at,),
+    )
+    if via_call_tool:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
+            (inner_at, json.dumps({"name": "get_short_interest", "arguments": {"ticker": "AAPL"}})),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,?)",
+            (inner_at, "call_tool"),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
+            (inner_at, "get_short_interest"),
+        )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+        (MODEL, disc_at),
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_holdout_passes_on_discover_then_dispatch(tmp_path: Path) -> None:
+    ok, _ = v.evaluate_holdout_attempt(_holdout_db(tmp_path / "runs.sqlite"), "get_short_interest")
+    assert ok
+
+
+def test_holdout_fails_when_discovery_after_dispatch(tmp_path: Path) -> None:
+    p = _holdout_db(tmp_path / "runs.sqlite", disc_at="2026-01-01T00:00:02+00:00", inner_at="2026-01-01T00:00:01+00:00")
+    ok, reason = v.evaluate_holdout_attempt(p, "get_short_interest")
+    assert not ok
+    assert "precede" in reason
+
+
+def test_holdout_fails_without_call_tool_dispatch(tmp_path: Path) -> None:
+    p = _holdout_db(tmp_path / "runs.sqlite", via_call_tool=False)
+    ok, reason = v.evaluate_holdout_attempt(p, "get_short_interest")
+    assert not ok
+    assert "call_tool" in reason

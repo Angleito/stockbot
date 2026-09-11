@@ -11,7 +11,7 @@ Index of documents and exhibits attached to one filing, looked up by accession n
 
 ## Avoid when
 
-- Do not use to read document text; use get_sec_document instead.
+- Does not return document text.
 
 ## Related tools
 

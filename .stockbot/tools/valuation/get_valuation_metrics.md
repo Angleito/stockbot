@@ -10,7 +10,7 @@ Whether a stock is cheap or expensive: valuation anchored to live price with tra
 
 ## Avoid when
 
-- Do not use for reported EPS alone; use get_fundamentals instead.
+- Not for reported EPS alone.
 
 ## Related tools
 

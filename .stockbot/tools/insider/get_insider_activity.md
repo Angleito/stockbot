@@ -10,7 +10,7 @@ Executed insider transactions from Forms 3/4/5 with SEC codes mapped to buy, sel
 
 ## Avoid when
 
-- Do not use for planned but unexecuted sales; use get_planned_insider_sales.
+- Not for planned but unexecuted sales.
 
 ## Related tools
 

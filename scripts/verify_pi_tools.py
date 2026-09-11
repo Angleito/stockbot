@@ -53,7 +53,13 @@ FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
 # tests/test_verify_pi_tools.py::test_prereq_chains_are_documented_in_descriptions.
 PREREQ_CHAINS: dict[str, frozenset[str]] = build_prerequisite_graph_from_tool_metadata()
 # Discovery primitives: first-class citizens on attempts 1-2, never strays.
-DISCOVERY_TOOLS = frozenset({"list_tool_domains", "search_tools", "describe_tool"})
+DISCOVERY_TOOLS = frozenset({"browse_tools", "call_tool", "list_tool_domains", "search_tools", "describe_tool"})
+# Dispatch primitives: schema-only discovery/dispatch surface (no natural fixture;
+# call_tool has required args). Plus list_tool_domains/describe_tool: not
+# model-visible in TS and forbidden as call_tool inner names, so unreachable by
+# construction. None are ever live-matrix targets.
+_DISPATCH_PRIMITIVES = frozenset({"browse_tools", "call_tool"})
+_MATRIX_EXCLUDED = _DISPATCH_PRIMITIVES | frozenset({"list_tool_domains", "describe_tool"})
 
 
 def get_concurrency() -> int:
@@ -267,100 +273,6 @@ VERIFY_CASES: dict[str, _VerifyCase] = {
     "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_v1": "Still watching NVDA datacenter demand. Add that to thesis thesis-placeholder.", "natural_v2": "Please note for thesis thesis-placeholder: still watching NVDA datacenter demand."},
 }
 
-class _RoutingCase(TypedDict):
-    question: str
-    expected_first_search_any: list[str]
-    forbidden_before_expected: list[str]
-
-# Deterministic top-3 routing gate derived from VERIFY_CASES (2 natural V1/V2
-# questions per tool). No hand-curated list: every verify case must rank its
-# intended target in matches[:MAX_ACTIVE_RESEARCH_TOOLS]. Forbidden-before-target
-# lists from the legacy benchmark are retained where the same question text
-# recurs; all other cases use an empty forbidden list plus the rank check.
-# Cap shared with the extension activation path
-# (.pi/extensions/stockbot.ts MAX_ACTIVE_RESEARCH_TOOLS): one search activates
-# at most the top-3 ranked matches, so the gate asserts the same slice.
-# ponytail: deterministic scorer check, not live-Pi sessions.
-MAX_ACTIVE_RESEARCH_TOOLS = 3
-_LEGACY_FORBIDDEN: dict[str, list[str]] = {
-    "why did GPRO shoot up the past 30 days?": ["get_valuation_metrics", "get_offering_history", "get_recent_ownership_filings"],
-    "What does Apple earn per share?": ["search_web", "get_beneficial_ownership"],
-    "Is Apple stock cheap or expensive right now?": ["get_offering_history", "get_recent_ownership_filings"],
-    "Who owns more than 5% of Apple?": ["get_valuation_metrics", "search_web"],
-    "What insider purchases and sales has Apple reported?": ["get_valuation_metrics", "search_web"],
-    "What big events has Apple disclosed since 2024-01-01?": ["get_valuation_metrics", "get_offering_history"],
-    "List Apple recent SEC filings.": ["get_valuation_metrics", "thesis_show"],
-    "What is Apple current short interest?": ["get_valuation_metrics", "search_web"],
-    "Track my investment thesis on NVDA AI demand staying strong.": ["get_valuation_metrics", "search_web"],
-    "What trends were picked up in the US around September 1st?": ["get_valuation_metrics", "search_web"],
-    "What patents has Apple filed lately?": ["get_valuation_metrics", "search_web"],
-    "What is California unemployment rate?": ["get_valuation_metrics", "get_xbrl_facts"],
-    "Has Apple had any board or governance changes?": ["get_valuation_metrics", "search_web"],
-}
-
-
-def build_routing_cases() -> list[_RoutingCase]:
-    """Derive routing cases from VERIFY_CASES: 2 natural prompts per tool.
-
-    The discovery triple is permanently active and never search-routed, so its
-    cases are excluded (the scorer only ranks TOOL_DISCOVERY_REGISTRY)."""
-    cases: list[_RoutingCase] = []
-    for tool, case in VERIFY_CASES.items():
-        if tool in DISCOVERY_TOOLS:
-            continue
-        for question in (case["natural_v1"], case["natural_v2"]):
-            if not question:
-                continue
-            cases.append(
-                {
-                    "question": question,
-                    "expected_first_search_any": [tool],
-                    "forbidden_before_expected": list(_LEGACY_FORBIDDEN.get(question, [])),
-                }
-            )
-    expected_count = 2 * (len(VERIFY_CASES) - len(DISCOVERY_TOOLS))
-    if len(cases) != expected_count:
-        raise AssertionError(f"routing cases {len(cases)} != 2 per routable tool ({expected_count}); add the missing natural_v1/v2")
-    return cases
-
-
-def run_routing_benchmark(question_filter: str | None = None) -> int:
-    """Top-3 routing gate over VERIFY_CASES-derived prompts. Returns 0 when every
-    case ranks its intended target in matches[:MAX_ACTIVE_RESEARCH_TOOLS] with no
-    forbidden tool above it; 1 otherwise."""
-    from app.tools import _search_tools
-
-    failed = 0
-    ran = 0
-    for case in build_routing_cases():
-        if question_filter and question_filter.lower() not in case["question"].lower():
-            continue
-        ran += 1
-        result = _search_tools({"query": case["question"]}, "benchmark")
-        matches = result.get("matches")
-        names: list[str] = [m["name"] for m in matches if isinstance(m, dict) and isinstance(m.get("name"), str)] if isinstance(matches, list) else []
-        top3 = names[:MAX_ACTIVE_RESEARCH_TOOLS]
-        expected = case["expected_first_search_any"]
-        expected_ranks = [names.index(e) for e in expected if e in names]
-        if not expected_ranks:
-            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank=absent")
-            failed += 1
-            continue
-        first_expected = min(expected_ranks)
-        stray = [n for n in names[:first_expected] if n in case["forbidden_before_expected"]]
-        if first_expected >= MAX_ACTIVE_RESEARCH_TOOLS:
-            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank={first_expected}")
-            failed += 1
-        elif stray:
-            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank={first_expected} (forbidden {stray} before expected)")
-            failed += 1
-        else:
-            print(f"PASS {case['question']!r} -> {top3} rank={first_expected}")
-    if not ran:
-        print("routing benchmark: no cases matched filter", file=sys.stderr)
-        return 1
-    print(f"routing benchmark: {ran - failed}/{ran} cases rank top-{MAX_ACTIVE_RESEARCH_TOOLS}")
-    return 0 if not failed else 1
 
 def tool_schemas() -> dict[str, dict[str, object]]:
     schemas: dict[str, dict[str, object]] = {}
@@ -483,7 +395,7 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
 
 
 def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]:
-    """Dispatched Stockbot tools other than the discovery triple and the required target.
+    """Dispatched Stockbot tools other than the discovery set and the required target.
 
     tool_calls rows are written only by execute_pi_tool (app/pi_gateway.py:399),
     so every name here is a Stockbot-dispatched call; Pi built-ins never appear.
@@ -493,6 +405,42 @@ def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]
     return sorted(r[0] for r in rows if r[0] in names and r[0] not in DISCOVERY_TOOLS and r[0] != required_tool)
 
 
+def _call_tool_dispatched_names(conn: sqlite3.Connection) -> set[str]:
+    """Inner names Pi requested via outer `call_tool` lifecycle events.
+
+    The gateway records the inner canonical name in `tool_calls` but writes no
+    outer row; Pi records only the outer `call_tool` lifecycle in
+    `agent_events`. The `tool_started` event keeps the outer arguments, which
+    carry the inner name. Lenient on shape; unparseable rows are ignored.
+    """
+    names: set[str] = set()
+    try:
+        rows = conn.execute(
+            "SELECT arguments FROM agent_events WHERE event_type = 'tool_started' AND tool_name = 'call_tool'"
+        ).fetchall()
+    except sqlite3.Error:
+        return names
+    for (raw,) in rows:
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        inner = payload.get("name")
+        if isinstance(inner, str) and inner:
+            names.add(inner)
+            continue
+        wrapped = payload.get("arguments")
+        if isinstance(wrapped, dict):
+            inner_wrapped = wrapped.get("name")
+            if isinstance(inner_wrapped, str) and inner_wrapped:
+                names.add(inner_wrapped)
+    return names
+
+
 def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
     """None when `name` has a clean success; otherwise a short failure reason."""
     ok_calls = conn.execute(
@@ -500,17 +448,25 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
     ).fetchone()[0]
     if ok_calls < 1:
         return "absent"
-    completed = conn.execute(
-        "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)
-    ).fetchone()[0]
-    if completed < 1:
-        return "no completed event"
     failed = conn.execute(
         "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)
     ).fetchone()[0]
     if failed > 0:
         return "failed execution present"
-    return None
+    completed = conn.execute(
+        "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)
+    ).fetchone()[0]
+    if completed >= 1:
+        return None
+    # Generic-dispatch path: inner success in `tool_calls`, outer `call_tool`
+    # lifecycle in `agent_events`. Correlate via the started event's inner name.
+    if name in _call_tool_dispatched_names(conn):
+        outer_completed = conn.execute(
+            "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = 'call_tool'"
+        ).fetchone()[0]
+        if outer_completed >= 1:
+            return None
+    return "no completed event"
 
 
 def _row_errors_transient(conn: sqlite3.Connection, names: Collection[str]) -> bool:
@@ -578,7 +534,7 @@ def _search_queries_for_db(db_path_str: str) -> list[str]:
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Routing benchmark: attempts 1-2 allow a clean discovery-triple call and a clean
+    # Routing gate: attempts 1-2 allow a clean discovery-set call and a clean
     # required-target call only (PREREQ_CHAINS is empty: no prerequisite edges remain
     # in TOOL_DISCOVERY_REGISTRY). More than 2 search_tools calls fails the attempt
     # on every attempt (strict 3/3, no exemption).
@@ -806,7 +762,7 @@ def run_matrix(jobs: list[tuple[str, int]], worker: Callable[[str, int], Attempt
     return results
 
 
-def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, object], batch_root: Path, cwd: Path, durable: Path, repetitions: int) -> AttemptResult:
+def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, object], batch_root: Path, cwd: Path, durable: Path, repetitions: int, *, prompt_override: str | None = None) -> AttemptResult:
     """Own one Pi attempt end to end: isolated store/DB/fixture, then evaluate."""
     start = time.monotonic()
     try:
@@ -819,7 +775,7 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
             fixture_id = ensure_thesis_fixture(store_dir.resolve())
             if args.get("id") == THESIS_ID_PLACEHOLDER:
                 args["id"] = fixture_id
-        prompt = build_attempt_prompt(tool, args, attempt)
+        prompt = prompt_override if prompt_override is not None else build_attempt_prompt(tool, args, attempt)
         code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
         base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
         ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
@@ -835,16 +791,116 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
             fallback = ""
         return AttemptResult(tool, attempt, False, f"attempt error: {exc}", 124, fallback, elapsed)
 
+def _discovery_before_dispatch(conn: sqlite3.Connection, expected_tool: str) -> bool:
+    """True iff a clean discovery call started before the expected inner dispatch."""
+    try:
+        disc = conn.execute(
+            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools') AND error_type IS NULL"
+        ).fetchone()[0]
+        inner = conn.execute(
+            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (expected_tool,)
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return False
+    return bool(disc) and bool(inner) and str(disc) < str(inner)
 
+
+def evaluate_holdout_attempt(db_path: Path, expected_tool: str) -> tuple[bool, str]:
+    """Holdout-only verdict: unseen prompt must discover-then-dispatch cleanly.
+
+    Ordered lifecycle over one attempt DB: clean discovery (browse OR search)
+    strictly before the expected tool's `call_tool` dispatch, no stray research
+    calls, no harness rejections, terminal telemetry. Legacy `evaluate_attempt`
+    gates stay byte-identical; this never weakens them.
+    """
+    if not db_path.is_file():
+        return False, f"missing recorder DB: {db_path}"
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rejected = list(_rejected_tools(conn))
+            if rejected:
+                return False, f"routing failed: harness-rejected call to {', '.join(rejected)}"
+            unexpected = _unexpected_tools(conn, expected_tool)
+            if unexpected:
+                return False, f"routing failed: unexpected research tool call(s): {', '.join(unexpected)}"
+            dispatched = {r[0] for r in conn.execute("SELECT DISTINCT tool_name FROM tool_calls").fetchall()}
+            bad_discovery = sorted(t for t in DISCOVERY_TOOLS if t in dispatched and t != expected_tool and _tool_success(conn, t, attempt=1) is not None)
+            if bad_discovery:
+                if _row_errors_transient(conn, bad_discovery):
+                    return False, f"transient: discovery tool(s) transient error: {', '.join(bad_discovery)}"
+                return False, f"routing failed: errored discovery tool call(s): {', '.join(bad_discovery)}"
+            browse_ok = _tool_success(conn, "browse_tools", attempt=1) is None
+            search_ok = _tool_success(conn, "search_tools", attempt=1) is None
+            if not (browse_ok or search_ok):
+                return False, "routing failed: no clean browse_tools or search_tools discovery before call_tool"
+            target_problem = _tool_success(conn, expected_tool, attempt=1)
+            if target_problem is not None:
+                if _row_errors_transient(conn, [expected_tool]):
+                    return False, f"transient: target '{expected_tool}' {target_problem} (transient error)"
+                return False, f"target '{expected_tool}' absent ({target_problem})"
+            if expected_tool not in _call_tool_dispatched_names(conn):
+                return False, f"routing failed: '{expected_tool}' not dispatched via call_tool"
+            if not _discovery_before_dispatch(conn, expected_tool):
+                return False, f"routing failed: discovery did not precede call_tool dispatch of '{expected_tool}'"
+            models = conn.execute("SELECT model FROM model_calls").fetchall()
+            if not any((r[0] or "").strip() for r in models):
+                return False, "no model telemetry: model_calls has no non-empty model ID"
+            rows = conn.execute("SELECT status FROM agent_runs").fetchall()
+            if not rows or any((r[0] or "") != "completed" for r in rows):
+                return False, f"agent_runs not completed: {[r[0] for r in rows]}"
+            return True, "pass"
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return False, f"DB read failed: {exc}"
+
+
+def run_holdout(holdout_path: str) -> int:
+    """Discovery holdout: every unseen prompt must browse-or-search then call_tool
+    its expected canonical tool with no stray research calls (attempt-1 gates)."""
+    try:
+        raw = json.loads(Path(holdout_path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"holdout read failed: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(raw, list) or not raw:
+        print(f"holdout {holdout_path} must be a non-empty list", file=sys.stderr)
+        return 1
+    schemas = tool_schemas()
+    batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = Path("data/verify") / batch / "holdout"
+    cwd = Path.cwd()
+    durable = get_data_root()
+    failed = 0
+    for i, case in enumerate(raw):
+        if not isinstance(case, dict) or not isinstance(case.get("prompt"), str) or not isinstance(case.get("expected_tool"), str):
+            print(f"FAIL case {i}: needs string prompt + expected_tool", file=sys.stderr)
+            failed += 1
+            continue
+        tool = str(case["expected_tool"])
+        try:
+            base_args = dict(case["arguments"]) if isinstance(case.get("arguments"), dict) else resolve_arguments(tool, schemas)
+        except LookupError as exc:
+            print(f"FAIL {case['prompt']!r}: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        result = run_verification_attempt(tool, 1, base_args, root, cwd, durable, 1, prompt_override=str(case["prompt"]))
+        db_path = Path(result.db) if result.db else root / tool / "attempt-1" / "runs.sqlite"
+        holdout_ok, holdout_reason = evaluate_holdout_attempt(db_path, tool)
+        print(f"{'PASS' if holdout_ok else 'FAIL'} {case['prompt']!r} -> {tool} ({holdout_reason}) [{result.duration_seconds:.1f}s]")
+        if not holdout_ok:
+            failed += 1
+    print(f"holdout: {len(raw) - failed}/{len(raw)} prompts discover-then-dispatch cleanly")
+    return 0 if not failed else 1
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tool", default=None, help="verify one tool only (debug mode)")
-    parser.add_argument("--routing", action="store_true", help="run the natural routing benchmark only (no live Pi)")
-    parser.add_argument("--routing-filter", default=None, help="run only routing cases containing this substring")
+    parser.add_argument("--holdout", nargs="?", const="evals/holdout_discovery.json", default=None, help="run the discovery holdout only (no live matrix): each prompt must browse-or-search then call_tool its expected tool")
     args = parser.parse_args()
-    if args.routing:
-        return run_routing_benchmark(args.routing_filter)
+    if args.holdout is not None:
+        return run_holdout(args.holdout)
     debug = args.tool is not None
     if debug:
         print("DEBUG MODE — partial verification")
@@ -877,9 +933,12 @@ def main() -> int:
         if args.tool not in describe_names:
             print(f"unknown tool for --tool: {args.tool}", file=sys.stderr)
             return 1
+        if args.tool in _MATRIX_EXCLUDED:
+            print(f"tool '{args.tool}' is not a live-matrix target", file=sys.stderr)
+            return 1
         tool_names = [args.tool]
     else:
-        tool_names = describe_names
+        tool_names = [t for t in describe_names if t not in _MATRIX_EXCLUDED]
 
     pre = check_pre_pi(describe_names)
     if pre:

@@ -10,7 +10,7 @@ Bounded text window of one filing document by accession number for targeted exce
 
 ## Avoid when
 
-- Do not use for what-changed questions; use get_material_events first.
+- Not for what-changed questions.
 
 ## Related tools
 

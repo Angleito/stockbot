@@ -10,7 +10,7 @@ Persisted SEC ingestion coverage and backfill-job status for a form, source, or 
 
 ## Avoid when
 
-- Do not use to retrieve filing content; use get_sec_filing or get_sec_document.
+- Does not retrieve filing content.
 
 ## Related tools
 

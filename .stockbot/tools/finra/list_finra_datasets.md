@@ -10,7 +10,7 @@ Catalog of public FINRA datasets with canonical ids, groups, and ticker/date sup
 
 ## Avoid when
 
-- Do not use to read dataset fields; use describe_finra_dataset instead.
+- Does not return dataset fields or schemas.
 
 ## Related tools
 

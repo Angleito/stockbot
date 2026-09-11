@@ -10,7 +10,7 @@ Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval po
 
 ## Avoid when
 
-- Do not use for merger-deal status; use get_transaction_status instead.
+- Not for merger-deal status.
 
 ## Related tools
 

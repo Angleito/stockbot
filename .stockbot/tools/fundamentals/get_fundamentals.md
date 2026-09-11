@@ -10,7 +10,7 @@ Reported EPS including diluted EPS, dividends, balance-sheet items, or shares ou
 
 ## Avoid when
 
-- Do not use for forward analyst expectations; use get_analyst_estimates instead.
+- Not for forward analyst expectations (estimates of future performance).
 
 ## Related tools
 

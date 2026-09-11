@@ -10,7 +10,7 @@ Resolve a company name, ticker, or CIK to verified SEC entity candidates with CI
 
 ## Avoid when
 
-- Do not use when the exact ticker or CIK is known; call list_sec_filings directly.
+- Unneeded when the exact ticker or CIK is already known.
 
 ## Related tools
 

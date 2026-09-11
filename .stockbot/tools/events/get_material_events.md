@@ -11,9 +11,8 @@ Deterministic 8-K-derived recent event feed with accession citations for what ch
 
 ## Avoid when
 
-- Do not use to explain a price move with news; use search_web for market reaction.
+- Does not cover market reaction or news commentary.
 - Answer from the event feed; do not open filing documents unless the question needs document text.
-- Use the given ticker directly; no entity lookup is needed.
 
 ## Related tools
 

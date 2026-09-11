@@ -11,8 +11,7 @@ FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and
 
 ## Avoid when
 
-- Do not use for ordinary short interest levels; use get_short_interest instead.
-- Call directly for the current list; no FINRA discovery chain is needed.
+- Not for ordinary short interest levels.
 
 ## Related tools
 

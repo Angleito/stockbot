@@ -47,11 +47,14 @@ def tool_schema_name(tool: Mapping[str, object]) -> str:
 
 def get_registry_sets() -> dict[str, set[str]]:
     schemas = {tool_schema_name(t) for t in TOOLS}
-    handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS)
+    # call_tool has no _MODEL_HANDLERS entry by design; the Pi gateway
+    # intercepts it before execute_tool and tail-calls the inner tool once.
+    handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS) | {"call_tool"}
+    # Discovery primitives have no TOOL_DISCOVERY entry like search_tools.
     research = {
         tool_schema_name(t)
         for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))
-    } - {"search_tools"}
+    } - {"search_tools", "browse_tools", "call_tool"}
     return {
         "schemas": schemas,
         "handlers": handlers,

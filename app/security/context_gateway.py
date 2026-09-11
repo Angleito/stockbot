@@ -88,6 +88,8 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "search_tools": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "list_tool_domains": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "describe_tool": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "browse_tools": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "call_tool": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_recent_ownership_filings": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "diff_risk_factors": _envelope("sec", SourceType.FILING, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_financial_statements": _envelope("sec", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),

@@ -12,7 +12,7 @@ Short-position values and figures from FINRA (exact source values for explicit r
 
 ## Avoid when
 
-- Do not use for ordinary analysis; use query_finra or the helper tools.
+- Not for ordinary analysis.
 
 ## Related tools
 
@@ -27,7 +27,7 @@ None
 ## Required arguments
 
 - `dataset` (string): Canonical id group/name (e.g. otcMarket/consolidatedShortInterest). Legacy bare names accepted when unambiguous.
-- `fields` (array): Exact field names to return (e.g. settlementDate, symbolCode, currentShortPositionQuantity for short interest). Call describe_finra_dataset only for unfamiliar datasets.
+- `fields` (array): Exact field names to return (e.g. settlementDate, symbolCode, currentShortPositionQuantity for short interest).
 
 ## Optional arguments
 

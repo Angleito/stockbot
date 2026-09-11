@@ -10,7 +10,7 @@ Ranked most-shorted stocks by short interest as a percent of SEC shares outstand
 
 ## Avoid when
 
-- Do not use for one ticker's short interest; use get_short_interest instead.
+- Not for one ticker's short interest.
 
 ## Related tools
 

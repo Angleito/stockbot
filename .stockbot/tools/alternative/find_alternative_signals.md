@@ -10,8 +10,8 @@ Discovery scan for rising search-term and diffusion signals worth investigating.
 
 ## Avoid when
 
-- Do not use for evidence on one known trend; use get_trend_evidence instead.
-- Do not use for a dated, geography-specific trend question; use get_trend_evidence.
+- Not for evidence on one known trend.
+- Not for a dated, geography-specific trend question.
 
 ## Related tools
 

@@ -10,7 +10,7 @@ Future payment obligations from 10-Q/10-K notes: amounts, horizons, certainty la
 
 ## Avoid when
 
-- Do not use for valuation multiples; use get_valuation_metrics instead.
+- Not for valuation multiples.
 
 ## Related tools
 

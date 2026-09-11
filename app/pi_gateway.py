@@ -46,12 +46,18 @@ from .runtime import ExecutionBudget, ToolResultMeta
 from .storage.runs import get_current_recorder
 from .tool_render import render_tool_result
 from .tools import (
+    TOOLS,
     TOOL_REGISTRY_VERSION,
+    _invalid_args_error,
+    _tool_function,
+    _unknown_tool_error,
     _validate_tool_arguments,
     execute_tool,
     tool_is_permitted,
     tools_for_capabilities,
 )
+
+_CALL_TOOL_FORBIDDEN = frozenset({"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"})
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +284,25 @@ def _execute_pi_tool(
     data_root: str | Path | None = None,
     as_of: str | None = None,
 ) -> dict[str, object]:
+    # Generic dispatch: call_tool validates then tail-calls the inner tool once.
+    # The outer wrapper consumes no budget slot and writes no recorder row.
+    if name == "call_tool":
+        raw_inner = arguments.get("name") if isinstance(arguments, dict) else None
+        raw_inner_args = arguments.get("arguments") if isinstance(arguments, dict) else None
+        if not isinstance(raw_inner, str) or not raw_inner.strip():
+            invalid_outer = _validate_tool_arguments("call_tool", arguments if isinstance(arguments, dict) else {})
+            msg = invalid_outer if invalid_outer is not None else "call_tool: 'name' must be a non-empty string"
+            return _invalid_args_error("call_tool", msg)
+        inner_name = raw_inner.strip()
+        if not isinstance(raw_inner_args, dict):
+            invalid_inner_args = _validate_tool_arguments("call_tool", arguments if isinstance(arguments, dict) else {})
+            msg_inner = invalid_inner_args if invalid_inner_args is not None else "call_tool: 'arguments' must be an object"
+            return _invalid_args_error("call_tool", msg_inner)
+        if inner_name in _CALL_TOOL_FORBIDDEN:
+            return _invalid_args_error("call_tool", f"Tool '{inner_name}' cannot be called via call_tool; call browse_tools to find the exact canonical name, then call_tool with a research tool name")
+        if not any(_tool_function(t).get("name") == inner_name for t in TOOLS):
+            return _unknown_tool_error(inner_name)
+        return _execute_pi_tool(inner_name, raw_inner_args, session, tool_call_id=tool_call_id, protocol_id=protocol_id, bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of)
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
     args_for_hash = (
@@ -294,7 +319,7 @@ def _execute_pi_tool(
     # Gate 2: schema validation + 8KB arg-bytes cap.
     invalid = _validate_tool_arguments(name, arguments)
     if invalid is not None:
-        return {"error": invalid, "error_type": "invalid_tool_arguments"}
+        return _invalid_args_error(name, invalid)
     if len(json.dumps(arguments)) > LOCAL_CONTEXT.tool_policy.max_arguments_bytes:
         return {
             "error": (

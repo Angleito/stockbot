@@ -10,7 +10,7 @@ Sell-side consensus: price targets, ratings, forward EPS and revenue estimates, 
 
 ## Avoid when
 
-- Do not use for reported historical EPS; use get_fundamentals instead.
+- Not for reported historical EPS.
 
 ## Related tools
 

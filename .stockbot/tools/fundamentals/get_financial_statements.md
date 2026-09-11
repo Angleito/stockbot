@@ -10,7 +10,7 @@ Parsed income statement, balance sheet, and cash flow from 10-K or 10-Q filings:
 
 ## Avoid when
 
-- Do not use for a single metric like EPS; use get_fundamentals instead.
+- Not for a single metric like EPS.
 - Answer from the statements; do not re-pull single metrics.
 
 ## Related tools

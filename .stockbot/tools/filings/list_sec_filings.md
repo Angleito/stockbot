@@ -11,7 +11,7 @@ List EDGAR filings for an exact ticker or CIK, filterable by form and date range
 
 ## Avoid when
 
-- Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve identity via find_sec_entities first.
+- Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.
 
 ## Related tools
 

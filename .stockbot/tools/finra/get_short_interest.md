@@ -11,9 +11,9 @@ FINRA consolidated short interest amounts sold short for a ticker: position, day
 
 ## Avoid when
 
-- Do not use for change-over-time trends; use query_finra instead.
+- Not for change-over-time trends.
 - Answer from this result; do not pull positioning context unless asked.
-- Do not use when values or figures are asked for; use get_finra_datapoints instead.
+- Not for exact source values or figures.
 
 ## Related tools
 

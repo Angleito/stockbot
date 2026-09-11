@@ -10,7 +10,7 @@ FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rollin
 
 ## Avoid when
 
-- Do not use for biweekly short interest positions; use get_short_interest.
+- Not for biweekly short interest positions.
 
 ## Related tools
 

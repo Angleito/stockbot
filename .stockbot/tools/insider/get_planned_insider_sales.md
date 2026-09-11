@@ -12,7 +12,7 @@ Planned insider sales from Form 144 notices: proposed sales not yet executed.
 
 ## Avoid when
 
-- Do not use for completed insider trades; use get_insider_activity instead.
+- Not for completed insider trades.
 
 ## Related tools
 

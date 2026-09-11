@@ -12,7 +12,7 @@ Append an operator note or journal entry to a thesis log. Pass the thesis ID as 
 
 ## Avoid when
 
-- Do not use to revise claims; use thesis_refine instead.
+- Not for revising claims.
 
 ## Related tools
 

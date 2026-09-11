@@ -11,7 +11,7 @@ Enrichment of one social-arbitrage candidate with corroboration and exposure gap
 
 ## Avoid when
 
-- Do not use for broad signal discovery; use find_alternative_signals instead.
+- Not for broad signal discovery.
 
 ## Related tools
 

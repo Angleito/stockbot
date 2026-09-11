@@ -13,7 +13,7 @@ from app.tools import DOMAIN_DESCRIPTIONS, TOOLS, TOOL_DISCOVERY_REGISTRY, _tool
 CATALOG_ROOT = Path(__file__).resolve().parent.parent / ".stockbot" / "tools"
 
 # Discovery primitives never get catalog pages.
-EXCLUDED = frozenset({"search_tools", "list_tool_domains", "describe_tool"})
+EXCLUDED = frozenset({"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"})
 
 
 def _yaml_str(value: str) -> str:

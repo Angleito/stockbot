@@ -12,7 +12,7 @@ One FINRA dataset's fields, types, filter values, and supported methods.
 
 ## Avoid when
 
-- Do not use for analyzed briefings; use query_finra instead.
+- Not for analyzed briefings.
 
 ## Related tools
 

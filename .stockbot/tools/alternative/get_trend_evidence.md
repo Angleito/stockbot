@@ -12,7 +12,7 @@ Evidence for one known trend: search interest, rising queries, and geography.
 
 ## Avoid when
 
-- Do not use to discover new signals; use find_alternative_signals instead.
+- Not for discovering new signals.
 
 ## Related tools
 

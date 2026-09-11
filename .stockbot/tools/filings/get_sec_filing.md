@@ -12,7 +12,7 @@ One filing's record by accession number: filer, form, dates, primary document, s
 
 ## Avoid when
 
-- Do not use to discover filings; list or search for the accession first.
+- Does not discover filings; list or search for the accession when unknown.
 - Answer from the filing record; do not retrieve document text unless the question asks for it.
 
 ## Related tools

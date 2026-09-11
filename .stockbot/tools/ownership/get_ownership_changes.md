@@ -11,7 +11,7 @@ Deterministic diffs between a holder's consecutive 13D/G filings: share and perc
 
 ## Avoid when
 
-- Do not use for the current snapshot of holders; use get_beneficial_ownership.
+- Not for the current snapshot of holders.
 
 ## Related tools
 

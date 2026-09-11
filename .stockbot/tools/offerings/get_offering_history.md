@@ -12,7 +12,7 @@ Financing history from S-1/S-3/424B filings: offering terms with source-registra
 
 ## Avoid when
 
-- Do not use for dilution math; use get_dilution_profile instead.
+- Not for dilution math.
 
 ## Related tools
 

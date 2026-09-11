@@ -1,5 +1,7 @@
 [
   "analyze_option_contract",
+  "browse_tools",
+  "call_tool",
   "compare_options",
   "describe_finra_dataset",
   "describe_tool",

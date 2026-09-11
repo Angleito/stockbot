@@ -11,7 +11,7 @@ Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 
 
 ## Avoid when
 
-- Do not use for one company's current holders; use get_beneficial_ownership.
+- Not for one company's current holders.
 
 ## Related tools
 

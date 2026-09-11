@@ -10,7 +10,7 @@ Short-positioning context combining FINRA data with SEC shares outstanding and t
 
 ## Avoid when
 
-- Do not use for short interest over time; use query_finra or get_short_interest.
+- Not for short interest over time.
 
 ## Related tools
 
