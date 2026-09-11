@@ -450,6 +450,43 @@ def test_infra_only_still_fails_but_reports_infra() -> None:
     assert not v.tool_passes(infra_trio)
 
 
+def test_routing_reasons_win_over_mixed_infra_keywords() -> None:
+    assert v.is_routing_failure("routing failed: unexpected research tool call(s): foo (timed out after 30s)")
+    assert not v.is_infra_failure("routing failed: unexpected research tool call(s): foo (timed out after 30s)")
+    assert v.is_routing_failure("target 'get_x' absent (429 Too Many Requests)")
+    assert not v.is_infra_failure("target 'get_x' absent (429 Too Many Requests)")
+    assert not v.is_routing_failure("pi timeout before terminal state")
+    assert not v.is_routing_failure("ratelimit 429 quota exceeded")
+    assert v.is_infra_failure("ratelimit 429 quota exceeded")
+
+
+def test_stderr_429_does_not_reclassify_routing_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def rate_limited(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        return (1, False, "", "Error 429 Too Many Requests", False)
+
+    monkeypatch.setattr(v, "run_pi", rate_limited)
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
+    assert not r.ok
+    assert not r.model_config_failed
+
+
+def test_timeout_still_fails_gate_but_flags_infra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def hung(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        return (0, True, "", "", False)
+
+    monkeypatch.setattr(v, "run_pi", hung)
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
+    assert not r.ok
+    assert r.model_config_failed
+    assert v.is_infra_failure(r.reason) and not v.is_routing_failure(r.reason)
+
+
 def test_run_matrix_returns_sorted_order() -> None:
     def worker(tool: str, attempt: int) -> v.AttemptResult:
         time.sleep(0.03 * (4 - attempt))

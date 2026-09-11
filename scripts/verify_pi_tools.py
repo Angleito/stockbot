@@ -636,11 +636,21 @@ class AttemptResult:
     model_config_failed: bool = False
 
 _INFRA_RE = re.compile(r"ratelimit|rate limit|rate-limit|429|quota|too many requests|timeout|timed out|latency|deadline|temporarily|try again|overloaded|503|502|504", re.IGNORECASE)
+# Explicit routing-failure markers from evaluate_attempt; these take precedence
+# over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
+_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
+
+
+def is_routing_failure(reason: str) -> bool:
+    """True iff reason is an explicit routing failure (never infra)."""
+    return bool(_ROUTING_RE.search(reason or ""))
 
 
 def is_infra_failure(reason: str) -> bool:
     """True iff reason looks like ratelimit/latency infra (still a gate failure, never a pass)."""
-    return bool(_INFRA_RE.search(reason or ""))
+    if not reason or is_routing_failure(reason):
+        return False
+    return bool(_INFRA_RE.search(reason))
 
 
 def tool_passes(attempts: Collection[object]) -> bool:
@@ -688,7 +698,8 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
         code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
         base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
         ok, reason = evaluate_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
-        model_config_failed = base_config_failed or is_infra_failure(reason) or is_infra_failure(err_text)
+        # Routing reasons take precedence: stderr infra keywords never reclassify a routing failure.
+        model_config_failed = base_config_failed or is_infra_failure(reason) or (not is_routing_failure(reason) and is_infra_failure(err_text))
         duration_seconds = time.monotonic() - start
         return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed)
     except Exception as exc:
@@ -798,7 +809,7 @@ def main() -> int:
             failed_tools.append(tool)
             print(f"preserved DBs for {tool}: {root / tool}")
             by_tool = [r for r in ordered if r.tool == tool and not r.ok]
-            if by_tool and all(r.model_config_failed or is_infra_failure(r.reason) for r in by_tool):
+            if by_tool and not any(is_routing_failure(r.reason) for r in by_tool) and all(r.model_config_failed or is_infra_failure(r.reason) for r in by_tool):
                 print(f"infra-only failure for {tool} (still FAIL)")
     passed_tools = len(tool_names) - len(failed_tools)
     coverage = f"{passed_tools}/{len(tool_names)} tools"
