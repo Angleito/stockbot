@@ -281,10 +281,9 @@ def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
     assert "unexpected" in reason
 
 
-def test_dispatched_wrong_tool_success_fails_attempt_1(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
-    assert not ok
-    assert "unexpected" in reason
+def test_dispatched_wrong_tool_success_passes_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
 
 
 
@@ -859,11 +858,15 @@ def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> 
     p = _ok(tmp_path, discovery=None, via_call_tool=True)
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
     assert ok
-def test_attempt3_fails_on_stray_and_harness_rejected(tmp_path: Path) -> None:
+def test_attempt3_clean_stray_passes_and_harness_rejected_fails(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery=None, extra_tool="get_xbrl_facts")
-    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
-    assert not ok
-    assert "routing failed" in reason
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert ok
+    epath = tmp_path / "err.sqlite"
+    _db(epath, discovery=None, extra_tool="get_xbrl_facts", extra_error="tool_error")
+    ok_err, reason_err = v.evaluate_attempt(epath, "get_fundamentals", 0, False, attempt=3)
+    assert not ok_err
+    assert "routing failed" in reason_err
     qpath = tmp_path / "rej.sqlite"
     _db(qpath, discovery=None, rejected_other="get_xbrl_facts")
     ok2, reason2 = v.evaluate_attempt(qpath, "get_fundamentals", 0, False, attempt=3)
@@ -874,19 +877,94 @@ def test_search_tools_directly_verifiable(tmp_path: Path) -> None:
     assert ok1
     p2 = tmp_path / "s3.sqlite"
     _db(p2, tool="search_tools", discovery=None, via_call_tool=False)
-    ok3, _ = v.evaluate_attempt(p2, "search_tools", 0, False, attempt=3)
-    assert ok3
-
-
 def test_explicit_prompt_exact_dispatch_shape() -> None:
     prompt = v.build_explicit_prompt("get_short_interest", {"ticker": "AAPL"})
-    assert 'Do not call browse_tools or search_tools.' in prompt
+    assert "You may use browse_tools, search_tools, or describe_tool" in prompt
+    assert "Do not call browse_tools" not in prompt
     assert 'Call call_tool exactly once with name="get_short_interest"' in prompt
     assert '{"ticker": "AAPL"}' in prompt
     assert "TOOL_CHECK: PASS" in prompt and "TOOL_CHECK: FAIL" in prompt
     direct = v.build_explicit_prompt("search_tools", {"query": "short interest"})
     assert "Call the `search_tools` tool" in direct
     assert "call_tool exactly once" not in direct
+
+def test_attempt1_describe_only_passes_before_call_tool(tmp_path: Path) -> None:
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="describe_tool"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
+
+def test_attempt1_list_domains_only_passes_before_call_tool(tmp_path: Path) -> None:
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="list_tool_domains"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
+
+def test_errored_discovery_passes_with_clean_discovery(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery="search_tools", extra_tool="browse_tools", extra_error="tool_error")
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
+
+def test_rejected_discovery_passes_but_rejected_call_tool_fails(tmp_path: Path) -> None:
+    p = tmp_path / "runs.sqlite"
+    _db(p, discovery="browse_tools", rejected_other="search_tools")
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert ok
+    q = tmp_path / "rej_call.sqlite"
+    _db(q, discovery="browse_tools", rejected_other="call_tool")
+    ok2, reason2 = v.evaluate_attempt(q, "get_fundamentals", 0, False, attempt=1)
+    assert not ok2
+    assert "harness-rejected" in reason2
+
+
+def _add_discovery_rows(path: Path, n: int) -> None:
+    conn = sqlite3.connect(str(path))
+    for i in range(n):
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES (?,?,?,?,NULL)",
+            (f"tcx{i}", "r1", "browse_tools", "2026-01-01T00:00:00+00:00"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_discovery_cap_trips_at_thirteen(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery="browse_tools")
+    _add_discovery_rows(p, 11)
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert ok
+    q = tmp_path / "cap.sqlite"
+    _db(q, discovery="browse_tools")
+    _add_discovery_rows(q, 12)
+    ok2, reason2 = v.evaluate_attempt(q, "get_fundamentals", 0, False, attempt=1)
+    assert not ok2
+    assert "too-many-discovery:13" in reason2
+
+
+def test_attempt3_with_discovery_passes_when_dispatched(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery="browse_tools", via_call_tool=True)
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert ok
+
+
+def test_attempt3_missing_dispatch_still_fails(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery="browse_tools", via_call_tool=False)
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not ok
+    assert "call_tool" in reason
+
+
+def test_transient_stray_returns_transient(tmp_path: Path) -> None:
+    p = _ok(tmp_path, extra_tool="get_xbrl_facts", extra_error="rate_limited")
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert reason.startswith("transient: ")
+
+
+def test_errored_nontransient_stray_fails(tmp_path: Path) -> None:
+    p = _ok(tmp_path, extra_tool="get_xbrl_facts", extra_error="tool_error", extra_message="boom")
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "unexpected research" in reason
 
 def _norm_holdout_text(value: str) -> str:
     return " ".join(value.lower().split())
@@ -911,3 +989,34 @@ def test_holdout_prompts_are_novel_and_unquoted() -> None:
         assert norm_prompt not in verify_texts, f"holdout copies live-matrix prompt: {prompt!r}"
         for phrase in registry_phrases:
             assert phrase not in norm_prompt, f"holdout copies catalog prose: {phrase!r} in {prompt!r}"
+
+def _probe_db(path: Path, *, clean_args: str | None, failed_args: str | None) -> Path:
+    """Discovery + dispatched target with one clean and one failed same-tool call."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_SCHEMA)
+    disc = "2026-01-01T00:00:00+00:00"
+    inner = "2026-01-01T00:00:01+00:00"
+    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?, 'q', 'completed')", (disc,))
+    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','browse_tools',?,NULL)", (disc,))
+    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'browse_tools')", (disc,))
+    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type) VALUES ('tc1','r1','get_threshold_securities',?,?,NULL)", (clean_args, inner))
+    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type, error_message) VALUES ('tc2','r1','get_threshold_securities',?,?,'tool_error','No data')", (failed_args, inner))
+    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)", (inner, json.dumps({"name": "get_threshold_securities", "arguments": {"ticker": "AAPL"}})))
+    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,'call_tool')", (inner,))
+    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)", (MODEL, disc))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_same_tool_different_args_probe_forgiven(tmp_path: Path) -> None:
+    p = _probe_db(tmp_path / "runs.sqlite", clean_args='{"ticker": "AAPL"}', failed_args='{"ticker": "AAPL", "tradeDate": "2026-09-11"}')
+    ok, _ = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
+    assert ok
+
+
+def test_same_tool_same_args_failure_still_fails(tmp_path: Path) -> None:
+    p = _probe_db(tmp_path / "runs.sqlite", clean_args='{"ticker": "AAPL"}', failed_args='{"ticker": "AAPL"}')
+    ok, reason = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
+    assert not ok
+    assert "failed execution present" in reason

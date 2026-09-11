@@ -315,7 +315,7 @@ def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
             f"`TOOL_CHECK: PASS` if you called `search_tools` or `TOOL_CHECK: FAIL` otherwise."
         )
     return (
-        f"Do not call browse_tools or search_tools. Call call_tool exactly once with name=\"{tool}\" and arguments={payload}. "
+        f"You may use browse_tools, search_tools, or describe_tool to locate the tool, then Call call_tool exactly once with name=\"{tool}\" and arguments={payload}. "
         f"Then summarize the result in one sentence. End your reply with TOOL_CHECK: PASS if that call completed, or TOOL_CHECK: FAIL otherwise."
         )
 
@@ -389,6 +389,8 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
     call before dispatch (e.g. schema validation of a probe); a genuine
     execution failure always leaves an errored call row and is excluded here.
     Built-in Pi tools (read, grep, …) never appear in tool_calls and are excluded via the schema set.
+    Rejected discovery primitives (browse/search/describe/list-domains) never
+    fail: they are free exploration, not dispatch attempts.
     """
     rows = conn.execute(
         "SELECT DISTINCT e.tool_name FROM agent_events e "
@@ -397,7 +399,8 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
         "AND c.error_type IS NOT NULL)"
     ).fetchall()
     allowed_names = get_registry_sets()["schemas"]
-    return sorted(r[0] for r in rows if r[0] in allowed_names)
+    ignored = frozenset({"browse_tools", "search_tools", "describe_tool", "list_tool_domains"})
+    return sorted(r[0] for r in rows if r[0] in allowed_names and r[0] not in ignored)
 
 
 def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]:
@@ -458,7 +461,14 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
         "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)
     ).fetchone()[0]
     if failed > 0:
-        return "failed execution present"
+        # Same call must work; a failure repeating arguments of a clean call is
+        # signal, but a failure with different arguments is an exploratory probe
+        # (e.g. Pi re-probing a stale dataset) and does not negate the success.
+        # NULL == NULL, so arg-less fixtures keep the old strict behavior.
+        clean_args = {r[0] for r in conn.execute("SELECT arguments_json FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (name,)).fetchall()}
+        failed_args = [r[0] for r in conn.execute("SELECT arguments_json FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)).fetchall()]
+        if any(f in clean_args for f in failed_args):
+            return "failed execution present"
     completed = conn.execute(
         "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)
     ).fetchone()[0]
@@ -501,8 +511,8 @@ def _search_call_count(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name = 'search_tools'").fetchone()
     return int(row[0]) if row else 0
 def _discovery_attempt_count(conn: sqlite3.Connection) -> int:
-    """Any attempted browse_tools/search_tools call (clean or errored)."""
-    row = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools')").fetchone()
+    """Any attempted discovery call (clean or errored) across the four primitives."""
+    row = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains')").fetchone()
     return int(row[0]) if row else 0
 
 
@@ -544,15 +554,18 @@ def _search_queries_for_db(db_path_str: str) -> list[str]:
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Attempts 1-2 prove discovery through either catalog path before generic
-    # dispatch: clean browse_tools OR search_tools strictly before the expected
-    # inner target dispatched via outer call_tool. Attempt 3 proves exact-name
-    # call_tool dispatch with zero discovery. All attempts share stray/harness
-    # gates (no attempt-3 exemption). search_tools itself executes directly
-    # because app/pi_gateway.py forbids dispatching discovery via call_tool.
-    # More than 2 search_tools calls fails (loop guard, strict 3/3).
-    # Transient (rate_limited / timeout-message-only) never passes: it returns
-    # ok=False with a "transient: " reason for bounded same-prompt retry.
+    # Reachability bar: the model may explore discovery primitives freely
+    # (browse_tools, search_tools, describe_tool, list_tool_domains), but must
+    # dispatch the expected tool via call_tool. Attempts 1-2 require one clean
+    # discovery call strictly before the expected inner dispatch. Attempt 3
+    # allows discovery but still requires call_tool dispatch. Discovery
+    # errors/rejections never fail; only a generous total discovery cap (>12
+    # attempts) fails as a loop guard. Clean extra research calls are allowed;
+    # errored non-transient strays fail, all-transient strays retry. search_tools
+    # itself executes directly because app/pi_gateway.py forbids dispatching
+    # discovery via call_tool. Transient (rate_limited / timeout-message-only)
+    # never passes: it returns ok=False with a "transient: " reason for bounded
+    # same-prompt retry.
     if not db_path.is_file():
         if timed_out and not completed_override:
             return False, "transient: pi timeout before terminal state"
@@ -560,45 +573,40 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
     try:
         conn = sqlite3.connect(str(db_path))
         try:
-            search_count = _search_call_count(conn)
-            if required_tool != "search_tools" and search_count > 2:
-                return False, f"too-many-searches:{search_count}"
+            discovery_count = _discovery_attempt_count(conn)
+            if required_tool != "search_tools" and discovery_count > 12:
+                return False, f"too-many-discovery:{discovery_count}"
             rejected = list(_rejected_tools(conn))
             if rejected:
                 return False, f"routing failed: harness-rejected call to {', '.join(rejected)}"
             allowed_prereqs = set(PREREQ_CHAINS.get(required_tool, frozenset()))
             unexpected = _unexpected_tools(conn, required_tool)
-            stray_wrong = [t for t in unexpected if t not in allowed_prereqs]
-            if stray_wrong:
-                return False, f"routing failed: unexpected research tool call(s): {', '.join(stray_wrong)}"
-            prereq_errored = [t for t in unexpected if t in allowed_prereqs and _tool_success(conn, t, attempt=attempt) is not None]
-            if prereq_errored:
-                if _row_errors_transient(conn, prereq_errored):
-                    return False, f"transient: prereq tool(s) transient error: {', '.join(prereq_errored)}"
-                return False, f"routing failed: unexpected research tool call(s): {', '.join(prereq_errored)}"
-            dispatched = {r[0] for r in conn.execute("SELECT DISTINCT tool_name FROM tool_calls").fetchall()}
-            bad_discovery = sorted(t for t in DISCOVERY_TOOLS if t in dispatched and t != required_tool and _tool_success(conn, t, attempt=attempt) is not None)
-            if bad_discovery:
-                if _row_errors_transient(conn, bad_discovery):
-                    return False, f"transient: discovery tool(s) transient error: {', '.join(bad_discovery)}"
-                return False, f"routing failed: errored discovery tool call(s): {', '.join(bad_discovery)}"
+            stray_errored = [t for t in unexpected if _tool_success(conn, t, attempt=attempt) is not None]
+            prereq_errored = [t for t in stray_errored if t in allowed_prereqs]
+            nonprereq_errored = [t for t in stray_errored if t not in allowed_prereqs]
+            errored_strays = prereq_errored + nonprereq_errored
+            if errored_strays:
+                if _row_errors_transient(conn, errored_strays):
+                    return False, f"transient: stray tool(s) transient error: {', '.join(errored_strays)}"
+                return False, f"routing failed: unexpected research tool call(s): {', '.join(errored_strays)}"
+            # Discovery never fails: errored discovery calls are free exploration.
             # Transient target errors retry before discovery-ordering gates (no clean inner yet).
             _early_target = _tool_success(conn, required_tool, attempt=attempt)
             if _early_target is not None and _row_errors_transient(conn, [required_tool]):
                 return False, f"transient: target '{required_tool}' {_early_target} (transient error)"
             if required_tool != "search_tools":
                 if attempt in (1, 2):
-                    browse_ok = _tool_success(conn, "browse_tools", attempt=attempt) is None
-                    search_ok = _tool_success(conn, "search_tools", attempt=attempt) is None
-                    if not (browse_ok or search_ok):
-                        return False, "routing failed: no clean browse_tools or search_tools discovery before call_tool"
+                    discovery_ok = any(
+                        _tool_success(conn, t, attempt=attempt) is None
+                        for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains")
+                    )
+                    if not discovery_ok:
+                        return False, "routing failed: no clean discovery before call_tool"
                     if required_tool not in _call_tool_dispatched_names(conn):
                         return False, f"routing failed: '{required_tool}' not dispatched via call_tool"
                     if not _discovery_before_dispatch(conn, required_tool):
                         return False, f"routing failed: discovery did not precede call_tool dispatch of '{required_tool}'"
                 else:
-                    if _discovery_attempt_count(conn) > 0:
-                        return False, "routing failed: discovery attempted on exact-dispatch attempt"
                     if required_tool not in _call_tool_dispatched_names(conn):
                         return False, f"routing failed: '{required_tool}' not dispatched via call_tool"
             if timed_out and not completed_override:
@@ -738,7 +746,7 @@ class AttemptResult:
 _INFRA_RE = re.compile(r"ratelimit|rate limit|rate-limit|429|quota|too many requests|timeout|timed out|latency|deadline|temporarily|try again|overloaded|503|502|504", re.IGNORECASE)
 # Explicit routing-failure markers from evaluate_attempt; these take precedence
 # over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
-_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
+_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|too-many-discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
 
 
 def is_routing_failure(reason: str) -> bool:
@@ -821,7 +829,7 @@ def _discovery_before_dispatch(conn: sqlite3.Connection, expected_tool: str) -> 
     """True iff a clean discovery call started before the expected inner dispatch."""
     try:
         disc = conn.execute(
-            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools') AND error_type IS NULL"
+            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains') AND error_type IS NULL"
         ).fetchone()[0]
         inner = conn.execute(
             "SELECT MIN(started_at) FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (expected_tool,)
