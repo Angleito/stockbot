@@ -139,7 +139,7 @@ tools:
     summary: "Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown."
   - name: get_offering_history
     domain: offerings
-    summary: "Financing history from S-1/S-3/424B filings: offering terms with source-registration links."
+    summary: "Offering history from S-1/S-3/424B filings: offering terms with source-registration links."
   - name: get_beneficial_ownership
     domain: ownership
     summary: "Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers."

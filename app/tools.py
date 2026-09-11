@@ -2200,16 +2200,16 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_offering_history": ToolDiscovery(
         domain="offerings",
-        summary="Financing history from S-1/S-3/424B filings: offering terms with source-registration links.",
-        use_when=("Reviewing past offerings, shelf registrations, or IPO terms for a ticker.",),
-        avoid_when=("Not for dilution math.",),
+        summary="Offering history from S-1/S-3/424B filings: offering terms with source-registration links.",
+        use_when=("Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.",),
+        avoid_when=("Not for dilution math (get_dilution_profile).",),
         related_tools=("get_dilution_profile",),
     ),
     "get_dilution_profile": ToolDiscovery(
         domain="offerings",
         summary="Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown.",
         use_when=("Quantifying share-count impact from offerings, converts, or warrants.",),
-        avoid_when=("Not for offering-terms history.",),
+        avoid_when=("Not for offering-terms history (get_offering_history).",),
         related_tools=("get_offering_history",),
     ),
     "get_governance_events": ToolDiscovery(

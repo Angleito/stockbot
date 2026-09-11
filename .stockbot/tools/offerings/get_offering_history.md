@@ -2,15 +2,15 @@
 
 Domain: offerings
 
-Financing history from S-1/S-3/424B filings: offering terms with source-registration links.
+Offering history from S-1/S-3/424B filings: offering terms with source-registration links.
 
 ## Use when
 
-- Reviewing past offerings, shelf registrations, or IPO terms for a ticker.
+- Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.
 
 ## Avoid when
 
-- Not for dilution math.
+- Not for dilution math (get_dilution_profile).
 
 ## Related tools
 

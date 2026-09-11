@@ -10,7 +10,7 @@ Deterministic dilution math for diluted shareholders: inputs, formula, and sourc
 
 ## Avoid when
 
-- Not for offering-terms history.
+- Not for offering-terms history (get_offering_history).
 
 ## Related tools
 
