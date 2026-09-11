@@ -40,6 +40,9 @@ EXTENSION = ".pi/extensions/stockbot.ts"
 # 120s per-tool-call cliff still bounds any single hung handler.
 TIMEOUT_S = 300
 DEFAULT_REPETITIONS = 3
+TRANSIENT_ERROR_TYPES = frozenset({"rate_limited"})
+_TRANSIENT_MESSAGE_RE = re.compile(r"(?i)\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout|unreachable")
+TRANSIENT_RETRY_CAP = 2
 DEFAULT_CONCURRENCY = 6
 POLL_S = 2
 THESIS_ID_PLACEHOLDER = "thesis-placeholder"
@@ -65,10 +68,17 @@ def get_concurrency() -> int:
     return value
 
 
-def attempt_dirs(batch_root: Path, tool: str, attempt: int) -> tuple[Path, Path]:
+def attempt_dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> tuple[Path, Path]:
     """Per-attempt recorder DB and Stockbot store; keeps attempts mutually isolated."""
-    attempt_dir = batch_root / tool / f"attempt-{attempt}"
+    if retry:
+        attempt_dir = batch_root / tool / f"attempt-{attempt}-retry-{retry}"
+    else:
+        attempt_dir = batch_root / tool / f"attempt-{attempt}"
     return attempt_dir / "runs.sqlite", attempt_dir / "store"
+
+
+TRANSIENT_RETRIES: list[dict[str, object]] = []
+
 
 def remove_successful_attempt_dirs(batch_root: Path, tool: str, tool_recs: list[dict[str, object]]) -> None:
     """Delete whole attempt dirs for a fully-successful tool; prune tool dir when empty."""
@@ -78,6 +88,8 @@ def remove_successful_attempt_dirs(batch_root: Path, tool: str, tool_recs: list[
             continue
         attempt_dir = Path(db_value).parent
         if not attempt_dir.name.startswith("attempt-"):
+            continue
+        if "-retry-" in attempt_dir.name:
             continue
         shutil.rmtree(attempt_dir, ignore_errors=True)
     try:
@@ -260,62 +272,94 @@ class _RoutingCase(TypedDict):
     expected_first_search_any: list[str]
     forbidden_before_expected: list[str]
 
-# Natural routing benchmark (initial-routing gate only; deep-research turns may
-# search again). Deterministic: one _search_tools call per case counts as the
-# first search; resolving there with no forbidden tool ranked above the first
-# expected tool = 1 search. Missing expected = 3 (fails the <3 gate).
-# ponytail: deterministic scorer check, not live-Pi sessions; the live per-tool
-# wiring suite above already covers Pi dispatch. Graduate to session capture if
-# first-search routing passes here but live traces still cycle.
-ROUTING_CASES: list[_RoutingCase] = [
-    {"question": "why did GPRO shoot up the past 30 days?", "expected_first_search_any": ["search_web", "get_material_events"], "forbidden_before_expected": ["get_valuation_metrics", "get_offering_history", "get_recent_ownership_filings"]},
-    {"question": "What does Apple earn per share?", "expected_first_search_any": ["get_fundamentals"], "forbidden_before_expected": ["search_web", "get_beneficial_ownership"]},
-    {"question": "Is Apple stock cheap or expensive right now?", "expected_first_search_any": ["get_valuation_metrics"], "forbidden_before_expected": ["get_offering_history", "get_recent_ownership_filings"]},
-    {"question": "Who owns more than 5% of Apple?", "expected_first_search_any": ["get_beneficial_ownership"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "What insider purchases and sales has Apple reported?", "expected_first_search_any": ["get_insider_activity"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "What big events has Apple disclosed since 2024-01-01?", "expected_first_search_any": ["get_material_events"], "forbidden_before_expected": ["get_valuation_metrics", "get_offering_history"]},
-    {"question": "List Apple recent SEC filings.", "expected_first_search_any": ["list_sec_filings"], "forbidden_before_expected": ["get_valuation_metrics", "thesis_show"]},
-    {"question": "What is Apple current short interest?", "expected_first_search_any": ["get_short_interest"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "Track my investment thesis on NVDA AI demand staying strong.", "expected_first_search_any": ["thesis_create"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "What trends were picked up in the US around September 1st?", "expected_first_search_any": ["get_trend_evidence"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "What patents has Apple filed lately?", "expected_first_search_any": ["search_company_patents"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-    {"question": "What is California unemployment rate?", "expected_first_search_any": ["get_macro_context"], "forbidden_before_expected": ["get_valuation_metrics", "get_xbrl_facts"]},
-    {"question": "Has Apple had any board or governance changes?", "expected_first_search_any": ["get_governance_events"], "forbidden_before_expected": ["get_valuation_metrics", "search_web"]},
-]
+# Deterministic top-3 routing gate derived from VERIFY_CASES (2 natural V1/V2
+# questions per tool). No hand-curated list: every verify case must rank its
+# intended target in matches[:MAX_ACTIVE_RESEARCH_TOOLS]. Forbidden-before-target
+# lists from the legacy benchmark are retained where the same question text
+# recurs; all other cases use an empty forbidden list plus the rank check.
+# Cap shared with the extension activation path
+# (.pi/extensions/stockbot.ts MAX_ACTIVE_RESEARCH_TOOLS): one search activates
+# at most the top-3 ranked matches, so the gate asserts the same slice.
+# ponytail: deterministic scorer check, not live-Pi sessions.
+MAX_ACTIVE_RESEARCH_TOOLS = 3
+_LEGACY_FORBIDDEN: dict[str, list[str]] = {
+    "why did GPRO shoot up the past 30 days?": ["get_valuation_metrics", "get_offering_history", "get_recent_ownership_filings"],
+    "What does Apple earn per share?": ["search_web", "get_beneficial_ownership"],
+    "Is Apple stock cheap or expensive right now?": ["get_offering_history", "get_recent_ownership_filings"],
+    "Who owns more than 5% of Apple?": ["get_valuation_metrics", "search_web"],
+    "What insider purchases and sales has Apple reported?": ["get_valuation_metrics", "search_web"],
+    "What big events has Apple disclosed since 2024-01-01?": ["get_valuation_metrics", "get_offering_history"],
+    "List Apple recent SEC filings.": ["get_valuation_metrics", "thesis_show"],
+    "What is Apple current short interest?": ["get_valuation_metrics", "search_web"],
+    "Track my investment thesis on NVDA AI demand staying strong.": ["get_valuation_metrics", "search_web"],
+    "What trends were picked up in the US around September 1st?": ["get_valuation_metrics", "search_web"],
+    "What patents has Apple filed lately?": ["get_valuation_metrics", "search_web"],
+    "What is California unemployment rate?": ["get_valuation_metrics", "get_xbrl_facts"],
+    "Has Apple had any board or governance changes?": ["get_valuation_metrics", "search_web"],
+}
+
+
+def build_routing_cases() -> list[_RoutingCase]:
+    """Derive routing cases from VERIFY_CASES: 2 natural prompts per tool.
+
+    The discovery triple is permanently active and never search-routed, so its
+    cases are excluded (the scorer only ranks TOOL_DISCOVERY_REGISTRY)."""
+    cases: list[_RoutingCase] = []
+    for tool, case in VERIFY_CASES.items():
+        if tool in DISCOVERY_TOOLS:
+            continue
+        for question in (case["natural_v1"], case["natural_v2"]):
+            if not question:
+                continue
+            cases.append(
+                {
+                    "question": question,
+                    "expected_first_search_any": [tool],
+                    "forbidden_before_expected": list(_LEGACY_FORBIDDEN.get(question, [])),
+                }
+            )
+    expected_count = 2 * (len(VERIFY_CASES) - len(DISCOVERY_TOOLS))
+    if len(cases) != expected_count:
+        raise AssertionError(f"routing cases {len(cases)} != 2 per routable tool ({expected_count}); add the missing natural_v1/v2")
+    return cases
 
 
 def run_routing_benchmark(question_filter: str | None = None) -> int:
-    """First-search routing gate over ROUTING_CASES. Returns 0 when every case
-    resolves on the first search with no forbidden tool ranked above the first
-    expected tool; 1 otherwise. Fails any case needing 3+ searches."""
+    """Top-3 routing gate over VERIFY_CASES-derived prompts. Returns 0 when every
+    case ranks its intended target in matches[:MAX_ACTIVE_RESEARCH_TOOLS] with no
+    forbidden tool above it; 1 otherwise."""
     from app.tools import _search_tools
 
     failed = 0
     ran = 0
-    for case in ROUTING_CASES:
+    for case in build_routing_cases():
         if question_filter and question_filter.lower() not in case["question"].lower():
             continue
         ran += 1
         result = _search_tools({"query": case["question"]}, "benchmark")
         matches = result.get("matches")
-        names = [m["name"] for m in matches if isinstance(m, dict) and isinstance(m.get("name"), str)] if isinstance(matches, list) else []
-        expected_ranks = [names.index(e) for e in case["expected_first_search_any"] if e in names]
+        names: list[str] = [m["name"] for m in matches if isinstance(m, dict) and isinstance(m.get("name"), str)] if isinstance(matches, list) else []
+        top3 = names[:MAX_ACTIVE_RESEARCH_TOOLS]
+        expected = case["expected_first_search_any"]
+        expected_ranks = [names.index(e) for e in expected if e in names]
         if not expected_ranks:
-            print(f"FAIL {case['question'][:60]!r} -> {names} (expected {case['expected_first_search_any']} absent; searches_needed=3)")
+            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank=absent")
             failed += 1
             continue
         first_expected = min(expected_ranks)
         stray = [n for n in names[:first_expected] if n in case["forbidden_before_expected"]]
-        searches_needed = 1
-        if stray:
-            print(f"FAIL {case['question'][:60]!r} -> {names} (forbidden {stray} before expected; searches_needed=3)")
+        if first_expected >= MAX_ACTIVE_RESEARCH_TOOLS:
+            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank={first_expected}")
+            failed += 1
+        elif stray:
+            print(f"FAIL {case['question']!r} expected {expected[0]!r} top-3 {top3} rank={first_expected} (forbidden {stray} before expected)")
             failed += 1
         else:
-            print(f"PASS {case['question'][:60]!r} -> {names} (searches_needed={searches_needed})")
+            print(f"PASS {case['question']!r} -> {top3} rank={first_expected}")
     if not ran:
         print("routing benchmark: no cases matched filter", file=sys.stderr)
         return 1
-    print(f"routing benchmark: {ran - failed}/{ran} cases resolve on first search")
+    print(f"routing benchmark: {ran - failed}/{ran} cases rank top-{MAX_ACTIVE_RESEARCH_TOOLS}")
     return 0 if not failed else 1
 
 def tool_schemas() -> dict[str, dict[str, object]]:
@@ -469,46 +513,127 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
     return None
 
 
+def _row_errors_transient(conn: sqlite3.Connection, names: Collection[str]) -> bool:
+    """True iff `names` have errored calls and every one is transient evidence."""
+    name_list = list(names)
+    if not name_list:
+        return False
+    placeholders = ",".join("?" for _ in name_list)
+    rows = conn.execute(
+        f"SELECT error_type, error_message FROM tool_calls WHERE tool_name IN ({placeholders}) AND error_type IS NOT NULL",
+        tuple(name_list),
+    ).fetchall()
+    if not rows:
+        return False
+    for error_type, error_message in rows:
+        if (error_type or "") in TRANSIENT_ERROR_TYPES:
+            continue
+        if _TRANSIENT_MESSAGE_RE.search(error_message or ""):
+            continue
+        return False
+    return True
+
+
+def _search_call_count(conn: sqlite3.Connection) -> int:
+    """Number of search_tools invocations in this attempt's transcript."""
+    row = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name = 'search_tools'").fetchone()
+    return int(row[0]) if row else 0
+
+
+def _search_queries(conn: sqlite3.Connection) -> list[str]:
+    """Ordered search_tools query strings for failure diagnostics."""
+    queries: list[str] = []
+    rows = conn.execute(
+        "SELECT arguments_json FROM tool_calls WHERE tool_name = 'search_tools' ORDER BY started_at, tool_call_id"
+    ).fetchall()
+    for (raw,) in rows:
+        try:
+            args: dict[str, object] = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(args, dict):
+            continue
+        query_value = args.get("query")
+        if isinstance(query_value, str):
+            queries.append(query_value)
+    return queries
+
+
+def _search_queries_for_db(db_path_str: str) -> list[str]:
+    """Read ordered search queries from a finished attempt DB; [] when unavailable."""
+    if not db_path_str:
+        return []
+    db_path = Path(db_path_str)
+    if not db_path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return _search_queries(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Routing benchmark: attempts 1-2 allow a clean discovery-triple call, a clean
-    # required-target call, and the target's registry-derived prerequisites
-    # (PREREQ_CHAINS from TOOL_DISCOVERY_REGISTRY metadata, per-edge app/tools.py
-    # description citations enforced by
-    # tests/test_verify_pi_tools.py::test_prereq_chains_are_documented_in_descriptions).
+    # Routing benchmark: attempts 1-2 allow a clean discovery-triple call and a clean
+    # required-target call only (PREREQ_CHAINS is empty: no prerequisite edges remain
+    # in TOOL_DISCOVERY_REGISTRY). More than 2 search_tools calls fails the attempt
+    # on every attempt (strict 3/3, no exemption).
     # Any other Stockbot tool fails, whether harness-rejected pre-dispatch,
     # dispatched-and-errored, or dispatched-and-successful. A called but unclean
-    # discovery tool also fails. Attempt 3 uses an explicit recovery prompt under
-    # the same presence checks, exempt from both stray-tool gates. All three
-    # attempts must pass (see the all-ok gate in main).
-    if timed_out and not completed_override:
-        return False, "pi timeout"
-    if exit_code != 0 and not completed_override:
-        return False, f"pi exit {exit_code}"
+    # discovery tool also fails unless transient-only. Attempt 3 uses an explicit
+    # recovery prompt under the same presence checks, exempt from both
+    # stray-tool gates. All three attempts must pass (see the all-ok gate in main).
+    # Transient (rate_limited / timeout-message-only) never passes: it returns
+    # ok=False with a "transient: " reason for bounded same-prompt retry.
     if not db_path.is_file():
+        if timed_out and not completed_override:
+            return False, f"transient: missing recorder DB: {db_path}"
         return False, f"missing recorder DB: {db_path}"
     try:
         conn = sqlite3.connect(str(db_path))
         try:
+            search_count = _search_call_count(conn)
+            # Searching IS the contract for the search_tools target itself.
+            if required_tool != "search_tools" and search_count > 2:
+                return False, f"too-many-searches:{search_count}"
             if attempt in (1, 2):
                 rejected = list(_rejected_tools(conn))
                 if rejected:
                     return False, f"routing failed: harness-rejected call to {', '.join(rejected)}"
                 allowed_prereqs = set(PREREQ_CHAINS.get(required_tool, frozenset()))
-                stray_unexpected = [t for t in _unexpected_tools(conn, required_tool) if t not in allowed_prereqs or _tool_success(conn, t, attempt=attempt) is not None]
-                if stray_unexpected:
-                    return False, f"routing failed: unexpected research tool call(s): {', '.join(stray_unexpected)}"
+                unexpected = _unexpected_tools(conn, required_tool)
+                stray_wrong = [t for t in unexpected if t not in allowed_prereqs]
+                if stray_wrong:
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(stray_wrong)}"
+                prereq_errored = [t for t in unexpected if t in allowed_prereqs and _tool_success(conn, t, attempt=attempt) is not None]
+                if prereq_errored:
+                    if _row_errors_transient(conn, prereq_errored):
+                        return False, f"transient: prereq tool(s) transient error: {', '.join(prereq_errored)}"
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(prereq_errored)}"
                 dispatched = {r[0] for r in conn.execute("SELECT DISTINCT tool_name FROM tool_calls").fetchall()}
                 bad_discovery = sorted(t for t in DISCOVERY_TOOLS if t in dispatched and t != required_tool and _tool_success(conn, t, attempt=attempt) is not None)
                 if bad_discovery:
+                    if _row_errors_transient(conn, bad_discovery):
+                        return False, f"transient: discovery tool(s) transient error: {', '.join(bad_discovery)}"
                     return False, f"routing failed: errored discovery tool call(s): {', '.join(bad_discovery)}"
+            if timed_out and not completed_override:
+                return False, "transient: pi timeout before terminal state"
+            if exit_code != 0 and not completed_override:
+                return False, f"pi exit {exit_code}"
             if required_tool not in DISCOVERY_TOOLS:
                 search_problem = _tool_success(conn, "search_tools", attempt=attempt)
                 if search_problem is not None:
+                    if _row_errors_transient(conn, ["search_tools"]):
+                        return False, f"transient: search_tools {search_problem} (transient error)"
                     return False, f"routing failed: search_tools absent ({search_problem})"
             target_problem = _tool_success(conn, required_tool, attempt=attempt)
             if target_problem is not None:
+                if _row_errors_transient(conn, [required_tool]):
+                    return False, f"transient: target '{required_tool}' {target_problem} (transient error)"
                 return False, f"target '{required_tool}' absent ({target_problem})"
             # Pi configuration is authoritative for which model runs; assert presence only, never an exact ID.
             models = conn.execute("SELECT model FROM model_calls").fetchall()
@@ -638,7 +763,7 @@ class AttemptResult:
 _INFRA_RE = re.compile(r"ratelimit|rate limit|rate-limit|429|quota|too many requests|timeout|timed out|latency|deadline|temporarily|try again|overloaded|503|502|504", re.IGNORECASE)
 # Explicit routing-failure markers from evaluate_attempt; these take precedence
 # over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
-_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
+_ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)
 
 
 def is_routing_failure(reason: str) -> bool:
@@ -782,6 +907,7 @@ def main() -> int:
         return 1
     jobs = expand_jobs(tool_names, repetitions)
     verify_start = time.monotonic()
+    del TRANSIENT_RETRIES[:]
     def _worker(t: str, n: int) -> AttemptResult:
         return run_verification_attempt(t, n, case_args[t], root, cwd, durable, repetitions)
     ordered = run_matrix(jobs, _worker, concurrency)
@@ -792,7 +918,10 @@ def main() -> int:
         total += 1
         if r.ok:
             passed += 1
-        results[r.tool].append({"attempt": r.attempt, "ok": r.ok, "reason": r.reason, "exit": r.exit, "db": r.db, "duration_seconds": r.duration_seconds})
+        rec: dict[str, object] = {"attempt": r.attempt, "ok": r.ok, "reason": r.reason, "exit": r.exit, "db": r.db, "duration_seconds": r.duration_seconds}
+        if not r.ok:
+            rec["searchQueries"] = _search_queries_for_db(r.db)
+        results[r.tool].append(rec)
         print(f"{r.tool} attempt {r.attempt}/{repetitions}: {'PASS' if r.ok else 'FAIL'} ({r.reason}) [{r.duration_seconds:.1f}s]")
         if r.model_config_failed:
             print("PI MODEL CONFIGURATION FAILED", file=sys.stderr)
@@ -820,7 +949,7 @@ def main() -> int:
     print(f"RESULT: {'PASS' if not failed_tools else 'FAIL'}")
     if failed_tools:
         print(f"failed tools: {failed_tools}")
-    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "concurrency": concurrency, "wall_seconds": wall}
+    summary = {"git_sha": sha, "tool_count": len(tool_names), "repetitions": repetitions, "results": results, "transient_retries": list(TRANSIENT_RETRIES), "concurrency": concurrency, "wall_seconds": wall}
     (root / "summary.json").parent.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary, indent=2))
     return 0 if not failed_tools else 1

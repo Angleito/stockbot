@@ -17,10 +17,11 @@ Index of documents and exhibits attached to one filing, looked up by accession n
 
 - get_sec_filing
 - get_sec_document
+- list_sec_filings
 
 ## Prerequisites
 
-- list_sec_filings
+None
 
 ## Required arguments
 

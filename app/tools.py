@@ -131,7 +131,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Retrieve via get_sec_filing, list_sec_documents, or get_sec_document.",
+            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Search directly; do not call other filing tools first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -158,7 +158,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Does NOT search company names. If only a company, person, or domain is known, call find_sec_entities or search_sec_filings first, verify identity, then call with identifier.",
+            "description": "Lists SEC EDGAR filings for an exact ticker or CIK; Does NOT search company names. Call directly with the ticker (Apple: AAPL). Do not call find_sec_entities first for a named public company.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -177,7 +177,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_sec_relationships",
-            "description": "Ownership and transaction relationships for an entity (CIK, ticker, or entity id), both directions: 13D/G beneficial owners, 13F manager holdings (either direction), insider issuer/owner links, transaction filer/target/acquirer, offering filer/registrant, plus verified workflow links and observed mentions. Mentions never flatten into verified links; transaction status stays unknown without closing evidence.",
+            "description": "Ownership and transaction relationships for an entity (CIK, ticker, or entity id), both directions: 13D/G beneficial owners, 13F manager holdings (either direction), insider issuer/owner links, transaction filer/target/acquirer, offering filer/registrant, plus verified workflow links and observed mentions. Mentions never flatten into verified links; transaction status stays unknown without closing evidence. Call directly with the entity; do not search repeatedly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -219,7 +219,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_sec_filing",
-            "description": "Returns one filing's record (filer, subject when known, form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number. Find the accession number with list_sec_filings first.",
+            "description": "Returns one filing's record (filer, subject when known, form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number. When the accession number is unknown, find it with list_sec_filings; when already known, call directly. Do not call list_sec_filings, list_sec_documents, or get_sec_document first; call directly.",
             "parameters": {
                 "type": "object",
                 "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
@@ -231,7 +231,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "list_sec_documents",
-            "description": "Lists the documents and exhibits attached to one filing by accession number. Find the accession number with list_sec_filings first.",
+            "description": "Lists the documents and exhibits attached to one filing by accession number. When the accession number is unknown, find it with list_sec_filings; when already known, call directly. Do not call list_sec_filings or get_sec_filing first; call directly.",
             "parameters": {
                 "type": "object",
                 "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
@@ -243,7 +243,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_sec_document",
-            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history. For earnings, guidance, or material events, call get_material_events first, then retrieve the cited accession here.",
+            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history. When the accession is already known, call directly; use get_material_events only to discover what changed. Do not call get_material_events, list_sec_filings, or list_sec_documents first; call directly.",
             "parameters": {
                 "type": "object",
                 "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
@@ -255,7 +255,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "diff_sec_filings",
-            "description": "Deterministic diff between two filings by accession numbers (amendment vs prior, risk-factor changes). Numbers first; the LLM interprets only after deterministic output. Find accession numbers with list_sec_filings first.",
+            "description": "Deterministic diff between two filings by accession numbers (amendment vs prior, risk-factor changes). Numbers first; the LLM interprets only after deterministic output. When accession numbers are unknown, find them with list_sec_filings; when already known, call directly. Do not call list_sec_filings or get_sec_filing first; call directly with both accessions.",
             "parameters": {
                 "type": "object",
                 "properties": {"current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}},
@@ -267,7 +267,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_material_events",
-            "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions before loading raw filings. Follow the incremental chain: events, then the latest 8-K document, insider activity, >5% holder changes, financing/dilution, and financial changes; never load full history.",
+            "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions. Call directly with the ticker and date; never load full history.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -279,7 +279,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_beneficial_ownership",
-            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes.",
+            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes. Call directly with the ticker; do not resolve the entity or pull other tools first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -291,7 +291,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_ownership_changes",
-            "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes. Use for stake changes; use get_beneficial_ownership for current 5%+ stakes.",
+            "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes. Use for stake changes; use get_beneficial_ownership for current 5%+ stakes. Call directly with the ticker; do not call get_beneficial_ownership first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -303,7 +303,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_insider_activity",
-            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider transactions; use get_planned_insider_sales for planned (Form 144) sales.",
+            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider transactions; use get_planned_insider_sales for planned (Form 144) sales. Call directly with the ticker; do not call get_planned_insider_sales first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -315,7 +315,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_planned_insider_sales",
-            "description": "Planned insider sales from Form 144 notices (proposed, not yet executed). Compare with get_insider_activity for follow-through.",
+            "description": "Planned insider sales from Form 144 notices (proposed, not yet executed). Compare with get_insider_activity for follow-through. Call directly with the ticker; do not call get_insider_activity first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -327,7 +327,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_offering_history",
-            "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated. Pair with get_dilution_profile for financing/dilution work.",
+            "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated. Pair with get_dilution_profile for financing/dilution work. Call directly with the ticker; do not call get_dilution_profile first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -339,7 +339,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_dilution_profile",
-            "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable. Pair with get_offering_history for financing/dilution work.",
+            "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable. Pair with get_offering_history for financing/dilution work. Call directly with the ticker; do not call get_offering_history first.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}},
@@ -351,7 +351,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_governance_events",
-            "description": "Proxy/governance filing context (DEF 14A, contested forms, information statements) with retrieval pointers.",
+            "description": "Proxy/governance filing context (DEF 14A, contested forms, information statements) with retrieval pointers. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -363,7 +363,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_transaction_status",
-            "description": "M&A filing context (tender offers, 14D-9, S-4, merger proxies). Deal status is unknown until structured parsers land; use get_sec_document for filing text.",
+            "description": "M&A filing context (tender offers, 14D-9, S-4, merger proxies). Deal status is unknown until structured parsers land; use get_sec_document for filing text. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -375,7 +375,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_short_pressure_profile",
-            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation.",
+            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -387,11 +387,11 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            "description": "Search for relevant Stockbot tools first when the active tools cannot perform the task; returns ranked matches the harness activates. With a domain and empty query, lists that domain's tools in full.",
+            "description": "Search for relevant Stockbot tools first when the active tools cannot perform the task; returns ranked matches the harness activates. With a domain and empty query, lists that domain's tools in full. Search by capability first; browse a domain only when the capability wording is unknown.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
+                    "query": {"type": "string", "description": "Non-empty capability description (not a company or ticker); never call with an empty query."},
                     "domain": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matches; matches are otherwise uncapped."},
                 },
@@ -403,7 +403,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "list_tool_domains",
-            "description": "List the tool-domain catalog: domain names with one-line descriptions. Call first when unsure which domain covers a question, then search_tools within a domain.",
+            "description": "List the tool-domain catalog: domain names with one-line descriptions. Already active; call directly without searching. Prefer a search_tools capability search first; consult this catalog only when a search returned nothing.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -415,7 +415,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "describe_tool",
-            "description": "Show full metadata for one named Stockbot tool: domain, summary, use-when and avoid-when notes, related tools, prerequisites, required and optional arguments. Call with the exact tool name after search_tools, or describe several tools in one call with names.",
+            "description": "Show full metadata for one named Stockbot tool: domain, summary, use-when and avoid-when notes, related tools, prerequisites, required and optional arguments. Call with the exact tool name after search_tools, or describe several tools in one call with names. Call directly with the named tool; do not search first. Do not describe when the top match is clear; call it directly. Use for 'what can X do' questions; do not run the subject tool instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -433,8 +433,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Lists the most recent SC 13D/13G filings market-wide "
                 "(SEC current-filings feed, ~24h window): issuer, filer, stake "
                 "percent/shares, filed date, accession. Call for 'most recent' "
-                "or 'latest' big-investor filings when no ticker is given; then "
-                "drill into get_beneficial_ownership for detail. It lists filings, it "
+                "or 'latest' big-investor filings when no ticker is given. Call directly; do not search first and do not drill into get_beneficial_ownership unless asked. It lists filings, it "
                 "does not establish that a filing caused a price move.",
             "parameters": {
                 "type": "object",
@@ -452,7 +451,7 @@ TOOLS: list[dict[str, object]] = [
             "name": "diff_risk_factors",
             "description": "Returns what changed in Risk Factors language "
                 "vs. the prior filing. Call for 'what's new/changed' "
-                "questions.",
+                "questions. Call directly with the ticker; do not call find_sec_entities first. Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -465,7 +464,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_financial_statements",
             "description": "Returns parsed financial statements (income statement, "
-                "balance sheet, cash flow) from 10-K or 10-Q filings.",
+                "balance sheet, cash flow) from 10-K or 10-Q filings. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -483,7 +482,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_xbrl_facts",
             "description": "Returns XBRL financial metrics (Revenue, Net Income, "
-                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\").",
+                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\"). Use exact XBRL tag names (e.g. NetIncomeLoss for net income), never friendly labels. Call directly with the ticker and concept.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -504,7 +503,7 @@ TOOLS: list[dict[str, object]] = [
                 "or days-to-cover questions. For change-over-time or trend "
                 "questions, prefer query_finra. When the user asks to show "
                 "figures or values, or names exact fields, prefer "
-                "get_finra_datapoints.",
+                "get_finra_datapoints. Call directly with the ticker; never list or describe FINRA datasets for this single-dataset lookup.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -541,7 +540,7 @@ TOOLS: list[dict[str, object]] = [
             "name": "get_reg_sho_volume",
             "description": "Returns FINRA daily Reg SHO short-sale volume for a "
                 "ticker (short, short-exempt, and total share quantity by "
-                "reporting facility). Rolling 12 months.",
+                "reporting facility). Rolling 12 months. Call directly with the ticker; never list or describe FINRA datasets first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -560,7 +559,7 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_threshold_securities",
             "description": "Returns FINRA OTC Regulation SHO / Rule 4320 "
-                "threshold securities. Optionally filter by ticker and date.",
+                "threshold securities. Optionally filter by ticker and date. Call directly; never list or describe FINRA datasets first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -628,7 +627,7 @@ TOOLS: list[dict[str, object]] = [
                 "commitments, cloud commitments, lease obligations, "
                 "guarantees, or any 'what is the company obligated to pay "
                 "in the future' question. Contingent items are NOT counted "
-                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain.",
+                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -651,7 +650,7 @@ TOOLS: list[dict[str, object]] = [
                 "terminable, or default-triggered). The per-share obligation "
                 "drag is shown explicitly. Use for 'is the stock cheap', "
                 "P/E, forward earnings, or obligation-adjusted valuation "
-                "questions. Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp.",
+                "questions. Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp. Call directly with the ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -666,8 +665,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Lists public FINRA Query API datasets (filing cabinet "
                 "catalog): concise entries with canonical id group/name, group, "
                 "description, and ticker/date support. Optional group or search "
-                "filters. Call first when you are unsure which FINRA dataset to use; "
-                "then describe_finra_dataset before query_finra.",
+                "filters. Prefer calling the analysis tool directly with a known dataset ID; use this listing only to resolve an ID search did not surface.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -691,8 +689,7 @@ TOOLS: list[dict[str, object]] = [
             "name": "describe_finra_dataset",
             "description": "Describes one FINRA dataset: fields with types and "
                 "descriptions, ticker/date fields, documented filter values, and "
-                "supported methods. Call after list_finra_datasets and before "
-                "query_finra when the dataset is unfamiliar.",
+                "supported methods. Takes the dataset ID directly; use search_tools to find the right dataset when unsure. Do not call list_finra_datasets first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -727,14 +724,16 @@ TOOLS: list[dict[str, object]] = [
                 "client resolves the sort against the dataset's partitions "
                 "automatically. Do NOT use for ordinary analysis — query_finra "
                 "and the specific helper tools return analyzed briefings "
-                "instead. If exact field names are unknown, call "
-                "describe_finra_dataset first, then retry here with its field "
-                "names — ticker plus dataset is enough to begin. Returns at "
+                "instead. Common short-interest fields: settlementDate, symbolCode, "
+                "currentShortPositionQuantity, previousShortPositionQuantity, "
+                "averageDailyVolumeQuantity, daysToCoverQuantity. For other datasets, "
+                "call describe_finra_dataset first for exact field names — ticker "
+                "plus dataset is enough to begin. Returns at "
                 "most 25 rows containing only the requested fields. Exact "
                 "source values are guaranteed for normal scalar data; "
                 "oversized text fields are rendered as a marked excerpt "
                 "(table cells are capped at 200 characters to keep the tool "
-                "message compact). For unfamiliar datasets follow list_finra_datasets → describe_finra_dataset → get_finra_datapoints.",
+                "message compact). Takes the dataset ID directly; use search_tools to find the right dataset when unsure. Do not list or describe datasets preemptively; describe field names only after a field-name error.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -746,8 +745,7 @@ TOOLS: list[dict[str, object]] = [
                     },
                     "fields": {
                         "type": "array",
-                        "description": "Exact field names to return. Call "
-                        "describe_finra_dataset first to see valid fields.",
+                        "description": "Exact field names to return (e.g. settlementDate, symbolCode, currentShortPositionQuantity for short interest). Call describe_finra_dataset only for unfamiliar datasets.",
                         "items": {"type": "string"},
                         "minItems": 1
                     },
@@ -765,8 +763,7 @@ TOOLS: list[dict[str, object]] = [
                     },
                     "filters": {
                         "type": "array",
-                        "description": "Extra compare filters (field names must "
-                        "exist on the dataset — call describe_finra_dataset first).",
+                        "description": "Extra compare filters (field names must exist on the dataset — when unknown, call describe_finra_dataset first).",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -821,8 +818,7 @@ TOOLS: list[dict[str, object]] = [
                 "trends, data-quality warnings, and a concise prose briefing. "
                 "Raw source records are NOT returned. Prefer get_short_interest "
                 "/ get_reg_sho_volume / get_threshold_securities for those "
-                "specific questions. For unfamiliar datasets: list_finra_datasets "
-                "→ describe_finra_dataset → query_finra with a bounded limit. "
+                "specific questions. Takes the dataset ID directly with a bounded limit; use search_tools to find the right dataset when unsure. Do not list or describe datasets preemptively. "
                 "Use get_finra_datapoints only when the user explicitly asks "
                 "to see exact source values. For more records, paginate with offset using the returned next_offset/may_have_more indicators. If a result is flagged stale or historical (newest date older than 90 days), say so explicitly and never present it as current market data.",
             "parameters": {
@@ -858,8 +854,7 @@ TOOLS: list[dict[str, object]] = [
                     },
                     "filters": {
                         "type": "array",
-                        "description": "Extra compare filters (field names must "
-                        "exist on the dataset — call describe_finra_dataset first).",
+                        "description": "Extra compare filters (field names must exist on the dataset — when unknown, call describe_finra_dataset first).",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1036,7 +1031,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_create",
-            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds.",
+            "description": "Creates a thesis from a structured proposal. Returns thesis_id, scope, initial supported watch rules, or setup-needed state with missing questions when no target resolves. Never invents thresholds. Use for a bare investment view with no existing thesis ID; do not call thesis_refine, which needs an existing ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1066,7 +1061,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_refine",
-            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses. Read the thesis with thesis_show first.",
+            "description": "Refines a thesis with a clarification plus optional structured deltas. Adds claims/expressions and supported watch rules; never overwrites user-disabled rules. Refuses paused/closed theses. Do not call thesis_show first when the ID is given; act directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1082,7 +1077,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_watch",
-            "description": "Lists a thesis's watch rules, or appends one validated supported rule (IDs and domain input only). Never modifies existing rules. Read the thesis with thesis_show first.",
+            "description": "Lists a thesis's watch rules, or appends one validated supported rule (IDs and domain input only). Never modifies existing rules. Do not call thesis_show first when the ID is given; act directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1099,7 +1094,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "thesis_journal",
-            "description": "Appends one operator note to a thesis journal (active theses only). Read the thesis with thesis_show first to confirm it is active.",
+            "description": "Appends one operator note to a thesis journal (active theses only). Do not call thesis_show first when the ID is given; act directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1118,7 +1113,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "find_alternative_signals",
-            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
+            "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims. Call directly; do not call get_trend_evidence first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1135,7 +1130,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_trend_evidence",
-            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims.",
+            "description": "Bounded Google Trends discovery collection over public top/rising lists with stable source identity and retrieval timestamps. List membership only, never search-volume claims. Call directly for a named trend; do not call find_alternative_signals first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1172,7 +1167,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_macro_context",
-            "description": "Bounded Data Commons statistical observations for explicit geography/variable IDs with unit/facet/provider provenance. Distinct facets stay distinct; never splices incompatible series.",
+            "description": "Bounded Data Commons statistical observations for explicit geography/variable IDs with unit/facet/provider provenance. Distinct facets stay distinct; never splices incompatible series. Call directly with the geography IDs; do not use search_web for macro statistics.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1190,7 +1185,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_company_patents",
-            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals.",
+            "description": "Bounded patent-publication search for documented company assignees via checked-in BigQuery templates. Counts publications explicitly; never labels counts as inventions or bullish signals. Patent records are authoritative here; never use search_web.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2304,9 +2299,8 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         domain="filings",
         summary="List EDGAR filings for an exact ticker or CIK, filterable by form and date range.",
         use_when=("Listing 10-K, 10-Q, or 8-K filings once the exact ticker or CIK is verified, including the latest 10-K or 10-Q.", "Filing history: what was filed with the SEC lately, recent filings included."),
-        avoid_when=("Do not use with a bare company name; resolve identity via find_sec_entities first.",),
+        avoid_when=("Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve identity via find_sec_entities first.",),
         related_tools=("get_sec_filing", "search_sec_filings", "find_sec_entities"),
-        prerequisites=("find_sec_entities", "search_sec_filings"),
     ),
     "get_sec_filing": ToolDiscovery(
         domain="filings",
@@ -2314,15 +2308,13 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         use_when=("Fetching a filing's metadata once its accession number is known.", "What is in filing.", "Filing record."),
         avoid_when=("Do not use to discover filings; list or search for the accession first.", "Answer from the filing record; do not retrieve document text unless the question asks for it."),
         related_tools=("list_sec_filings", "list_sec_documents"),
-        prerequisites=("list_sec_filings",),
     ),
     "list_sec_documents": ToolDiscovery(
         domain="filings",
         summary="Index of documents and exhibits attached to one filing, looked up by accession number.",
         use_when=("Seeing which exhibits a filing contains before reading any document text.", "What documents are attached to filing."),
         avoid_when=("Do not use to read document text; use get_sec_document instead.",),
-        related_tools=("get_sec_filing", "get_sec_document"),
-        prerequisites=("list_sec_filings",),
+        related_tools=("get_sec_filing", "get_sec_document", "list_sec_filings"),
     ),
     "get_sec_document": ToolDiscovery(
         domain="filings",
@@ -2330,15 +2322,13 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         use_when=("Reading a specific section such as MD&A or risk factors from a known accession.",),
         avoid_when=("Do not use for what-changed questions; use get_material_events first.",),
         related_tools=("get_sec_filing", "get_material_events"),
-        prerequisites=("get_material_events",),
     ),
     "diff_sec_filings": ToolDiscovery(
         domain="filings",
         summary="Deterministic diff between two filings by accession numbers: whether one filing differs from another, e.g. amendment versus prior version.",
         use_when=("Comparing an amendment or restatement against its prior filing version.", "What changed between filings."),
         avoid_when=("Do not use for risk-factor-only changes; use diff_risk_factors instead.",),
-        related_tools=("diff_risk_factors", "get_sec_filing"),
-        prerequisites=("list_sec_filings",),
+        related_tools=("diff_risk_factors", "get_sec_filing", "list_sec_filings"),
     ),
     "get_material_events": ToolDiscovery(
         domain="events",
@@ -2552,48 +2542,44 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     "describe_finra_dataset": ToolDiscovery(
         domain="finra",
         summary="One FINRA dataset's fields, types, filter values, and supported methods.",
-        use_when=("Learning a dataset's schema and field names before querying it.", "What is in the dataset."),
+        use_when=("Learning a dataset's schema and field names before querying it.", "What is in the dataset.", "Describing what is in a named FINRA dataset such as short interest: fields, types, and filter values."),
         avoid_when=("Do not use for analyzed briefings; use query_finra instead.",),
         related_tools=("list_finra_datasets", "query_finra", "get_finra_datapoints"),
-        prerequisites=("list_finra_datasets",),
     ),
     "get_finra_datapoints": ToolDiscovery(
         domain="finra",
         summary="Short-position values and figures from FINRA (exact source values for explicit requests).",
         use_when=("Showing exact settlement-date values when the user asks to see figures.", "Recent short-interest values.", "Short-position figures."),
         avoid_when=("Do not use for ordinary analysis; use query_finra or the helper tools.",),
-        related_tools=("describe_finra_dataset", "query_finra"),
-        prerequisites=("list_finra_datasets", "describe_finra_dataset"),
+        related_tools=("describe_finra_dataset", "query_finra", "list_finra_datasets"),
     ),
     "query_finra": ToolDiscovery(
         domain="finra",
         summary="Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends, prose. Dataset IDs look like otcMarket/consolidatedShortInterest.",
         use_when=("Analyzing short-interest or other FINRA data moves and changes over time.", "Changed lately."),
         avoid_when=("Do not use when exact source values are requested; use get_finra_datapoints.",),
-        related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest"),
-        prerequisites=("list_finra_datasets", "describe_finra_dataset"),
+        related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest", "list_finra_datasets"),
     ),
     "thesis_create": ToolDiscovery(
         domain="thesis",
         summary="Start a new investment thesis proposal with scope, claims, and open questions.",
-        use_when=("Creating a new investment thesis to track and test.",),
+        use_when=("Creating a new investment thesis to track and test.", "Tracking a stated investment view such as I think NVDA AI demand will stay strong."),
         avoid_when=("Do not use to read an existing thesis; use thesis_show instead.", "Create directly; do not call thesis_show or thesis_refine first."),
         related_tools=("thesis_show", "thesis_refine"),
     ),
     "thesis_show": ToolDiscovery(
         domain="thesis",
         summary="Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Checking a thesis and its current assessment.",),
+        use_when=("Checking a thesis and its current assessment.", "Showing what a thesis says when asked what does thesis say or show me the thesis.", "Show me thesis.", "Show investment thesis.", "Show thesis."),
         avoid_when=("Do not use to change a thesis; use thesis_refine instead.",),
         related_tools=("thesis_create", "thesis_refine", "thesis_journal"),
     ),
     "thesis_refine": ToolDiscovery(
         domain="thesis",
         summary="Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Revising a thesis after new evidence or feedback.",),
+        use_when=("Revising a thesis after new evidence or feedback.", "Update thesis."),
         avoid_when=("Do not use for routine notes; use thesis_journal instead.",),
         related_tools=("thesis_show", "thesis_journal"),
-        prerequisites=("thesis_show",),
     ),
     "thesis_watch": ToolDiscovery(
         domain="thesis",
@@ -2601,15 +2587,13 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         use_when=("Setting an alert on a thesis invalidator or trigger.", "What am I watching for."),
         avoid_when=("Do not use to log notes; use thesis_journal instead.",),
         related_tools=("thesis_show",),
-        prerequisites=("thesis_show",),
     ),
     "thesis_journal": ToolDiscovery(
         domain="thesis",
         summary="Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Logging a dated note or observation against a thesis.", "Add that to thesis."),
+        use_when=("Logging a dated note or observation against a thesis.", "Add that to thesis.", "Note for thesis."),
         avoid_when=("Do not use to revise claims; use thesis_refine instead.",),
         related_tools=("thesis_show", "thesis_refine"),
-        prerequisites=("thesis_show",),
     ),
 }
 
@@ -2819,7 +2803,17 @@ def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
     raw = args.get("names")
     if isinstance(raw, list):
         return {"tools": [_describe_one(str(name)) for name in raw]}
-    return _describe_one(str(args.get("name") or ""))
+    name = args.get("name") or ""
+    if isinstance(name, str) and name.strip().startswith("["):
+        # ponytail: agents serialize the names array into the name string;
+        # coerce instead of failing their describe-then-call flow.
+        try:
+            parsed = json.loads(name)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, list) and parsed:
+            return {"tools": [_describe_one(str(item)) for item in parsed]}
+    return _describe_one(str(name))
 
 
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:
@@ -3319,8 +3313,17 @@ def _effective_at(context: RequestContext) -> str | None:
     return as_of if isinstance(as_of, str) and as_of else None
 
 
+def _normalize_thesis_id(value: str) -> str:
+    """Accept a bare UUID for a thesis:uuid (agents strip the prefix)."""
+    text = value.strip()
+    if text and ":" not in text:
+        return f"thesis:{text}"
+    return text
+
+
 def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: RequestContext) -> Thesis:
     """Thesis as seen at the run cutoff; live when the run has none."""
+    id_or_slug = _normalize_thesis_id(id_or_slug)
     cutoff = _effective_at(context)
     if not cutoff:
         return repo.load_thesis(id_or_slug)

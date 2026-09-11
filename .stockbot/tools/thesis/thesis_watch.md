@@ -19,7 +19,7 @@ Add a monitoring rule that alerts when a thesis condition triggers.
 
 ## Prerequisites
 
-- thesis_show
+None
 
 ## Required arguments
 

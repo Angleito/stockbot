@@ -16,7 +16,7 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None) -> Path:
+def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, tool_message: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None, extra_message: str | None = None) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     now = "2026-01-01T00:00:00+00:00"
@@ -26,8 +26,8 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
     )
     name = other_tool or tool
     conn.execute(
-        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1',?,?,?)",
-        (name, now, tool_error),
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, error_message) VALUES ('tc1','r1',?,?,?,?)",
+        (name, now, tool_error, tool_message),
     )
     if event in ("completed", "both", "harness-rejected"):
         conn.execute(
@@ -60,8 +60,8 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
         )
     if extra_tool is not None:
         conn.execute(
-            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,?,?)",
-            (extra_tool, now, extra_error),
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, error_message) VALUES ('tc9','r1',?,?,?,?)",
+            (extra_tool, now, extra_error, extra_message),
         )
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,?,?,?)",
@@ -91,14 +91,16 @@ def _ok(
     model: str = MODEL,
     status: str = "completed",
     tool_error: str | None = None,
+    tool_message: str | None = None,
     event: str = "completed",
     other_tool: str | None = None,
     rejected_other: str | None = None,
     extra_tool: str | None = None,
     extra_error: str | None = None,
+    extra_message: str | None = None,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error)
+    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, tool_message=tool_message, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error, extra_message=extra_message)
     return p
 
 
@@ -135,8 +137,64 @@ def test_nonzero_exit_fails(tmp_path: Path):
 
 
 def test_timeout_fails(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, True)
+    ok, reason = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, True)
     assert not ok
+    assert reason.startswith("transient: ")
+
+
+def test_timeout_with_wrong_tool_still_routing_fails(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, extra_tool="get_xbrl_facts", extra_error="tool_error"),
+        "get_fundamentals", 0, True, attempt=1,
+    )
+    assert not ok
+    assert "routing failed" in reason
+
+
+def test_target_rate_limited_returns_transient(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, tool_error="rate_limited"), "get_fundamentals", 0, False,
+    )
+    assert not ok
+    assert reason.startswith("transient: ")
+
+
+def test_target_timeout_message_returns_transient(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, tool_error="tool_error", tool_message="Exa search timed out"),
+        "get_fundamentals", 0, False,
+    )
+    assert not ok
+    assert reason.startswith("transient: ")
+
+
+def test_target_mixed_errors_plain_fail(tmp_path: Path):
+    p = tmp_path / "runs.sqlite"
+    _db(p, tool="get_fundamentals", tool_error="rate_limited")
+    conn = sqlite3.connect(str(p))
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1','get_fundamentals','2026-01-01T00:00:00+00:00','tool_error')"
+    )
+    conn.commit()
+    conn.close()
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False)
+    assert not ok
+    assert not reason.startswith("transient: ")
+
+
+
+
+def test_zero_call_absence_plain_fail(tmp_path: Path):
+    p = tmp_path / "empty.sqlite"
+    conn = sqlite3.connect(str(p))
+    conn.executescript(_SCHEMA)
+    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')")
+    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", (MODEL,))
+    conn.commit()
+    conn.close()
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False)
+    assert not ok
+    assert not reason.startswith("transient: ")
 
 
 def test_required_tool_absent_fails(tmp_path: Path):
@@ -212,9 +270,6 @@ def test_dispatched_wrong_tool_success_fails_attempt_1(tmp_path: Path):
     assert "unexpected" in reason
 
 
-def test_allowed_prereq_passes_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="find_sec_entities"), "list_sec_filings", 0, False, attempt=1)
-    assert ok
 
 
 def test_rejected_prereq_fails_attempt_1(tmp_path: Path):
@@ -223,9 +278,6 @@ def test_rejected_prereq_fails_attempt_1(tmp_path: Path):
     assert "harness-rejected" in reason
 
 
-def test_dispatched_prereq_passes_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
-    assert ok
 
 
 def test_errored_prereq_fails_attempt_1(tmp_path: Path):
@@ -565,6 +617,52 @@ def test_verification_attempt_crash_is_failed_attempt(tmp_path: Path, monkeypatc
     durable.mkdir()
     r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
     assert not r.ok and "pi exploded" in r.reason and r.exit == 124
+
+
+def test_verification_attempt_retries_transient_then_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Path] = []
+    del v.TRANSIENT_RETRIES[:]
+
+    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        calls.append(db_path)
+        if len(calls) == 1:
+            _db(db_path, tool="get_fundamentals", tool_error="rate_limited")
+        else:
+            _db(db_path, tool="get_fundamentals")
+        return (0, False, "", "", False)
+
+    monkeypatch.setattr(v, "run_pi", fake_run_pi)
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
+    assert r.ok
+    assert len(calls) == 2
+    assert calls[0].parent.name == "attempt-1"
+    assert calls[1].parent.name == "attempt-1-retry-1"
+    assert len(v.TRANSIENT_RETRIES) == 1
+    del v.TRANSIENT_RETRIES[:]
+
+
+def test_verification_attempt_cap_exhaustion_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Path] = []
+    del v.TRANSIENT_RETRIES[:]
+
+    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+        calls.append(db_path)
+        _db(db_path, tool="get_fundamentals", tool_error="rate_limited")
+        return (0, False, "", "", False)
+
+    monkeypatch.setattr(v, "run_pi", fake_run_pi)
+    batch = tmp_path / "batch"
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    r = v.run_verification_attempt("get_fundamentals", 1, {"ticker": "AAPL"}, batch, tmp_path, durable, 3)
+    assert not r.ok
+    assert "transient budget exhausted" in r.reason
+    assert len(calls) == v.TRANSIENT_RETRY_CAP + 1
+    assert len(v.TRANSIENT_RETRIES) == v.TRANSIENT_RETRY_CAP + 1
+    del v.TRANSIENT_RETRIES[:]
 
 
 def test_expand_jobs_interleaves_repetitions() -> None:

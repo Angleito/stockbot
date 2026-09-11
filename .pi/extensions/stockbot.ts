@@ -460,9 +460,11 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : {};
      const meta = inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : {};
      const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
-     const matches = (Array.isArray(raw) ? raw : [])
+     const topMatches = (Array.isArray(raw) ? raw : [])
       .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
-      .filter((n) => research.has(n));
+      .filter((n) => research.has(n))
+      .slice(0, MAX_ACTIVE_RESEARCH_TOOLS);
+     const matches = topMatches;
      // Uncapped pages carry total through the same envelope; page length when absent.
      const totalRaw = meta.total ?? inner.total ?? bridge.total ?? matches.length;
      const total = typeof totalRaw === "number" ? totalRaw : matches.length;
@@ -479,10 +481,10 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
       matches.length === 0
        ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}`
        : added.length > 0 && total > added.length
-        ? `Found ${total} tools, activated ${added.length}: ${added.map(need).join(", ")}`
+        ? `Found ${total} tools, activated ${added.length}: ${added.map(need).join(", ")}. Call the top-ranked match now, then stop.`
         : added.length
-         ? `Activated ${added.length} tools: ${added.map(need).join(", ")}`
-         : `Matching tools already active: ${matches.map(need).join(", ")}`;
+         ? `Activated ${added.length} tools in rank order: ${added.map(need).join(", ")}. Call the top-ranked match now, then stop.`
+         : `Matching tools already active, ranked: ${matches.map(need).join(", ")}. Call the top-ranked match now, then stop.`;
      refreshStatus(lastCtx);
      return {
       content: [{ type: "text", text }],

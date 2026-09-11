@@ -18,21 +18,21 @@ Short-position values and figures from FINRA (exact source values for explicit r
 
 - describe_finra_dataset
 - query_finra
+- list_finra_datasets
 
 ## Prerequisites
 
-- list_finra_datasets
-- describe_finra_dataset
+None
 
 ## Required arguments
 
 - `dataset` (string): Canonical id group/name (e.g. otcMarket/consolidatedShortInterest). Legacy bare names accepted when unambiguous.
-- `fields` (array): Exact field names to return. Call describe_finra_dataset first to see valid fields.
+- `fields` (array): Exact field names to return (e.g. settlementDate, symbolCode, currentShortPositionQuantity for short interest). Call describe_finra_dataset only for unfamiliar datasets.
 
 ## Optional arguments
 
 - `end_date` (string): YYYY-MM-DD.
-- `filters` (array): Extra compare filters (field names must exist on the dataset — call describe_finra_dataset first).
+- `filters` (array): Extra compare filters (field names must exist on the dataset — when unknown, call describe_finra_dataset first).
 - `limit` (integer): Max rows to return (clamped to 1..25; default 10).
 - `sort_fields` (array): FINRA sortFields syntax: '+field' ascending, '-field' descending, e.g. ["-settlementDate"] returns newest first. Use for 'latest five' / 'last five' / 'most recent' data requests. Fields must exist on the dataset.
 - `sort_order` (string): Convenience: sort by the dataset's date field ('desc' = newest first, for 'latest five' requests). Rejected when the dataset has no date field — use sort_fields instead.

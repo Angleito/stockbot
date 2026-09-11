@@ -7,6 +7,10 @@ Read a thesis: its status, assessment, and current state. Pass the thesis ID as 
 ## Use when
 
 - Checking a thesis and its current assessment.
+- Showing what a thesis says when asked what does thesis say or show me the thesis.
+- Show me thesis.
+- Show investment thesis.
+- Show thesis.
 
 ## Avoid when
 

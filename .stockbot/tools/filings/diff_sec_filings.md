@@ -17,10 +17,11 @@ Deterministic diff between two filings by accession numbers: whether one filing 
 
 - diff_risk_factors
 - get_sec_filing
+- list_sec_filings
 
 ## Prerequisites
 
-- list_sec_filings
+None
 
 ## Required arguments
 

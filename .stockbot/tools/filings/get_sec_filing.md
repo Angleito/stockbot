@@ -22,7 +22,7 @@ One filing's record by accession number: filer, form, dates, primary document, s
 
 ## Prerequisites
 
-- list_sec_filings
+None
 
 ## Required arguments
 

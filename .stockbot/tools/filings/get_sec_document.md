@@ -19,7 +19,7 @@ Bounded text window of one filing document by accession number for targeted exce
 
 ## Prerequisites
 
-- get_material_events
+None
 
 ## Required arguments
 
