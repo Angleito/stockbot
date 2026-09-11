@@ -53,8 +53,9 @@ export const DISCOVERY_TOOLS = ["list_tool_domains", "search_tools", "describe_t
 export function nextActiveTools(active: string[], matches: string[], research: Set<string>): string[] {
  const permanent = DISCOVERY_TOOLS.filter((n) => research.has(n));
  const base = active.filter((n) => !research.has(n) || permanent.includes(n));
- const temp = matches.filter((n) => research.has(n) && !permanent.includes(n)).slice(0, 4);
- return [...new Set([...base, ...permanent, ...temp])];
+ const kept = active.filter((n) => research.has(n) && !permanent.includes(n));
+ const fresh = matches.filter((n) => research.has(n) && !permanent.includes(n) && !kept.includes(n));
+ return [...base, ...kept, ...fresh];
 }
 
 // Absolute bridge paths derived from this file's location: Pi's extension
@@ -453,26 +454,25 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
      const raw = (meta.matches ?? inner.matches ?? bridge.matches ?? []) as unknown;
      const matches = (Array.isArray(raw) ? raw : [])
       .map((m) => (typeof m === "string" ? m : m && typeof m === "object" && typeof (m as Json).name === "string" ? ((m as Json).name as string) : ""))
-      .filter((n) => research.has(n))
-      .slice(0, 4);
+      .filter((n) => research.has(n));
+     // Uncapped pages carry total through the same envelope; page length when absent.
+     const totalRaw = meta.total ?? inner.total ?? bridge.total ?? matches.length;
+     const total = typeof totalRaw === "number" ? totalRaw : matches.length;
      const active = pi.getActiveTools();
      const next = nextActiveTools(active, matches, research);
      const added = next.filter((n) => !active.includes(n));
-     const dropped = active.filter((n) => !DISCOVERY_TOOLS.includes(n) && research.has(n) && !next.includes(n));
-     if (added.length || dropped.length) pi.setActiveTools(next);
-     const nowActive = next.filter((n) => !DISCOVERY_TOOLS.includes(n) && research.has(n));
+     if (added.length) pi.setActiveTools(next);
      const need = (n: string) => {
       const req = requiredOf[n] ?? [];
       return req.length ? `${n} (needs: ${req.join(", ")})` : n;
      };
-     const suffix = dropped.length ? `; now active: ${nowActive.map(need).join(", ") || "(none)"}` : "";
      const query = (params as Json).query;
      const text =
       matches.length === 0
-       ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}${suffix}`
+       ? `No tools found for: ${typeof query === "string" && query ? query : fn.name}`
        : added.length
-        ? `Activated ${added.length} tools: ${added.map(need).join(", ")}${suffix}`
-        : `Matching tools already active: ${matches.map(need).join(", ")}${suffix}`;
+        ? `Activated ${added.length} tools: ${added.map(need).join(", ")}`
+        : `Matching tools already active: ${matches.map(need).join(", ")}`;
      refreshStatus(lastCtx);
      return {
       content: [{ type: "text", text }],
@@ -615,9 +615,11 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
-  // Deferred loading: start with built-ins + discovery triple only; searches
-  // rotate matches (cap 4). research.size still counts registered tools.
-  pi.setActiveTools(nextActiveTools(pi.getActiveTools(), [], research));
+  // Deferred loading: reset to built-ins + discovery triple; searches
+  // accumulate matches from here. research.size still counts registered tools.
+  const booted = pi.getActiveTools();
+  const permanent = DISCOVERY_TOOLS.filter((n) => research.has(n));
+  pi.setActiveTools([...new Set([...booted.filter((n) => !research.has(n) || permanent.includes(n)), ...permanent])]);
   refreshStatus(ctx);
  });
  pi.on("agent_start", () => {

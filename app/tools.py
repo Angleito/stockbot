@@ -387,13 +387,13 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            "description": "Search for relevant Stockbot tools first when the active tools cannot perform the task; returns ranked matches the harness activates.",
+            "description": "Search for relevant Stockbot tools first when the active tools cannot perform the task; returns ranked matches the harness activates. With a domain and empty query, lists that domain's tools in full.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "domain": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 4},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matches; matches are otherwise uncapped."},
                 },
                 "required": ["query"]
             }
@@ -415,13 +415,14 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "describe_tool",
-            "description": "Show full metadata for one named Stockbot tool: domain, summary, use-when and avoid-when notes, related tools, prerequisites, required and optional arguments. Call with the exact tool name after search_tools.",
+            "description": "Show full metadata for one named Stockbot tool: domain, summary, use-when and avoid-when notes, related tools, prerequisites, required and optional arguments. Call with the exact tool name after search_tools, or describe several tools in one call with names.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "Describe several tools in one call, in order."},
                 },
-                "required": ["name"]
+                "required": list[str]()
             }
         }
     },
@@ -2703,10 +2704,10 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     query = str(args.get("query") or "")
     domain = str(args.get("domain") or "").strip().lower() or None
     try:
-        limit = int(str(args.get("limit", 4)))
+        offset = int(str(args.get("offset", 0)))
     except (TypeError, ValueError):
-        limit = 4
-    limit = max(1, min(4, limit))
+        offset = 0
+    offset = max(0, offset)
     if domain and not query.strip():
         names = sorted(name for name, meta in TOOL_DISCOVERY_REGISTRY.items() if meta.domain == domain)
         matches: list[dict[str, object]] = [
@@ -2716,9 +2717,9 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
                 "summary": TOOL_DISCOVERY_REGISTRY[name].summary,
                 "reason": TOOL_DISCOVERY_REGISTRY[name].summary,
             }
-            for name in names[:limit]
+            for name in names[offset:]
         ]
-        return {"query": query, "domain": domain, "matches": matches, "count": len(matches)}
+        return {"query": query, "domain": domain, "matches": matches, "count": len(matches), "total": len(names), "offset": offset}
     query_norm = " ".join(_normalize_discovery_text(query))
     query_tokens = _discovery_keywords(query)
     # ponytail: data-shape preconditions; a values-tool needs values-words and a
@@ -2764,9 +2765,9 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
             "summary": TOOL_DISCOVERY_REGISTRY[name].summary,
             "reason": TOOL_DISCOVERY_REGISTRY[name].summary,
         }
-        for _, name in scored[:limit]
+        for _, name in scored[offset:]
     ]
-    return {"query": query, "domain": domain, "matches": ranked, "count": len(ranked)}
+    return {"query": query, "domain": domain, "matches": ranked, "count": len(ranked), "total": len(scored), "offset": offset}
 
 
 def _list_tool_domains(args: dict[str, object], model: str) -> dict[str, object]:
@@ -2781,10 +2782,8 @@ def _list_tool_domains(args: dict[str, object], model: str) -> dict[str, object]
     }
 
 
-def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
+def _describe_one(name: str) -> dict[str, object]:
     """Full metadata for one named tool from the registry plus its canonical schema."""
-    del model
-    name = str(args.get("name") or "")
     meta = TOOL_DISCOVERY_REGISTRY.get(name)
     if meta is None:
         return {"error": "unknown_tool", "name": name}
@@ -2812,6 +2811,15 @@ def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
         "required_arguments": required,
         "optional_arguments": optional,
     }
+
+
+def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
+    """Full metadata for one named tool, or several tools in order with `names`."""
+    del model
+    raw = args.get("names")
+    if isinstance(raw, list):
+        return {"tools": [_describe_one(str(name)) for name in raw]}
+    return _describe_one(str(args.get("name") or ""))
 
 
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:

@@ -166,6 +166,42 @@ def test_search_tools_domain_browse_returns_ownership_pack():
     assert "schemas" not in result
 
 
+def test_search_tools_filings_domain_lists_all():
+    result = tools.execute_tool(
+        "search_tools", {"query": "", "domain": "filings"}, "test", context=_research_context()
+    )
+    expected = sorted(
+        name for name, meta in tools.TOOL_DISCOVERY_REGISTRY.items() if meta.domain == "filings"
+    )
+    found = sorted(m["name"] for m in _as_seq(result["matches"]))
+    assert found == expected
+    assert result["total"] == result["count"] == len(expected)
+    assert result["offset"] == 0
+
+
+def test_search_tools_total_equals_count_uncapped():
+    result = tools.execute_tool(
+        "search_tools", {"query": "short interest"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    assert result["total"] == result["count"] == len(matches)
+    assert result["offset"] == 0
+
+
+def test_describe_tool_batch_names():
+    result = tools.execute_tool(
+        "describe_tool",
+        {"names": ["get_sec_filing", "get_sec_document", "nope"]},
+        "test",
+        context=_research_context(),
+    )
+    entries = _as_seq(result["tools"])
+    assert [e.get("name") for e in entries] == ["get_sec_filing", "get_sec_document", "nope"]
+    assert entries[2].get("error") == "unknown_tool"
+
+
+
 def test_list_sec_filings_dispatch_wraps_records(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = SimpleNamespace(to_dict=lambda: {"accession_no": "0000000001-26-000001"})
 

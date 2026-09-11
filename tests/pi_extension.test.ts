@@ -958,15 +958,16 @@ test("every registered bridge tool carries its parameter schema", async () => {
 	}
 });
 
-test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", () => {
+test("nextActiveTools accumulates active tools without caps", () => {
 	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
 	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
 		"builtin",
 		"search_tools",
+		"a",
 		"b",
 		"c",
 	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools"]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools", "a"]);
 	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
 		"builtin",
 		"search_tools",
@@ -974,6 +975,7 @@ test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", (
 		"b",
 		"c",
 		"d",
+		"e",
 	]);
 	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
 		"builtin",
@@ -983,7 +985,7 @@ test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", (
 	]);
 });
 
-test("session_start then searches rotate research tools via the real bridge", async () => {
+test("session_start resets to triple, then searches accumulate via the real bridge", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
@@ -1009,10 +1011,10 @@ test("session_start then searches rotate research tools via the real bridge", as
 	const secondText = second.content[0].text;
 	expect(secondText).toContain("Activated");
 	expect(active).toContain("get_short_interest");
-	expect(active).not.toContain("get_insider_activity");
+	expect(active).toContain("get_insider_activity");
 	expect(active).toContain("builtin-tool");
 	expect(active).toContain("search_tools");
-	expect(secondText).toContain("; now active:");
+	expect(secondText).not.toContain("; now active:");
 	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });
 
@@ -1025,15 +1027,16 @@ test("tool_call blocks non-RESEARCH tools", async () => {
 	expect(String(result.reason)).toMatch(/RESEARCH-only/);
 });
 
-test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", () => {
+test("nextActiveTools accumulates active tools without caps", () => {
 	const research = new Set(["search_tools", "a", "b", "c", "d", "e", "f"]);
 	expect(nextActiveTools(["builtin", "search_tools", "a"], ["b", "c"], research)).toEqual([
 		"builtin",
 		"search_tools",
+		"a",
 		"b",
 		"c",
 	]);
-	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools"]);
+	expect(nextActiveTools(["builtin", "search_tools", "a"], [], research)).toEqual(["builtin", "search_tools", "a"]);
 	expect(nextActiveTools(["builtin", "search_tools"], ["a", "b", "c", "d", "e"], research)).toEqual([
 		"builtin",
 		"search_tools",
@@ -1041,6 +1044,7 @@ test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", (
 		"b",
 		"c",
 		"d",
+		"e",
 	]);
 	expect(nextActiveTools(["builtin", "search_tools", "a"], ["a", "b"], research)).toEqual([
 		"builtin",
@@ -1050,7 +1054,7 @@ test("nextActiveTools keeps builtins, drops stale research, caps and dedupes", (
 	]);
 });
 
-test("session_start then searches rotate research tools via the real bridge", async () => {
+test("session_start resets to triple, then searches accumulate via the real bridge", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	type Registered = { name: string; execute: (id: string, params: Json) => Promise<{ content: { text: string }[] }> };
@@ -1075,6 +1079,6 @@ test("session_start then searches rotate research tools via the real bridge", as
 	const second = await search.execute("call-2", { query: "short interest" });
 	const secondText = second.content[0].text;
 	expect(secondText).toContain("Activated");
-	expect(secondText).toContain("; now active:");
+	expect(secondText).not.toContain("; now active:");
 	expect(statuses.at(-1)).toMatch(/registered.*research active.*calls/);
 });
