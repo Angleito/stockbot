@@ -40,8 +40,8 @@ EXTENSION = ".pi/extensions/stockbot.ts"
 # 120s per-tool-call cliff still bounds any single hung handler.
 TIMEOUT_S = 300
 DEFAULT_REPETITIONS = 3
-TRANSIENT_ERROR_TYPES = frozenset({"rate_limited", "quota_exhausted", "quota_refused"})
-_TRANSIENT_MESSAGE_RE = re.compile(r"(?i)ratelimit|rate-limit|rate limit|quota|\b429\b|latency|\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout")
+TRANSIENT_ERROR_TYPES = frozenset({"rate_limited"})
+_TRANSIENT_MESSAGE_RE = re.compile(r"(?i)\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout")
 TRANSIENT_RETRY_CAP = 2
 DEFAULT_CONCURRENCY = 6
 POLL_S = 2
@@ -764,7 +764,7 @@ class AttemptResult:
     duration_seconds: float
     model_config_failed: bool = False
 
-_INFRA_RE = re.compile(r"ratelimit|rate-limit|rate limit|quota|429|timeout|timed out|latency|deadline exceeded|drain.?timeout", re.IGNORECASE)
+_INFRA_RE = re.compile(r"ratelimit|rate-limit|rate limit|429|timeout|timed out|latency|deadline exceeded|drain.?timeout", re.IGNORECASE)
 # Explicit routing-failure markers from evaluate_attempt; these take precedence
 # over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
 _ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|too-many-discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)

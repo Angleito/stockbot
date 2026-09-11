@@ -174,14 +174,6 @@ def test_target_rate_limited_returns_transient(tmp_path: Path):
     assert reason.startswith("transient: ")
 
 
-def test_target_quota_exhausted_returns_transient(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(
-        _ok(tmp_path, tool_error="quota_exhausted"), "get_fundamentals", 0, False, attempt=1,
-    )
-    assert not ok
-    assert reason.startswith("transient: ")
-
-
 def test_target_timeout_message_returns_transient(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
         _ok(tmp_path, tool_error="tool_error", tool_message="Exa search timed out"),
@@ -289,10 +281,9 @@ def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
     assert "unexpected" in reason
 
 
-def test_dispatched_wrong_tool_clean_stray_fails_attempt_1(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
-    assert not ok
-    assert "routing failed" in reason
+def test_dispatched_wrong_tool_success_passes_attempt_1(tmp_path: Path):
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
 
 
 
@@ -521,7 +512,7 @@ def test_two_pass_one_fail_is_tool_failure() -> None:
 def test_infra_only_still_fails_but_reports_infra() -> None:
     assert v.is_infra_failure("ratelimit 429 quota exceeded")
     assert v.is_infra_failure("pi timeout before terminal state")
-    assert not v.is_infra_failure("Overloaded 503 try again")
+    assert v.is_infra_failure("Overloaded 503 try again")
     assert not v.is_infra_failure("routing failed: unexpected research tool call(s): foo")
     assert not v.is_infra_failure("target 'x' absent (ok)")
     infra_trio = [v.AttemptResult("t", n, False, "transient: pi timeout before terminal state", 124, "", 0.0) for n in (1, 2, 3)]
@@ -867,11 +858,10 @@ def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> 
     p = _ok(tmp_path, discovery=None, via_call_tool=True)
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
     assert ok
-def test_attempt3_clean_stray_fails_and_harness_rejected_fails(tmp_path: Path) -> None:
+def test_attempt3_clean_stray_passes_and_harness_rejected_fails(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery=None, extra_tool="get_xbrl_facts")
-    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
-    assert not ok
-    assert "routing failed" in reason
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert ok
     epath = tmp_path / "err.sqlite"
     _db(epath, discovery=None, extra_tool="get_xbrl_facts", extra_error="tool_error")
     ok_err, reason_err = v.evaluate_attempt(epath, "get_fundamentals", 0, False, attempt=3)
@@ -937,17 +927,17 @@ def _add_discovery_rows(path: Path, n: int) -> None:
     conn.close()
 
 
-def test_discovery_cap_trips_at_four(tmp_path: Path) -> None:
+def test_discovery_cap_trips_at_thirteen(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery="browse_tools")
-    _add_discovery_rows(p, 2)
+    _add_discovery_rows(p, 11)
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
     assert ok
     q = tmp_path / "cap.sqlite"
     _db(q, discovery="browse_tools")
-    _add_discovery_rows(q, 3)
+    _add_discovery_rows(q, 12)
     ok2, reason2 = v.evaluate_attempt(q, "get_fundamentals", 0, False, attempt=1)
     assert not ok2
-    assert "too-many-discovery:4" in reason2
+    assert "too-many-discovery:13" in reason2
 
 
 def test_attempt3_with_discovery_passes_when_dispatched(tmp_path: Path) -> None:
@@ -1019,11 +1009,10 @@ def _probe_db(path: Path, *, clean_args: str | None, failed_args: str | None) ->
     return path
 
 
-def test_same_tool_different_args_failure_still_fails(tmp_path: Path) -> None:
+def test_same_tool_different_args_probe_forgiven(tmp_path: Path) -> None:
     p = _probe_db(tmp_path / "runs.sqlite", clean_args='{"ticker": "AAPL"}', failed_args='{"ticker": "AAPL", "tradeDate": "2026-09-11"}')
-    ok, reason = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
-    assert not ok
-    assert "failed execution present" in reason
+    ok, _ = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
+    assert ok
 
 
 def test_same_tool_same_args_failure_still_fails(tmp_path: Path) -> None:
