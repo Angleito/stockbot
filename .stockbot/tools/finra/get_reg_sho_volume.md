@@ -2,7 +2,7 @@
 
 Domain: finra
 
-Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.
+Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.
 
 ## Use when
 
@@ -11,6 +11,7 @@ Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 1
 ## Avoid when
 
 - Do NOT use for biweekly short interest positions (get_short_interest).
+- Do NOT call describe_finra_dataset or get_finra_datapoints; dataset and fields resolve internally.
 
 ## Related tools
 

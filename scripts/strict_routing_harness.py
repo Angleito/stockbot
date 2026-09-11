@@ -31,8 +31,8 @@ import app.pi_gateway as _gw  # noqa: E402
 from app.pi_gateway import PiSessionContext, execute_pi_tool  # noqa: E402
 from app.policy import RequestContext  # noqa: E402
 
-# Narrow infra excuse: ratelimit | 429 | timeout | latency only.
-_INFRA_RE = re.compile(r"(?i)ratelimit|\b429\b|timeout|latency")
+# Narrow infra excuse: ratelimit | quota | 429 | timeout | latency | deadline/drain only.
+_INFRA_RE = re.compile(r"(?i)ratelimit|rate-limit|rate limit|quota|\b429\b|timeout|timed out|latency|deadline exceeded|drain.?timeout")
 
 # (eval id, required tools exact, required sequence). Ids 6/29/1 have no
 # required_tools in fixtures, so expected_tools stands in as required.

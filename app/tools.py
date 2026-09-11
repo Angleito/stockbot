@@ -255,11 +255,11 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "diff_sec_filings",
-            "description": "Full-filing diff between two accessions: deterministic diff by accession numbers (amendment vs prior, all sections in full context). Numbers first; the LLM interprets only after deterministic output. Do NOT use for risk-factor-only year-over-year diffs for one ticker (diff_risk_factors). When accession numbers are unknown, find them with list_sec_filings.",
+            "description": "Self-contained full-filing diff for one ticker: pass ticker (plus optional forms hint like S-3/A) and the two most recent matching filings resolve internally; or pass two accession numbers directly. Returns added/removed language. Do NOT call list_sec_filings first. Do NOT use for risk-factor-only year-over-year diffs for one ticker (diff_risk_factors).",
             "parameters": {
                 "type": "object",
-                "properties": {"current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}},
-                "required": ["current_accession", "previous_accession"]
+                "properties": {"ticker": {"type": "string"}, "forms": {"type": "array", "items": {"type": "string"}}, "current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
+                "required": []
             }
         }
     },
@@ -482,8 +482,8 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "diff_risk_factors",
-            "description": "Risk Factors section year-over-year diff for one ticker: what changed in Risk Factors language "
-                "vs. the prior filing. Call for risk-disclosure change framing (what is new/changed). Do NOT use for full-filing diffs between two accessions (diff_sec_filings). Takes a ticker. "
+            "description": "Self-contained Risk Factors year-over-year diff for one ticker: what changed in Risk Factors language "
+                "vs. the prior filing. Takes a ticker alone; filings resolve internally so do NOT call list_sec_filings first. Call for risk-disclosure change framing (what is new/changed). Do NOT use for full-filing diffs between two accessions (diff_sec_filings). "
                 "Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
             "parameters": {
                 "type": "object",
@@ -571,9 +571,9 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_reg_sho_volume",
-            "description": "Daily short-sale volume by venue for one ticker: FINRA daily Reg SHO short-sale volume "
+            "description": "Self-contained daily short-sale volume by venue for one ticker: FINRA daily Reg SHO short-sale volume "
                 "ticker (short, short-exempt, and total share quantity by "
-                "reporting facility). Rolling 12 months. Do NOT use for biweekly short interest positions (get_short_interest). Takes a ticker.",
+                "reporting facility). Rolling 12 months. Takes a ticker alone; dataset and fields resolve internally so do NOT call describe_finra_dataset or get_finra_datapoints. Do NOT use for biweekly short interest positions (get_short_interest). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2158,10 +2158,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "diff_sec_filings": ToolDiscovery(
         domain="filings",
-        summary="Full-filing diff between two accessions: amendment versus prior version, all sections in context.",
-        use_when=("Comparing two known filing accessions for amendment or restatement changes.",),
-        avoid_when=("Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).",),
-        related_tools=("diff_risk_factors", "get_sec_filing", "list_sec_filings"),
+        summary="Self-contained full-filing diff for one ticker or two accessions: amendment versus prior version.",
+        use_when=("Comparing a ticker's latest amendment filing versus its predecessor filing.", "Comparing two known filing accessions for amendment or restatement changes."),
+        avoid_when=("Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).", "Do NOT call list_sec_filings first; ticker resolution is internal."),
+        related_tools=("diff_risk_factors", "get_sec_filing"),
     ),
     "get_material_events": ToolDiscovery(
         domain="events",
@@ -2242,9 +2242,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "diff_risk_factors": ToolDiscovery(
         domain="filings",
-        summary="Risk Factors section year-over-year diff for one ticker: what is new or changed.",
+        summary="Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed.",
         use_when=("What is new or changed in a company's risk disclosures for one ticker.",),
-        avoid_when=("Do NOT use for full-filing diffs between accessions (diff_sec_filings).", "Do NOT use for disclosure search without change framing (search_sec_filings).",),
+        avoid_when=("Do NOT use for full-filing diffs between accessions (diff_sec_filings).", "Do NOT use for disclosure search without change framing (search_sec_filings).", "Self-contained for one ticker; do NOT call list_sec_filings before or after."),
         related_tools=("diff_sec_filings", "search_sec_filings"),
     ),
     "get_financial_statements": ToolDiscovery(
@@ -2277,9 +2277,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_reg_sho_volume": ToolDiscovery(
         domain="finra",
-        summary="Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.",
+        summary="Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.",
         use_when=("Daily short-sale volume or venue breakdowns for one ticker.",),
-        avoid_when=("Do NOT use for biweekly short interest positions (get_short_interest).",),
+        avoid_when=("Do NOT use for biweekly short interest positions (get_short_interest).", "Do NOT call describe_finra_dataset or get_finra_datapoints; dataset and fields resolve internally."),
         related_tools=("get_short_interest", "query_finra"),
     ),
     "get_threshold_securities": ToolDiscovery(
@@ -2906,6 +2906,40 @@ def _list_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
         ),
         "filings",
     )
+def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
+    """Accession pair direct, or ticker self-resolution via sec.list_sec_filings."""
+    del model
+    cur = _str_or_none(args.get("current_accession"))
+    prev = _str_or_none(args.get("previous_accession"))
+    section = _str_or_none(args.get("section"))
+    if cur and prev:
+        return sec.diff_filings(cur, prev, section=section)
+    ticker = _str_or_none(args.get("ticker"))
+    if not ticker:
+        return _invalid_args_error("diff_sec_filings", "Provide ticker or current_accession+previous_accession for tool 'diff_sec_filings'")
+    raw_forms = args.get("forms")
+    if raw_forms is None:
+        forms: str | list[str] | tuple[str, ...] | None = None
+    elif isinstance(raw_forms, str):
+        forms = raw_forms
+    elif isinstance(raw_forms, (list, tuple)):
+        forms = tuple(str(x) for x in raw_forms)
+    else:
+        forms = None
+    try:
+        filings = sec.list_sec_filings(ticker, forms=forms, as_of=_str_or_none(args.get("as_of")), limit=10)
+    except Exception as exc:
+        return {"error": str(exc)}
+    if len(filings) < 2:
+        return {"error": f"No pair of filings found for {ticker}: {len(filings)} match"}
+    latest = filings[0]
+    same = [f for f in filings[1:] if f.form == latest.form]
+    current, previous = (latest, same[0]) if same else (filings[0], filings[1])
+    out = sec.diff_filings(current.accession_no, previous.accession_no, section=section)
+    if isinstance(out, dict) and "error" not in out:
+        out = {**out, "ticker": ticker.strip().upper(), "resolved_via": "list_sec_filings-internal"}
+    return out
+
 
 
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
@@ -2930,9 +2964,7 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
             str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))), "documents",
     ),
     "get_sec_document": _get_sec_document,
-    "diff_sec_filings": lambda args, model: sec.diff_filings(
-        str(args["current_accession"]), str(args["previous_accession"]), section=_str_or_none(args.get("section")),
-    ),
+    "diff_sec_filings": _diff_sec_filings,
     "get_material_events": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_material_events(
             str(args["ticker"]), str(args["since"]), as_of=_str_or_none(args.get("as_of")),

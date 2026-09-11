@@ -55,10 +55,10 @@ tools:
     summary: "Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours."
   - name: diff_risk_factors
     domain: filings
-    summary: "Risk Factors section year-over-year diff for one ticker: what is new or changed."
+    summary: "Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed."
   - name: diff_sec_filings
     domain: filings
-    summary: "Full-filing diff between two accessions: amendment versus prior version, all sections in context."
+    summary: "Self-contained full-filing diff for one ticker or two accessions: amendment versus prior version."
   - name: find_sec_entities
     domain: filings
     summary: "Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers."
@@ -88,7 +88,7 @@ tools:
     summary: "Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows."
   - name: get_reg_sho_volume
     domain: finra
-    summary: "Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months."
+    summary: "Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months."
   - name: get_short_interest
     domain: finra
     summary: "Biweekly short position for one ticker: FINRA short interest, days to cover, percent change."

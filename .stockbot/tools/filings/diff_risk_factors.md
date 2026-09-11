@@ -2,7 +2,7 @@
 
 Domain: filings
 
-Risk Factors section year-over-year diff for one ticker: what is new or changed.
+Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed.
 
 ## Use when
 
@@ -12,6 +12,7 @@ Risk Factors section year-over-year diff for one ticker: what is new or changed.
 
 - Do NOT use for full-filing diffs between accessions (diff_sec_filings).
 - Do NOT use for disclosure search without change framing (search_sec_filings).
+- Self-contained for one ticker; do NOT call list_sec_filings before or after.
 
 ## Related tools
 
