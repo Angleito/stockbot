@@ -67,16 +67,26 @@ def tool_markdown(name: str) -> str:
         f"# {name}\n",
         "\n",
         f"Domain: {meta.domain}\n",
+        f"Family: {meta.family}\n",
+        f"Intent: {meta.intent}\n",
+        f"Output kind: {meta.output_kind}\n",
+        f"Source: {meta.source}\n",
+        f"Entity scope: {meta.entity_scope}\n",
+        f"Time mode: {meta.time_mode}\n",
         "\n",
         f"{meta.summary}\n",
         "\n",
-        "## Use when\n",
+        "## Choose when\n",
         "\n",
-        _bullets(meta.use_when),
+        _bullets(meta.choose_when),
         "\n",
-        "## Avoid when\n",
+        "## Reject when\n",
         "\n",
-        _bullets(meta.avoid_when),
+        _bullets(meta.reject_when),
+        "\n",
+        "## Conflicts with\n",
+        "\n",
+        _bullets(meta.conflicts_with),
         "\n",
         "## Related tools\n",
         "\n",
@@ -96,22 +106,35 @@ def tool_markdown(name: str) -> str:
     ]
     return "".join(lines)
 
-def _sort_key(name: str) -> tuple[str, str]:
+def _sort_key(name: str) -> tuple[str, str, str]:
     meta = TOOL_DISCOVERY_REGISTRY[name]
-    return (meta.domain, name)
+    return (meta.domain, meta.family, name)
 
 
 def index_yaml(names: list[str]) -> str:
     domains = sorted({TOOL_DISCOVERY_REGISTRY[n].domain for n in names})
-    lines = ["version: 1\n", "domains:\n"]
+    lines = ["version: 2\n", "domains:\n"]
     for domain in domains:
         lines.append(f"  {domain}:\n")
         lines.append(f"    description: {_yaml_str(DOMAIN_DESCRIPTIONS[domain])}\n")
+        fams = sorted({TOOL_DISCOVERY_REGISTRY[n].family for n in names if TOOL_DISCOVERY_REGISTRY[n].domain == domain})
+        if fams:
+            lines.append("    families:\n")
+        for fam in fams:
+            lines.append(f"      - {fam}:\n")
+            lines.append(f"        path: {_yaml_str(f'/{domain}/{fam}')}\n")
     lines.append("tools:\n")
     for name in sorted(names, key=_sort_key):
         meta = TOOL_DISCOVERY_REGISTRY[name]
         lines.append(f"  - name: {name}\n")
         lines.append(f"    domain: {meta.domain}\n")
+        lines.append(f"    family: {meta.family}\n")
+        lines.append(f"    path: {_yaml_str(f'/{meta.domain}/{meta.family}/{name}')}\n")
+        lines.append(f"    intent: {meta.intent}\n")
+        lines.append(f"    output_kind: {meta.output_kind}\n")
+        lines.append(f"    source: {meta.source}\n")
+        lines.append(f"    entity_scope: {meta.entity_scope}\n")
+        lines.append(f"    time_mode: {meta.time_mode}\n")
         lines.append(f"    summary: {_yaml_str(meta.summary)}\n")
     return "".join(lines)
 
@@ -122,15 +145,15 @@ def main() -> int:
         meta = TOOL_DISCOVERY_REGISTRY[name]
         if meta.domain not in DOMAIN_DESCRIPTIONS:
             raise ValueError(f"tool {name!r} has undescribed domain {meta.domain!r}")
-        for ref in (*meta.related_tools, *meta.prerequisites):
+        for ref in (*meta.related_tools, *meta.prerequisites, *meta.conflicts_with):
             if ref not in TOOL_DISCOVERY_REGISTRY:
                 raise ValueError(f"tool {name!r} references unknown tool {ref!r}")
         _schema_args(name)  # missing schema raises
     CATALOG_ROOT.mkdir(parents=True, exist_ok=True)
     (CATALOG_ROOT / "index.yaml").write_text(index_yaml(names))
     for name in names:
-        domain = TOOL_DISCOVERY_REGISTRY[name].domain
-        path = CATALOG_ROOT / domain / f"{name}.md"
+        meta = TOOL_DISCOVERY_REGISTRY[name]
+        path = CATALOG_ROOT / meta.domain / meta.family / f"{name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tool_markdown(name))
     print(f"wrote {len(names)} tools to {CATALOG_ROOT}")

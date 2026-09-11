@@ -1,0 +1,42 @@
+# get_beneficial_ownership
+
+Domain: ownership
+Family: stakes
+Intent: retrieve_current_beneficial_owners
+Output kind: current_snapshot
+Source: sec
+Entity scope: single_security
+Time mode: latest_or_as_of
+
+Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers.
+
+## Choose when
+
+- Finding who owns more than 5% of a company.
+
+## Reject when
+
+- Not for stake changes over time (get_ownership_changes).
+- Answer from these records; do not open filings or pull changes unless asked.
+
+## Conflicts with
+
+- get_ownership_changes
+
+## Related tools
+
+- get_ownership_changes
+- search_sec_relationships
+
+## Prerequisites
+
+None
+
+## Required arguments
+
+- `ticker` (string)
+
+## Optional arguments
+
+- `as_of` (string)
+- `limit` (integer)

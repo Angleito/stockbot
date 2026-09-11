@@ -537,7 +537,7 @@ def _execute_pi_tool(
         "status": status,
         "as_of": meta.as_of,
     }
-    if name == "search_tools" and isinstance(result, dict):
+    if name in ("search_tools", "browse_tools") and isinstance(result, dict):
         # Deferred loading: the TS extension activates these schemas additively.
         # Names are already model-visible in content; meta carries them structured.
         raw_matches = result.get("matches")
@@ -546,7 +546,6 @@ def _execute_pi_tool(
                 m.get("name") for m in raw_matches
                 if isinstance(m, dict) and isinstance(m.get("name"), str)
             ]
-
         else:
             # Pre-discovery search shape: full schemas under "schemas".
             raw_schemas = result.get("schemas")
@@ -558,5 +557,11 @@ def _execute_pi_tool(
                     if isinstance(tool_name, str):
                         names.append(tool_name)
                 safe_meta["matches"] = names
+        raw_tools = result.get("tools")
+        if isinstance(raw_tools, list):
+            safe_meta["tools"] = [
+                m.get("name") for m in raw_tools
+                if isinstance(m, dict) and isinstance(m.get("name"), str)
+            ]
 
     return {"content": final_text, "meta": safe_meta}

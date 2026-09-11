@@ -84,7 +84,7 @@ def catalog_errors() -> list[str]:
     expected = {"index.yaml": index_yaml(names)}
     for name in names:
         meta = TOOL_DISCOVERY_REGISTRY[name]
-        expected[str(Path(meta.domain) / f"{name}.md")] = tool_markdown(name)
+        expected[str(Path(meta.domain) / meta.family / f"{name}.md")] = tool_markdown(name)
     problems = []
     for rel, text in sorted(expected.items()):
         page = CATALOG_ROOT / rel
@@ -92,7 +92,7 @@ def catalog_errors() -> list[str]:
             problems.append(f"missing {rel}")
         elif page.read_text() != text:
             problems.append(f"drift {rel}")
-    on_disk = {"index.yaml"} | {str(p.relative_to(CATALOG_ROOT)) for p in CATALOG_ROOT.glob("*/*.md")} if CATALOG_ROOT.is_dir() else set()
+    on_disk = {"index.yaml"} | {str(p.relative_to(CATALOG_ROOT)) for p in CATALOG_ROOT.glob("**/*.md")} if CATALOG_ROOT.is_dir() else set()
     for rel in sorted(on_disk - set(expected)):
         problems.append(f"orphan {rel}")
     return problems

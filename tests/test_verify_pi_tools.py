@@ -601,7 +601,9 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
     monkeypatch.setattr(v, "run_pi", fake_run_pi)
     monkeypatch.setattr(v, "evaluate_attempt", fake_eval)
     monkeypatch.setattr(v, "evaluate_reachability_attempt", fake_eval)
-    monkeypatch.setattr(v, "evaluate_routing_attempt", lambda db_path, tool, code, timed_out, **k: fake_eval(db_path, tool, code, timed_out, **{x: y for x, y in k.items() if x != "expected_args"}))
+    def fake_routing(db_path: Path, tool: str, code: int, timed_out: bool, **k: object) -> tuple[bool, str]:
+        return fake_eval(db_path, tool, code, timed_out, **{x: y for x, y in k.items() if x != "expected_args"})  # type: ignore[arg-type]
+    monkeypatch.setattr(v, "evaluate_routing_attempt", fake_routing)
     base: dict[str, object] = {"id": v.THESIS_ID_PLACEHOLDER}
     batch = tmp_path / "batch"
     durable = tmp_path / "durable"
@@ -823,11 +825,10 @@ def test_holdout_fails_when_discovery_after_dispatch(tmp_path: Path) -> None:
     assert "precede" in reason
 
 
-def test_holdout_fails_without_call_tool_dispatch(tmp_path: Path) -> None:
+def test_holdout_passes_on_direct_completion(tmp_path: Path) -> None:
     p = _holdout_db(tmp_path / "runs.sqlite", via_call_tool=False)
-    ok, reason = v.evaluate_holdout_attempt(p, "get_short_interest")
-    assert not ok
-    assert "call_tool" in reason
+    ok, _ = v.evaluate_holdout_attempt(p, "get_short_interest")
+    assert ok
 
 def test_attempt1_browse_only_passes_before_call_tool(tmp_path: Path) -> None:
     ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="browse_tools"), "get_fundamentals", 0, False, attempt=1)
@@ -852,11 +853,10 @@ def test_attempt1_late_discovery_fails(tmp_path: Path) -> None:
     assert "precede" in reason
 
 
-def test_attempt1_direct_hidden_tool_completion_fails(tmp_path: Path) -> None:
+def test_attempt1_direct_tool_completion_passes(tmp_path: Path) -> None:
     p = _ok(tmp_path, via_call_tool=False)
-    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
-    assert not ok
-    assert "call_tool" in reason
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert ok
 
 
 def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> None:
@@ -993,7 +993,7 @@ def test_holdout_prompts_are_novel_and_unquoted() -> None:
     verify_texts.discard("")
     registry_phrases: list[str] = []
     for meta in TOOL_DISCOVERY_REGISTRY.values():
-        for phrase in (meta.summary, *meta.use_when):
+        for phrase in (meta.summary, *meta.choose_when):
             norm = _norm_holdout_text(phrase)
             if len(norm.split()) >= 5:
                 registry_phrases.append(norm)
@@ -1037,3 +1037,348 @@ def test_same_tool_same_args_failure_still_fails(tmp_path: Path) -> None:
     ok, reason = v.evaluate_attempt(p, "get_threshold_securities", 0, False, attempt=1)
     assert not ok
     assert "failed execution present" in reason
+
+
+def _completion_db(
+    path: Path,
+    *,
+    expected_tool: str | None = "get_fundamentals",
+    discovery_at: str = "2026-01-01T00:00:00+00:00",
+    research_at: str = "2026-01-01T00:00:01+00:00",
+    continuation_at: str | None = None,
+    continuations: int = 0,
+    search_row_count: int | None = None,
+    research: bool = True,
+    answer: str = "evidence-backed answer",
+    via_call_tool: bool = False,
+) -> Path:
+    """Mocked agent-loop trace: discovery -> [continuation] -> research -> answer."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_SCHEMA)
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status, final_answer_hash) VALUES ('r1','r1',?,'q','completed',?)",
+        (discovery_at, answer),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, result_row_count) VALUES ('tc0','r1','search_tools',?,NULL,?)",
+        (discovery_at, search_row_count),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
+        (discovery_at,),
+    )
+    for i in range(continuations):
+        at = continuation_at or "2026-01-01T00:00:01+00:00"
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at) VALUES (?,?,?,'routing_continuation',?)",
+            (f"c{i}", at, 10 + i, at),
+        )
+    if research and expected_tool is not None:
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1',?,?,NULL)",
+            (expected_tool, research_at),
+        )
+        if via_call_tool:
+            conn.execute(
+                "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
+                (research_at, json.dumps({"name": expected_tool, "arguments": {"ticker": "AAPL"}})),
+            )
+            conn.execute(
+                "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,'call_tool')",
+                (research_at,),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
+                (research_at, expected_tool),
+            )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+        (MODEL, discovery_at),
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_completion_supported_direct_passes(tmp_path: Path) -> None:
+    p = _completion_db(tmp_path / "runs.sqlite")
+    ok, _ = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert ok
+
+
+def test_completion_supported_fallback_passes(tmp_path: Path) -> None:
+    p = _completion_db(tmp_path / "runs.sqlite", via_call_tool=True)
+    ok, _ = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert ok
+
+
+def test_completion_premature_stop_fails(tmp_path: Path) -> None:
+    p = _completion_db(tmp_path / "runs.sqlite", research=False)
+    ok, reason = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert not ok
+    assert "absent" in reason
+
+
+def test_completion_one_shot_recovery_passes(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite",
+        discovery_at="2026-01-01T00:00:00+00:00",
+        continuation_at="2026-01-01T00:00:01+00:00",
+        research_at="2026-01-01T00:00:02+00:00",
+        continuations=1,
+    )
+    ok, _ = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert ok
+
+
+def test_completion_continuation_without_recovery_fails(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite",
+        discovery_at="2026-01-01T00:00:00+00:00",
+        research_at="2026-01-01T00:00:01+00:00",
+        continuation_at="2026-01-01T00:00:02+00:00",
+        continuations=1,
+    )
+    ok, reason = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert not ok
+    assert "did not recover" in reason
+
+
+def test_completion_double_continuation_fails(tmp_path: Path) -> None:
+    p = _completion_db(tmp_path / "runs.sqlite", continuations=2)
+    ok, reason = v.evaluate_completion_attempt(p, "get_fundamentals")
+    assert not ok
+    assert "multiple routing continuations" in reason
+
+
+def test_completion_unsupported_zero_match_passes(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite", expected_tool=None, research=False,
+        search_row_count=0, answer="no suitable tool exists",
+    )
+    ok, _ = v.evaluate_completion_attempt(p, None)
+    assert ok
+
+
+def test_completion_unsupported_nonzero_match_fails(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite", expected_tool=None, research=False,
+        search_row_count=2, answer="no suitable tool exists",
+    )
+    ok, reason = v.evaluate_completion_attempt(p, None)
+    assert not ok
+    assert "no clean zero-match" in reason
+
+
+def test_completion_unsupported_null_row_count_fails_closed(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite", expected_tool=None, research=False,
+        search_row_count=None, answer="no suitable tool exists",
+    )
+    ok, reason = v.evaluate_completion_attempt(p, None)
+    assert not ok
+    assert "no clean zero-match" in reason
+
+
+def test_completion_unsupported_with_research_fails(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite", expected_tool=None, research=False, search_row_count=0,
+    )
+    conn = sqlite3.connect(str(p))
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tcx','r1','get_fundamentals','2026-01-01T00:00:01+00:00',NULL)"
+    )
+    conn.commit()
+    conn.close()
+    ok, reason = v.evaluate_completion_attempt(p, None)
+    assert not ok
+    assert "unexpected research" in reason
+
+
+def test_completion_unsupported_empty_answer_fails(tmp_path: Path) -> None:
+    p = _completion_db(
+        tmp_path / "runs.sqlite", expected_tool=None, research=False,
+        search_row_count=0, answer="   ",
+    )
+    ok, reason = v.evaluate_completion_attempt(p, None)
+    assert not ok
+    assert "empty final answer" in reason
+
+
+def test_routing_metrics_event_parses_latest(tmp_path: Path) -> None:
+    p = _completion_db(tmp_path / "runs.sqlite")
+    conn = sqlite3.connect(str(p))
+    assert v._routing_metrics_event(conn) is None
+    payload = {"discovery_calls": 1, "invalid_tool_calls": 0, "unrelated_research_calls": 0}
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, metadata) VALUES ('m1','r1',5,'routing_metrics','2026-01-01T00:00:03+00:00',?)",
+        (json.dumps(payload),),
+    )
+    assert v._routing_metrics_event(conn) == payload
+    conn.close()
+
+
+def _attempt(
+    tool: str, attempt: int, ok: bool, discovery: int = 1, research: int = 1,
+    metrics: dict[str, object] | None = None, completion: bool | None = None,
+    terminal: bool = True,
+) -> v.AttemptResult:
+    return v.AttemptResult(
+        tool, attempt, ok, "pass" if ok else "routing failed: x", 0, "", 0.0,
+        False, None, "", None, "", discovery, research, 0, completion,
+        "" if completion else "", metrics, terminal_completed=terminal,
+    )
+
+def test_aggregate_formulas() -> None:
+    results = [
+        _attempt("a", 1, True, 1, 1, {"discovered_tool_count": 2, "premature_stop_detected": False, "continuation_injected": True, "continuation_succeeded": True, "invalid_tool_calls": 0, "unrelated_research_calls": 0, "discovery_calls": 1, "call_tool_count": 0, "direct_tool_calls": 1}, True),
+        _attempt("a", 2, True, 1, 0, {"discovered_tool_count": 1, "premature_stop_detected": True, "continuation_injected": False, "continuation_succeeded": False, "invalid_tool_calls": 2, "unrelated_research_calls": 1, "discovery_calls": 1, "call_tool_count": 1, "direct_tool_calls": 0}, False),
+        _attempt("unsupported", 5, True, 1, 0, {"discovered_tool_count": 0, "premature_stop_detected": False, "continuation_injected": False, "continuation_succeeded": False, "invalid_tool_calls": 0, "unrelated_research_calls": 0, "discovery_calls": 1, "call_tool_count": 0, "direct_tool_calls": 0}, True),
+        _attempt("b", 1, False, 0, 0, None, None, terminal=False),
+        _attempt("c", 1, False, 5, 5, {"discovered_tool_count": 5}, None, terminal=False),
+    ]
+    agg = v.aggregate_results(results)
+    assert agg["population"] == 3
+    conv = agg["discovery_to_research_conversion"]
+    assert isinstance(conv, dict) and conv == {"with_research": 1, "with_discovery": 2, "rate": 0.5}
+    premature = agg["premature_stop_rate"]
+    assert isinstance(premature, dict) and premature == {"premature": 1, "total": 3, "rate": 1 / 3}
+    recovery = agg["continuation_recovery"]
+    assert isinstance(recovery, dict) and recovery == {"recovered": 1, "injected": 1, "rate": 1.0}
+    invalid = agg["invalid_tool_call_rate"]
+    assert isinstance(invalid, dict)
+    assert (invalid["invalid_calls"], invalid["routed_calls"], invalid["invalid_attempts"]) == (2, 5, 1)
+    assert 0.0 <= float(invalid["rate"]) <= 1.0
+    assert agg["unrelated_research_calls"] == 1
+    completion = agg["completion"]
+    assert isinstance(completion, dict) and completion == {"passed": 2, "evaluated": 3, "rate": 2 / 3}
+    assert agg["median_discovery_calls"] == 1.0
+    assert agg["median_research_calls"] == 0.0
+
+
+def test_run_agent_loop_main_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    canned = [
+        _attempt("search_web", 1, True, 1, 1, {"continuation_injected": False}, True),
+        _attempt("unsupported", 5, True, 1, 0, None, True),
+    ]
+    def _canned(root: Path, cwd: Path) -> list[v.AttemptResult]:
+        del root, cwd
+        return canned
+    monkeypatch.setattr(v, "run_agent_loop", _canned)
+    monkeypatch.chdir(tmp_path)
+    assert v.run_agent_loop_main() == 0
+    batches = sorted((tmp_path / "data" / "verify").glob("*"))
+    summary = json.loads(batches[0].joinpath("agent-loop", "summary.json").read_text())
+    assert len(summary["cases"]) == 2
+    assert summary["cases"][0]["expected_tool"] == "search_web"
+    assert summary["aggregates"]["population"] == 2
+    assert summary["aggregates"]["completion"] == {"passed": 2, "evaluated": 2, "rate": 1.0}
+    failing = [v.AttemptResult("x", 1, False, "routing failed: x", 1, "", 0.0)]
+    def _failing(root: Path, cwd: Path) -> list[v.AttemptResult]:
+        del root, cwd
+        return failing
+    monkeypatch.setattr(v, "run_agent_loop", _failing)
+    assert v.run_agent_loop_main() == 1
+
+def _metrics_db(path: Path, *, expected: str = "get_fundamentals", discovered: list[str] | None, extra_clean: str | None = None, dispatch_expected: bool = True, expected_error: str | None = None, unparseable: bool = False, rejected_expected: bool = False, args_json: str | None = None) -> Path:
+    """Minimal trace for classify tests with explicit routing_metrics surfaced list."""
+    import sqlite3 as _sq
+    from app.storage.runs import _SCHEMA as _SC
+    conn = _sq.connect(str(path))
+    conn.executescript(_SC)
+    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')")
+    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools','2026-01-01T00:00:00+00:00',NULL)")
+    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed','2026-01-01T00:00:00+00:00','search_tools')")
+    if dispatch_expected:
+        err = expected_error
+        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, arguments_json) VALUES ('tc1','r1',?,'2026-01-01T00:00:01+00:00',?,?)", (expected, err, args_json or '{"ticker": "AAPL"}'))
+        if unparseable:
+            conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool','not-json')")
+        else:
+            conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool',?)", (json.dumps({"name": expected, "arguments": {"ticker": "AAPL"}}),))
+        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed','2026-01-01T00:00:01+00:00','call_tool')")
+    if extra_clean is not None:
+        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,'2026-01-01T00:00:01+00:00',NULL)", (extra_clean,))
+        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_completed','2026-01-01T00:00:01+00:00',?)", (extra_clean,))
+    if rejected_expected:
+        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e8','r1',8,'tool_failed','2026-01-01T00:00:01+00:00',?)", (expected,))
+    empty: list[str] = []
+    payload = {"discovered_tools": discovered if discovered is not None else empty, "discovered_tool_count": len(discovered or [])}
+    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, metadata) VALUES ('m1','r1',5,'routing_metrics','2026-01-01T00:00:03+00:00',?)", (json.dumps(payload),))
+    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", ("test-model",))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_classify_discovery_failure(tmp_path: Path):
+    p = _metrics_db(tmp_path / "d.sqlite", discovered=["search_web"])
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.DISCOVERY_FAILURE
+
+
+def test_classify_selection_failure(tmp_path: Path):
+    p = _metrics_db(tmp_path / "s.sqlite", discovered=["get_fundamentals", "get_xbrl_facts"], extra_clean="get_xbrl_facts")
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.SELECTION_FAILURE
+
+
+def test_classify_dispatch_failure(tmp_path: Path):
+    p = _metrics_db(tmp_path / "x.sqlite", discovered=["get_fundamentals"], dispatch_expected=False)
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.DISPATCH_FAILURE
+
+
+def test_classify_argument_failure_unparseable(tmp_path: Path):
+    p = _metrics_db(tmp_path / "a.sqlite", discovered=["get_fundamentals"], unparseable=True)
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.ARGUMENT_FAILURE
+
+
+def test_classify_argument_failure_mismatch(tmp_path: Path):
+    p = _metrics_db(tmp_path / "m.sqlite", discovered=["get_fundamentals"], args_json='{"ticker": "MSFT"}')
+    cat = v.classify_routing_failure(p, "get_fundamentals", attempt=1, expected_args={"ticker": "AAPL"})
+    assert cat == v.RoutingFailureCategory.ARGUMENT_FAILURE
+
+
+def test_classify_execution_failure(tmp_path: Path):
+    p = _metrics_db(tmp_path / "e.sqlite", discovered=["get_fundamentals"], expected_error="tool_error")
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.EXECUTION_FAILURE
+
+
+def test_classify_precedence_discovery_first(tmp_path: Path):
+    # Missing from surfaced beats even a clean stray.
+    p = _metrics_db(tmp_path / "p.sqlite", discovered=["search_web"], extra_clean="get_xbrl_facts", dispatch_expected=False)
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.DISCOVERY_FAILURE
+
+
+def test_classify_attempt3_skips_discovery(tmp_path: Path):
+    p = _metrics_db(tmp_path / "a3.sqlite", discovered=["search_web"], dispatch_expected=False)
+    # Explicit attempt skips discovery; missing dispatch is next.
+    assert v.classify_routing_failure(p, "get_fundamentals", attempt=3) == v.RoutingFailureCategory.DISPATCH_FAILURE
+
+
+def test_generate_confusion_cases_complete():
+    cases = v.generate_confusion_cases()
+    # 18 undirected edges -> 36 directed
+    assert len(cases) == 36
+    pairs: set[tuple[str, str]] = set()
+    for c in cases:
+        raw_pair = c["pair"]
+        assert isinstance(raw_pair, list)
+        pair = tuple(sorted(str(x) for x in raw_pair))
+        assert len(pair) == 2
+        pairs.add((pair[0], pair[1]))
+    assert len(pairs) == 18
+    assert ("get_short_interest", "query_finra") in pairs or ("get_finra_datapoints", "query_finra") in pairs
+    for c in cases:
+        assert c["prompt"] and c["expected_tool"] and isinstance(c["arguments"], dict)
+
+
+def test_holdout_hash_rejects_altered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import evals as _e  # noqa: F401
+    hold = Path("evals/holdout_discovery.json")
+    digest = __import__("hashlib").sha256(hold.read_bytes()).hexdigest()
+    assert digest == v.HOLDOUT_SHA256
+    bad = tmp_path / "hold.json"
+    bad.write_text(hold.read_text() + " ")
+    # run_holdout must fail before spawning Pi
+    assert v.run_holdout(str(bad)) == 1
+

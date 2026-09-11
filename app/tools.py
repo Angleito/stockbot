@@ -387,13 +387,12 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_tools",
-            "description": "Search for relevant Stockbot tools when the active tools cannot perform the task. With a domain and empty query, lists that domain's tools in full.",
+            "description": "Search for relevant Stockbot tools when the active tools cannot perform the task. Returns compact routing cards with ambiguity groups; browse_tools remains the hierarchical catalog path.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Non-empty capability description (not a company or ticker); never call with an empty query."},
                     "domain": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matches; matches are otherwise uncapped."},
                 },
                 "required": ["query"]
             }
@@ -415,7 +414,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "describe_tool",
-            "description": "Show full metadata for one named Stockbot tool: domain, summary, use-when and avoid-when notes, related tools, prerequisites, required and optional arguments. Call with the exact tool name, or describe several tools in one call with names. Use for 'what can X do' questions; do not run the subject tool instead.",
+            "description": "Show full metadata for one named Stockbot tool: domain, family, intent, output kind, source, entity scope, time mode, choose-when and reject-when notes, conflicts, related tools, prerequisites, required and optional arguments. Call with the exact tool name, or describe several tools in one call with names. Use for 'what can X do' questions; do not run the subject tool instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -430,14 +429,13 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "browse_tools",
-            "description": "Browse the full Stockbot tool catalog: all domains and tool names with one-line summaries, or one domain's tools, or one tool's full metadata with canonical parameters.",
+            "description": "Browse the hierarchical Stockbot tool catalog: root domains, one domain's families, one family's tools with contrast, or one tool's full metadata with canonical parameters.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "domain": {"type": "string"},
+                    "family": {"type": "string"},
                     "name": {"type": "string"},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
                 },
                 "additionalProperties": False
             }
@@ -1233,8 +1231,7 @@ TOOLS: list[dict[str, object]] = [
         },
     },
 ]
-# Content-derived registry version for observability records.
-TOOL_REGISTRY_VERSION = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()[:12]
+# TOOL_REGISTRY_VERSION moved below TOOL_DISCOVERY_REGISTRY (hashes schemas + routing metadata).
 
 
 def _robinhood_client(
@@ -2059,15 +2056,19 @@ class ToolDiscovery:
     """Catalog metadata for one RESEARCH tool (generic lexical search source)."""
 
     domain: str
+    family: str
+    intent: str
+    output_kind: str
+    source: str
+    entity_scope: str
+    time_mode: str
     summary: str
-    use_when: tuple[str, ...]
-    avoid_when: tuple[str, ...] = ()
+    choose_when: tuple[str, ...]
+    reject_when: tuple[str, ...] = ()
+    conflicts_with: tuple[str, ...] = ()
     related_tools: tuple[str, ...] = ()
     prerequisites: tuple[str, ...] = ()
-    examples: tuple[str, ...] = ()
-    source_type: str = ""
-    freshness_notes: str = ""
-    pit_notes: str = ""
+    direct_activation: bool = True
 
 
 # Single source for domain descriptions (list_tool_domains + catalog generator share this).
@@ -2075,7 +2076,7 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
     "alternative": "Alternative and non-filing signals outside standard SEC and market feeds.",
     "analyst": "Analyst estimates and expectations for earnings, revenue, and price targets.",
     "events": "Material company events derived from 8-K and filing activity.",
-    "filings": "SEC filing discovery, retrieval, and document reading via EDGAR.",
+    "sec": "SEC filing discovery, retrieval, and document reading via EDGAR.",
     "finra": "FINRA short interest, short volume, and threshold-securities data.",
     "fundamentals": "Reported numeric fundamentals such as EPS, dividends, and balance-sheet items.",
     "governance": "Proxy, meeting, vote, and board-compensation records.",
@@ -2093,338 +2094,791 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
 
 
 TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
-    "get_fundamentals": ToolDiscovery(
-        domain="fundamentals",
-        summary="Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding.",
-        use_when=("One specific numeric fundamental for one ticker: EPS, dividends, or shares outstanding.",),
-        avoid_when=("Do NOT use for full statements (get_financial_statements).", "Do NOT use for XBRL facts by concept (get_xbrl_facts).", "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).", "Do NOT use for forward consensus (get_analyst_estimates).",),
-        related_tools=("get_xbrl_facts", "get_financial_statements", "get_valuation_metrics", "get_analyst_estimates"),
-    ),
-    "find_sec_entities": ToolDiscovery(
-        domain="filings",
-        summary="Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers.",
-        use_when=("Starting from a company name when the exact ticker or CIK is not known.",),
-        avoid_when=("Unneeded when the exact ticker or CIK is already known.",),
-        related_tools=("list_sec_filings", "search_sec_filings"),
-    ),
-    "search_sec_filings": ToolDiscovery(
-        domain="filings",
-        summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
-        use_when=("Searching SEC filing text or mentions when the accession number is unknown.",),
-        avoid_when=("Not a filing lister for a known ticker (list_sec_filings).", "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",),
-        related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities", "diff_risk_factors"),
-    ),
-    "search_sec_relationships": ToolDiscovery(
-        domain="ownership",
-        summary="Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links.",
-        use_when=("Mapping who owns, holds, or transacts with an entity in either direction.",),
-        avoid_when=("Not for current 5%+ stake sizes.",),
-        related_tools=("get_beneficial_ownership", "get_ownership_changes"),
-    ),
-    "get_sec_search_coverage": ToolDiscovery(
-        domain="filings",
-        summary="Persisted SEC ingestion coverage and backfill-job status for a form, source, or date partition.",
-        use_when=("Checking whether a form or date partition is covered or still queued before searching.",),
-        avoid_when=("Does not retrieve filing content.",),
-        related_tools=("search_sec_filings",),
-    ),
-    "list_sec_filings": ToolDiscovery(
-        domain="filings",
-        summary="List EDGAR filings for an exact ticker or CIK, filterable by form and date range.",
-        use_when=("Listing filings for an exact ticker or CIK, optionally filtered by form or date.",),
-        avoid_when=("Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.",),
-        related_tools=("get_sec_filing", "search_sec_filings", "find_sec_entities"),
-    ),
-    "get_sec_filing": ToolDiscovery(
-        domain="filings",
-        summary="One filing's record by accession number: filer, form, dates, primary document, source URL.",
-        use_when=("Fetching filing metadata after its accession number is known.",),
-        avoid_when=("Does not discover filings; list or search for the accession when unknown.", "Answer from the filing record; do not retrieve document text unless the question asks for it."),
-        related_tools=("list_sec_filings", "list_sec_documents"),
-    ),
-    "list_sec_documents": ToolDiscovery(
-        domain="filings",
-        summary="Index of documents and exhibits attached to one filing, looked up by accession number.",
-        use_when=("Listing documents and exhibits attached to a known filing accession.",),
-        avoid_when=("Does not return document text.",),
-        related_tools=("get_sec_filing", "get_sec_document", "list_sec_filings"),
-    ),
-    "get_sec_document": ToolDiscovery(
-        domain="filings",
-        summary="Bounded text window of one filing document by accession number for targeted excerpt reading.",
-        use_when=("Reading a specific section such as MD&A or risk factors from a known accession.",),
-        avoid_when=("Not for what-changed questions.",),
-        related_tools=("get_sec_filing", "get_material_events"),
-    ),
-    "diff_sec_filings": ToolDiscovery(
-        domain="filings",
-        summary="Self-contained full-filing diff for one ticker or two accessions: amendment versus prior version.",
-        use_when=("Comparing a ticker's latest amendment filing versus its predecessor filing.", "Comparing two known filing accessions for amendment or restatement changes."),
-        avoid_when=("Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).", "Do NOT call list_sec_filings first; ticker resolution is internal."),
-        related_tools=("diff_risk_factors", "get_sec_filing"),
-    ),
-    "get_material_events": ToolDiscovery(
-        domain="events",
-        summary="Deterministic 8-K-derived recent event feed with accession citations for what changed since a date.",
-        use_when=("Finding recent 8-K-derived events for a company since a date.",),
-        avoid_when=("Does not cover market reaction or news commentary.", "Answer from the event feed; do not open filing documents unless the question needs document text."),
-        related_tools=("get_sec_document", "search_web", "get_recent_ownership_filings"),
-    ),
-    "get_beneficial_ownership": ToolDiscovery(
-        domain="ownership",
-        summary="Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers.",
-        use_when=("Finding who owns more than 5% of a company.",),
-        avoid_when=("Not for stake changes over time.", "Answer from these records; do not open filings or pull changes unless asked."),
-        related_tools=("get_ownership_changes", "search_sec_relationships"),
-    ),
-    "get_ownership_changes": ToolDiscovery(
-        domain="ownership",
-        summary="Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions.",
-        use_when=("Comparing consecutive 13D/G filings for changes in a holder's stake.",),
-        avoid_when=("Not for the current snapshot of holders.",),
-        related_tools=("get_beneficial_ownership",),
-    ),
-    "get_insider_activity": ToolDiscovery(
-        domain="insider",
-        summary="Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5.",
-        use_when=("One ticker's executed insider buys/sells by executives and directors (Forms 3/4/5).",),
-        avoid_when=("Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales).",),
-        related_tools=("get_planned_insider_sales", "get_beneficial_ownership"),
-    ),
-    "get_planned_insider_sales": ToolDiscovery(
-        domain="insider",
-        summary="Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker.",
-        use_when=("Proposed insider sales reported on Form 144 for one ticker.",),
-        avoid_when=("Do NOT use for completed insider trades (get_insider_activity).",),
-        related_tools=("get_insider_activity",),
-    ),
-    "get_offering_history": ToolDiscovery(
-        domain="offerings",
-        summary="Offering history from S-1/S-3/424B filings: offering terms with source-registration links.",
-        use_when=("Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.",),
-        avoid_when=("Not for dilution math (get_dilution_profile).",),
-        related_tools=("get_dilution_profile",),
-    ),
-    "get_dilution_profile": ToolDiscovery(
-        domain="offerings",
-        summary="Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown.",
-        use_when=("Quantifying share-count impact from offerings, converts, or warrants.",),
-        avoid_when=("Not for offering-terms history (get_offering_history).",),
-        related_tools=("get_offering_history",),
-    ),
-    "get_governance_events": ToolDiscovery(
-        domain="governance",
-        summary="Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval pointers.",
-        use_when=("Finding shareholder-meeting, proxy-vote, or board-compensation records.",),
-        avoid_when=("Not for merger-deal status.",),
-        related_tools=("get_transaction_status",),
-    ),
-    "get_transaction_status": ToolDiscovery(
-        domain="transactions",
-        summary="M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies.",
-        use_when=("Checking merger, acquisition, or tender-offer filing context for a ticker.",),
-        avoid_when=("Not for governance or proxy votes.",),
-        related_tools=("get_governance_events", "get_sec_document"),
-    ),
-    "get_short_pressure_profile": ToolDiscovery(
-        domain="market",
-        summary="Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio.",
-        use_when=("Short positioning relative to shares outstanding for one ticker.",),
-        avoid_when=("Do NOT use for biweekly short position alone (get_short_interest).", "Do NOT use for daily short-sale volume (get_reg_sho_volume).",),
-        related_tools=("get_short_interest", "query_finra", "get_reg_sho_volume"),
-    ),
-    "get_recent_ownership_filings": ToolDiscovery(
-        domain="events",
-        summary="Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours.",
-        use_when=("Finding the latest market-wide SC 13D/G filings when no ticker is given.",),
-        avoid_when=("Not for one company's current holders.",),
-        related_tools=("get_beneficial_ownership", "get_material_events"),
+    "describe_finra_dataset": ToolDiscovery(
+        domain="finra",
+        family="catalog",
+        intent="inspect_finra_dataset_schema",
+        output_kind="schema",
+        source="finra",
+        entity_scope="single_dataset",
+        time_mode="current",
+        summary="One FINRA dataset's fields, types, filter values, and supported methods.",
+        choose_when=("Learning a named FINRA dataset's fields, types, filters, and coverage before querying.",),
+        reject_when=("Not for analyzed briefings.",),
+        conflicts_with=(),
+        related_tools=("list_finra_datasets", "query_finra", "get_finra_datapoints",),
+        prerequisites=(),
     ),
     "diff_risk_factors": ToolDiscovery(
-        domain="filings",
+        domain="sec",
+        family="filing-diff",
+        intent="compare_risk_factors",
+        output_kind="diff",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest",
         summary="Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed.",
-        use_when=("What is new or changed in a company's risk disclosures for one ticker.",),
-        avoid_when=("Do NOT use for full-filing diffs between accessions (diff_sec_filings).", "Do NOT use for disclosure search without change framing (search_sec_filings).", "Self-contained for one ticker; do NOT call list_sec_filings before or after."),
-        related_tools=("diff_sec_filings", "search_sec_filings"),
+        choose_when=("What is new or changed in a company's risk disclosures for one ticker.",),
+        reject_when=(
+            "Do NOT use for full-filing diffs between accessions (diff_sec_filings).",
+            "Do NOT use for disclosure search without change framing (search_sec_filings).",
+            "Self-contained for one ticker; do NOT call list_sec_filings before or after.",
+        ),
+        conflicts_with=("diff_sec_filings", "search_sec_filings",),
+        related_tools=("diff_sec_filings", "search_sec_filings",),
+        prerequisites=(),
     ),
-    "get_financial_statements": ToolDiscovery(
-        domain="fundamentals",
-        summary="Full parsed statements for one ticker: income statement, balance sheet, and cash flow.",
-        use_when=("Full financial statements rather than one numeric metric.",),
-        avoid_when=("Do NOT use for a single metric like EPS (get_fundamentals).", "Do NOT use for a single XBRL fact (get_xbrl_facts).",),
-        related_tools=("get_fundamentals", "get_xbrl_facts"),
-    ),
-    "get_xbrl_facts": ToolDiscovery(
-        domain="fundamentals",
-        summary="Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity.",
-        use_when=("One tagged line-item value by exact XBRL concept name.",),
-        avoid_when=("Do NOT use for EPS (get_fundamentals).", "Do NOT use for full statements (get_financial_statements).",),
-        related_tools=("get_fundamentals", "get_financial_statements"),
-    ),
-    "get_short_interest": ToolDiscovery(
-        domain="finra",
-        summary="Biweekly short position for one ticker: FINRA short interest, days to cover, percent change.",
-        use_when=("One ticker's current short interest, short float, or days to cover.",),
-        avoid_when=("Do NOT use for daily short-sale volume by venue (get_reg_sho_volume).", "Do NOT use for market-wide most-shorted screens (get_short_interest_leaderboard).", "Do NOT use for short-vs-shares context (get_short_pressure_profile).", "Do NOT use for exact source values (get_finra_datapoints).",),
-        related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "get_short_interest_leaderboard"),
-    ),
-    "get_short_interest_leaderboard": ToolDiscovery(
-        domain="finra",
-        summary="Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares.",
-        use_when=("Screening which stocks are the most shorted across the market.",),
-        avoid_when=("Do NOT use for one ticker's short interest (get_short_interest).",),
-        related_tools=("get_short_interest",),
-    ),
-    "get_reg_sho_volume": ToolDiscovery(
-        domain="finra",
-        summary="Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.",
-        use_when=("Daily short-sale volume or venue breakdowns for one ticker.",),
-        avoid_when=("Do NOT use for biweekly short interest positions (get_short_interest).", "Do NOT call describe_finra_dataset or get_finra_datapoints; dataset and fields resolve internally."),
-        related_tools=("get_short_interest", "query_finra"),
-    ),
-    "get_threshold_securities": ToolDiscovery(
-        domain="finra",
-        summary="FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and date.",
-        use_when=("Checking whether securities appear on the Reg SHO threshold list.",),
-        avoid_when=("Not for ordinary short interest levels.",),
-        related_tools=("get_short_interest",),
-    ),
-    "get_analyst_estimates": ToolDiscovery(
-        domain="analyst",
-        summary="Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions.",
-        use_when=("What analysts expect for one ticker: targets, consensus EPS, or estimate revisions.",),
-        avoid_when=("Do NOT use for reported historical EPS (get_fundamentals).",),
-        related_tools=("get_valuation_metrics", "get_fundamentals"),
-    ),
-    "get_sp500_weight": ToolDiscovery(
-        domain="market",
-        summary="A company's current weight and rank in the S&P 500 index from the constituent list.",
-        use_when=("Answering what percent of the S&P 500 a ticker represents.",),
-        avoid_when=("Do not use for valuation or short-positioning questions.",),
-        related_tools=("get_analyst_estimates",),
-    ),
-    "get_obligations": ToolDiscovery(
-        domain="fundamentals",
-        summary="Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.",
-        use_when=("What a company is obligated to pay in the future for one ticker.",),
-        avoid_when=("Do NOT use for valuation multiples (get_valuation_metrics).",),
-        related_tools=("get_valuation_metrics", "get_financial_statements"),
-    ),
-    "get_valuation_metrics": ToolDiscovery(
-        domain="valuation",
-        summary="Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E.",
-        use_when=("Whether a company is cheap or expensive on earnings multiples for one ticker.",),
-        avoid_when=("Do NOT use for reported EPS alone (get_fundamentals).", "Do NOT use for forward consensus alone (get_analyst_estimates).",),
-        related_tools=("get_analyst_estimates", "get_obligations", "get_fundamentals"),
-    ),
-    "search_web": ToolDiscovery(
-        domain="web",
-        summary="External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks.",
-        use_when=("Finding recent external news, commentary, or market reaction outside structured sources.",),
-        avoid_when=("Not for FINRA short data.",),
-        related_tools=("get_material_events", "query_finra"),
+    "diff_sec_filings": ToolDiscovery(
+        domain="sec",
+        family="filing-diff",
+        intent="compare_full_filings",
+        output_kind="diff",
+        source="sec",
+        entity_scope="filing_pair_or_security",
+        time_mode="latest_or_as_of",
+        summary="Self-contained full-filing diff for one ticker or two accessions: amendment versus prior version.",
+        choose_when=(
+            "Comparing a ticker's latest amendment filing versus its predecessor filing.",
+            "Comparing two known filing accessions for amendment or restatement changes.",
+        ),
+        reject_when=(
+            "Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).",
+            "Do NOT call list_sec_filings first; ticker resolution is internal.",
+            "Do NOT use for disclosure search without change framing (search_sec_filings).",
+        ),
+        conflicts_with=("diff_risk_factors", "search_sec_filings",),
+        related_tools=("diff_risk_factors", "get_sec_filing",),
+        prerequisites=(),
     ),
     "find_alternative_signals": ToolDiscovery(
         domain="alternative",
+        family="signal-discovery",
+        intent="discover_emerging_signals",
+        output_kind="ranked_candidates",
+        source="google_trends",
+        entity_scope="market_wide",
+        time_mode="latest_or_as_of",
         summary="Discovery scan for rising search-term and diffusion signals worth investigating.",
-        use_when=("Screening for emerging trend or attention signals across terms.",),
-        avoid_when=("Not for evidence on one known trend.", "Not for a dated, geography-specific trend question."),
-        related_tools=("get_trend_evidence", "investigate_social_arbitrage_candidate"),
+        choose_when=("Screening for emerging trend or attention signals across terms.",),
+        reject_when=(
+            "Not for evidence on one known trend.",
+            "Not for a dated, geography-specific trend question.",
+        ),
+        conflicts_with=(),
+        related_tools=("get_trend_evidence", "investigate_social_arbitrage_candidate",),
+        prerequisites=(),
     ),
-    "get_trend_evidence": ToolDiscovery(
-        domain="alternative",
-        summary="Evidence for one known trend: search interest, rising queries, and geography.",
-        use_when=("Backing a known trend claim with dated, geography-specific search-interest evidence.",),
-        avoid_when=("Not for discovering new signals.",),
-        related_tools=("find_alternative_signals",),
+    "find_sec_entities": ToolDiscovery(
+        domain="sec",
+        family="entity-discovery",
+        intent="resolve_sec_entity",
+        output_kind="candidate_records",
+        source="sec",
+        entity_scope="entity_query",
+        time_mode="current",
+        summary="Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers.",
+        choose_when=("Starting from a company name when the exact ticker or CIK is not known.",),
+        reject_when=("Unneeded when the exact ticker or CIK is already known.",),
+        conflicts_with=(),
+        related_tools=("list_sec_filings", "search_sec_filings",),
+        prerequisites=(),
     ),
-    "investigate_social_arbitrage_candidate": ToolDiscovery(
-        domain="alternative",
-        summary="Enrichment of one social-arbitrage candidate with corroboration and exposure gap. Social signals vetting.",
-        use_when=("Testing whether online attention around one candidate corresponds to real demand.",),
-        avoid_when=("Not for broad signal discovery.",),
-        related_tools=("find_alternative_signals", "get_trend_evidence"),
+    "get_analyst_estimates": ToolDiscovery(
+        domain="analyst",
+        family="estimates",
+        intent="retrieve_forward_consensus",
+        output_kind="forecast_snapshot",
+        source="yahoo_finance",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions.",
+        choose_when=("What analysts expect for one ticker: targets, consensus EPS, or estimate revisions.",),
+        reject_when=(
+            "Do NOT use for reported historical EPS (get_fundamentals).",
+            "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).",
+        ),
+        conflicts_with=("get_fundamentals", "get_valuation_metrics",),
+        related_tools=("get_valuation_metrics", "get_fundamentals",),
+        prerequisites=(),
     ),
-    "list_finra_datasets": ToolDiscovery(
-        domain="finra",
-        summary="Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support.",
-        use_when=("Finding which FINRA dataset covers a question before querying.",),
-        avoid_when=("Does not return dataset fields or schemas.",),
-        related_tools=("describe_finra_dataset",),
+    "get_beneficial_ownership": ToolDiscovery(
+        domain="ownership",
+        family="stakes",
+        intent="retrieve_current_beneficial_owners",
+        output_kind="current_snapshot",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers.",
+        choose_when=("Finding who owns more than 5% of a company.",),
+        reject_when=(
+            "Not for stake changes over time (get_ownership_changes).",
+            "Answer from these records; do not open filings or pull changes unless asked.",
+        ),
+        conflicts_with=("get_ownership_changes",),
+        related_tools=("get_ownership_changes", "search_sec_relationships",),
+        prerequisites=(),
     ),
-    "get_macro_context": ToolDiscovery(
-        domain="macro",
-        summary="Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates.",
-        use_when=("Retrieving population, labor, inflation, GDP, or rate statistics for a geography.",),
-        avoid_when=("Not for company-specific facts.",),
-        related_tools=("search_web",),
+    "get_dilution_profile": ToolDiscovery(
+        domain="offerings",
+        family="capital-raising",
+        intent="calculate_dilution",
+        output_kind="derived_analysis",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown.",
+        choose_when=("Quantifying share-count impact from offerings, converts, or warrants.",),
+        reject_when=("Not for offering-terms history (get_offering_history).",),
+        conflicts_with=("get_offering_history",),
+        related_tools=("get_offering_history",),
+        prerequisites=(),
     ),
-    "search_company_patents": ToolDiscovery(
-        domain="patents",
-        summary="Company patent search: publications, assignees, counts, and classifications.",
-        use_when=("Finding patents a company filed or patented lately, with publication counts and classifications.",),
-        avoid_when=("Not for financial or filing questions.", "Answer from patent records."),
-    ),
-    "describe_finra_dataset": ToolDiscovery(
-        domain="finra",
-        summary="One FINRA dataset's fields, types, filter values, and supported methods.",
-        use_when=("Learning a named FINRA dataset's fields, types, filters, and coverage before querying.",),
-        avoid_when=("Not for analyzed briefings.",),
-        related_tools=("list_finra_datasets", "query_finra", "get_finra_datapoints"),
+    "get_financial_statements": ToolDiscovery(
+        domain="fundamentals",
+        family="statements",
+        intent="retrieve_financial_statement",
+        output_kind="statement",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="Full parsed statements for one ticker: income statement, balance sheet, and cash flow.",
+        choose_when=("Full financial statements rather than one numeric metric.",),
+        reject_when=(
+            "Do NOT use for a single metric like EPS (get_fundamentals).",
+            "Do NOT use for a single XBRL fact (get_xbrl_facts).",
+        ),
+        conflicts_with=("get_fundamentals", "get_xbrl_facts",),
+        related_tools=("get_fundamentals", "get_xbrl_facts",),
+        prerequisites=(),
     ),
     "get_finra_datapoints": ToolDiscovery(
         domain="finra",
+        family="short-interest",
+        intent="retrieve_finra_records",
+        output_kind="raw_records",
+        source="finra",
+        entity_scope="single_dataset",
+        time_mode="date_range_or_latest",
         summary="Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows.",
-        use_when=("Exact fields and values from a named FINRA dataset for an explicit data request.",),
-        avoid_when=("Do NOT use for analyzed briefings or trends (query_finra).",),
-        related_tools=("describe_finra_dataset", "query_finra", "list_finra_datasets"),
+        choose_when=("Exact fields and values from a named FINRA dataset for an explicit data request.",),
+        reject_when=(
+            "Do NOT use for analyzed briefings or trends (query_finra).",
+            "Do NOT use for one ticker's current short position (get_short_interest).",
+        ),
+        conflicts_with=("get_short_interest", "query_finra",),
+        related_tools=("describe_finra_dataset", "query_finra", "list_finra_datasets",),
+        prerequisites=(),
+    ),
+    "get_fundamentals": ToolDiscovery(
+        domain="fundamentals",
+        family="metrics",
+        intent="retrieve_reported_metric",
+        output_kind="metric_snapshot",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding.",
+        choose_when=("One specific reported historical numeric fundamental for one ticker: basic/diluted/TTM EPS, dividends, or shares outstanding.",),
+        reject_when=(
+            "Do NOT use for full statements (get_financial_statements).",
+            "Do NOT use for XBRL facts by concept (get_xbrl_facts).",
+            "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).",
+            "Do NOT use for forward consensus (get_analyst_estimates).",
+        ),
+        conflicts_with=("get_analyst_estimates", "get_financial_statements", "get_valuation_metrics", "get_xbrl_facts",),
+        related_tools=("get_xbrl_facts", "get_financial_statements", "get_valuation_metrics", "get_analyst_estimates",),
+        prerequisites=(),
+    ),
+    "get_governance_events": ToolDiscovery(
+        domain="governance",
+        family="events",
+        intent="retrieve_governance_events",
+        output_kind="event_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="since_or_as_of",
+        summary="Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval pointers.",
+        choose_when=("Finding shareholder-meeting, proxy-vote, or board-compensation records.",),
+        reject_when=("Not for merger-deal status.",),
+        conflicts_with=(),
+        related_tools=("get_transaction_status",),
+        prerequisites=(),
+    ),
+    "get_insider_activity": ToolDiscovery(
+        domain="insider",
+        family="trades",
+        intent="retrieve_executed_insider_trades",
+        output_kind="transaction_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5.",
+        choose_when=("One ticker's executed insider sales (buys/sells) by executives and directors (Forms 3/4/5).",),
+        reject_when=("Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales).",),
+        conflicts_with=("get_planned_insider_sales",),
+        related_tools=("get_planned_insider_sales", "get_beneficial_ownership",),
+        prerequisites=(),
+    ),
+    "get_macro_context": ToolDiscovery(
+        domain="macro",
+        family="statistics",
+        intent="retrieve_macro_statistics",
+        output_kind="statistic_series",
+        source="datacommons",
+        entity_scope="geography",
+        time_mode="latest",
+        summary="Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates.",
+        choose_when=("Retrieving population, labor, inflation, GDP, or rate statistics for a geography.",),
+        reject_when=("Not for company-specific facts.",),
+        conflicts_with=(),
+        related_tools=("search_web",),
+        prerequisites=(),
+    ),
+    "get_material_events": ToolDiscovery(
+        domain="events",
+        family="company-events",
+        intent="retrieve_recent_material_events",
+        output_kind="event_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="since_or_as_of",
+        summary="Deterministic 8-K-derived recent event feed with accession citations for what changed since a date.",
+        choose_when=("Finding what changed recently: recent 8-K-derived events for a company since a date.",),
+        reject_when=(
+            "Does not cover market reaction or news commentary.",
+            "Answer from the event feed; do not open filing documents unless the question needs document text.",
+        ),
+        conflicts_with=(),
+        related_tools=("get_sec_document", "search_web", "get_recent_ownership_filings",),
+        prerequisites=(),
+    ),
+    "get_obligations": ToolDiscovery(
+        domain="fundamentals",
+        family="obligations",
+        intent="retrieve_future_obligations",
+        output_kind="obligation_schedule",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.",
+        choose_when=("What a company is obligated to pay in the future for one ticker.",),
+        reject_when=("Do NOT use for valuation multiples (get_valuation_metrics).",),
+        conflicts_with=(),
+        related_tools=("get_valuation_metrics", "get_financial_statements",),
+        prerequisites=(),
+    ),
+    "get_offering_history": ToolDiscovery(
+        domain="offerings",
+        family="capital-raising",
+        intent="retrieve_offering_history",
+        output_kind="offering_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Offering history from S-1/S-3/424B filings: offering terms with source-registration links.",
+        choose_when=("Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.",),
+        reject_when=("Not for dilution math (get_dilution_profile).",),
+        conflicts_with=("get_dilution_profile",),
+        related_tools=("get_dilution_profile",),
+        prerequisites=(),
+    ),
+    "get_ownership_changes": ToolDiscovery(
+        domain="ownership",
+        family="stakes",
+        intent="compare_ownership_stakes",
+        output_kind="change_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions.",
+        choose_when=("Comparing consecutive 13D/G filings for changes in a holder's stake.",),
+        reject_when=("Not for the current snapshot of holders (get_beneficial_ownership).",),
+        conflicts_with=("get_beneficial_ownership",),
+        related_tools=("get_beneficial_ownership",),
+        prerequisites=(),
+    ),
+    "get_planned_insider_sales": ToolDiscovery(
+        domain="insider",
+        family="trades",
+        intent="retrieve_planned_insider_sales",
+        output_kind="notice_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker.",
+        choose_when=("Proposed insider sales reported on Form 144 for one ticker.",),
+        reject_when=("Do NOT use for completed insider trades (get_insider_activity).",),
+        conflicts_with=("get_insider_activity",),
+        related_tools=("get_insider_activity",),
+        prerequisites=(),
+    ),
+    "get_recent_ownership_filings": ToolDiscovery(
+        domain="events",
+        family="ownership-filings",
+        intent="retrieve_latest_ownership_filings",
+        output_kind="filing_series",
+        source="sec",
+        entity_scope="market_wide",
+        time_mode="latest",
+        summary="Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours.",
+        choose_when=("Finding the latest market-wide SC 13D/G filings when no ticker is given.",),
+        reject_when=("Not for one company's current holders.",),
+        conflicts_with=(),
+        related_tools=("get_beneficial_ownership", "get_material_events",),
+        prerequisites=(),
+    ),
+    "get_reg_sho_volume": ToolDiscovery(
+        domain="finra",
+        family="short-sale-volume",
+        intent="daily_short_sale_volume",
+        output_kind="daily_series",
+        source="finra",
+        entity_scope="single_security",
+        time_mode="date_range_or_latest",
+        summary="Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.",
+        choose_when=("Daily short-sale volume or venue breakdowns for one ticker.",),
+        reject_when=(
+            "Do NOT use for biweekly short interest positions (get_short_interest).",
+            "Do NOT call describe_finra_dataset or get_finra_datapoints; dataset and fields resolve internally.",
+        ),
+        conflicts_with=("get_short_interest",),
+        related_tools=("get_short_interest", "query_finra",),
+        prerequisites=(),
+    ),
+    "get_sec_document": ToolDiscovery(
+        domain="sec",
+        family="filing-catalog",
+        intent="read_filing_document",
+        output_kind="text_window",
+        source="sec",
+        entity_scope="single_document",
+        time_mode="as_of",
+        summary="Bounded text window of one filing document by accession number for targeted excerpt reading.",
+        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.",),
+        reject_when=("Not for what-changed questions.",),
+        conflicts_with=(),
+        related_tools=("get_sec_filing", "get_material_events",),
+        prerequisites=(),
+    ),
+    "get_sec_filing": ToolDiscovery(
+        domain="sec",
+        family="filing-catalog",
+        intent="retrieve_filing_metadata",
+        output_kind="record",
+        source="sec",
+        entity_scope="single_filing",
+        time_mode="as_of",
+        summary="One filing's record by accession number: filer, form, dates, primary document, source URL.",
+        choose_when=("Fetching filing metadata after its accession number is known.",),
+        reject_when=(
+            "Does not discover filings; list or search for the accession when unknown.",
+            "Answer from the filing record; do not retrieve document text unless the question asks for it.",
+        ),
+        conflicts_with=(),
+        related_tools=("list_sec_filings", "list_sec_documents",),
+        prerequisites=(),
+    ),
+    "get_sec_search_coverage": ToolDiscovery(
+        domain="sec",
+        family="filing-search",
+        intent="inspect_ingestion_coverage",
+        output_kind="coverage_status",
+        source="sec",
+        entity_scope="dataset_partition",
+        time_mode="current",
+        summary="Persisted SEC ingestion coverage and backfill-job status for a form, source, or date partition.",
+        choose_when=("Checking whether a form or date partition is covered or still queued before searching.",),
+        reject_when=("Does not retrieve filing content.",),
+        conflicts_with=(),
+        related_tools=("search_sec_filings",),
+        prerequisites=(),
+    ),
+    "get_short_interest": ToolDiscovery(
+        domain="finra",
+        family="short-interest",
+        intent="current_reported_short_position",
+        output_kind="current_snapshot",
+        source="finra",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Biweekly short position for one ticker: FINRA short interest, days to cover, percent change.",
+        choose_when=("One ticker's current short interest, short float, or days to cover.",),
+        reject_when=(
+            "Do NOT use for daily short-sale volume by venue (get_reg_sho_volume).",
+            "Do NOT use for market-wide most-shorted screens (get_short_interest_leaderboard).",
+            "Do NOT use for short-vs-shares context (get_short_pressure_profile).",
+            "Do NOT use for exact source values (get_finra_datapoints).",
+            "Do NOT use for analyzed briefings or trends over a dataset (query_finra).",
+        ),
+        conflicts_with=("get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "query_finra",),
+        related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "get_short_interest_leaderboard",),
+        prerequisites=(),
+    ),
+    "get_short_interest_leaderboard": ToolDiscovery(
+        domain="finra",
+        family="screens",
+        intent="rank_short_interest",
+        output_kind="leaderboard",
+        source="finra_sec",
+        entity_scope="market_wide",
+        time_mode="latest_or_as_of",
+        summary="Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares.",
+        choose_when=("Screening which stocks are the most shorted across the market.",),
+        reject_when=("Do NOT use for one ticker's short interest (get_short_interest).",),
+        conflicts_with=(),
+        related_tools=("get_short_interest",),
+        prerequisites=(),
+    ),
+    "get_short_pressure_profile": ToolDiscovery(
+        domain="finra",
+        family="short-interest",
+        intent="assess_short_pressure",
+        output_kind="derived_composite",
+        source="finra_sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio.",
+        choose_when=("Short positioning relative to shares outstanding for one ticker.",),
+        reject_when=(
+            "Do NOT use for biweekly short position alone (get_short_interest).",
+            "Do NOT use for daily short-sale volume (get_reg_sho_volume).",
+        ),
+        conflicts_with=("get_short_interest",),
+        related_tools=("get_short_interest", "query_finra", "get_reg_sho_volume",),
+        prerequisites=(),
+    ),
+    "get_sp500_weight": ToolDiscovery(
+        domain="market",
+        family="index-membership",
+        intent="retrieve_sp500_weight",
+        output_kind="current_snapshot",
+        source="slickcharts",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="A company's current weight and rank in the S&P 500 index from the constituent list.",
+        choose_when=("Answering what percent of the S&P 500 a ticker represents.",),
+        reject_when=("Do not use for valuation or short-positioning questions.",),
+        conflicts_with=(),
+        related_tools=("get_analyst_estimates",),
+        prerequisites=(),
+    ),
+    "get_threshold_securities": ToolDiscovery(
+        domain="finra",
+        family="threshold-securities",
+        intent="retrieve_threshold_status",
+        output_kind="status_series",
+        source="finra",
+        entity_scope="single_security_or_market",
+        time_mode="date_or_latest",
+        summary="FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and date.",
+        choose_when=("Checking whether securities appear on the Reg SHO threshold list.",),
+        reject_when=("Not for ordinary short interest levels.",),
+        conflicts_with=(),
+        related_tools=("get_short_interest",),
+        prerequisites=(),
+    ),
+    "get_transaction_status": ToolDiscovery(
+        domain="transactions",
+        family="deals",
+        intent="retrieve_transaction_status",
+        output_kind="event_series",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest_or_as_of",
+        summary="M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies.",
+        choose_when=("Checking merger, acquisition, or tender-offer filing context for a ticker.",),
+        reject_when=("Not for governance or proxy votes.",),
+        conflicts_with=(),
+        related_tools=("get_governance_events", "get_sec_document",),
+        prerequisites=(),
+    ),
+    "get_trend_evidence": ToolDiscovery(
+        domain="alternative",
+        family="trend-evidence",
+        intent="retrieve_known_trend_evidence",
+        output_kind="evidence_series",
+        source="google_trends",
+        entity_scope="single_topic",
+        time_mode="date_range",
+        summary="Evidence for one known trend: search interest, rising queries, and geography.",
+        choose_when=("Backing a known trend claim with dated, geography-specific search-interest evidence.",),
+        reject_when=("Not for discovering new signals.",),
+        conflicts_with=(),
+        related_tools=("find_alternative_signals",),
+        prerequisites=(),
+    ),
+    "get_valuation_metrics": ToolDiscovery(
+        domain="valuation",
+        family="multiples",
+        intent="calculate_valuation_multiples",
+        output_kind="derived_snapshot",
+        source="yahoo_finance_sec",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E.",
+        choose_when=("Whether a company is cheap or expensive on earnings multiples for one ticker.",),
+        reject_when=(
+            "Do NOT use for reported EPS alone (get_fundamentals).",
+            "Do NOT use for forward consensus alone (get_analyst_estimates).",
+        ),
+        conflicts_with=("get_analyst_estimates", "get_fundamentals",),
+        related_tools=("get_analyst_estimates", "get_obligations", "get_fundamentals",),
+        prerequisites=(),
+    ),
+    "get_xbrl_facts": ToolDiscovery(
+        domain="fundamentals",
+        family="metrics",
+        intent="retrieve_xbrl_concept",
+        output_kind="fact_records",
+        source="sec",
+        entity_scope="single_security",
+        time_mode="latest",
+        summary="Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity.",
+        choose_when=("One tagged line-item value by exact XBRL concept name.",),
+        reject_when=(
+            "Do NOT use for EPS (get_fundamentals).",
+            "Do NOT use for full statements (get_financial_statements).",
+        ),
+        conflicts_with=("get_financial_statements", "get_fundamentals",),
+        related_tools=("get_fundamentals", "get_financial_statements",),
+        prerequisites=(),
+    ),
+    "investigate_social_arbitrage_candidate": ToolDiscovery(
+        domain="alternative",
+        family="social-arbitrage",
+        intent="assess_attention_demand_gap",
+        output_kind="derived_analysis",
+        source="google_trends",
+        entity_scope="single_topic",
+        time_mode="latest_or_as_of",
+        summary="Enrichment of one social-arbitrage candidate with corroboration and exposure gap. Social signals vetting.",
+        choose_when=("Testing whether online attention around one candidate corresponds to real demand.",),
+        reject_when=("Not for broad signal discovery.",),
+        conflicts_with=(),
+        related_tools=("find_alternative_signals", "get_trend_evidence",),
+        prerequisites=(),
+    ),
+    "list_finra_datasets": ToolDiscovery(
+        domain="finra",
+        family="catalog",
+        intent="discover_finra_dataset",
+        output_kind="catalog",
+        source="finra",
+        entity_scope="dataset_catalog",
+        time_mode="current",
+        summary="Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support.",
+        choose_when=("Finding which FINRA dataset covers a question before querying.",),
+        reject_when=("Does not return dataset fields or schemas.",),
+        conflicts_with=(),
+        related_tools=("describe_finra_dataset",),
+        prerequisites=(),
+    ),
+    "list_sec_documents": ToolDiscovery(
+        domain="sec",
+        family="filing-catalog",
+        intent="list_filing_documents",
+        output_kind="record_series",
+        source="sec",
+        entity_scope="single_filing",
+        time_mode="as_of",
+        summary="Index of documents and exhibits attached to one filing, looked up by accession number.",
+        choose_when=("Listing documents and exhibits attached to a known filing accession.",),
+        reject_when=("Does not return document text.",),
+        conflicts_with=(),
+        related_tools=("get_sec_filing", "get_sec_document", "list_sec_filings",),
+        prerequisites=(),
+    ),
+    "list_sec_filings": ToolDiscovery(
+        domain="sec",
+        family="filing-catalog",
+        intent="list_entity_filings",
+        output_kind="filing_series",
+        source="sec",
+        entity_scope="single_entity",
+        time_mode="date_range_or_as_of",
+        summary="List EDGAR filings for an exact ticker or CIK, filterable by form and date range.",
+        choose_when=("Listing filings for an exact ticker or CIK, optionally filtered by form or date.",),
+        reject_when=(
+            "Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.",
+            "Do NOT use for disclosure search without known identifier (search_sec_filings).",
+        ),
+        conflicts_with=("search_sec_filings",),
+        related_tools=("get_sec_filing", "search_sec_filings", "find_sec_entities",),
+        prerequisites=(),
     ),
     "query_finra": ToolDiscovery(
         domain="finra",
+        family="short-interest",
+        intent="analyze_historical_finra_records",
+        output_kind="distribution_or_trend",
+        source="finra",
+        entity_scope="single_dataset",
+        time_mode="date_range",
         summary="Analyzed FINRA briefing with trends and metrics over any named dataset, no raw rows.",
-        use_when=("Analyzing a FINRA dataset's coverage, distribution, and changes over time.",),
-        avoid_when=("Do NOT use for exact source values (get_finra_datapoints).",),
-        related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest", "list_finra_datasets"),
+        choose_when=("Analyzing a FINRA dataset's coverage, distribution, and changes over time.",),
+        reject_when=(
+            "Do NOT use for exact source values (get_finra_datapoints).",
+            "Do NOT use for one ticker's current short position (get_short_interest).",
+        ),
+        conflicts_with=("get_finra_datapoints", "get_short_interest",),
+        related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest", "list_finra_datasets",),
+        prerequisites=(),
+    ),
+    "search_company_patents": ToolDiscovery(
+        domain="patents",
+        family="search",
+        intent="search_company_patents",
+        output_kind="patent_records",
+        source="google_patents",
+        entity_scope="single_company",
+        time_mode="date_range_or_latest",
+        summary="Company patent search: publications, assignees, counts, and classifications.",
+        choose_when=("Finding patents a company filed or patented lately, with publication counts and classifications.",),
+        reject_when=(
+            "Not for financial or filing questions.",
+            "Answer from patent records.",
+        ),
+        conflicts_with=(),
+        related_tools=(),
+        prerequisites=(),
+    ),
+    "search_sec_filings": ToolDiscovery(
+        domain="sec",
+        family="filing-search",
+        intent="search_filing_text",
+        output_kind="search_results",
+        source="sec",
+        entity_scope="multi_entity",
+        time_mode="date_range_or_as_of",
+        summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
+        choose_when=("Searching SEC filing text or mentions when the accession number is unknown.",),
+        reject_when=(
+            "Not a filing lister for a known ticker (list_sec_filings).",
+            "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",
+            "Do NOT use for full-filing diffs between accessions (diff_sec_filings).",
+        ),
+        conflicts_with=("diff_risk_factors", "diff_sec_filings", "list_sec_filings",),
+        related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities", "diff_risk_factors",),
+        prerequisites=(),
+    ),
+    "search_sec_relationships": ToolDiscovery(
+        domain="ownership",
+        family="stakes",
+        intent="search_ownership_relationships",
+        output_kind="relationship_records",
+        source="sec",
+        entity_scope="single_entity",
+        time_mode="latest_or_as_of",
+        summary="Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links.",
+        choose_when=("Mapping who owns, holds, or transacts with an entity in either direction.",),
+        reject_when=("Not for current 5%+ stake sizes.",),
+        conflicts_with=(),
+        related_tools=("get_beneficial_ownership", "get_ownership_changes",),
+        prerequisites=(),
+    ),
+    "search_web": ToolDiscovery(
+        domain="web",
+        family="search",
+        intent="search_external_web",
+        output_kind="search_results",
+        source="exa",
+        entity_scope="open_query",
+        time_mode="latest",
+        summary="External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks.",
+        choose_when=("Finding recent news, announcements, catalysts, market reaction, why a stock moved/rose/fell, or recent commentary outside structured sources.",),
+        reject_when=("Not for FINRA short data.",),
+        conflicts_with=(),
+        related_tools=("get_material_events", "query_finra",),
+        prerequisites=(),
     ),
     "thesis_create": ToolDiscovery(
         domain="thesis",
+        family="lifecycle",
+        intent="create_thesis",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="current",
         summary="Start a new investment thesis proposal with scope, claims, and open questions.",
-        use_when=("Creating a new investment thesis to track and test.",),
-        avoid_when=("Not for reading an existing thesis.",),
-        related_tools=("thesis_show", "thesis_refine"),
-    ),
-    "thesis_show": ToolDiscovery(
-        domain="thesis",
-        summary="Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Checking a thesis and its current assessment.",),
-        avoid_when=("Not for changing a thesis.",),
-        related_tools=("thesis_create", "thesis_refine", "thesis_journal"),
-    ),
-    "thesis_refine": ToolDiscovery(
-        domain="thesis",
-        summary="Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Revising a thesis after new evidence or feedback.",),
-        avoid_when=("Not for routine notes.",),
-        related_tools=("thesis_show", "thesis_journal"),
-    ),
-    "thesis_watch": ToolDiscovery(
-        domain="thesis",
-        summary="Add a monitoring rule that alerts when a thesis condition triggers.",
-        use_when=("Setting an alert on a thesis invalidator or trigger.",),
-        avoid_when=("Not for logging notes.",),
-        related_tools=("thesis_show",),
+        choose_when=("Creating a new investment thesis to track and test.",),
+        reject_when=("Not for reading an existing thesis.",),
+        conflicts_with=(),
+        related_tools=("thesis_show", "thesis_refine",),
+        prerequisites=(),
+        direct_activation=False,
     ),
     "thesis_journal": ToolDiscovery(
         domain="thesis",
+        family="lifecycle",
+        intent="append_thesis_journal",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="current",
         summary="Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>.",
-        use_when=("Logging a dated note or observation against a thesis.",),
-        avoid_when=("Not for revising claims.",),
-        related_tools=("thesis_show", "thesis_refine"),
+        choose_when=("Logging a dated note or observation against a thesis.",),
+        reject_when=("Not for revising claims.",),
+        conflicts_with=(),
+        related_tools=("thesis_show", "thesis_refine",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "thesis_refine": ToolDiscovery(
+        domain="thesis",
+        family="lifecycle",
+        intent="refine_thesis",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="current",
+        summary="Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uuid>.",
+        choose_when=("Revising a thesis after new evidence or feedback.",),
+        reject_when=("Not for routine notes.",),
+        conflicts_with=(),
+        related_tools=("thesis_show", "thesis_journal",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "thesis_show": ToolDiscovery(
+        domain="thesis",
+        family="lifecycle",
+        intent="retrieve_thesis",
+        output_kind="current_snapshot",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="latest_or_as_of",
+        summary="Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>.",
+        choose_when=("Checking a thesis and its current assessment.",),
+        reject_when=("Not for changing a thesis.",),
+        conflicts_with=(),
+        related_tools=("thesis_create", "thesis_refine", "thesis_journal",),
+        prerequisites=(),
+    ),
+    "thesis_watch": ToolDiscovery(
+        domain="thesis",
+        family="lifecycle",
+        intent="add_thesis_watch",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="current",
+        summary="Add a monitoring rule that alerts when a thesis condition triggers.",
+        choose_when=("Setting an alert on a thesis invalidator or trigger.",),
+        reject_when=("Not for logging notes.",),
+        conflicts_with=(),
+        related_tools=("thesis_show",),
+        prerequisites=(),
+        direct_activation=False,
     ),
 }
 
 
 _DISCOVERY_TEXT_LIMIT = 200
+
+
+_SLUG_KEBAB_RE = __import__("re").compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
+_SLUG_SNAKE_RE = __import__("re").compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
 
 def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
@@ -2434,17 +2888,38 @@ def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
         meta = TOOL_DISCOVERY_REGISTRY[name]
         if meta.domain not in known_domains:
             raise AssertionError(f"tool discovery {name!r} has unknown domain {meta.domain!r}")
+        for field_name in ("domain", "family", "source"):
+            value = getattr(meta, field_name)
+            if not value or not _SLUG_KEBAB_RE.match(value):
+                raise AssertionError(f"tool discovery {name!r} has non-slug {field_name} {value!r}")
+        for field_name in ("intent", "output_kind", "entity_scope", "time_mode"):
+            value = getattr(meta, field_name)
+            if not value or not _SLUG_SNAKE_RE.match(value):
+                raise AssertionError(f"tool discovery {name!r} has non-snake {field_name} {value!r}")
         if not meta.summary or len(meta.summary) > _DISCOVERY_TEXT_LIMIT:
             raise AssertionError(f"tool discovery {name!r} has empty/overlong summary")
-        if not meta.use_when or not meta.avoid_when:
-            raise AssertionError(f"tool discovery {name!r} needs >=1 use_when and >=1 avoid_when")
-        bullets = (*meta.use_when, *meta.avoid_when, *meta.related_tools, *meta.prerequisites, *meta.examples)
+        if not meta.choose_when or not meta.reject_when:
+            raise AssertionError(f"tool discovery {name!r} needs >=1 choose_when and >=1 reject_when")
+        bullets = (*meta.choose_when, *meta.reject_when, *meta.related_tools, *meta.prerequisites, *meta.conflicts_with)
         for bullet in bullets:
             if not bullet or len(bullet) > _DISCOVERY_TEXT_LIMIT:
                 raise AssertionError(f"tool discovery {name!r} has empty/overlong bullet {bullet!r}")
         for ref in (*meta.related_tools, *meta.prerequisites):
             if ref not in TOOL_DISCOVERY_REGISTRY:
                 raise AssertionError(f"tool discovery {name!r} references unknown tool {ref!r}")
+        if name in meta.conflicts_with:
+            raise AssertionError(f"tool discovery {name!r} self-conflicts with {name!r}")
+        if len(set(meta.conflicts_with)) != len(meta.conflicts_with):
+            raise AssertionError(f"tool discovery {name!r} has duplicate conflicts_with entry")
+        for peer in meta.conflicts_with:
+            if peer not in TOOL_DISCOVERY_REGISTRY:
+                raise AssertionError(f"tool discovery {name!r} conflicts with unknown tool {peer!r}")
+            peer_meta = TOOL_DISCOVERY_REGISTRY[peer]
+            if name not in peer_meta.conflicts_with:
+                raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but {peer!r} does not reciprocate {name!r}")
+            blob = " ".join(meta.reject_when)
+            if peer not in blob:
+                raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but never names {peer!r} in reject_when")
     raw_caps = globals().get("TOOL_CAPABILITIES")
     if isinstance(raw_caps, dict):
         uncovered = sorted(
@@ -2454,10 +2929,56 @@ def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
         )
         if uncovered:
             raise AssertionError(f"tool discovery registry missing RESEARCH tools: {uncovered}")
+        for name, meta in TOOL_DISCOVERY_REGISTRY.items():
+            if meta.direct_activation and raw_caps.get(name) is not Capability.RESEARCH:
+                raise AssertionError(f"tool discovery {name!r} is direct-activatable but not Capability.RESEARCH")
     return TOOL_DISCOVERY_REGISTRY
 
 
+# Content-derived registry version for observability records (schemas + routing metadata).
+_TOOL_DISCOVERY_FINGERPRINT = json.dumps(
+    {
+        name: [
+            meta.domain, meta.family, meta.intent, meta.output_kind, meta.source,
+            meta.entity_scope, meta.time_mode, meta.summary,
+            list(meta.choose_when), list(meta.reject_when),
+            sorted(meta.conflicts_with), sorted(meta.related_tools),
+            sorted(meta.prerequisites), meta.direct_activation,
+        ]
+        for name, meta in sorted(TOOL_DISCOVERY_REGISTRY.items())
+    },
+    sort_keys=True,
+)
+TOOL_REGISTRY_VERSION = hashlib.sha256((json.dumps(TOOLS, sort_keys=True) + _TOOL_DISCOVERY_FINGERPRINT).encode()).hexdigest()[:12]
+
+
 validate_tool_discovery_registry()
+
+
+def dynamically_activatable_tool_names() -> list[str]:
+    """Sorted canonical names eligible for direct small-model activation."""
+    return sorted(name for name, meta in validate_tool_discovery_registry().items() if meta.direct_activation)
+
+
+def _routing_card(name: str) -> dict[str, object]:
+    """Compact routing card: registry metadata plus canonical arg lists, never full parameters."""
+    meta = TOOL_DISCOVERY_REGISTRY[name]
+    _, required, optional = _canonical_tool_schema(name)
+    return {
+        "name": name,
+        "domain": meta.domain,
+        "family": meta.family,
+        "summary": meta.summary,
+        "intent": meta.intent,
+        "output_kind": meta.output_kind,
+        "source": meta.source,
+        "entity_scope": meta.entity_scope,
+        "time_mode": meta.time_mode,
+        "choose_when": list(meta.choose_when),
+        "reject_when": list(meta.reject_when),
+        "required": required,
+        "optional": optional,
+    }
 
 
 def build_prerequisite_graph_from_tool_metadata() -> dict[str, frozenset[str]]:
@@ -2495,49 +3016,95 @@ def _discovery_keywords(value: str) -> set[str]:
     return {t for t in _normalize_discovery_text(value) if len(t) > 1 and t not in _DISCOVERY_STOPWORDS}
 
 
+def _ambiguity_groups(ranked_names: list[str]) -> tuple[bool, list[dict[str, object]]]:
+    """Connected components of conflicts_with among returned matches."""
+    if len(ranked_names) < 2:
+        return False, []
+    index = {name: i for i, name in enumerate(ranked_names)}
+    parent: dict[str, str] = {n: n for n in ranked_names}
+    def _find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+    present = set(ranked_names)
+    for name in ranked_names:
+        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
+            if peer in present:
+                _union(name, peer)
+    comps: dict[str, list[str]] = {}
+    for name in ranked_names:
+        comps.setdefault(_find(name), []).append(name)
+    groups: list[dict[str, object]] = []
+    for comp in comps.values():
+        if len(comp) < 2:
+            continue
+        # Only a real ambiguity group when at least one conflict edge is internal.
+        if not any(
+            any(peer in comp for peer in TOOL_DISCOVERY_REGISTRY[n].conflicts_with)
+            for n in comp
+        ):
+            continue
+        def _order_key(n: str) -> int:
+            return index[n]
+        ordered = sorted(comp, key=_order_key)
+        paths = sorted({f"{TOOL_DISCOVERY_REGISTRY[n].domain}/{TOOL_DISCOVERY_REGISTRY[n].family}" for n in ordered})
+        bits = [f"{n} \u2014 {TOOL_DISCOVERY_REGISTRY[n].choose_when[0]}" if TOOL_DISCOVERY_REGISTRY[n].choose_when else n for n in ordered]
+        groups.append({
+            "candidates": ordered,
+            "paths": paths,
+            "distinguishing_question": "Which outcome do you need: " + "; ".join(bits) + "?",
+        })
+    def _group_key(g: dict[str, object]) -> str:
+        cands = g.get("candidates")
+        if isinstance(cands, list) and cands and isinstance(cands[0], str):
+            return str(cands[0])
+        return ""
+    groups.sort(key=_group_key)
+    return (len(groups) > 0), groups
+
+
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Generic lexical ranking over TOOL_DISCOVERY_REGISTRY fields only.
 
     Signals (small generic weights, no per-intent boosts): exact tool-name
-    match (10) > exact phrase in summary/use_when (5) > token overlap over
-    name/domain/summary/use_when/related names (1 per token) > domain-name
-    overlap (1). Ties break alphabetically for determinism. A relative-noise
-    margin keeps only hits within 4 points of the best score.
+    match (10) > exact phrase in summary/choose_when (5) > token overlap over
+    name/domain/family/intent/output_kind/summary/choose_when/reject_when/related names
+    (1 per token) > domain-name overlap (1). Ties break alphabetically for
+    determinism. A relative-noise margin keeps only hits within 4 points of
+    the best score. Returns compact routing cards only: the top 3, plus ranks
+    4-5 while tied with rank 3. Adds ambiguity groups over conflicts_with.
     """
     del model
     query = str(args.get("query") or "")
     domain = str(args.get("domain") or "").strip().lower() or None
-    try:
-        offset = int(str(args.get("offset", 0)))
-    except (TypeError, ValueError):
-        offset = 0
-    offset = max(0, offset)
-    if domain and not query.strip():
-        names = sorted(name for name, meta in TOOL_DISCOVERY_REGISTRY.items() if meta.domain == domain)
-        matches: list[dict[str, object]] = [
-            {
-                "name": name,
-                "domain": TOOL_DISCOVERY_REGISTRY[name].domain,
-                "summary": TOOL_DISCOVERY_REGISTRY[name].summary,
-                "reason": TOOL_DISCOVERY_REGISTRY[name].summary,
-            }
-            for name in names[offset:]
-        ]
-        return {"query": query, "domain": domain, "matches": matches, "count": len(matches), "total": len(names), "offset": offset}
+    if not query.strip():
+        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": []}
     query_norm = " ".join(_normalize_discovery_text(query))
     query_tokens = _discovery_keywords(query)
     scored: list[tuple[int, str]] = []
     for name, meta in TOOL_DISCOVERY_REGISTRY.items():
+        if domain and meta.domain != domain:
+            continue
         score = 0
         if query_norm and query_norm == " ".join(_normalize_discovery_text(name.replace("_", " "))):
             score += 10
-        for text in (meta.summary, *meta.use_when):
+        for text in (meta.summary, *meta.choose_when):
             phrase = " ".join(_normalize_discovery_text(text))
             if query_norm and phrase and (query_norm in phrase or phrase in query_norm):
                 score += 5
                 break
         field_tokens = _discovery_keywords(
-            " ".join((name.replace("_", " "), meta.domain, meta.summary, " ".join(meta.use_when), " ".join(meta.related_tools).replace("_", " ")))
+            " ".join((
+                name.replace("_", " "), meta.domain, meta.family.replace("-", " "),
+                meta.intent.replace("_", " "), meta.output_kind.replace("_", " "),
+                meta.summary, " ".join(meta.choose_when), " ".join(meta.reject_when),
+                " ".join(meta.related_tools).replace("_", " "),
+            ))
         )
         score += len(query_tokens & field_tokens)
         if query_tokens and set(_normalize_discovery_text(meta.domain)) <= query_tokens:
@@ -2552,16 +3119,18 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     def _rank_key(hit: tuple[int, str]) -> tuple[int, str]:
         return (-hit[0], hit[1])
     scored.sort(key=_rank_key)
-    ranked: list[dict[str, object]] = [
-        {
-            "name": name,
-            "domain": TOOL_DISCOVERY_REGISTRY[name].domain,
-            "summary": TOOL_DISCOVERY_REGISTRY[name].summary,
-            "reason": TOOL_DISCOVERY_REGISTRY[name].summary,
-        }
-        for _, name in scored[offset:]
-    ]
-    return {"query": query, "domain": domain, "matches": ranked, "count": len(ranked), "total": len(scored), "offset": offset}
+    top = scored[:3]
+    if len(scored) > 3:
+        third = scored[2][0]
+        for score, name in scored[3:5]:
+            if score == third:
+                top.append((score, name))
+            else:
+                break
+    ranked_names = [name for _, name in top]
+    ranked = [_routing_card(name) for name in ranked_names]
+    ambiguous, groups = _ambiguity_groups(ranked_names)
+    return {"matches": ranked, "count": len(ranked), "ambiguous": ambiguous, "ambiguity_groups": groups}
 
 
 def _list_tool_domains(args: dict[str, object], model: str) -> dict[str, object]:
@@ -2598,9 +3167,16 @@ def _describe_one(name: str) -> dict[str, object]:
     return {
         "name": name,
         "domain": meta.domain,
+        "family": meta.family,
         "summary": meta.summary,
-        "use_when": list(meta.use_when),
-        "avoid_when": list(meta.avoid_when),
+        "intent": meta.intent,
+        "output_kind": meta.output_kind,
+        "source": meta.source,
+        "entity_scope": meta.entity_scope,
+        "time_mode": meta.time_mode,
+        "choose_when": list(meta.choose_when),
+        "reject_when": list(meta.reject_when),
+        "conflicts_with": list(meta.conflicts_with),
         "related_tools": list(meta.related_tools),
         "prerequisites": list(meta.prerequisites),
         "required_arguments": required,
@@ -2627,18 +3203,23 @@ def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
     return _describe_one(str(name))
 
 
-def _browse_key(nm: str) -> tuple[str, str]:
-    """Sort key for the full catalog: (domain, name)."""
-    return (TOOL_DISCOVERY_REGISTRY[nm].domain, nm)
+def _browse_key(nm: str) -> tuple[str, str, str]:
+    """Sort key for the full catalog: (domain, family, name)."""
+    meta = TOOL_DISCOVERY_REGISTRY[nm]
+    return (meta.domain, meta.family, nm)
 
 
 def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
-    """Paged catalog: every domain + one page of registry names, or one domain slice, or one tool's canonical schema."""
+    """Hierarchical catalog: root domains, domain families, family tools + contrast, or one tool."""
     del model
     raw_name = args.get("name")
     name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
     raw_domain = args.get("domain")
     domain = raw_domain.strip().lower() if isinstance(raw_domain, str) and raw_domain.strip() else None
+    raw_family = args.get("family")
+    family = raw_family.strip().lower() if isinstance(raw_family, str) and raw_family.strip() else None
+    if name and (domain or family):
+        return {"error": "ambiguous_browse", "hint": "call browse_tools with either name or domain/family, not both"}
     if name:
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
         if meta is None:
@@ -2646,42 +3227,53 @@ def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
         info = _describe_one(name)
         params, _, _ = _canonical_tool_schema(name)
         return {**info, "parameters": params}
-    try:
-        offset = int(str(args.get("offset", 0)))
-    except (TypeError, ValueError):
-        offset = 0
-    offset = max(0, offset)
-    try:
-        limit = int(str(args.get("limit", 50)))
-    except (TypeError, ValueError):
-        limit = 50
-    limit = max(1, min(100, limit))
+    if family and not domain:
+        return {"error": "family_requires_domain", "hint": "call browse_tools with domain and family"}
+    if domain and domain not in DOMAIN_DESCRIPTIONS:
+        return {"error": "unknown_domain", "domains": sorted(DOMAIN_DESCRIPTIONS)}
+    if domain and family:
+        names = sorted(
+            (n for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain and m.family == family),
+            key=_browse_key,
+        )
+        if not names:
+            return {"error": "unknown_family", "domain": domain, "families": sorted({m.family for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain})}
+        tools = [
+            {
+                "name": n,
+                "domain": TOOL_DISCOVERY_REGISTRY[n].domain,
+                "family": TOOL_DISCOVERY_REGISTRY[n].family,
+                "summary": TOOL_DISCOVERY_REGISTRY[n].summary,
+                "intent": TOOL_DISCOVERY_REGISTRY[n].intent,
+                "output_kind": TOOL_DISCOVERY_REGISTRY[n].output_kind,
+            }
+            for n in names
+        ]
+        contrast = [
+            {
+                "tool": n,
+                "use_it_for": TOOL_DISCOVERY_REGISTRY[n].choose_when[0] if TOOL_DISCOVERY_REGISTRY[n].choose_when else "",
+                "do_not_use_it_for": " ".join(TOOL_DISCOVERY_REGISTRY[n].reject_when),
+            }
+            for n in names
+        ]
+        return {
+            "path": f"/{domain}/{family}",
+            "domain": domain,
+            "family": family,
+            "tools": tools,
+            "count": len(tools),
+            "contrast_table": contrast,
+        }
     if domain:
-        if domain not in DOMAIN_DESCRIPTIONS:
-            return {"error": "unknown_domain", "domains": sorted(DOMAIN_DESCRIPTIONS)}
-        names = sorted(n for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain)
-        total = len(names)
-        page = names[offset:offset + limit]
-        matches = [{"name": n, "domain": TOOL_DISCOVERY_REGISTRY[n].domain, "summary": TOOL_DISCOVERY_REGISTRY[n].summary, "reason": TOOL_DISCOVERY_REGISTRY[n].summary} for n in page]
-        count = len(page)
-        more = offset + count < total
-        return {"query": "", "domain": domain, "matches": matches, "count": count, "total": total, "offset": offset, "limit": limit, "next_offset": offset + count if more else None, "may_have_more": more}
-    ordered = sorted(TOOL_DISCOVERY_REGISTRY, key=_browse_key)
-    total = len(ordered)
-    page = ordered[offset:offset + limit]
-    tools = [{"name": n, "domain": TOOL_DISCOVERY_REGISTRY[n].domain, "summary": TOOL_DISCOVERY_REGISTRY[n].summary} for n in page]
-    count = len(page)
-    more = offset + count < total
-    return {
-        "domains": [{"name": d, "description": DOMAIN_DESCRIPTIONS[d]} for d in sorted(DOMAIN_DESCRIPTIONS)],
-        "tools": tools,
-        "count": count,
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "next_offset": offset + count if more else None,
-        "may_have_more": more,
-    }
+        fams: dict[str, list[str]] = {}
+        for n, m in TOOL_DISCOVERY_REGISTRY.items():
+            if m.domain == domain:
+                fams.setdefault(m.family, []).append(n)
+        families = [{"name": f, "path": f"/{domain}/{f}", "tool_count": len(v)} for f, v in sorted(fams.items())]
+        return {"path": f"/{domain}", "domain": domain, "families": families}
+    domains = [{"name": d, "path": f"/{d}", "description": DOMAIN_DESCRIPTIONS[d]} for d in sorted(DOMAIN_DESCRIPTIONS)]
+    return {"path": "/", "domains": domains}
 
 
 

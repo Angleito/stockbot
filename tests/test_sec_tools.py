@@ -159,35 +159,129 @@ def test_search_tools_insider_sale_includes_both_insider_tools():
 
 def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
-        "search_tools", {"query": "", "domain": "ownership"}, "test", context=_research_context()
+        "search_tools", {"query": "ownership", "domain": "ownership"}, "test", context=_research_context()
     )
     found = {m["name"] for m in _as_seq(result["matches"])}
-    assert found == {"search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"}
+    assert found == {"search_sec_relationships", "get_beneficial_ownership"}
     assert "schemas" not in result
 
 
-def test_search_tools_filings_domain_lists_all():
-    result = tools.execute_tool(
-        "search_tools", {"query": "", "domain": "filings"}, "test", context=_research_context()
-    )
-    expected = sorted(
-        name for name, meta in tools.TOOL_DISCOVERY_REGISTRY.items() if meta.domain == "filings"
-    )
-    found = sorted(m["name"] for m in _as_seq(result["matches"]))
-    assert found == expected
-    assert result["total"] == result["count"] == len(expected)
-    assert result["offset"] == 0
-
-
-def test_search_tools_total_equals_count_uncapped():
+def test_search_tools_returns_compact_routing_cards():
     result = tools.execute_tool(
         "search_tools", {"query": "short interest"}, "test", context=_research_context()
     )
     matches = _as_seq(result["matches"])
     assert matches
-    assert result["total"] == result["count"] == len(matches)
-    assert result["offset"] == 0
+    assert result["count"] == len(matches) <= 5
+    assert "schemas" not in result and "total" not in result and "offset" not in result
+    for match in matches:
+        card = _as_dict(match)
+        assert set(card) == {"name", "domain", "family", "summary", "intent", "output_kind", "source", "entity_scope", "time_mode", "choose_when", "reject_when", "required", "optional"}
+        assert "parameters" not in card
+    assert "ambiguous" in result and "ambiguity_groups" in result
 
+
+def test_search_tools_domain_filter_uses_same_ranking_cap():
+    result = tools.execute_tool(
+        "search_tools", {"query": "filings", "domain": "sec"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    assert result["count"] == len(matches) <= 5
+    for match in matches:
+        assert _as_dict(match)["domain"] == "sec"
+    assert "schemas" not in result
+
+
+def test_search_tools_empty_query_returns_zero_matches():
+    blank = tools.execute_tool(
+        "search_tools", {"query": ""}, "test", context=_research_context()
+    )
+    assert _as_seq(blank["matches"]) == []
+    assert blank["count"] == 0
+    assert blank["ambiguous"] is False
+    assert blank["ambiguity_groups"] == []
+    blank_domain = tools.execute_tool(
+        "search_tools", {"query": "", "domain": "ownership"}, "test", context=_research_context()
+    )
+    assert _as_seq(blank_domain["matches"]) == []
+    assert blank_domain["count"] == 0
+    assert blank_domain["ambiguity_groups"] == []
+
+
+def test_search_current_vs_historical_share_family_but_differ():
+    current = tools.execute_tool(
+        "search_tools", {"query": "current reported short position for one security"}, "test", context=_research_context()
+    )
+    names = {m["name"] for m in _as_seq(current["matches"])}
+    assert "get_short_interest" in names
+    by_name = {m["name"]: m for m in _as_seq(current["matches"])}
+    assert by_name["get_short_interest"]["intent"] == "current_reported_short_position"
+    assert current["ambiguous"] is True
+    groups = current["ambiguity_groups"]
+    assert isinstance(groups, list)
+    found_exact = False
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        cands = g.get("candidates")
+        if isinstance(cands, list) and "get_short_interest" in cands:
+            found_exact = True
+    assert found_exact
+    hist = tools.execute_tool(
+        "search_tools", {"query": "historical FINRA short-interest trend"}, "test", context=_research_context()
+    )
+    hnames = {m["name"] for m in _as_seq(hist["matches"])}
+    assert "query_finra" in hnames
+    hby = {m["name"]: m for m in _as_seq(hist["matches"])}
+    assert hby["query_finra"]["intent"] == "analyze_historical_finra_records"
+    assert hby["query_finra"]["output_kind"] != by_name["get_short_interest"]["output_kind"]
+    assert hist["ambiguous"] is True
+    hgroups = hist["ambiguity_groups"]
+    assert isinstance(hgroups, list) and hgroups
+    first = hgroups[0]
+    assert isinstance(first, dict)
+    q = first["distinguishing_question"]
+    assert isinstance(q, str)
+    assert q.startswith("Which outcome do you need:")
+    assert "query_finra" in q and "get_short_interest" in q
+
+
+
+def test_search_tools_routes_named_natural_intents():
+    gopro = tools.execute_tool(
+        "search_tools", {"query": "Why did GoPro stock shoot up over the last 30 days?"}, "test", context=_research_context()
+    )
+    assert "search_web" in {m["name"] for m in _as_seq(gopro["matches"])}
+    eps = tools.execute_tool(
+        "search_tools", {"query": "What is NVDA EPS?"}, "test", context=_research_context()
+    )
+    assert "get_fundamentals" in {m["name"] for m in _as_seq(eps["matches"])}
+    short = tools.execute_tool(
+        "search_tools", {"query": "What's GME short interest?"}, "test", context=_research_context()
+    )
+    assert "get_short_interest" in {m["name"] for m in _as_seq(short["matches"])}
+    amd = tools.execute_tool(
+        "search_tools", {"query": "What changed at AMD recently?"}, "test", context=_research_context()
+    )
+    assert "get_material_events" in {m["name"] for m in _as_seq(amd["matches"])}
+    orthogonal = tools.execute_tool(
+        "search_tools", {"query": "How do I bake sourdough bread at home?"}, "test", context=_research_context()
+    )
+    assert _as_seq(orthogonal["matches"]) == []
+    assert orthogonal["count"] == 0
+
+
+def test_search_tools_exact_tie_extends_to_five_max():
+    result = tools.execute_tool(
+        "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert result["count"] == len(matches) == 5
+    narrow = tools.execute_tool(
+        "search_tools", {"query": "short interest"}, "test", context=_research_context()
+    )
+    assert narrow["count"] == len(_as_seq(narrow["matches"])) == 2
 
 def test_describe_tool_batch_names():
     result = tools.execute_tool(
@@ -612,10 +706,10 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     )
     assert "search_sec_filings" in {m["name"] for m in _as_seq(fts["matches"])}
     pack = tools.execute_tool(
-        "search_tools", {"query": "", "domain": "filings"}, "test", context=_research_context()
+        "search_tools", {"query": "SEC filings", "domain": "sec"}, "test", context=_research_context()
     )
     names = {m["name"] for m in _as_seq(pack["matches"])}
-    assert "find_sec_entities" in names
+    assert "search_sec_filings" in names
     listed = next(t for t in tools.TOOLS if _as_dict(_as_dict(t)["function"])["name"] == "list_sec_filings")
     function = _as_dict(_as_dict(listed)["function"])
     parameters = _as_dict(function["parameters"])
