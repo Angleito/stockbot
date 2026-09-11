@@ -7,8 +7,8 @@ there and proves fail-loud.
 
 Prereqs: host `~/.pi/agent/auth.json` holds a working `opencode-go` (API key)
 entry. Real secrets never enter the sandbox: the OpenCode key stays
-Docker-proxy-managed. Local models live in host `~/.pi/agent/models.json`
-(`liquid-local`, `qwen-local`, `minicpm-local`, `local-qwen`) and need no sandbox egress.
+Docker-proxy-managed. Local models run through one llama-server router at
+`http://127.0.0.1:8080` (host `~/.pi/agent/models.json` providers `liquid-local`, `qwen-local`, `minicpm-local`, `local-qwen`); IDs are the router preset IDs (`LiquidAI/LFM2.5-1.2B-Thinking-GGUF:Q4_K_M`, `ggml-org/Qwen3.6-35B-A3B-GGUF:Q4_K_M`, `openbmb/MiniCPM5-1B-GGUF:Q4_K_M`) — one port for all models — and need no sandbox egress.
 
 ## 1. Register host credentials
 
