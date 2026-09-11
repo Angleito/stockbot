@@ -2,7 +2,7 @@
 
 Domain: filings
 
-What was disclosed about risk factors in recent filings: full-text EDGAR SEC search and retrieval across entity, EFTS, and 10-K/10-Q routes, with disclosure language and mentions.
+General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.
 
 ## Use when
 
@@ -10,13 +10,15 @@ What was disclosed about risk factors in recent filings: full-text EDGAR SEC sea
 
 ## Avoid when
 
-- Not a filing lister for a known ticker.
+- Not a filing lister for a known ticker (list_sec_filings).
+- Do NOT use for year-over-year risk-factor changes (diff_risk_factors).
 
 ## Related tools
 
 - list_sec_filings
 - get_sec_filing
 - find_sec_entities
+- diff_risk_factors
 
 ## Prerequisites
 

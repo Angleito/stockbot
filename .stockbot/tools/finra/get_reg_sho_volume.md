@@ -2,15 +2,15 @@
 
 Domain: finra
 
-FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rolling 12 months.
+Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.
 
 ## Use when
 
-- Checking daily short-sale volume breakdowns for one ticker.
+- Daily short-sale volume or venue breakdowns for one ticker.
 
 ## Avoid when
 
-- Not for biweekly short interest positions.
+- Do NOT use for biweekly short interest positions (get_short_interest).
 
 ## Related tools
 

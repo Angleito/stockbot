@@ -2,7 +2,7 @@
 
 Domain: finra
 
-Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends, prose. Dataset IDs look like otcMarket/consolidatedShortInterest.
+Analyzed FINRA briefing with trends and metrics over any named dataset, no raw rows.
 
 ## Use when
 
@@ -10,7 +10,7 @@ Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends,
 
 ## Avoid when
 
-- Not for exact source values.
+- Do NOT use for exact source values (get_finra_datapoints).
 
 ## Related tools
 

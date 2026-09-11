@@ -2,21 +2,25 @@
 
 Domain: fundamentals
 
-Reported EPS including diluted EPS, dividends, balance-sheet items, or shares outstanding for a ticker from SEC filings.
+Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding.
 
 ## Use when
 
-- Asking for a specific numeric fundamental (what a company earns) such as EPS, earnings per share, dividends, or shares outstanding.
+- One specific numeric fundamental for one ticker: EPS, dividends, or shares outstanding.
 
 ## Avoid when
 
-- Not for forward analyst expectations (estimates of future performance).
+- Do NOT use for full statements (get_financial_statements).
+- Do NOT use for XBRL facts by concept (get_xbrl_facts).
+- Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).
+- Do NOT use for forward consensus (get_analyst_estimates).
 
 ## Related tools
 
 - get_xbrl_facts
 - get_financial_statements
 - get_valuation_metrics
+- get_analyst_estimates
 
 ## Prerequisites
 

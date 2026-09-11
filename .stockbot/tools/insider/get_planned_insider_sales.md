@@ -2,15 +2,15 @@
 
 Domain: insider
 
-Planned insider sales from Form 144 notices: proposed sales not yet executed.
+Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker.
 
 ## Use when
 
-- Finding proposed insider sales reported on Form 144.
+- Proposed insider sales reported on Form 144 for one ticker.
 
 ## Avoid when
 
-- Not for completed insider trades.
+- Do NOT use for completed insider trades (get_insider_activity).
 
 ## Related tools
 

@@ -41,7 +41,7 @@ EXTENSION = ".pi/extensions/stockbot.ts"
 TIMEOUT_S = 300
 DEFAULT_REPETITIONS = 3
 TRANSIENT_ERROR_TYPES = frozenset({"rate_limited"})
-_TRANSIENT_MESSAGE_RE = re.compile(r"(?i)\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout|unreachable")
+_TRANSIENT_MESSAGE_RE = re.compile(r"(?i)\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout")
 TRANSIENT_RETRY_CAP = 2
 DEFAULT_CONCURRENCY = 6
 POLL_S = 2
@@ -450,6 +450,33 @@ def _call_tool_dispatched_names(conn: sqlite3.Connection) -> set[str]:
     return names
 
 
+def _call_tool_has_unparseable(conn: sqlite3.Connection) -> bool:
+    """True iff any outer `call_tool` row carries unparseable/missing inner args."""
+    try:
+        rows = conn.execute(
+            "SELECT arguments FROM agent_events WHERE event_type = 'tool_started' AND tool_name = 'call_tool'"
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    for (raw,) in rows:
+        if not isinstance(raw, str) or not raw:
+            return True
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return True
+        if not isinstance(payload, dict):
+            return True
+        inner = payload.get("name")
+        if isinstance(inner, str) and inner:
+            continue
+        wrapped = payload.get("arguments")
+        if isinstance(wrapped, dict) and isinstance(wrapped.get("name"), str) and wrapped.get("name"):
+            continue
+        return True
+    return False
+
+
 def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
     """None when `name` has a clean success; otherwise a short failure reason."""
     ok_calls = conn.execute(
@@ -461,14 +488,8 @@ def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str |
         "SELECT COUNT(*) FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)
     ).fetchone()[0]
     if failed > 0:
-        # Same call must work; a failure repeating arguments of a clean call is
-        # signal, but a failure with different arguments is an exploratory probe
-        # (e.g. Pi re-probing a stale dataset) and does not negate the success.
-        # NULL == NULL, so arg-less fixtures keep the old strict behavior.
-        clean_args = {r[0] for r in conn.execute("SELECT arguments_json FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (name,)).fetchall()}
-        failed_args = [r[0] for r in conn.execute("SELECT arguments_json FROM tool_calls WHERE tool_name = ? AND error_type IS NOT NULL", (name,)).fetchall()]
-        if any(f in clean_args for f in failed_args):
-            return "failed execution present"
+        # Strict: any errored execution fails, even with different arguments.
+        return "failed execution present"
     completed = conn.execute(
         "SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_completed' AND tool_name = ?", (name,)
     ).fetchone()[0]
@@ -554,14 +575,14 @@ def _search_queries_for_db(db_path_str: str) -> list[str]:
 def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
     # Pi 0.85.0 -p does not exit after answering in this environment; when the
     # recorder DB already shows terminal state, the kill is cleanup, not failure.
-    # Reachability bar: the model may explore discovery primitives freely
+    # Strict routing bar: the model may explore discovery primitives freely
     # (browse_tools, search_tools, describe_tool, list_tool_domains), but must
     # dispatch the expected tool via call_tool. Attempts 1-2 require one clean
     # discovery call strictly before the expected inner dispatch. Attempt 3
     # allows discovery but still requires call_tool dispatch. Discovery
-    # errors/rejections never fail; only a generous total discovery cap (>12
-    # attempts) fails as a loop guard. Clean extra research calls are allowed;
-    # errored non-transient strays fail, all-transient strays retry. search_tools
+    # errors/rejections never fail; only a tight total discovery cap (>3
+    # attempts) fails as a loop guard. Any non-target research dispatch (clean
+    # or errored) fails; all-transient errored strays retry. search_tools
     # itself executes directly because app/pi_gateway.py forbids dispatching
     # discovery via call_tool. Transient (rate_limited / timeout-message-only)
     # never passes: it returns ok=False with a "transient: " reason for bounded
@@ -574,21 +595,21 @@ def evaluate_attempt(db_path: Path, required_tool: str, exit_code: int, timed_ou
         conn = sqlite3.connect(str(db_path))
         try:
             discovery_count = _discovery_attempt_count(conn)
-            if required_tool != "search_tools" and discovery_count > 12:
+            if required_tool != "search_tools" and discovery_count > 3:
                 return False, f"too-many-discovery:{discovery_count}"
             rejected = list(_rejected_tools(conn))
             if rejected:
                 return False, f"routing failed: harness-rejected call to {', '.join(rejected)}"
-            allowed_prereqs = set(PREREQ_CHAINS.get(required_tool, frozenset()))
+            if _call_tool_has_unparseable(conn):
+                return False, "routing failed: unparseable call_tool dispatch args"
             unexpected = _unexpected_tools(conn, required_tool)
-            stray_errored = [t for t in unexpected if _tool_success(conn, t, attempt=attempt) is not None]
-            prereq_errored = [t for t in stray_errored if t in allowed_prereqs]
-            nonprereq_errored = [t for t in stray_errored if t not in allowed_prereqs]
-            errored_strays = prereq_errored + nonprereq_errored
-            if errored_strays:
-                if _row_errors_transient(conn, errored_strays):
-                    return False, f"transient: stray tool(s) transient error: {', '.join(errored_strays)}"
-                return False, f"routing failed: unexpected research tool call(s): {', '.join(errored_strays)}"
+            if unexpected:
+                clean_strays = [t for t in unexpected if _tool_success(conn, t, attempt=attempt) is None]
+                if clean_strays:
+                    return False, f"routing failed: unexpected research tool call(s): {', '.join(clean_strays)}"
+                if _row_errors_transient(conn, unexpected):
+                    return False, f"transient: stray tool(s) transient error: {', '.join(unexpected)}"
+                return False, f"routing failed: unexpected research tool call(s): {', '.join(unexpected)}"
             # Discovery never fails: errored discovery calls are free exploration.
             # Transient target errors retry before discovery-ordering gates (no clean inner yet).
             _early_target = _tool_success(conn, required_tool, attempt=attempt)
@@ -743,7 +764,7 @@ class AttemptResult:
     duration_seconds: float
     model_config_failed: bool = False
 
-_INFRA_RE = re.compile(r"ratelimit|rate limit|rate-limit|429|quota|too many requests|timeout|timed out|latency|deadline|temporarily|try again|overloaded|503|502|504", re.IGNORECASE)
+_INFRA_RE = re.compile(r"ratelimit|rate-limit|rate limit|429|timeout|timed out|latency|deadline exceeded|drain.?timeout", re.IGNORECASE)
 # Explicit routing-failure markers from evaluate_attempt; these take precedence
 # over infra keywords (a routing reason mentioning "timeout"/"429" is routing).
 _ROUTING_RE = re.compile(r"routing failed|harness-rejected|unexpected research|errored discovery|too-many-searches|too-many-discovery|absent|no model telemetry|agent_runs not completed|pi exit|missing recorder DB|DB read failed", re.IGNORECASE)

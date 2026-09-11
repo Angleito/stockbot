@@ -2,7 +2,7 @@
 
 Domain: ownership
 
-Ownership and transaction relationships an entity must disclose: 13D/G owners, 13F holdings, insider links, deal parties.
+Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links.
 
 ## Use when
 

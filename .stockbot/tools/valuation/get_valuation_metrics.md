@@ -2,15 +2,16 @@
 
 Domain: valuation
 
-Whether a stock is cheap or expensive: valuation anchored to live price with trailing P/E plus consensus and obligation-adjusted forward P/E.
+Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E.
 
 ## Use when
 
-- Answering whether a company is cheap or expensive on earnings multiples.
+- Whether a company is cheap or expensive on earnings multiples for one ticker.
 
 ## Avoid when
 
-- Not for reported EPS alone.
+- Do NOT use for reported EPS alone (get_fundamentals).
+- Do NOT use for forward consensus alone (get_analyst_estimates).
 
 ## Related tools
 

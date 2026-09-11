@@ -2,15 +2,15 @@
 
 Domain: insider
 
-Executed insider transactions from Forms 3/4/5 with SEC codes mapped to buy, sell, or grant.
+Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5.
 
 ## Use when
 
-- Answering insider sale questions: actual insider purchases and sales by executives and directors.
+- One ticker's executed insider buys/sells by executives and directors (Forms 3/4/5).
 
 ## Avoid when
 
-- Not for planned but unexecuted sales.
+- Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales).
 
 ## Related tools
 

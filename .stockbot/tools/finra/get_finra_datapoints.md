@@ -2,15 +2,15 @@
 
 Domain: finra
 
-Short-position values and figures from FINRA (exact source values for explicit requests).
+Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows.
 
 ## Use when
 
-- Returning exact fields and settlement-date values from a named FINRA dataset.
+- Exact fields and values from a named FINRA dataset for an explicit data request.
 
 ## Avoid when
 
-- Not for ordinary analysis.
+- Do NOT use for analyzed briefings or trends (query_finra).
 
 ## Related tools
 

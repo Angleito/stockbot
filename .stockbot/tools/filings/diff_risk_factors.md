@@ -2,20 +2,21 @@
 
 Domain: filings
 
-What changed in the Risk Factors section versus the prior filing: year-over-year diff for a ticker.
+Risk Factors section year-over-year diff for one ticker: what is new or changed.
 
 ## Use when
 
-- Answering what is new or changed in a company's risk disclosures.
+- What is new or changed in a company's risk disclosures for one ticker.
 
 ## Avoid when
 
-- Not for full-filing diffs.
-- Not for searching filing text for risk-factor mentions.
+- Do NOT use for full-filing diffs between accessions (diff_sec_filings).
+- Do NOT use for disclosure search without change framing (search_sec_filings).
 
 ## Related tools
 
 - diff_sec_filings
+- search_sec_filings
 
 ## Prerequisites
 

@@ -2,15 +2,15 @@
 
 Domain: analyst
 
-Sell-side consensus: price targets, ratings, forward EPS and revenue estimates, revision trends.
+Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions.
 
 ## Use when
 
-- Answering what analysts expect: targets, consensus EPS, or estimate revisions.
+- What analysts expect for one ticker: targets, consensus EPS, or estimate revisions.
 
 ## Avoid when
 
-- Not for reported historical EPS.
+- Do NOT use for reported historical EPS (get_fundamentals).
 
 ## Related tools
 

@@ -2,7 +2,7 @@
 
 Domain: filings
 
-Deterministic diff between two filings by accession numbers: whether one filing differs from another, e.g. amendment versus prior version.
+Full-filing diff between two accessions: amendment versus prior version, all sections in context.
 
 ## Use when
 
@@ -10,7 +10,7 @@ Deterministic diff between two filings by accession numbers: whether one filing 
 
 ## Avoid when
 
-- Not for risk-factor-only changes.
+- Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).
 
 ## Related tools
 

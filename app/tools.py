@@ -90,11 +90,11 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_fundamentals",
-            "description": "Returns a specific numeric fundamental (EPS, "
+            "description": "Single reported fundamental for one ticker: a specific numeric fundamental (EPS, "
                 "dividends, balance sheet line item, shares outstanding) for a ticker. "
                 "Note: shares_outstanding is SEC-reported shares outstanding, "
                 "not public float. Call this for any request for a specific "
-                "numeric metric. When presenting EPS, show basic and diluted EPS side by side in a markdown table "
+                "numeric metric. Do NOT use for full financial statements (get_financial_statements), XBRL-tagged facts by concept name (get_xbrl_facts), cheap-vs-expensive multiples (get_valuation_metrics), or forward consensus expectations (get_analyst_estimates). When presenting EPS, show basic and diluted EPS side by side in a markdown table "
                 "with period, basic EPS, and diluted EPS columns, including TTM for both when available. Dividends responses include last paid and next "
                 "SEC-declared (upcoming) dividends with filing provenance; undeclared estimates are never included. Render past, present, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED. Dividend metrics are tool-computed; interpret, never recalculate.",
             "parameters": {
@@ -255,7 +255,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "diff_sec_filings",
-            "description": "Deterministic diff between two filings by accession numbers (amendment vs prior, risk-factor changes). Numbers first; the LLM interprets only after deterministic output. When accession numbers are unknown, find them with list_sec_filings.",
+            "description": "Full-filing diff between two accessions: deterministic diff by accession numbers (amendment vs prior, all sections in full context). Numbers first; the LLM interprets only after deterministic output. Do NOT use for risk-factor-only year-over-year diffs for one ticker (diff_risk_factors). When accession numbers are unknown, find them with list_sec_filings.",
             "parameters": {
                 "type": "object",
                 "properties": {"current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}},
@@ -303,7 +303,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_insider_activity",
-            "description": "Insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider transactions; use get_planned_insider_sales for planned (Form 144) sales. Takes a ticker.",
+            "description": "Executed insider buys/sells for one ticker: insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider purchases and sales by executives and directors. Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -315,7 +315,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_planned_insider_sales",
-            "description": "Planned insider sales from Form 144 notices (proposed, not yet executed). Compare with get_insider_activity for follow-through. Takes a ticker.",
+            "description": "Planned Form 144 sale notices not yet executed for one ticker: proposed insider sales. Use for proposed or planned insider sales. Do NOT use for completed insider trades (get_insider_activity); compare with get_insider_activity for follow-through. Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
@@ -375,7 +375,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_short_pressure_profile",
-            "description": "Short-interest context (FINRA positioning plus SEC shares outstanding and their ratio). Describes positioning only; never assesses manipulation or causation. Takes a ticker.",
+            "description": "Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares outstanding and their ratio. Do NOT use for one ticker's biweekly short position alone (get_short_interest) or daily short-sale volume (get_reg_sho_volume). Describes positioning only; never assesses manipulation or causation. Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -482,9 +482,9 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "diff_risk_factors",
-            "description": "Returns what changed in Risk Factors language "
-                "vs. the prior filing. Call for 'what's new/changed' "
-                "questions. Takes a ticker. Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
+            "description": "Risk Factors section year-over-year diff for one ticker: what changed in Risk Factors language "
+                "vs. the prior filing. Call for risk-disclosure change framing (what is new/changed). Do NOT use for full-filing diffs between two accessions (diff_sec_filings). Takes a ticker. "
+                "Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -496,8 +496,8 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_financial_statements",
-            "description": "Returns parsed financial statements (income statement, "
-                "balance sheet, cash flow) from 10-K or 10-Q filings. Takes a ticker.",
+            "description": "Full parsed statements for one ticker: income statement, "
+                "balance sheet, and cash flow from 10-K or 10-Q filings. Do NOT use for a single metric like EPS (get_fundamentals) or a single XBRL-tagged fact (get_xbrl_facts). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -514,8 +514,8 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_xbrl_facts",
-            "description": "Returns XBRL financial metrics (Revenue, Net Income, "
-                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\"). Use exact XBRL tag names (e.g. NetIncomeLoss for net income), never friendly labels. Takes a ticker and concept.",
+            "description": "Single XBRL-tagged fact by concept name for one ticker: XBRL financial metrics (Revenue, Net Income, "
+                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\"). Use exact XBRL tag names (e.g. NetIncomeLoss for net income), never friendly labels. Do NOT use for full statements (get_financial_statements). Takes a ticker and concept.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -530,10 +530,10 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_short_interest",
-            "description": "Returns FINRA consolidated short interest for a ticker "
+            "description": "Biweekly short position for one ticker: FINRA consolidated short interest "
                 "(current/previous short position, days to cover, average daily "
                 "volume, percent change). Call for short interest, short float, "
-                "or days-to-cover questions. For change-over-time or trend "
+                "or days-to-cover questions. Do NOT use for daily short-sale volume by venue (get_reg_sho_volume), market-wide most-shorted screens (get_short_interest_leaderboard), or short-vs-shares-outstanding context (get_short_pressure_profile). For change-over-time or trend "
                 "questions, prefer query_finra. When the user asks to show "
                 "figures or values, or names exact fields, prefer "
                 "get_finra_datapoints. Takes a ticker.",
@@ -555,7 +555,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_short_interest_leaderboard",
-            "description": "Returns the FINRA short-interest leaderboard: short interest as a percentage of SEC-reported shares outstanding for tickers that map 1:1 to an SEC CIK whose security is classified as common equity and that has a shares-outstanding fact knowable on or before the as-of date (default: today). Excludes symbols that cannot be mapped to a single SEC entity, are not classified as common equity (funds, ETFs, preferred issues), lack a usable shares-outstanding fact, or have invalid short-interest quantities; every exclusion is counted and returned in coverage. Use for questions such as 'which stock has the highest short interest', 'most shorted stock', or 'short interest as a percent of total shares'. This is a deterministic, complete FINRA settlement-date screen; it is NOT percent of public float and is not real-time short interest.",
+            "description": "Market-wide most-shorted screen: FINRA short-interest leaderboard, short interest as a percentage of SEC-reported shares outstanding for tickers that map 1:1 to an SEC CIK whose security is classified as common equity and that has a shares-outstanding fact knowable on or before the as-of date (default: today). Excludes symbols that cannot be mapped to a single SEC entity, are not classified as common equity (funds, ETFs, preferred issues), lack a usable shares-outstanding fact, or have invalid short-interest quantities; every exclusion is counted and returned in coverage. Use for questions such as 'which stock has the highest short interest', 'most shorted stock', or 'short interest as a percent of total shares'. Do NOT use for one ticker's short interest (get_short_interest). This is a deterministic, complete FINRA settlement-date screen; it is NOT percent of public float and is not real-time short interest.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -571,9 +571,9 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_reg_sho_volume",
-            "description": "Returns FINRA daily Reg SHO short-sale volume for a "
+            "description": "Daily short-sale volume by venue for one ticker: FINRA daily Reg SHO short-sale volume "
                 "ticker (short, short-exempt, and total share quantity by "
-                "reporting facility). Rolling 12 months. Takes a ticker.",
+                "reporting facility). Rolling 12 months. Do NOT use for biweekly short interest positions (get_short_interest). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -610,7 +610,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_analyst_estimates",
-            "description": "Returns sell-side consensus estimates for a ticker "
+            "description": "Forward sell-side consensus expectations for one ticker: sell-side consensus estimates "
                 "from Yahoo Finance: latest quote, analyst 12-month price "
                 "targets (mean/median/high/low) and recommendation rating, "
                 "forward EPS and revenue estimates per period (current quarter, "
@@ -618,7 +618,7 @@ TOOLS: list[dict[str, object]] = [
                 "growth rates, plus EPS estimate-revision trend (7/30/60 days "
                 "ago). Call for analyst estimates, price targets, consensus "
                 "expectations, forward growth, or valuation-vs-consensus "
-                "questions. Consensus moves daily; the response includes the "
+                "questions. Do NOT use for reported historical EPS (get_fundamentals). Consensus moves daily; the response includes the "
                 "as-of timestamp. Always state the as-of date.",
             "parameters": {
                 "type": "object",
@@ -648,7 +648,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_obligations",
-            "description": "Returns quantified contractual obligations and "
+            "description": "Future cash obligations from 10-K/10-Q notes for one ticker: quantified contractual obligations and "
                 "commitments disclosed in the latest 10-Q/10-K notes: "
                 "manufacturing/supply/capacity commitments, cloud service "
                 "agreements, vendor commitments, operating leases, and "
@@ -659,7 +659,7 @@ TOOLS: list[dict[str, object]] = [
                 "source excerpt. Call for purchase obligations, supply "
                 "commitments, cloud commitments, lease obligations, "
                 "guarantees, or any 'what is the company obligated to pay "
-                "in the future' question. Contingent items are NOT counted "
+                "in the future' question. Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics). Contingent items are NOT counted "
                 "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Takes a ticker.",
             "parameters": {
                 "type": "object",
@@ -672,7 +672,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_valuation_metrics",
-            "description": "Returns valuation metrics anchored to the live "
+            "description": "Cheap-vs-expensive earnings multiples at live price for one ticker: valuation metrics anchored to the live "
                 "price as of the query: trailing P/E (SEC GAAP TTM EPS), "
                 "consensus forward P/E (Yahoo), plus three clearly separated "
                 "EPS figures: consensus forward EPS; adjusted forward EPS "
@@ -683,7 +683,7 @@ TOOLS: list[dict[str, object]] = [
                 "terminable, or default-triggered). The per-share obligation "
                 "drag is shown explicitly. Use for 'is the stock cheap', "
                 "P/E, forward earnings, or obligation-adjusted valuation "
-                "questions. Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp. Takes a ticker.",
+                "questions. Do NOT use for reported EPS alone (get_fundamentals) or forward consensus alone (get_analyst_estimates). Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp. Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -741,7 +741,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_finra_datapoints",
-            "description": "Returns exact source values from a FINRA dataset "
+            "description": "Exact raw rows from any named FINRA dataset: returns exact source values "
                 "for explicit data requests ONLY (e.g. 'show the last five "
                 "settlement-date values' or 'show recent position figures'). "
                 "Requires a 'fields' list and at least one narrowing "
@@ -844,7 +844,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "query_finra",
-            "description": "Queries a FINRA dataset by canonical group/name "
+            "description": "Analyzed FINRA briefing with trends and metrics over any named dataset: queries a FINRA dataset by canonical group/name "
                 "(or legacy bare name) and returns an analyzed briefing: "
                 "query provenance, coverage dates, deterministic metrics "
                 "(min/max/mean/median/sum, latest-vs-prior change), derived "
@@ -2095,10 +2095,10 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
 TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     "get_fundamentals": ToolDiscovery(
         domain="fundamentals",
-        summary="Reported EPS including diluted EPS, dividends, balance-sheet items, or shares outstanding for a ticker from SEC filings.",
-        use_when=("Asking for a specific numeric fundamental (what a company earns) such as EPS, earnings per share, dividends, or shares outstanding.",),
-        avoid_when=("Not for forward analyst expectations (estimates of future performance).",),
-        related_tools=("get_xbrl_facts", "get_financial_statements", "get_valuation_metrics"),
+        summary="Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding.",
+        use_when=("One specific numeric fundamental for one ticker: EPS, dividends, or shares outstanding.",),
+        avoid_when=("Do NOT use for full statements (get_financial_statements).", "Do NOT use for XBRL facts by concept (get_xbrl_facts).", "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).", "Do NOT use for forward consensus (get_analyst_estimates).",),
+        related_tools=("get_xbrl_facts", "get_financial_statements", "get_valuation_metrics", "get_analyst_estimates"),
     ),
     "find_sec_entities": ToolDiscovery(
         domain="filings",
@@ -2109,10 +2109,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "search_sec_filings": ToolDiscovery(
         domain="filings",
-        summary="What was disclosed about risk factors in recent filings: full-text EDGAR SEC search and retrieval across entity, EFTS, and 10-K/10-Q routes, with disclosure language and mentions.",
+        summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
         use_when=("Searching SEC filing text or mentions when the accession number is unknown.",),
-        avoid_when=("Not a filing lister for a known ticker.",),
-        related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities"),
+        avoid_when=("Not a filing lister for a known ticker (list_sec_filings).", "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",),
+        related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities", "diff_risk_factors"),
     ),
     "search_sec_relationships": ToolDiscovery(
         domain="ownership",
@@ -2158,9 +2158,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "diff_sec_filings": ToolDiscovery(
         domain="filings",
-        summary="Deterministic diff between two filings by accession numbers: whether one filing differs from another, e.g. amendment versus prior version.",
+        summary="Full-filing diff between two accessions: amendment versus prior version, all sections in context.",
         use_when=("Comparing two known filing accessions for amendment or restatement changes.",),
-        avoid_when=("Not for risk-factor-only changes.",),
+        avoid_when=("Do NOT use for risk-factor-only year-over-year diffs (diff_risk_factors).",),
         related_tools=("diff_risk_factors", "get_sec_filing", "list_sec_filings"),
     ),
     "get_material_events": ToolDiscovery(
@@ -2186,16 +2186,16 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_insider_activity": ToolDiscovery(
         domain="insider",
-        summary="Executed insider transactions from Forms 3/4/5 with SEC codes mapped to buy, sell, or grant.",
-        use_when=("Answering insider sale questions: actual insider purchases and sales by executives and directors.",),
-        avoid_when=("Not for planned but unexecuted sales.",),
+        summary="Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5.",
+        use_when=("One ticker's executed insider buys/sells by executives and directors (Forms 3/4/5).",),
+        avoid_when=("Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales).",),
         related_tools=("get_planned_insider_sales", "get_beneficial_ownership"),
     ),
     "get_planned_insider_sales": ToolDiscovery(
         domain="insider",
-        summary="Planned insider sales from Form 144 notices: proposed sales not yet executed.",
-        use_when=("Finding proposed insider sales reported on Form 144.",),
-        avoid_when=("Not for completed insider trades.",),
+        summary="Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker.",
+        use_when=("Proposed insider sales reported on Form 144 for one ticker.",),
+        avoid_when=("Do NOT use for completed insider trades (get_insider_activity).",),
         related_tools=("get_insider_activity",),
     ),
     "get_offering_history": ToolDiscovery(
@@ -2228,10 +2228,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_short_pressure_profile": ToolDiscovery(
         domain="market",
-        summary="Short-positioning context combining FINRA data with SEC shares outstanding and their ratio.",
-        use_when=("Getting short-positioning context relative to shares outstanding for one ticker.",),
-        avoid_when=("Not for short interest over time.",),
-        related_tools=("get_short_interest", "query_finra"),
+        summary="Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio.",
+        use_when=("Short positioning relative to shares outstanding for one ticker.",),
+        avoid_when=("Do NOT use for biweekly short position alone (get_short_interest).", "Do NOT use for daily short-sale volume (get_reg_sho_volume).",),
+        related_tools=("get_short_interest", "query_finra", "get_reg_sho_volume"),
     ),
     "get_recent_ownership_filings": ToolDiscovery(
         domain="events",
@@ -2242,44 +2242,44 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "diff_risk_factors": ToolDiscovery(
         domain="filings",
-        summary="What changed in the Risk Factors section versus the prior filing: year-over-year diff for a ticker.",
-        use_when=("Answering what is new or changed in a company's risk disclosures.",),
-        avoid_when=("Not for full-filing diffs.", "Not for searching filing text for risk-factor mentions."),
-        related_tools=("diff_sec_filings",),
+        summary="Risk Factors section year-over-year diff for one ticker: what is new or changed.",
+        use_when=("What is new or changed in a company's risk disclosures for one ticker.",),
+        avoid_when=("Do NOT use for full-filing diffs between accessions (diff_sec_filings).", "Do NOT use for disclosure search without change framing (search_sec_filings).",),
+        related_tools=("diff_sec_filings", "search_sec_filings"),
     ),
     "get_financial_statements": ToolDiscovery(
         domain="fundamentals",
-        summary="Parsed income statement, balance sheet, and cash flow from 10-K or 10-Q filings: revenue, expenses, profit.",
-        use_when=("Reading full financial statements rather than one numeric metric.",),
-        avoid_when=("Not for a single metric like EPS.", "Answer from the statements; do not re-pull single metrics."),
+        summary="Full parsed statements for one ticker: income statement, balance sheet, and cash flow.",
+        use_when=("Full financial statements rather than one numeric metric.",),
+        avoid_when=("Do NOT use for a single metric like EPS (get_fundamentals).", "Do NOT use for a single XBRL fact (get_xbrl_facts).",),
         related_tools=("get_fundamentals", "get_xbrl_facts"),
     ),
     "get_xbrl_facts": ToolDiscovery(
         domain="fundamentals",
-        summary="XBRL-tagged financial facts such as revenue, net income, cash, debt, or equity for a ticker. Concept names look like NetIncomeLoss.",
-        use_when=("Fetching a tagged line-item value such as revenue or total debt.",),
-        avoid_when=("Not for EPS.",),
+        summary="Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity.",
+        use_when=("One tagged line-item value by exact XBRL concept name.",),
+        avoid_when=("Do NOT use for EPS (get_fundamentals).", "Do NOT use for full statements (get_financial_statements).",),
         related_tools=("get_fundamentals", "get_financial_statements"),
     ),
     "get_short_interest": ToolDiscovery(
         domain="finra",
-        summary="FINRA consolidated short interest amounts sold short for a ticker: position, days to cover, and percent change.",
-        use_when=("Answering current short interest or days to cover for one ticker.",),
-        avoid_when=("Not for change-over-time trends.", "Answer from this result; do not pull positioning context unless asked.", "Not for exact source values or figures."),
-        related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume"),
+        summary="Biweekly short position for one ticker: FINRA short interest, days to cover, percent change.",
+        use_when=("One ticker's current short interest, short float, or days to cover.",),
+        avoid_when=("Do NOT use for daily short-sale volume by venue (get_reg_sho_volume).", "Do NOT use for market-wide most-shorted screens (get_short_interest_leaderboard).", "Do NOT use for short-vs-shares context (get_short_pressure_profile).", "Do NOT use for exact source values (get_finra_datapoints).",),
+        related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "get_short_interest_leaderboard"),
     ),
     "get_short_interest_leaderboard": ToolDiscovery(
         domain="finra",
-        summary="Ranked most-shorted stocks by short interest as a percent of SEC shares outstanding.",
+        summary="Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares.",
         use_when=("Screening which stocks are the most shorted across the market.",),
-        avoid_when=("Not for one ticker's short interest.",),
+        avoid_when=("Do NOT use for one ticker's short interest (get_short_interest).",),
         related_tools=("get_short_interest",),
     ),
     "get_reg_sho_volume": ToolDiscovery(
         domain="finra",
-        summary="FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rolling 12 months.",
-        use_when=("Checking daily short-sale volume breakdowns for one ticker.",),
-        avoid_when=("Not for biweekly short interest positions.",),
+        summary="Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months.",
+        use_when=("Daily short-sale volume or venue breakdowns for one ticker.",),
+        avoid_when=("Do NOT use for biweekly short interest positions (get_short_interest).",),
         related_tools=("get_short_interest", "query_finra"),
     ),
     "get_threshold_securities": ToolDiscovery(
@@ -2291,9 +2291,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_analyst_estimates": ToolDiscovery(
         domain="analyst",
-        summary="Sell-side consensus: price targets, ratings, forward EPS and revenue estimates, revision trends.",
-        use_when=("Answering what analysts expect: targets, consensus EPS, or estimate revisions.",),
-        avoid_when=("Not for reported historical EPS.",),
+        summary="Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions.",
+        use_when=("What analysts expect for one ticker: targets, consensus EPS, or estimate revisions.",),
+        avoid_when=("Do NOT use for reported historical EPS (get_fundamentals).",),
         related_tools=("get_valuation_metrics", "get_fundamentals"),
     ),
     "get_sp500_weight": ToolDiscovery(
@@ -2305,24 +2305,17 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_obligations": ToolDiscovery(
         domain="fundamentals",
-        summary="Future payment obligations from 10-Q/10-K notes: amounts, horizons, certainty language.",
-        use_when=("Totalling what a company is obligated to pay in the future.",),
-        avoid_when=("Not for valuation multiples.",),
+        summary="Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.",
+        use_when=("What a company is obligated to pay in the future for one ticker.",),
+        avoid_when=("Do NOT use for valuation multiples (get_valuation_metrics).",),
         related_tools=("get_valuation_metrics", "get_financial_statements"),
     ),
     "get_valuation_metrics": ToolDiscovery(
         domain="valuation",
-        summary="Whether a stock is cheap or expensive: valuation anchored to live price with trailing P/E plus consensus and obligation-adjusted forward P/E.",
-        use_when=("Answering whether a company is cheap or expensive on earnings multiples.",),
-        avoid_when=("Not for reported EPS alone.",),
+        summary="Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E.",
+        use_when=("Whether a company is cheap or expensive on earnings multiples for one ticker.",),
+        avoid_when=("Do NOT use for reported EPS alone (get_fundamentals).", "Do NOT use for forward consensus alone (get_analyst_estimates).",),
         related_tools=("get_analyst_estimates", "get_obligations", "get_fundamentals"),
-    ),
-    "search_sec_relationships": ToolDiscovery(
-        domain="ownership",
-        summary="Ownership and transaction relationships an entity must disclose: 13D/G owners, 13F holdings, insider links, deal parties.",
-        use_when=("Mapping who owns, holds, or transacts with an entity in either direction.",),
-        avoid_when=("Not for current 5%+ stake sizes.",),
-        related_tools=("get_beneficial_ownership", "get_ownership_changes"),
     ),
     "search_web": ToolDiscovery(
         domain="web",
@@ -2381,16 +2374,16 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     ),
     "get_finra_datapoints": ToolDiscovery(
         domain="finra",
-        summary="Short-position values and figures from FINRA (exact source values for explicit requests).",
-        use_when=("Returning exact fields and settlement-date values from a named FINRA dataset.",),
-        avoid_when=("Not for ordinary analysis.",),
+        summary="Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows.",
+        use_when=("Exact fields and values from a named FINRA dataset for an explicit data request.",),
+        avoid_when=("Do NOT use for analyzed briefings or trends (query_finra).",),
         related_tools=("describe_finra_dataset", "query_finra", "list_finra_datasets"),
     ),
     "query_finra": ToolDiscovery(
         domain="finra",
-        summary="Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends, prose. Dataset IDs look like otcMarket/consolidatedShortInterest.",
+        summary="Analyzed FINRA briefing with trends and metrics over any named dataset, no raw rows.",
         use_when=("Analyzing a FINRA dataset's coverage, distribution, and changes over time.",),
-        avoid_when=("Not for exact source values.",),
+        avoid_when=("Do NOT use for exact source values (get_finra_datapoints).",),
         related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest", "list_finra_datasets"),
     ),
     "thesis_create": ToolDiscovery(

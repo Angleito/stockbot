@@ -2,7 +2,7 @@
 
 Domain: finra
 
-Ranked most-shorted stocks by short interest as a percent of SEC shares outstanding.
+Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares.
 
 ## Use when
 
@@ -10,7 +10,7 @@ Ranked most-shorted stocks by short interest as a percent of SEC shares outstand
 
 ## Avoid when
 
-- Not for one ticker's short interest.
+- Do NOT use for one ticker's short interest (get_short_interest).
 
 ## Related tools
 

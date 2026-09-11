@@ -2,15 +2,16 @@
 
 Domain: fundamentals
 
-XBRL-tagged financial facts such as revenue, net income, cash, debt, or equity for a ticker. Concept names look like NetIncomeLoss.
+Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity.
 
 ## Use when
 
-- Fetching a tagged line-item value such as revenue or total debt.
+- One tagged line-item value by exact XBRL concept name.
 
 ## Avoid when
 
-- Not for EPS.
+- Do NOT use for EPS (get_fundamentals).
+- Do NOT use for full statements (get_financial_statements).
 
 ## Related tools
 

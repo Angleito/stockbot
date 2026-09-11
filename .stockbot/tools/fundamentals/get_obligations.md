@@ -2,15 +2,15 @@
 
 Domain: fundamentals
 
-Future payment obligations from 10-Q/10-K notes: amounts, horizons, certainty language.
+Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.
 
 ## Use when
 
-- Totalling what a company is obligated to pay in the future.
+- What a company is obligated to pay in the future for one ticker.
 
 ## Avoid when
 
-- Not for valuation multiples.
+- Do NOT use for valuation multiples (get_valuation_metrics).
 
 ## Related tools
 

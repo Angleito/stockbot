@@ -2,20 +2,22 @@
 
 Domain: market
 
-Short-positioning context combining FINRA data with SEC shares outstanding and their ratio.
+Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio.
 
 ## Use when
 
-- Getting short-positioning context relative to shares outstanding for one ticker.
+- Short positioning relative to shares outstanding for one ticker.
 
 ## Avoid when
 
-- Not for short interest over time.
+- Do NOT use for biweekly short position alone (get_short_interest).
+- Do NOT use for daily short-sale volume (get_reg_sho_volume).
 
 ## Related tools
 
 - get_short_interest
 - query_finra
+- get_reg_sho_volume
 
 ## Prerequisites
 

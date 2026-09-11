@@ -46,7 +46,7 @@ tools:
     summary: "Enrichment of one social-arbitrage candidate with corroboration and exposure gap. Social signals vetting."
   - name: get_analyst_estimates
     domain: analyst
-    summary: "Sell-side consensus: price targets, ratings, forward EPS and revenue estimates, revision trends."
+    summary: "Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions."
   - name: get_material_events
     domain: events
     summary: "Deterministic 8-K-derived recent event feed with accession citations for what changed since a date."
@@ -55,10 +55,10 @@ tools:
     summary: "Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours."
   - name: diff_risk_factors
     domain: filings
-    summary: "What changed in the Risk Factors section versus the prior filing: year-over-year diff for a ticker."
+    summary: "Risk Factors section year-over-year diff for one ticker: what is new or changed."
   - name: diff_sec_filings
     domain: filings
-    summary: "Deterministic diff between two filings by accession numbers: whether one filing differs from another, e.g. amendment versus prior version."
+    summary: "Full-filing diff between two accessions: amendment versus prior version, all sections in context."
   - name: find_sec_entities
     domain: filings
     summary: "Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers."
@@ -79,22 +79,22 @@ tools:
     summary: "List EDGAR filings for an exact ticker or CIK, filterable by form and date range."
   - name: search_sec_filings
     domain: filings
-    summary: "What was disclosed about risk factors in recent filings: full-text EDGAR SEC search and retrieval across entity, EFTS, and 10-K/10-Q routes, with disclosure language and mentions."
+    summary: "General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions."
   - name: describe_finra_dataset
     domain: finra
     summary: "One FINRA dataset's fields, types, filter values, and supported methods."
   - name: get_finra_datapoints
     domain: finra
-    summary: "Short-position values and figures from FINRA (exact source values for explicit requests)."
+    summary: "Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows."
   - name: get_reg_sho_volume
     domain: finra
-    summary: "FINRA daily Reg SHO short-sale volume by reporting facility for a ticker, rolling 12 months."
+    summary: "Daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months."
   - name: get_short_interest
     domain: finra
-    summary: "FINRA consolidated short interest amounts sold short for a ticker: position, days to cover, and percent change."
+    summary: "Biweekly short position for one ticker: FINRA short interest, days to cover, percent change."
   - name: get_short_interest_leaderboard
     domain: finra
-    summary: "Ranked most-shorted stocks by short interest as a percent of SEC shares outstanding."
+    summary: "Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares."
   - name: get_threshold_securities
     domain: finra
     summary: "FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and date."
@@ -103,34 +103,34 @@ tools:
     summary: "Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support."
   - name: query_finra
     domain: finra
-    summary: "Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends, prose. Dataset IDs look like otcMarket/consolidatedShortInterest."
+    summary: "Analyzed FINRA briefing with trends and metrics over any named dataset, no raw rows."
   - name: get_financial_statements
     domain: fundamentals
-    summary: "Parsed income statement, balance sheet, and cash flow from 10-K or 10-Q filings: revenue, expenses, profit."
+    summary: "Full parsed statements for one ticker: income statement, balance sheet, and cash flow."
   - name: get_fundamentals
     domain: fundamentals
-    summary: "Reported EPS including diluted EPS, dividends, balance-sheet items, or shares outstanding for a ticker from SEC filings."
+    summary: "Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding."
   - name: get_obligations
     domain: fundamentals
-    summary: "Future payment obligations from 10-Q/10-K notes: amounts, horizons, certainty language."
+    summary: "Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language."
   - name: get_xbrl_facts
     domain: fundamentals
-    summary: "XBRL-tagged financial facts such as revenue, net income, cash, debt, or equity for a ticker. Concept names look like NetIncomeLoss."
+    summary: "Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity."
   - name: get_governance_events
     domain: governance
     summary: "Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval pointers."
   - name: get_insider_activity
     domain: insider
-    summary: "Executed insider transactions from Forms 3/4/5 with SEC codes mapped to buy, sell, or grant."
+    summary: "Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5."
   - name: get_planned_insider_sales
     domain: insider
-    summary: "Planned insider sales from Form 144 notices: proposed sales not yet executed."
+    summary: "Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker."
   - name: get_macro_context
     domain: macro
     summary: "Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates."
   - name: get_short_pressure_profile
     domain: market
-    summary: "Short-positioning context combining FINRA data with SEC shares outstanding and their ratio."
+    summary: "Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio."
   - name: get_sp500_weight
     domain: market
     summary: "A company's current weight and rank in the S&P 500 index from the constituent list."
@@ -148,7 +148,7 @@ tools:
     summary: "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions."
   - name: search_sec_relationships
     domain: ownership
-    summary: "Ownership and transaction relationships an entity must disclose: 13D/G owners, 13F holdings, insider links, deal parties."
+    summary: "Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links."
   - name: search_company_patents
     domain: patents
     summary: "Company patent search: publications, assignees, counts, and classifications."
@@ -172,7 +172,7 @@ tools:
     summary: "M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies."
   - name: get_valuation_metrics
     domain: valuation
-    summary: "Whether a stock is cheap or expensive: valuation anchored to live price with trailing P/E plus consensus and obligation-adjusted forward P/E."
+    summary: "Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E."
   - name: search_web
     domain: web
     summary: "External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks."

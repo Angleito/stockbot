@@ -2,16 +2,16 @@
 
 Domain: fundamentals
 
-Parsed income statement, balance sheet, and cash flow from 10-K or 10-Q filings: revenue, expenses, profit.
+Full parsed statements for one ticker: income statement, balance sheet, and cash flow.
 
 ## Use when
 
-- Reading full financial statements rather than one numeric metric.
+- Full financial statements rather than one numeric metric.
 
 ## Avoid when
 
-- Not for a single metric like EPS.
-- Answer from the statements; do not re-pull single metrics.
+- Do NOT use for a single metric like EPS (get_fundamentals).
+- Do NOT use for a single XBRL fact (get_xbrl_facts).
 
 ## Related tools
 
