@@ -6,8 +6,7 @@ Deterministic 8-K-derived recent event feed with accession citations for what ch
 
 ## Use when
 
-- Answering what changed or what is new for a company since a date, including 8-K events behind a move.
-- Linking an 8-K event to a stock move over the past days or weeks, including jumps, falls, fallen, or rallies after earnings.
+- Finding recent 8-K-derived events for a company since a date.
 
 ## Avoid when
 

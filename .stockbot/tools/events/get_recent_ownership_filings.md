@@ -6,8 +6,7 @@ Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 
 
 ## Use when
 
-- Finding the latest big-investor filings when no ticker is given.
-- Filings just came out.
+- Finding the latest market-wide SC 13D/G filings when no ticker is given.
 
 ## Avoid when
 

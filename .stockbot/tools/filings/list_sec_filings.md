@@ -6,8 +6,7 @@ List EDGAR filings for an exact ticker or CIK, filterable by form and date range
 
 ## Use when
 
-- Listing 10-K, 10-Q, or 8-K filings once the exact ticker or CIK is verified, including the latest 10-K or 10-Q.
-- Filing history: what was filed with the SEC lately, recent filings included.
+- Listing filings for an exact ticker or CIK, optionally filtered by form or date.
 
 ## Avoid when
 

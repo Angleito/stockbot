@@ -18,7 +18,7 @@ from app.security.context_gateway import TOOL_ENVELOPES  # noqa: E402
 from app.tools import (  # noqa: E402
     TOOLS,
     TOOL_CAPABILITIES,
-    TOOL_DISCOVERY,
+    TOOL_DISCOVERY_REGISTRY,
     _DIRECT_HANDLERS,
     _FINRA_HANDLERS,
     _ROBINHOOD_HANDLERS,
@@ -50,11 +50,10 @@ def get_registry_sets() -> dict[str, set[str]]:
     # call_tool has no _MODEL_HANDLERS entry by design; the Pi gateway
     # intercepts it before execute_tool and tail-calls the inner tool once.
     handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS) | {"call_tool"}
-    # Discovery primitives have no TOOL_DISCOVERY entry like search_tools.
     research = {
         tool_schema_name(t)
         for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))
-    } - {"search_tools", "browse_tools", "call_tool"}
+    } - {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"}
     return {
         "schemas": schemas,
         "handlers": handlers,
@@ -62,7 +61,7 @@ def get_registry_sets() -> dict[str, set[str]]:
         "domains": set(TOOL_DOMAINS),
         "envelopes": set(TOOL_ENVELOPES),
         "research": research,
-        "discovery": set(TOOL_DISCOVERY),
+        "discovery": set(TOOL_DISCOVERY_REGISTRY),
     }
 
 

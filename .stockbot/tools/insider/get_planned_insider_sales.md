@@ -6,9 +6,7 @@ Planned insider sales from Form 144 notices: proposed sales not yet executed.
 
 ## Use when
 
-- Seeing insider sales that are planned but may not have happened yet.
-- Insiders planning to sell.
-- Planned insider sales.
+- Finding proposed insider sales reported on Form 144.
 
 ## Avoid when
 

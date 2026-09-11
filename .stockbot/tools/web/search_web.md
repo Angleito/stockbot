@@ -6,8 +6,7 @@ External web news and commentary for price moves, headlines, and industry develo
 
 ## Use when
 
-- Explaining why a stock went up or down: jumps, falls, fallen, rallies, surges, drops, gains, spikes, or crashes.
-- Finding recent news and market reaction to a price catalyst, rally, or earnings announcement over the past days or weeks.
+- Finding recent external news, commentary, or market reaction outside structured sources.
 
 ## Avoid when
 

@@ -6,8 +6,7 @@ Macro statistics for a geography such as California: population (how many people
 
 ## Use when
 
-- Answering how many people live in a state, its unemployment rate, inflation, or other economic backdrop.
-- Tracking how unemployment or inflation moves when a rate changes.
+- Retrieving population, labor, inflation, GDP, or rate statistics for a geography.
 
 ## Avoid when
 

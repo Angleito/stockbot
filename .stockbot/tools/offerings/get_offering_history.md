@@ -7,8 +7,6 @@ Financing history from S-1/S-3/424B filings: offering terms with source-registra
 ## Use when
 
 - Reviewing past offerings, shelf registrations, or IPO terms for a ticker.
-- Offering history.
-- Offerings done.
 
 ## Avoid when
 

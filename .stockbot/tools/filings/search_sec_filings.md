@@ -6,9 +6,7 @@ What was disclosed about risk factors in recent filings: full-text EDGAR SEC sea
 
 ## Use when
 
-- Searching filing text or mentions when the exact accession number is unknown.
-- Risk-factor language used in recent SEC filings.
-- Risk-factor language in SEC filings.
+- Searching SEC filing text or mentions when the accession number is unknown.
 
 ## Avoid when
 

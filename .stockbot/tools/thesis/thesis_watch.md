@@ -7,7 +7,6 @@ Add a monitoring rule that alerts when a thesis condition triggers.
 ## Use when
 
 - Setting an alert on a thesis invalidator or trigger.
-- What am I watching for.
 
 ## Avoid when
 

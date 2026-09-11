@@ -7,8 +7,6 @@ Append an operator note or journal entry to a thesis log. Pass the thesis ID as 
 ## Use when
 
 - Logging a dated note or observation against a thesis.
-- Add that to thesis.
-- Note for thesis.
 
 ## Avoid when
 

@@ -6,9 +6,7 @@ Short-position values and figures from FINRA (exact source values for explicit r
 
 ## Use when
 
-- Showing exact settlement-date values when the user asks to see figures.
-- Recent short-interest values.
-- Short-position figures.
+- Returning exact fields and settlement-date values from a named FINRA dataset.
 
 ## Avoid when
 

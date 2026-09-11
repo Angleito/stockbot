@@ -6,8 +6,7 @@ Analyzed briefing over a FINRA dataset: coverage, deterministic metrics, trends,
 
 ## Use when
 
-- Analyzing short-interest or other FINRA data moves and changes over time.
-- Changed lately.
+- Analyzing a FINRA dataset's coverage, distribution, and changes over time.
 
 ## Avoid when
 

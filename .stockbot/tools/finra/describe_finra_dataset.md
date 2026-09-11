@@ -6,9 +6,7 @@ One FINRA dataset's fields, types, filter values, and supported methods.
 
 ## Use when
 
-- Learning a dataset's schema and field names before querying it.
-- What is in the dataset.
-- Describing what is in a named FINRA dataset such as short interest: fields, types, and filter values.
+- Learning a named FINRA dataset's fields, types, filters, and coverage before querying.
 
 ## Avoid when
 

@@ -7,7 +7,6 @@ FINRA consolidated short interest amounts sold short for a ticker: position, day
 ## Use when
 
 - Answering current short interest or days to cover for one ticker.
-- Sold short.
 
 ## Avoid when
 

@@ -6,8 +6,7 @@ Deterministic diffs between a holder's consecutive 13D/G filings: share and perc
 
 ## Use when
 
-- Tracking how one holder's stake increased or decreased between filings.
-- Changed their stakes.
+- Comparing consecutive 13D/G filings for changes in a holder's stake.
 
 ## Avoid when
 

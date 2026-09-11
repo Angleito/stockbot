@@ -6,8 +6,7 @@ FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and
 
 ## Use when
 
-- Checking whether a ticker sits on the Reg SHO threshold list.
-- On the threshold list.
+- Checking whether securities appear on the Reg SHO threshold list.
 
 ## Avoid when
 

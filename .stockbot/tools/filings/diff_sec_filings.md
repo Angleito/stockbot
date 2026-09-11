@@ -6,8 +6,7 @@ Deterministic diff between two filings by accession numbers: whether one filing 
 
 ## Use when
 
-- Comparing an amendment or restatement against its prior filing version.
-- What changed between filings.
+- Comparing two known filing accessions for amendment or restatement changes.
 
 ## Avoid when
 

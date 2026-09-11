@@ -6,8 +6,7 @@ Index of documents and exhibits attached to one filing, looked up by accession n
 
 ## Use when
 
-- Seeing which exhibits a filing contains before reading any document text.
-- What documents are attached to filing.
+- Listing documents and exhibits attached to a known filing accession.
 
 ## Avoid when
 

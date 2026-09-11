@@ -16,69 +16,80 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, tool_message: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None, extra_message: str | None = None) -> Path:
+def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, tool_message: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None, extra_message: str | None = None, discovery: str | None = "search_tools", disc_at: str = "2026-01-01T00:00:00+00:00", inner_at: str = "2026-01-01T00:00:01+00:00", via_call_tool: bool = True) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
-    now = "2026-01-01T00:00:00+00:00"
     conn.execute(
         "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)",
-        (now, "q", status),
+        (disc_at, "q", status),
     )
-    name = other_tool or tool
+    target_name = other_tool or tool
+    # Discovery row (browse OR search) strictly before inner when routing-clean.
+    if discovery is not None and discovery != target_name:
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1',?,?,NULL)",
+            (discovery, disc_at),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,?)",
+            (disc_at, discovery),
+        )
     conn.execute(
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, error_message) VALUES ('tc1','r1',?,?,?,?)",
-        (name, now, tool_error, tool_message),
+        (target_name, inner_at, tool_error, tool_message),
     )
-    if event in ("completed", "both", "harness-rejected"):
+    # search_tools itself executes directly; gateway forbids dispatching discovery via call_tool.
+    effective_via = via_call_tool and target_name != "search_tools" and event not in ("failed-only",)
+    if effective_via and event in ("completed", "both", "harness-rejected"):
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
+            (inner_at, json.dumps({"name": target_name, "arguments": {"ticker": "AAPL"}})),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,?)",
+            (inner_at, "call_tool"),
+        )
+    elif event in ("completed", "both", "harness-rejected"):
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
-            (now, tool if other_tool is None else other_tool if False else tool if event == 'both' else name),
+            (inner_at, tool if other_tool is None else other_tool if False else tool if event == 'both' else target_name),
         )
     if event == "both":
         conn.execute(
-            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
-            (now, tool),
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e3','r1',3,'tool_failed',?,?)",
+            (inner_at, target_name),
         )
         conn.execute(
-            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1',?,'2026-01-01T00:00:00+00:00','tool_error')",
-            (tool,),
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1',?,?,'tool_error')",
+            (target_name, inner_at),
         )
     if event == "harness-rejected":
         conn.execute(
-            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_failed',?,?)",
-            (now, tool),
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e4','r1',4,'tool_failed',?,?)",
+            (inner_at, target_name),
         )
     if event == "failed-only":
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_failed',?,?)",
-            (now, tool),
+            (inner_at, target_name),
         )
     if rejected_other is not None:
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_failed',?,?)",
-            (now, rejected_other),
+            (inner_at, rejected_other),
         )
     if extra_tool is not None:
         conn.execute(
             "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, error_message) VALUES ('tc9','r1',?,?,?,?)",
-            (extra_tool, now, extra_error, extra_message),
+            (extra_tool, inner_at, extra_error, extra_message),
         )
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,?,?,?)",
-            ("tool_completed" if extra_error is None else "tool_failed", now, extra_tool),
-        )
-    if tool != "search_tools" and other_tool != "search_tools":
-        conn.execute(
-            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
-            (now,),
-        )
-        conn.execute(
-            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
-            (now,),
+            ("tool_completed" if extra_error is None else "tool_failed", inner_at, extra_tool),
         )
     conn.execute(
         "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
-        (model, now),
+        (model, disc_at),
     )
     conn.commit()
     conn.close()
@@ -98,9 +109,13 @@ def _ok(
     extra_tool: str | None = None,
     extra_error: str | None = None,
     extra_message: str | None = None,
+    discovery: str | None = "search_tools",
+    disc_at: str = "2026-01-01T00:00:00+00:00",
+    inner_at: str = "2026-01-01T00:00:01+00:00",
+    via_call_tool: bool = True,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, tool_message=tool_message, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error, extra_message=extra_message)
+    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, tool_message=tool_message, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error, extra_message=extra_message, discovery=discovery, disc_at=disc_at, inner_at=inner_at, via_call_tool=via_call_tool)
     return p
 
 
@@ -132,12 +147,12 @@ def test_missing_fixture_fails_closed():
 
 
 def test_nonzero_exit_fails(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 1, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 1, False, attempt=1)
     assert not ok
 
 
 def test_timeout_fails(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, True)
+    ok, reason = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, True, attempt=1)
     assert not ok
     assert reason.startswith("transient: ")
 
@@ -153,7 +168,7 @@ def test_timeout_with_wrong_tool_still_routing_fails(tmp_path: Path):
 
 def test_target_rate_limited_returns_transient(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
-        _ok(tmp_path, tool_error="rate_limited"), "get_fundamentals", 0, False,
+        _ok(tmp_path, tool_error="rate_limited"), "get_fundamentals", 0, False, attempt=1,
     )
     assert not ok
     assert reason.startswith("transient: ")
@@ -162,7 +177,7 @@ def test_target_rate_limited_returns_transient(tmp_path: Path):
 def test_target_timeout_message_returns_transient(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
         _ok(tmp_path, tool_error="tool_error", tool_message="Exa search timed out"),
-        "get_fundamentals", 0, False,
+        "get_fundamentals", 0, False, attempt=1,
     )
     assert not ok
     assert reason.startswith("transient: ")
@@ -173,11 +188,11 @@ def test_target_mixed_errors_plain_fail(tmp_path: Path):
     _db(p, tool="get_fundamentals", tool_error="rate_limited")
     conn = sqlite3.connect(str(p))
     conn.execute(
-        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1','get_fundamentals','2026-01-01T00:00:00+00:00','tool_error')"
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc2','r1','get_fundamentals','2026-01-01T00:00:01+00:00','tool_error')"
     )
     conn.commit()
     conn.close()
-    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False)
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
     assert not ok
     assert not reason.startswith("transient: ")
 
@@ -210,23 +225,23 @@ def test_required_tool_absent_fails(tmp_path: Path):
 
 
 def test_wrong_tool_only_fails(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", 0, False)
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", 0, False, attempt=1)
     assert not ok
-    assert "absent" in reason
+    assert "routing failed" in reason
 
 
 def test_error_envelope_fails(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool_error="tool_error"), "get_fundamentals", 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool_error="tool_error"), "get_fundamentals", 0, False, attempt=1)
     assert not ok
 
 
 def test_valid_empty_passes(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, False)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", 0, False, attempt=1)
     assert ok
 
 
 def test_empty_model_telemetry_fails(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, model=""), "get_fundamentals", 0, False)
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, model=""), "get_fundamentals", 0, False, attempt=1)
     assert not ok
     assert "no model telemetry" in reason
 
@@ -242,9 +257,10 @@ def test_harness_rejection_fails_attempt_1(tmp_path: Path):
     assert "harness-rejected" in reason
 
 
-def test_harness_rejection_without_execution_passes(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=3)
-    assert ok
+def test_harness_rejection_without_execution_fails_attempt_3(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="harness-rejected"), "get_fundamentals", 0, False, attempt=3)
+    assert not ok
+    assert "routing failed" in reason
 
 
 def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
@@ -253,9 +269,10 @@ def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
     assert "harness-rejected" in reason
 
 
-def test_rejected_wrong_tool_passes_attempt_3(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
-    assert ok
+def test_rejected_wrong_tool_fails_attempt_3(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
+    assert not ok
+    assert "routing failed" in reason
 
 
 def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
@@ -296,9 +313,10 @@ def test_prereq_chains_are_documented_in_descriptions():
             assert edge.lower() in descriptions[target].lower(), f"{edge} not named in {target} description"
 
 
-def test_dispatched_wrong_tool_passes_attempt_3(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
-    assert ok
+def test_dispatched_wrong_tool_fails_attempt_3(tmp_path: Path):
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
+    assert not ok
+    assert "routing failed" in reason
 
 
 def test_failed_builtin_ignored_attempt_1(tmp_path: Path):
@@ -321,13 +339,13 @@ def test_doctor_describe_skew_fails():
 def test_any_pi_model_id_accepted(tmp_path: Path):
     ok, _ = v.evaluate_attempt(
         _ok(tmp_path, model="muse-spark-1.3-contributor"),
-        "get_fundamentals", 0, False,
+        "get_fundamentals", 0, False, attempt=1,
     )
     assert ok
 
 
 def test_completed_override_passes_despite_kill(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", -9, False, completed_override=True)
+    ok, _ = v.evaluate_attempt(_ok(tmp_path), "get_fundamentals", -9, False, completed_override=True, attempt=1)
     assert ok
 
 
@@ -709,34 +727,35 @@ def test_tool_success_via_call_tool_dispatch(tmp_path: Path) -> None:
     p = tmp_path / "runs.sqlite"
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA)
-    now = "2026-01-01T00:00:00+00:00"
+    disc = "2026-01-01T00:00:00+00:00"
+    inner = "2026-01-01T00:00:01+00:00"
     conn.execute(
         "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)",
-        (now, "q", "completed"),
+        (disc, "q", "completed"),
     )
     conn.execute(
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc1','r1','get_short_interest',?,NULL)",
-        (now,),
+        (inner,),
     )
     conn.execute(
         "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
-        (now, json.dumps({"name": "get_short_interest", "arguments": {"ticker": "AAPL"}})),
+        (inner, json.dumps({"name": "get_short_interest", "arguments": {"ticker": "AAPL"}})),
     )
     conn.execute(
         "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,?)",
-        (now, "call_tool"),
+        (inner, "call_tool"),
     )
     conn.execute(
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools',?,NULL)",
-        (now,),
+        (disc,),
     )
     conn.execute(
         "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'search_tools')",
-        (now,),
+        (disc,),
     )
     conn.execute(
         "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
-        (MODEL, now),
+        (MODEL, disc),
     )
     conn.commit()
     assert v._tool_success(conn, "get_short_interest", attempt=1) is None
@@ -805,3 +824,90 @@ def test_holdout_fails_without_call_tool_dispatch(tmp_path: Path) -> None:
     ok, reason = v.evaluate_holdout_attempt(p, "get_short_interest")
     assert not ok
     assert "call_tool" in reason
+
+def test_attempt1_browse_only_passes_before_call_tool(tmp_path: Path) -> None:
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="browse_tools"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
+
+def test_attempt1_search_only_passes_before_call_tool(tmp_path: Path) -> None:
+    ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="search_tools"), "get_fundamentals", 0, False, attempt=1)
+    assert ok
+
+
+def test_attempt1_missing_discovery_fails(tmp_path: Path) -> None:
+    ok, reason = v.evaluate_attempt(_ok(tmp_path, discovery=None), "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "routing failed" in reason
+
+
+def test_attempt1_late_discovery_fails(tmp_path: Path) -> None:
+    p = _ok(tmp_path, disc_at="2026-01-01T00:00:02+00:00", inner_at="2026-01-01T00:00:01+00:00")
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "precede" in reason
+
+
+def test_attempt1_direct_hidden_tool_completion_fails(tmp_path: Path) -> None:
+    p = _ok(tmp_path, via_call_tool=False)
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not ok
+    assert "call_tool" in reason
+
+
+def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery=None, via_call_tool=True)
+    ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert ok
+def test_attempt3_fails_on_stray_and_harness_rejected(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery=None, extra_tool="get_xbrl_facts")
+    ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not ok
+    assert "routing failed" in reason
+    qpath = tmp_path / "rej.sqlite"
+    _db(qpath, discovery=None, rejected_other="get_xbrl_facts")
+    ok2, reason2 = v.evaluate_attempt(qpath, "get_fundamentals", 0, False, attempt=3)
+    assert not ok2
+    assert "harness-rejected" in reason2
+def test_search_tools_directly_verifiable(tmp_path: Path) -> None:
+    ok1, _ = v.evaluate_attempt(_ok(tmp_path, tool="search_tools", discovery=None, via_call_tool=False), "search_tools", 0, False, attempt=1)
+    assert ok1
+    p2 = tmp_path / "s3.sqlite"
+    _db(p2, tool="search_tools", discovery=None, via_call_tool=False)
+    ok3, _ = v.evaluate_attempt(p2, "search_tools", 0, False, attempt=3)
+    assert ok3
+
+
+def test_explicit_prompt_exact_dispatch_shape() -> None:
+    prompt = v.build_explicit_prompt("get_short_interest", {"ticker": "AAPL"})
+    assert 'Do not call browse_tools or search_tools.' in prompt
+    assert 'Call call_tool exactly once with name="get_short_interest"' in prompt
+    assert '{"ticker": "AAPL"}' in prompt
+    assert "TOOL_CHECK: PASS" in prompt and "TOOL_CHECK: FAIL" in prompt
+    direct = v.build_explicit_prompt("search_tools", {"query": "short interest"})
+    assert "Call the `search_tools` tool" in direct
+    assert "call_tool exactly once" not in direct
+
+def _norm_holdout_text(value: str) -> str:
+    return " ".join(value.lower().split())
+
+
+def test_holdout_prompts_are_novel_and_unquoted() -> None:
+    from app.tools import TOOL_DISCOVERY_REGISTRY
+    holdout = __import__("json").loads(__import__("pathlib").Path("evals/holdout_discovery.json").read_text())
+    assert isinstance(holdout, list) and len(holdout) == 20
+    verify_texts = {_norm_holdout_text(c.get("natural_v1", "")) for c in v.VERIFY_CASES.values()}
+    verify_texts |= {_norm_holdout_text(c.get("natural_v2", "")) for c in v.VERIFY_CASES.values()}
+    verify_texts.discard("")
+    registry_phrases: list[str] = []
+    for meta in TOOL_DISCOVERY_REGISTRY.values():
+        for phrase in (meta.summary, *meta.use_when):
+            norm = _norm_holdout_text(phrase)
+            if len(norm.split()) >= 5:
+                registry_phrases.append(norm)
+    for case in holdout:
+        prompt = str(case.get("prompt", ""))
+        norm_prompt = _norm_holdout_text(prompt)
+        assert norm_prompt not in verify_texts, f"holdout copies live-matrix prompt: {prompt!r}"
+        for phrase in registry_phrases:
+            assert phrase not in norm_prompt, f"holdout copies catalog prose: {phrase!r} in {prompt!r}"

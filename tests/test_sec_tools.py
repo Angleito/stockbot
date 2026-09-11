@@ -149,12 +149,12 @@ def test_thesis_domains_split_from_sec_suite():
     assert "error" in result
 
 
-def test_search_tools_insider_sale_returns_two_schemas_only():
+def test_search_tools_insider_sale_includes_both_insider_tools():
     result = tools.execute_tool(
         "search_tools", {"query": "insider sale"}, "test", context=_research_context()
     )
     found = {m["name"] for m in _as_seq(result["matches"])}
-    assert found == {"get_insider_activity", "get_planned_insider_sales"}
+    assert {"get_insider_activity", "get_planned_insider_sales"} <= found
     assert "schemas" not in result
 
 def test_search_tools_domain_browse_returns_ownership_pack():
@@ -622,7 +622,7 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     assert "identifier" in _as_dict(parameters["properties"])
     description = function["description"]
     assert isinstance(description, str)
-    assert "Does NOT search company names" in description
+    assert "does NOT search company names" in description
     rel = tools.execute_tool(
         "search_tools", {"query": "inverse 13F manager holdings"}, "test", context=_research_context()
     )

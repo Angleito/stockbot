@@ -6,8 +6,7 @@ Enrichment of one social-arbitrage candidate with corroboration and exposure gap
 
 ## Use when
 
-- Vetting whether online buzz around a candidate reflects real demand.
-- Worth a closer look.
+- Testing whether online attention around one candidate corresponds to real demand.
 
 ## Avoid when
 

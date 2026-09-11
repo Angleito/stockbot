@@ -7,7 +7,6 @@ Start a new investment thesis proposal with scope, claims, and open questions.
 ## Use when
 
 - Creating a new investment thesis to track and test.
-- Tracking a stated investment view such as I think NVDA AI demand will stay strong.
 
 ## Avoid when
 

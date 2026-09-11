@@ -6,7 +6,7 @@ Deterministic dilution math for diluted shareholders: inputs, formula, and sourc
 
 ## Use when
 
-- Quantifying how diluted shareholders could get: share-count impact, dilution picture, from offerings, converts, or warrants.
+- Quantifying share-count impact from offerings, converts, or warrants.
 
 ## Avoid when
 

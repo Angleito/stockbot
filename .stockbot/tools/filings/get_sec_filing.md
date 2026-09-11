@@ -6,9 +6,7 @@ One filing's record by accession number: filer, form, dates, primary document, s
 
 ## Use when
 
-- Fetching a filing's metadata once its accession number is known.
-- What is in filing.
-- Filing record.
+- Fetching filing metadata after its accession number is known.
 
 ## Avoid when
 

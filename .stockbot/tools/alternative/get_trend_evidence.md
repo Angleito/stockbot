@@ -6,9 +6,7 @@ Evidence for one known trend: search interest, rising queries, and geography.
 
 ## Use when
 
-- Backing a specific trend claim with search-interest evidence.
-- Backing a trend picked up in a geography such as the US around a date, with search-interest evidence.
-- Trends picked up.
+- Backing a known trend claim with dated, geography-specific search-interest evidence.
 
 ## Avoid when
 

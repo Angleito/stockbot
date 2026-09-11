@@ -7,7 +7,6 @@ Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uu
 ## Use when
 
 - Revising a thesis after new evidence or feedback.
-- Update thesis.
 
 ## Avoid when
 
