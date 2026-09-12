@@ -896,9 +896,43 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
         # Search for concept (case-insensitive, partial match)
         concept_lower = concept.lower()
         matching = df[df["concept"].str.lower().str.contains(concept_lower, na=False)]
+        if matching.empty:
+            # Spaced guesses ("Net Income") never match spaceless GAAP names;
+            # retry against space-stripped values before reporting no data.
+            compact = concept_lower.replace(" ", "")
+            if compact != concept_lower:
+                stripped = df["concept"].str.lower().str.replace(" ", "", regex=False)
+                matching = df[stripped.str.contains(compact, na=False, regex=False)]
         
         if matching.empty:
+            # Last resort: all significant query tokens inside one concept
+            # ("Total Revenues" -> Revenues, "TotalRevenue" -> Revenues).
+            # Only runs when nothing matched.
+            words: list[str] = []
+            current = ""
+            for ch in concept:
+                if ch.isalnum():
+                    if ch.isupper() and current and not current[-1].isupper():
+                        words.append(current)
+                        current = ""
+                    current += ch
+                elif current:
+                    words.append(current)
+                    current = ""
+            if current:
+                words.append(current)
+            tokens = [w.lower() for w in words if len(w) > 2]
+            if tokens:
+                lowered = df["concept"].str.lower()
+                mask = lowered.str.contains(tokens[0], na=False, regex=False)
+                for token in tokens[1:]:
+                    mask = mask & lowered.str.contains(token, na=False, regex=False)
+                matching = df[mask]
+
+        if matching.empty:
             return _no_data(ticker, f"no XBRL facts found for concept '{concept}'")
+        if matching["concept"].nunique() > 1:
+            return _no_data(ticker, f"ambiguous XBRL concept for '{concept}': {sorted(matching['concept'].unique().tolist())[:8]}")
         
         # Return recent values (most recent 5)
         recent = matching.sort_values("period_end").tail(5)

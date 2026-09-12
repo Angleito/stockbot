@@ -194,10 +194,10 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
     with _recorder("run-pi-1") as recorder:
         token = set_current_recorder(recorder)
         try:
-            fallback = gateway.execute_pi_tool("search_tools", {}, session)
+            fallback = gateway.execute_pi_tool("search_tools", {"query": "telemetry probe"}, session)
             assert fallback.get("content")
             correlated = gateway.execute_pi_tool(
-                "search_tools", {}, session, tool_call_id="call-9",
+                "search_tools", {"query": "telemetry probe"}, session, tool_call_id="call-9",
                 protocol_id="proto-9", bridge_queue_ms=7.5,
             )
             assert correlated.get("content")

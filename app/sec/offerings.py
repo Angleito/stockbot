@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 import re
+import threading
 from pathlib import Path
 
 # `object` marks the edgar SDK dynamic boundary (no stubs): attrs are read
@@ -16,6 +17,7 @@ OFFERING_FORMS = (
 REGISTRATION_FORMS = (
     "S-1", "S-1/A", "S-3", "S-3/A", "F-1", "F-1/A", "F-3", "F-3/A", "S-8",
 )
+_TERMS_LOCK = threading.Lock()
 
 _SHARE_ATTRS = ("shares", "shares_offered", "num_shares", "offered_shares",
                 "share_count", "number_of_shares", "securities_registered",
@@ -228,6 +230,14 @@ def extract_offering_facts(obj: object | None = None, *, text: str | None = None
 
 def load_terms(accession_no: str) -> dict[str, object]:
     """Live seam: best-effort edgar attr sweep; any failure -> {}."""
+    # ponytail: one global fetch lock; concurrent term sweeps collapse SEC
+    # throttle into multi-minute runs (50 filings x 2 parallel calls blew the
+    # 120s tool cliff). Per-accession singleflight if serialized latency matters.
+    with _TERMS_LOCK:
+        return _load_terms_locked(accession_no)
+
+
+def _load_terms_locked(accession_no: str) -> dict[str, object]:
     try:
         from .documents import get_by_accession_number
 
@@ -314,9 +324,12 @@ def normalize_offering(accession_no: str, form: str, *, issuer: str,
 
 def get_offering_history(ticker_or_cik: str | int, *, as_of: str | None = None,
                          limit: int | None = 50,
-                         forms: tuple[str, ...] | list[str] = OFFERING_FORMS) -> list[Offering]:
+                         forms: tuple[str, ...] | list[str] = OFFERING_FORMS,
+                         terms_forms: tuple[str, ...] | list[str] | frozenset[str] | set[str] | None = None) -> list[Offering]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
+    wanted = ({str(f).strip().upper() for f in terms_forms}
+              if terms_forms is not None else None)
     out: list[Offering] = []
     for filing in filings:
         try:
@@ -328,10 +341,16 @@ def get_offering_history(ticker_or_cik: str | int, *, as_of: str | None = None,
             filer_name = getattr(filing, "filer_name", None)
         except Exception:
             continue
-        try:
-            terms = load_terms(accession)
-        except Exception:
+        # Terms are live per-filing fetches: skip forms the caller never
+        # consumes (registration accessions need no terms).
+        norm = form.strip().upper() if isinstance(form, str) else ""
+        if wanted is not None and norm not in wanted:
             terms = None
+        else:
+            try:
+                terms = load_terms(accession)
+            except Exception:
+                terms = None
         if not isinstance(terms, dict):
             terms = None
         try:

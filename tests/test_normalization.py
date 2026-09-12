@@ -163,7 +163,7 @@ def test_short_interest_normalization():
         "currentShortPositionQuantity": "-5", "settlementDate": "2026-08-14",
     }]
     datasets = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="h1", source_url="u", source_record_id="r",
     )
     (row,) = datasets["short_interest"]
@@ -173,19 +173,84 @@ def test_short_interest_normalization():
     assert row["days_to_cover"] is None   # missing -> None
     assert row["parser_version"] == SHORT_INTEREST_PARSER_VERSION
     assert row["row_id"] == "finra:row:2026-08-14:AAA:h1"
+    assert row["known_at"] == RETRIEVED_AT  # conservative: publication unknown, retrieval is known_at
+    assert row["retrieved_at"] == RETRIEVED_AT
 
 
 def test_short_interest_corrected_snapshot_is_new_version():
     rows: list[dict[str, object]] = [{"symbolCode": "AAA", "currentShortPositionQuantity": 20, "settlementDate": "2026-08-14"}]
     v1 = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="v1-hash", source_url="u", source_record_id="r",
     )
     v2 = normalize_finra_short_interest(
-        rows, settlement_date="2026-08-14", known_at=RETRIEVED_AT, retrieved_at=RETRIEVED_AT,
+        rows, settlement_date="2026-08-14", retrieved_at=RETRIEVED_AT,
         content_hash="v2-hash", source_url="u", source_record_id="r",
     )
     assert v1["short_interest"][0]["row_id"] != v2["short_interest"][0]["row_id"]
+
+def test_short_interest_explicit_known_at_wins_with_bounds():
+    datasets = normalize_finra_short_interest(
+        [{"symbolCode": "AAA", "currentShortPositionQuantity": 20}],
+        settlement_date="2025-12-15", known_at="2025-12-24T08:00:00Z",
+        retrieved_at="2025-12-24T12:00:00Z",
+        content_hash="h1", source_url="u", source_record_id="r",
+    )
+    (row,) = datasets["short_interest"]
+    assert row["known_at"] == "2025-12-24T08:00:00Z"
+    assert row["retrieved_at"] == "2025-12-24T12:00:00Z"
+
+
+def test_short_interest_explicit_known_at_rejects_out_of_bounds():
+    import pytest
+
+    with pytest.raises(ValueError, match="precedes settlement_date"):
+        normalize_finra_short_interest(
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-14T23:00:00Z",
+            retrieved_at="2025-12-24T12:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
+        )
+    with pytest.raises(ValueError, match="exceeds retrieved_at"):
+        normalize_finra_short_interest(
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-25T00:00:00Z",
+            retrieved_at="2025-12-24T12:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
+        )
+
+
+def test_short_interest_known_at_compares_instants_not_strings():
+    import pytest
+
+    with pytest.raises(ValueError, match="exceeds retrieved_at"):
+        normalize_finra_short_interest(
+            [{"symbolCode": "AAA"}],
+            settlement_date="2025-12-15",
+            known_at="2025-12-24T10:00:00-08:00",
+            retrieved_at="2025-12-24T17:00:00Z",
+            content_hash="h1",
+            source_url="u",
+            source_record_id="r",
+        )
+    datasets = normalize_finra_short_interest(
+        [{"symbolCode": "AAA"}],
+        settlement_date="2025-12-15",
+        known_at="2025-12-24T01:00:00-08:00",
+        retrieved_at="2025-12-24T12:00:00Z",
+        content_hash="h1",
+        source_url="u",
+        source_record_id="r",
+    )
+    (row,) = datasets["short_interest"]
+    assert row["known_at"] == "2025-12-24T01:00:00-08:00"
+
 
 def test_eps_facts_normalized_with_period_metadata():
     diluted: list[dict[str, object]] = [{

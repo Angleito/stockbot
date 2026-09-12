@@ -6,6 +6,7 @@ Network-free and agent-free: raw payloads in, normalized rows out.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from .domain.market import ids
@@ -456,6 +457,8 @@ def normalize_sec_company_facts(
     entity_id = ids.sec_entity_id(cik)
     security_id = ids.sec_security_id(cik)
     extracted_facts = _extract_facts(raw)
+    filed_dates = sorted(str(fact.get("filed") or "") for _, _, _, fact in extracted_facts if str(fact.get("filed") or ""))
+    envelope_known = filed_dates[-1] if filed_dates else retrieved_at
     documents: list[dict[str, object]] = [{
         "doc_id": ids.sec_doc_id("companyfacts", source_record_id, content_hash),
         "source": "sec",
@@ -466,7 +469,7 @@ def normalize_sec_company_facts(
         "sha256": content_hash,
         "retrieved_at": retrieved_at,
         "published_at": None,
-        "known_at": retrieved_at,
+        "known_at": envelope_known,
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }]
@@ -537,7 +540,7 @@ def normalize_sec_company_facts(
         "ticker": None,
         "exchange": None,
         "source": "sec:companyfacts",
-        "known_at": retrieved_at,
+        "known_at": envelope_known,
         "retrieved_at": retrieved_at,
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
@@ -546,7 +549,7 @@ def normalize_sec_company_facts(
             "securities": securities, "dividend_events": dividend_events}
 
 
-SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
+SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v2"
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -571,16 +574,39 @@ def _to_float(value: object) -> Optional[float]:
         return float(text)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_iso_instant(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{field} {value!r} is not a parseable ISO-8601 timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def normalize_finra_short_interest(
     rows: list[dict[str, object]],
     *,
     settlement_date: str,
-    known_at: str,
     retrieved_at: str,
+    known_at: Optional[str] = None,
     content_hash: str,
     source_url: str,
     source_record_id: str,
 ) -> dict[str, list[dict[str, object]]]:
+    if known_at:
+        try:
+            settlement_day = date.fromisoformat(settlement_date)
+        except ValueError:
+            raise ValueError(f"settlement_date {settlement_date!r} is not a parseable date")
+        known_instant = _parse_iso_instant(known_at, "known_at")
+        retrieved_instant = _parse_iso_instant(retrieved_at, "retrieved_at")
+        if known_instant.date() < settlement_day:
+            raise ValueError(f"known_at {known_at} precedes settlement_date {settlement_date}")
+        if known_instant > retrieved_instant:
+            raise ValueError(f"known_at {known_at} exceeds retrieved_at {retrieved_at}")
     short_interest: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -593,7 +619,7 @@ def normalize_finra_short_interest(
             short_position = None
         entity_id = ids.finra_entity_id(symbol)
         # The row ID includes the snapshot content hash so a corrected source
-        # payload becomes a NEW source version (new known_at) instead of
+        # payload becomes a NEW source version (new retrieved_at) instead of
         # colliding with the original row in the dedupe.
         short_interest.append({
             "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
@@ -608,7 +634,9 @@ def normalize_finra_short_interest(
             "days_to_cover": _to_float(row.get("daysToCoverQuantity")),
             "source_url": source_url,
             "source_record_id": source_record_id,
-            "known_at": known_at,
+            # Explicit publication date wins when provided; otherwise retrieved_at
+            # is the conservative known_at (no FINRA calendar lookup in-repo).
+            "known_at": known_at if known_at else retrieved_at,
             "retrieved_at": retrieved_at,
             "content_hash": content_hash,
             "parser_version": SHORT_INTEREST_PARSER_VERSION,

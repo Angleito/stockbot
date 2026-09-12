@@ -16,13 +16,24 @@ from .normalization import document_from_attachment, filing_from_edgar
 
 _MAX_CHARS = 32_000
 
+def _normalize_accession(accession_no: str) -> str:
+    """Tolerate pasting variants of the same identifier (never invent one):
+    surrounding whitespace is stripped and a bare 18-digit run takes the
+    canonical 10-2-6 dashes. Anything else passes through to live lookup."""
+    text = accession_no.strip() if isinstance(accession_no, str) else accession_no
+    digits = "".join(ch for ch in str(text) if ch.isdigit())
+    if isinstance(text, str) and "-" not in text and len(digits) == 18 and text.strip().isdigit():
+        return f"{digits[:10]}-{digits[10:12]}-{digits[12:]}"
+    return text
+
+
 def get_by_accession_number(accession_no: str) -> EdgarFiling:
     """Seam for tests: monkeypatch this name, never `edgar` itself."""
     from .client import ensure_identity
     from edgar import get_by_accession_number as _get
 
     ensure_identity()
-    filing: EdgarFiling = _get(accession_no)
+    filing: EdgarFiling = _get(_normalize_accession(accession_no))
     return filing
 
 
@@ -91,14 +102,21 @@ def _resolve_in(filing: EdgarFiling, accession_no: str, document_name: str | Non
         attachments = filing.attachments
     except Exception as exc:
         raise ValueError(f"no documents for accession: {accession_no!r}") from exc
+    names: list[str] = []
     for attachment in attachments:
         try:
             name = getattr(attachment, "document")
         except Exception:
             continue
+        if isinstance(name, str) and name:
+            names.append(name)
         if name == document_name:
             return attachment
-    raise ValueError(f"document not found: {document_name!r}")
+    sample = ", ".join(names[:12])
+    raise ValueError(
+        f"document not found: {document_name!r} for accession {accession_no!r}; "
+        f"available documents: {sample or 'none'}. Call list_sec_documents "
+        f"for the full list, or omit the document name for the primary document.")
 
 
 def _resolve(accession_no: str, document_name: str | None = None) -> object:
