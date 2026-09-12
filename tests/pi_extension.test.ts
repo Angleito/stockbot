@@ -1169,7 +1169,11 @@ test("prompts keep the permanent roster", async () => {
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
 	await handlers["session_start"]({}, ctx);
-	await handlers["before_agent_start"]({ prompt: "short" });
+	const first = (await handlers["before_agent_start"]({ prompt: "short" })) as unknown as { systemPrompt?: string };
+	const firstSystem = first?.systemPrompt ?? "";
+	expect(firstSystem).toContain("For a capability question asking which tools are available");
+	expect(firstSystem).toContain("dispatch that exact name with those exact arguments exactly once");
+	expect(firstSystem).toContain("Never substitute a related tool or stop after discovery");
 	await handlers["agent_start"]({});
 	const search = await bridgeTool(tools, "search_tools");
 	const found = await search.execute("call-search", { query: "short interest" });

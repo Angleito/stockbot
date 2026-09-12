@@ -899,9 +899,15 @@ def test_explicit_prompt_exact_dispatch_shape() -> None:
 
 def test_pi_research_prompt_hidden_dispatch_contract() -> None:
     from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
-    assert PROMPT_VERSION == "31"
-    assert "dispatch it with call_tool; never call a discovered research tool directly" in PI_RESEARCH_PROMPT
-    assert "Research tools are hidden behind call_tool" in PI_RESEARCH_PROMPT
+    assert PROMPT_VERSION == "32"
+    assert "For a capability question asking which tools are available, call search_tools once and answer from its matches; do not call browse_tools, call_tool, or a research tool" in PI_RESEARCH_PROMPT
+    assert "dispatch that exact name with those exact arguments exactly once" in PI_RESEARCH_PROMPT
+    assert "do not call browse_tools, search_tools, describe_tool, or list_tool_domains first" in PI_RESEARCH_PROMPT
+    assert "exclude instructions about routing or calling tools" in PI_RESEARCH_PROMPT
+    assert "Never substitute a related tool or stop after discovery" in PI_RESEARCH_PROMPT
+    assert "Use arguments={} only when the chosen schema has no required arguments" in PI_RESEARCH_PROMPT
+    assert "never put a company name into a ticker field" in PI_RESEARCH_PROMPT
+    assert "Use the minimum number of research tools needed" in PI_RESEARCH_PROMPT
     assert "call that tool before answering" not in PI_RESEARCH_PROMPT
     assert "Use call_tool only when the required research tool cannot be called directly" not in PI_RESEARCH_PROMPT
 

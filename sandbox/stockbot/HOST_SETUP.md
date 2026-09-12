@@ -8,8 +8,8 @@ there and proves fail-loud.
 Prereqs: host `~/.pi/agent/auth.json` holds a working `opencode-go` (API key)
 entry. Real secrets never enter the sandbox: the OpenCode key stays
 Docker-proxy-managed. Local models run through one llama-server router at
-`http://127.0.0.1:8080` (host `~/.pi/agent/models.json` providers `liquid-local`, `minicpm-local`); IDs are the router preset IDs (`LiquidAI/LFM2.5-1.2B-Thinking-GGUF:Q4_K_M`, `openbmb/MiniCPM5-1B-GGUF:Q4_K_M`) — one port for all models — and need no sandbox egress.
-Router presets live in `~/.config/llama-server/presets.ini` (start the router with `--models-preset` for them to apply). Qwen3.6-35B removed entirely: ~20G weights exceeded this host's 4GiB iGPU heap (`vk::Queue::submit: ErrorDeviceLost`), files deleted from the HF cache, no Pi provider points at it.
+`http://127.0.0.1:8080` (host `~/.pi/agent/models.json` providers `granite-local`, `liquid-local`, `minicpm-local`); IDs are the router preset IDs (`lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M`, `LiquidAI/LFM2.5-1.2B-Thinking-GGUF:Q4_K_M`, `openbmb/MiniCPM5-1B-GGUF:Q4_K_M`) — one port for all models — and need no sandbox egress. Stockbot on Granite: `STOCKBOT_PI_PROVIDER=granite-local STOCKBOT_PI_MODEL=lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M bun run stockbot` (or `bun run stockbot:granite`).
+Router presets live in `~/.config/llama-server/presets.ini` (start the router with `--models-preset` for them to apply; `bun run llama`). Do not run a direct `llama-server -hf ...` on port 8080 alongside the router — same port, bind fails; stop the router first if you need direct mode. Qwen3.6-35B removed entirely: ~20G weights exceeded this host's 4GiB iGPU heap (`vk::Queue::submit: ErrorDeviceLost`), files deleted from the HF cache, no Pi provider points at it.
 
 ## 1. Register host credentials
 

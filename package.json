@@ -24,6 +24,7 @@
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run typecheck-ts && bun run verify-integrity && bun run verify-tools && bun run verify-pi && bun run verify-confusion && bun run verify-holdout",
     "sandbox-doctor": "venv/bin/python scripts/sandbox_doctor.py",
     "stockbot": "pi --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --extension .pi/extensions/stockbot.ts",
+    "stockbot:granite": "STOCKBOT_PI_PROVIDER=granite-local STOCKBOT_PI_MODEL=lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M bun run stockbot",
     "llama": "llama-server --models-dir ${HOME}/.cache/huggingface/hub --models-preset ${HOME}/.config/llama-server/presets.ini --models-max 1 --host 127.0.0.1 --port 8080"
   },
   "dependencies": {
