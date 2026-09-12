@@ -217,17 +217,8 @@ def test_search_current_vs_historical_share_family_but_differ():
     assert "get_short_interest" in names
     by_name = {m["name"]: m for m in _as_seq(current["matches"])}
     assert by_name["get_short_interest"]["intent"] == "current_reported_short_position"
-    assert current["ambiguous"] is True
-    groups = current["ambiguity_groups"]
-    assert isinstance(groups, list)
-    found_exact = False
-    for g in groups:
-        if not isinstance(g, dict):
-            continue
-        cands = g.get("candidates")
-        if isinstance(cands, list) and "get_short_interest" in cands:
-            found_exact = True
-    assert found_exact
+    assert current["ambiguous"] is False
+    assert current["ambiguity_groups"] == []
     hist = tools.execute_tool(
         "search_tools", {"query": "historical FINRA short-interest trend"}, "test", context=_research_context()
     )

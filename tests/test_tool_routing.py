@@ -75,7 +75,7 @@ def test_browse_rejects_bad_paths() -> None:
     unknown_family = execute_tool("browse_tools", {"domain": "finra", "family": "nope"}, "test", context=_CTX)
     assert "error" in unknown_family
     both = execute_tool("browse_tools", {"domain": "finra", "name": "get_short_interest"}, "test", context=_CTX)
-    assert "error" in both
+    assert "error" not in both and both["name"] == "get_short_interest"
 
 
 def test_invalid_arguments_return_repairable_shape_and_execute_nothing(

@@ -437,7 +437,7 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
 
 def test_get_concurrency_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_VERIFY_CONCURRENCY", raising=False)
-    assert v.get_concurrency() == v.DEFAULT_CONCURRENCY == 6
+    assert v.get_concurrency() == v.DEFAULT_CONCURRENCY == 3
     monkeypatch.setenv("PI_VERIFY_CONCURRENCY", "1")
     assert v.get_concurrency() == 1
     monkeypatch.setenv("PI_VERIFY_CONCURRENCY", "3")
