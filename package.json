@@ -26,7 +26,7 @@
     "llama": "llama-server --models-dir ${HOME}/.cache/huggingface/hub --models-preset ${HOME}/.config/llama-server/presets.ini --models-max 1 --host 127.0.0.1 --port 8080"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.0"
+    "@earendil-works/pi-coding-agent": "0.85.1"
   },
   "devDependencies": {
     "bun-types": "^1.4.2",
