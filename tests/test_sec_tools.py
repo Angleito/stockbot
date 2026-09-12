@@ -272,12 +272,13 @@ def test_search_tools_routes_named_natural_intents():
     assert orthogonal["count"] == 0
 
 
-def test_search_tools_exact_tie_extends_to_five_max():
+def test_search_tools_top_three_cap():
     result = tools.execute_tool(
         "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
     )
     matches = _as_seq(result["matches"])
-    assert result["count"] == len(matches) == 5
+    assert result["count"] == len(matches) == 3
+    assert [m["name"] for m in matches] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
     narrow = tools.execute_tool(
         "search_tools", {"query": "short interest"}, "test", context=_research_context()
     )

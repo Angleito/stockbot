@@ -1357,8 +1357,8 @@ def test_classify_attempt3_skips_discovery(tmp_path: Path):
 
 def test_generate_confusion_cases_complete():
     cases = v.generate_confusion_cases()
-    # 18 undirected edges -> 36 directed
-    assert len(cases) == 36
+    # 26 undirected edges -> 52 directed
+    assert len(cases) == 52
     pairs: set[tuple[str, str]] = set()
     for c in cases:
         raw_pair = c["pair"]
@@ -1366,7 +1366,7 @@ def test_generate_confusion_cases_complete():
         pair = tuple(sorted(str(x) for x in raw_pair))
         assert len(pair) == 2
         pairs.add((pair[0], pair[1]))
-    assert len(pairs) == 18
+    assert len(pairs) == 26
     assert ("get_short_interest", "query_finra") in pairs or ("get_finra_datapoints", "query_finra") in pairs
     for c in cases:
         assert c["prompt"] and c["expected_tool"] and isinstance(c["arguments"], dict)
