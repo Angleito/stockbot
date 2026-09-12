@@ -33,9 +33,10 @@ None
 
 ## Required arguments
 
-- `ticker` (string)
+- `ticker` (string): Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither.
 
 ## Optional arguments
 
 - `as_of` (string)
+- `company_name` (string): Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker.
 - `limit` (integer)

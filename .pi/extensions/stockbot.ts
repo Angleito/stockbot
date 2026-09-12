@@ -436,7 +436,25 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      routing.researchCalls++;
      routing.researchToolNames.push(researchTarget);
     }
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    // Transparent query assistance: ticker-only/short searches cannot rank.
+    // Native full-question passes stay untouched; assisted calls are tagged
+    // in the returned text and counted separately (bridge only persists
+    // routing_metrics/agent tool rows, so no separate event is emitted).
+    let effParams = params;
+    let searchAssisted = false;
+    let searchOriginalQuery = "";
+    if (fn.name === "search_tools") {
+     const bag = params as Json;
+     const q: unknown = typeof bag === "object" && bag !== null && "query" in bag ? bag.query : undefined;
+     const stored = runQuestions.get(runId) ?? "";
+     if (isShortQuery(q) && stored.length > q.trim().length + 10) {
+      searchAssisted = true;
+      searchOriginalQuery = q.trim();
+      effParams = { ...(bag as Record<string, unknown>), query: stored } as typeof params;
+      routing.assistedSearchCalls++;
+     }
+    }
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
     const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
     const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");
@@ -459,6 +477,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       .map((m) => (typeof m === "string" ? m : m && typeof m === "object" ? ((m as Json).name as unknown) : undefined))
       .filter((n): n is string => typeof n === "string" && registeredResearch.has(n));
      for (const m of matches) routing.discoveredTools.add(m);
+     if (searchAssisted) for (const m of matches) routing.assistedDiscoveredTools.push(m);
      routing.discoveryHadMatches = matches.length > 0;
     }
     if (fn.name === "browse_tools" && !failed && !invalid) {
@@ -472,7 +491,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     }
     refreshStatus(lastCtx);
     return {
-     content: [{ type: "text", text: bridgeModelText(bridge) }],
+     content: [{ type: "text", text: bridgeModelText(bridge) + (searchAssisted ? `\n\nStockbot note: short search query "${searchOriginalQuery}" was expanded with the session question for this call (assisted search; native passes stay unassisted).` : "") }],
      details: bridge,
     };
    },
@@ -579,6 +598,18 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
  let runId: string = crypto.randomUUID();
  let pendingQuestion = "";
+ const runQuestions = new Map<string, string>();
+ function baseQuestion(prompt: string): string {
+  // Harness natural prompts append routing guidance after the user wording;
+  // direct runs carry the bare question. Either way the leading text is the
+  // user's own question.
+  const i = prompt.indexOf(" To answer,");
+  return (i < 0 ? prompt : prompt.slice(0, i)).trim();
+ }
+ function isShortQuery(q: unknown): q is string {
+  if (typeof q !== "string" || !q.trim()) return false;
+  return q.trim().split(/\s+/).length <= 2;
+ }
  const dataRoots = new Map<string, string>();
  const doneFiles = new Map<string, string>();
  const asOfs = new Map<string, string>();
@@ -602,6 +633,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   invalidToolCalls: 0,
   callToolCount: 0,
   directToolCalls: 0,
+  assistedSearchCalls: 0,
+  assistedDiscoveredTools: [] as string[],
   continuationInjected: false,
   continuationPending: false,
   discoveryHadMatches: false,
@@ -619,6 +652,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   routing.invalidToolCalls = 0;
   routing.callToolCount = 0;
   routing.directToolCalls = 0;
+  routing.assistedSearchCalls = 0;
+  routing.assistedDiscoveredTools = [];
   routing.continuationInjected = false;
   routing.continuationPending = false;
   routing.discoveryHadMatches = false;
@@ -687,6 +722,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   if (envDoneFile) doneFiles.set(runId, envDoneFile);
   const envAsOf = process.env.STOCKBOT_AS_OF;
   if (envAsOf) asOfs.set(runId, envAsOf);
+  runQuestions.set(runId, baseQuestion(pendingQuestion));
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });
@@ -790,6 +826,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    failed_research_calls: routing.failedResearchCalls,
    call_tool_count: routing.callToolCount,
    direct_tool_calls: routing.directToolCalls,
+   assisted_search_calls: routing.assistedSearchCalls,
+   assisted_discovered_tools: [...routing.assistedDiscoveredTools],
    invalid_tool_calls: routing.invalidToolCalls,
    premature_stop_detected: routing.prematureStopDetected,
    continuation_injected: routing.continuationInjected,
@@ -812,5 +850,6 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   doneFiles.delete(runId);
   dataRoots.delete(runId);
   asOfs.delete(runId);
+  runQuestions.delete(runId);
  });
 }

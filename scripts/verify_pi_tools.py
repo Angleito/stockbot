@@ -45,7 +45,7 @@ DEFAULT_REPETITIONS = 3
 TRANSIENT_ERROR_TYPES = frozenset({"rate_limited"})
 _TRANSIENT_MESSAGE_RE = re.compile(r"(?i)\btimed?\s*-?\s*out\b|deadline exceeded|drain.?timeout")
 TRANSIENT_RETRY_CAP = 2
-DEFAULT_CONCURRENCY = 6
+DEFAULT_CONCURRENCY = 3
 POLL_S = 2
 THESIS_ID_PLACEHOLDER = "thesis-placeholder"
 THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
@@ -317,6 +317,10 @@ def get_concurrency() -> int:
         raise ValueError("PI_VERIFY_CONCURRENCY must be an integer >= 1")
     return value
 
+def _batch_id() -> str:
+    """Process-unique batch ID: UTC microseconds plus PID so parallel probes never share a directory."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-p{os.getpid()}"
+
 
 def attempt_dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> tuple[Path, Path]:
     """Per-attempt recorder DB and Stockbot store; keeps attempts mutually isolated."""
@@ -582,6 +586,12 @@ _NATURAL_ROUTING_GUIDANCE = (
     "is unsupported."
 )
 
+_SEARCH_ONLY_GUIDANCE = (
+    " To answer, call search_tools once with a single query, then summarize "
+    "its matches in one sentence. Do not call call_tool, browse_tools, or any "
+    "research tool; the discovery matches are the answer."
+)
+
 def _natural_prompt_v1(tool: str, args: Mapping[str, object]) -> str:
     """Ordinary user wording for attempt 1; never names the tool."""
     case = VERIFY_CASES.get(tool)
@@ -590,6 +600,8 @@ def _natural_prompt_v1(tool: str, args: Mapping[str, object]) -> str:
     natural = case["natural_v1"]
     if THESIS_ID_PLACEHOLDER in natural and "id" in args:
         natural = natural.replace(THESIS_ID_PLACEHOLDER, str(args["id"]))
+    if tool == "search_tools":
+        return natural + _SEARCH_ONLY_GUIDANCE
     return natural + _NATURAL_ROUTING_GUIDANCE
 
 
@@ -601,6 +613,8 @@ def _natural_prompt_v2(tool: str, args: Mapping[str, object]) -> str:
     natural = case["natural_v2"]
     if THESIS_ID_PLACEHOLDER in natural and "id" in args:
         natural = natural.replace(THESIS_ID_PLACEHOLDER, str(args["id"]))
+    if tool == "search_tools":
+        return natural + _SEARCH_ONLY_GUIDANCE
     return natural + _NATURAL_ROUTING_GUIDANCE
 
 
@@ -1618,7 +1632,7 @@ def run_agent_loop_case(case: _AgentLoopCase, batch_root: Path, cwd: Path, index
 
 def run_agent_loop_main() -> int:
     """Live agent-loop gate: each AGENT_LOOP_CASES prompt must complete discovery -> research -> answer."""
-    batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    batch = _batch_id()
     root = Path("data/verify") / batch / "agent-loop"
     cwd = Path.cwd()
     loop_start = time.monotonic()
@@ -1654,7 +1668,7 @@ def run_confusion() -> int:
         print(f"confusion preflight failed: {exc}", file=sys.stderr)
         return 1
     print(f"confusion cases: {len(cases)} directed ({len(cases)//2} undirected edges)")
-    batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    batch = _batch_id()
     root = Path("data/verify") / batch / "confusion"
     cwd = Path.cwd()
     durable = get_data_root()
@@ -1745,7 +1759,7 @@ def run_holdout(holdout_path: str) -> int:
         print(f"holdout {holdout_path} must be a non-empty list", file=sys.stderr)
         return 1
     schemas = tool_schemas()
-    batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    batch = _batch_id()
     root = Path("data/verify") / batch / "holdout"
     cwd = Path.cwd()
     durable = get_data_root()
@@ -1849,7 +1863,7 @@ def main() -> int:
     print(f"Tools: {len(tool_names)}")
     print(f"Attempts per tool: {repetitions}")
     print(f"Total Pi attempts: {len(tool_names) * repetitions}")
-    batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    batch = _batch_id()
     root = Path("data/verify") / batch
     cwd = Path.cwd()
     # Contain live side effects (e.g. thesis_create) in per-attempt dirs; never

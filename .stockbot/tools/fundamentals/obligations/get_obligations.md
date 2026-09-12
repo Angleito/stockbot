@@ -12,7 +12,7 @@ Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty langu
 
 ## Choose when
 
-- What a company is obligated to pay in the future for one ticker.
+- What a company is obligated to pay in the future for one ticker, including contracts and commitments.
 
 ## Reject when
 
@@ -33,8 +33,8 @@ None
 
 ## Required arguments
 
-- `ticker` (string)
+- `ticker` (string): Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither.
 
 ## Optional arguments
 
-None
+- `company_name` (string): Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker.

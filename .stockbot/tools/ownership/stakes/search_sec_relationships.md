@@ -35,11 +35,12 @@ None
 
 ## Required arguments
 
-- `entity` (string): CIK, ticker, entity id, or candidate dict.
+- `entity` (string): CIK, ticker, entity id, or candidate dict. If unknown, pass company_name instead; never call with neither.
 
 ## Optional arguments
 
 - `as_of` (string): Point-in-time date YYYY-MM-DD.
+- `company_name` (string): Company name (e.g. Apple) when entity is unknown; the server maps it to a ticker.
 - `exhaustive` (boolean): Exhaust all applicable relationship indexes and SEC routes; the returned model context remains bounded.
 - `limit` (integer)
 - `relationship_types` (array): Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager).

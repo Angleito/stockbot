@@ -177,11 +177,12 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_sec_relationships",
-            "description": "Ownership and transaction relationships for an entity (CIK, ticker, or entity id), both directions: 13D/G beneficial owners, 13F manager holdings (either direction), insider issuer/owner links, transaction filer/target/acquirer, offering filer/registrant, plus verified workflow links and observed mentions. Mentions never flatten into verified links; transaction status stays unknown without closing evidence.",
+            "description": "Ownership and transaction relationships for an entity (CIK, ticker, or entity id), both directions: 13D/G beneficial owners, 13F manager holdings (either direction), insider issuer/owner links, transaction filer/target/acquirer, offering filer/registrant, plus verified workflow links and observed mentions. Mentions never flatten into verified links; transaction status stays unknown without closing evidence. Pass an entity, or a company_name (e.g. Apple); the server maps the name.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "CIK, ticker, entity id, or candidate dict."},
+                    "entity": {"type": "string", "description": "CIK, ticker, entity id, or candidate dict. If unknown, pass company_name instead; never call with neither."},
+                    "company_name": {"type": "string", "description": "Company name (e.g. Apple) when entity is unknown; the server maps it to a ticker."},
                     "relationship_types": {"type": "array", "items": {"type": "string"}, "description": "Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager)."},
                     "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD."},
                     "limit": {"type": "integer"},
@@ -279,10 +280,10 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_beneficial_ownership",
-            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes. Takes a ticker.",
+            "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes. Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name. Never call with neither.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
                 "required": ["ticker"]
             }
         }
@@ -303,10 +304,10 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_insider_activity",
-            "description": "Executed insider buys/sells for one ticker: insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider purchases and sales by executives and directors. Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales). Takes a ticker.",
+            "description": "Executed insider buys/sells for one ticker: insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider purchases and sales by executives and directors. Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales). Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name. Never call with neither.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
+                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
                 "required": ["ticker"]
             }
         }
@@ -445,14 +446,14 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "call_tool",
-            "description": "Call one catalog tool by its exact canonical name with arguments; validates against the canonical schema and executes through the standard gateway path.",
+            "description": "Call one catalog tool by its exact canonical name with arguments; arguments defaults to {} (required for zero-argument tools the model may omit); validates against the canonical schema and executes through the standard gateway path.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "arguments": {"type": "object"},
                 },
-                "required": ["name", "arguments"],
+                "required": ["name"],
                 "additionalProperties": False
             }
         }
@@ -658,10 +659,10 @@ TOOLS: list[dict[str, object]] = [
                 "commitments, cloud commitments, lease obligations, "
                 "guarantees, or any 'what is the company obligated to pay "
                 "in the future' question. Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics). Contingent items are NOT counted "
-                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Takes a ticker.",
+                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name to a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}},
+                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}},
                 "required": ["ticker"]
             }
         }
@@ -2366,7 +2367,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_security",
         time_mode="latest",
         summary="Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.",
-        choose_when=("What a company is obligated to pay in the future for one ticker.",),
+        choose_when=("What a company is obligated to pay in the future for one ticker, including contracts and commitments.",),
         reject_when=("Do NOT use for valuation multiples (get_valuation_metrics).",),
         conflicts_with=(),
         related_tools=("get_valuation_metrics", "get_financial_statements",),
@@ -2429,7 +2430,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="market_wide",
         time_mode="latest",
         summary="Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours.",
-        choose_when=("Finding the latest market-wide SC 13D/G filings when no ticker is given.",),
+        choose_when=("Finding the latest market-wide SC 13D/G filings when no ticker is given; what just came out, newly filed.",),
         reject_when=("Not for one company's current holders.",),
         conflicts_with=(),
         related_tools=("get_beneficial_ownership", "get_material_events",),
@@ -3004,7 +3005,7 @@ def build_prerequisite_graph_from_tool_metadata() -> dict[str, frozenset[str]]:
 
 def _normalize_discovery_text(value: str) -> list[str]:
     """Lowercase, de-punctuate, and de-pluralize discovery text into tokens."""
-    lowered = value.lower().replace("p/e", "pe").replace("13-d", "13d")
+    lowered = value.lower().replace("p/e", "pe").replace("13-d", "13d").replace("contractual", "contract").replace("trended", "trend").replace("changed", "change")
     cleaned = "".join(c if c.isalnum() or c == " " else " " for c in lowered)
     collapsed = " ".join(cleaned.split()).replace("10 k", "10k")
     tokens: list[str] = []
@@ -3084,22 +3085,28 @@ def _ambiguity_groups(ranked_names: list[str]) -> tuple[bool, list[dict[str, obj
     return (len(groups) > 0), groups
 
 
+_SEARCH_EMPTY_HINT = "No matches. Retry with the full user question as the query (never a ticker or one word); omit domain unless certain of it."
+
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Generic lexical ranking over TOOL_DISCOVERY_REGISTRY fields only.
 
     Signals (small generic weights, no per-intent boosts): exact tool-name
     match (10) > exact phrase in summary/choose_when (5) > token overlap over
-    name/domain/family/intent/output_kind/summary/choose_when/reject_when/related names
+    name/domain/family/intent/output_kind/summary/choose_when
     (1 per token) > domain-name overlap (1). Ties break alphabetically for
-    determinism. A relative-noise margin keeps only hits within 4 points of
+    determinism. reject_when and related_tools never score: reject text names
+    rivals, so counting it boosts a tool for the queries it must lose.
+    A relative-noise margin keeps only hits within 4 points of
     the best score. Returns compact routing cards only: the top 3 exact.
     Confusable siblings surface only via ambiguity groups over conflicts_with.
     """
     del model
     query = str(args.get("query") or "")
     domain = str(args.get("domain") or "").strip().lower() or None
+    if domain is not None and domain not in DOMAIN_DESCRIPTIONS:
+        domain = None
     if not query.strip():
-        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": []}
+        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
     query_norm = " ".join(_normalize_discovery_text(query))
     query_tokens = _discovery_keywords(query)
     scored: list[tuple[int, str]] = []
@@ -3118,8 +3125,7 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
             " ".join((
                 name.replace("_", " "), meta.domain, meta.family.replace("-", " "),
                 meta.intent.replace("_", " "), meta.output_kind.replace("_", " "),
-                meta.summary, " ".join(meta.choose_when), " ".join(meta.reject_when),
-                " ".join(meta.related_tools).replace("_", " "),
+                meta.summary, " ".join(meta.choose_when),
             ))
         )
         score += len(query_tokens & field_tokens)
@@ -3139,6 +3145,8 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     ranked_names = [name for _, name in top]
     ranked = [_routing_card(name) for name in ranked_names]
     ambiguous, groups = _ambiguity_groups(ranked_names)
+    if not ranked:
+        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
     return {"matches": ranked, "count": len(ranked), "ambiguous": ambiguous, "ambiguity_groups": groups}
 
 
@@ -3227,9 +3235,10 @@ def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
     domain = raw_domain.strip().lower() if isinstance(raw_domain, str) and raw_domain.strip() else None
     raw_family = args.get("family")
     family = raw_family.strip().lower() if isinstance(raw_family, str) and raw_family.strip() else None
-    if name and (domain or family):
-        return {"error": "ambiguous_browse", "hint": "call browse_tools with either name or domain/family, not both"}
     if name:
+        # Name-authoritative: the 1B model copies the whole routing card into
+        # browse (name plus a guessed domain/family). The exact name uniquely
+        # identifies the tool, so resolve it instead of rejecting.
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
         if meta is None:
             return {"error": "unknown_tool", "name": name}
@@ -3542,6 +3551,103 @@ def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     return out
 
 
+def _resolve_company_to_ticker(name: str) -> str | None:
+    """Company name to ticker: exact warehouse match, then EDGAR company index top hit."""
+    try:
+        from app.services.evidence_resolution import warehouse_name_to_ticker
+        mapped = warehouse_name_to_ticker(name)
+        if mapped and mapped.strip():
+            return mapped.strip().upper()
+    except Exception:
+        pass
+    try:
+        from app.sec.client import find_sec_company
+        for cand in find_sec_company(name, limit=3):
+            ticks = cand.get("tickers") if isinstance(cand, dict) else None
+            if isinstance(ticks, list) and ticks and isinstance(ticks[0], str) and ticks[0].strip():
+                return ticks[0].strip().upper()
+    except Exception:
+        pass
+    return None
+
+
+def _get_obligations(args: dict[str, object], model: str) -> dict[str, object]:
+    """Ticker or company name; the server maps names to tickers for single dispatch."""
+    del model
+    raw_ticker = args.get("ticker")
+    ticker = raw_ticker.strip().upper() if isinstance(raw_ticker, str) and raw_ticker.strip() else None
+    if ticker is not None and isinstance(raw_ticker, str) and raw_ticker != raw_ticker.upper():
+        resolved = _resolve_company_to_ticker(raw_ticker)
+        if resolved is not None and resolved != ticker:
+            ticker = resolved
+    if ticker is None:
+        raw_name = args.get("company_name")
+        name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+        if name is None:
+            return _invalid_args_error("get_obligations", "Provide a ticker (e.g. AAPL) or company_name (e.g. Apple) for tool 'get_obligations'")
+        resolved = _resolve_company_to_ticker(name)
+        if resolved is None:
+            return _invalid_args_error("get_obligations", f"Unknown company name '{name}'; pass a ticker like AAPL")
+        ticker = resolved
+    return obligations.get_obligations(ticker)
+def _ticker_or_company_name(args: dict[str, object], tool: str, key: str = "ticker") -> tuple[str | None, dict[str, object] | None]:
+    """Ticker/entity value or company_name; maps names to tickers for single dispatch."""
+    raw = args.get(key)
+    value = raw.strip().upper() if isinstance(raw, str) and raw.strip() else None
+    if value is not None:
+        if isinstance(raw, str) and raw != raw.upper():
+            resolved = _resolve_company_to_ticker(raw)
+            if resolved is not None and resolved != value:
+                return resolved, None
+        return value, None
+    raw_name = args.get("company_name")
+    name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+    if name is None:
+        return None, _invalid_args_error(tool, f"Provide an entity/ticker (e.g. AAPL) or company_name (e.g. Apple) for tool '{tool}'; never call with neither")
+    resolved = _resolve_company_to_ticker(name)
+    if resolved is None:
+        return None, _invalid_args_error(tool, f"Unknown company name '{name}'; pass a {key} like AAPL")
+    return resolved, None
+
+
+def _get_beneficial_ownership(args: dict[str, object], model: str) -> dict[str, object]:
+    """Ticker or company name."""
+    del model
+    ticker, err = _ticker_or_company_name(args, "get_beneficial_ownership")
+    if err is not None:
+        return err
+    assert ticker is not None
+    return _wrap_list(
+        ticker, sec.get_beneficial_ownership(
+            ticker, as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
+        ), "records",
+    )
+
+
+def _get_insider_activity(args: dict[str, object], model: str) -> dict[str, object]:
+    """Ticker or company name."""
+    del model
+    ticker, err = _ticker_or_company_name(args, "get_insider_activity")
+    if err is not None:
+        return err
+    assert ticker is not None
+    return _wrap_list(
+        ticker, sec.get_insider_activity(
+            ticker, as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
+        ), "transactions",
+    )
+
+
+def _search_sec_relationships(args: dict[str, object], model: str) -> dict[str, object]:
+    """Entity or company name; tickers are valid entity values."""
+    del model
+    entity, err = _ticker_or_company_name(args, "search_sec_relationships", key="entity")
+    if err is not None:
+        return err
+    assert entity is not None
+    return _sec_relationships_result({**args, "entity": entity})
+
+
 
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
@@ -3551,7 +3657,7 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
         str(args["ticker"]), str(args["metric"]), as_of=_str_or_none(args.get("as_of"))
     ),
     "find_sec_entities": lambda args, model: _find_sec_entities(args),
-    "search_sec_relationships": lambda args, model: _sec_relationships_result(args),
+    "search_sec_relationships": _search_sec_relationships,
     "get_sec_search_coverage": lambda args, model: sec.get_sec_search_coverage(
         source=_str_or_none(args.get("source")), form=_str_or_none(args.get("form")),
         search_id=_str_or_none(args.get("search_id")), limit=int(str(args.get("limit", 200))),
@@ -3572,21 +3678,13 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
             limit=_optional_int(args.get("limit", 50)),
         ), "events",
     ),
-    "get_beneficial_ownership": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_beneficial_ownership(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
-        ), "records",
-    ),
+    "get_beneficial_ownership": _get_beneficial_ownership,
     "get_ownership_changes": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_ownership_changes(
             str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
         ), "changes",
     ),
-    "get_insider_activity": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_insider_activity(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
-        ), "transactions",
-    ),
+    "get_insider_activity": _get_insider_activity,
     "get_planned_insider_sales": lambda args, model: _wrap_list(
         args.get("ticker"), sec.get_planned_insider_sales(
             str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
@@ -3626,7 +3724,7 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
     ),
     "get_analyst_estimates": lambda args, model: analyst_client.get_analyst_estimates(str(args["ticker"])),
     "get_sp500_weight": lambda args, model: analyst_client.get_sp500_weight(str(args["ticker"])),
-    "get_obligations": lambda args, model: obligations.get_obligations(str(args["ticker"])),
+    "get_obligations": _get_obligations,
     "get_valuation_metrics": lambda args, model: valuation.get_valuation_metrics(str(args["ticker"])),
     "search_web": _search_web,
     "find_alternative_signals": _find_alternative_signals,

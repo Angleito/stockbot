@@ -169,7 +169,7 @@ tools:
     time_mode: since_or_as_of
     summary: "Deterministic 8-K-derived recent event feed with accession citations for what changed since a date."
     version: 2
-    keywords: [accession, changed, citation, company, date, derived, deterministic, event, feed, finding, get, material, recent, recently, retrieve, since]
+    keywords: [accession, change, citation, company, date, derived, deterministic, event, feed, finding, get, material, recent, recently, retrieve, since]
   - name: get_recent_ownership_filings
     domain: events
     family: ownership-filings
@@ -181,7 +181,7 @@ tools:
     time_mode: latest
     summary: "Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours."
     version: 2
-    keywords: [13d, 13g, 24, feed, filing, finding, get, given, hour, last, latest, market, most, no, ownership, recent, retrieve, roughly, sc, ticker, wide]
+    keywords: [13d, 13g, 24, came, feed, filed, filing, finding, get, given, hour, just, last, latest, market, most, newly, no, out, ownership, recent, retrieve, roughly, sc, ticker, wide]
   - name: describe_finra_dataset
     domain: finra
     family: catalog
@@ -325,7 +325,7 @@ tools:
     time_mode: latest
     summary: "Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language."
     version: 2
-    keywords: [10, 10k, amount, cash, certainty, company, future, get, horizon, language, note, obligated, obligation, one, pay, retrieve, ticker]
+    keywords: [10, 10k, amount, cash, certainty, commitment, company, contract, future, get, horizon, including, language, note, obligated, obligation, one, pay, retrieve, ticker]
   - name: get_financial_statements
     domain: fundamentals
     family: statements
@@ -445,7 +445,7 @@ tools:
     time_mode: latest_or_as_of
     summary: "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions."
     version: 2
-    keywords: [13d, between, change, changed, compare, comparing, consecutive, deterministic, diff, filing, get, holder, ownership, percent, position, share, stake]
+    keywords: [13d, between, change, compare, comparing, consecutive, deterministic, diff, filing, get, holder, ownership, percent, position, share, stake]
   - name: search_sec_relationships
     domain: ownership
     family: stakes
@@ -541,7 +541,7 @@ tools:
     time_mode: latest
     summary: "Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed."
     version: 2
-    keywords: [changed, company, compare, contained, diff, disclosure, factor, new, one, over, risk, self, ticker, year]
+    keywords: [change, company, compare, contained, diff, disclosure, factor, new, one, over, risk, self, ticker, year]
   - name: diff_sec_filings
     domain: sec
     family: filing-diff

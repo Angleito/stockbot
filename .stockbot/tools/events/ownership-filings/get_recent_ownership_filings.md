@@ -12,7 +12,7 @@ Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 
 
 ## Choose when
 
-- Finding the latest market-wide SC 13D/G filings when no ticker is given.
+- Finding the latest market-wide SC 13D/G filings when no ticker is given; what just came out, newly filed.
 
 ## Reject when
 

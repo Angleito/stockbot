@@ -49,6 +49,7 @@ from .tools import (
     TOOLS,
     TOOL_REGISTRY_VERSION,
     _invalid_args_error,
+    _resolve_company_to_ticker,
     _tool_function,
     _unknown_tool_error,
     _validate_tool_arguments,
@@ -288,7 +289,11 @@ def _execute_pi_tool(
     # The outer wrapper consumes no budget slot and writes no recorder row.
     if name == "call_tool":
         raw_inner = arguments.get("name") if isinstance(arguments, dict) else None
-        raw_inner_args = arguments.get("arguments") if isinstance(arguments, dict) else None
+        raw_args = arguments.get("arguments") if isinstance(arguments, dict) else None
+        if raw_args is None:
+            raw_inner_args: object = {}
+        else:
+            raw_inner_args = raw_args
         if not isinstance(raw_inner, str) or not raw_inner.strip():
             invalid_outer = _validate_tool_arguments("call_tool", arguments if isinstance(arguments, dict) else {})
             msg = invalid_outer if invalid_outer is not None else "call_tool: 'name' must be a non-empty string"
@@ -303,6 +308,35 @@ def _execute_pi_tool(
         if not any(_tool_function(t).get("name") == inner_name for t in TOOLS):
             return _unknown_tool_error(inner_name)
         return _execute_pi_tool(inner_name, raw_inner_args, session, tool_call_id=tool_call_id, protocol_id=protocol_id, bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of)
+    # Single-dispatch company-name support, schema-driven: any tool whose
+    # schema declares company_name alongside a ticker/entity identifier
+    # fills the missing identifier before validation. Cards keep the
+    # identifier required (visible signal) while name-only dispatches
+    # still execute; tools without company_name are untouched.
+    if isinstance(arguments, dict):
+        _fn = next(
+            (_tool_function(t) for t in TOOLS if _tool_function(t).get("name") == name),
+            None,
+        )
+        _fparams = _fn.get("parameters") if isinstance(_fn, dict) else None
+        _fprops = _fparams.get("properties") if isinstance(_fparams, dict) else None
+        _freq = _fparams.get("required") if isinstance(_fparams, dict) else None
+        _req_names: list[str] = [str(_r) for _r in _freq] if isinstance(_freq, list) else []
+        _prop_names: set[str] = set(_fprops.keys()) if isinstance(_fprops, dict) else set()
+        _id_key = next(
+            (_k for _k in ("ticker", "entity") if _k in _req_names and _k in _prop_names),
+            next((_k for _k in ("ticker", "entity") if _k in _prop_names), None),
+        )
+        if _id_key is not None and "company_name" in _prop_names:
+            _raw_id = arguments.get(_id_key)
+            _raw_cname = arguments.get("company_name")
+            if (not isinstance(_raw_id, str) or not _raw_id.strip()) and isinstance(_raw_cname, str) and _raw_cname.strip():
+                try:
+                    _resolved = _resolve_company_to_ticker(_raw_cname)
+                except Exception:
+                    _resolved = None
+                if _resolved:
+                    arguments = {**arguments, _id_key: _resolved}
     recorder = get_current_recorder()
     run_id = recorder.run_id if recorder is not None else f"pi-{session.session_id}"
     args_for_hash = (
