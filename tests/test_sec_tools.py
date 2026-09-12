@@ -289,6 +289,16 @@ def test_search_tools_expands_direct_conflicts():
     assert "query_finra" in names
     assert any(isinstance(g, dict) and {"get_short_interest", "query_finra"} <= set(g.get("candidates") or []) for g in _as_seq(result["ambiguity_groups"]))
 
+
+def test_search_conflict_expansion_respects_domain_filter():
+    result = tools.execute_tool(
+        "search_tools", {"query": "analyst estimates", "domain": "analyst"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    for match in matches:
+        assert _as_dict(match)["domain"] == "analyst"
+
 def test_describe_tool_batch_names():
     result = tools.execute_tool(
         "describe_tool",

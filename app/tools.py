@@ -3146,6 +3146,9 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     for name in ranked_names:
         for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
             if peer not in expanded:
+                peer_meta = TOOL_DISCOVERY_REGISTRY[peer]
+                if domain and peer_meta.domain != domain:
+                    continue
                 expanded.append(peer)
     expanded = expanded[:5]
     ranked = [_routing_card(name) for name in expanded]
