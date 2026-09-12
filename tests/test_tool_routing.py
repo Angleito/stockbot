@@ -78,6 +78,14 @@ def test_browse_rejects_bad_paths() -> None:
     assert "error" not in both and both["name"] == "get_short_interest"
 
 
+def test_browse_name_overrides_conflicting_coordinates() -> None:
+    conflicted = execute_tool("browse_tools", {"domain": "sec", "family": "filing-catalog", "name": "get_short_interest"}, "test", context=_CTX)
+    assert "error" not in conflicted
+    assert conflicted["name"] == "get_short_interest"
+    assert conflicted["domain"] == "finra"
+    assert conflicted["family"] == "short-interest"
+
+
 def test_invalid_arguments_return_repairable_shape_and_execute_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

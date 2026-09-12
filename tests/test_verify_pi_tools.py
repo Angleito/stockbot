@@ -601,8 +601,9 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
     monkeypatch.setattr(v, "run_pi", fake_run_pi)
     monkeypatch.setattr(v, "evaluate_attempt", fake_eval)
     monkeypatch.setattr(v, "evaluate_reachability_attempt", fake_eval)
-    def fake_routing(db_path: Path, tool: str, code: int, timed_out: bool, **k: object) -> tuple[bool, str]:
-        return fake_eval(db_path, tool, code, timed_out, **{x: y for x, y in k.items() if x != "expected_args"})  # type: ignore[arg-type]
+    def fake_routing(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3, expected_args: object = None) -> tuple[bool, str]:
+        del expected_args
+        return fake_eval(db_path, tool, code, timed_out, completed_override=completed_override, attempt=attempt)
     monkeypatch.setattr(v, "evaluate_routing_attempt", fake_routing)
     base: dict[str, object] = {"id": v.THESIS_ID_PLACEHOLDER}
     batch = tmp_path / "batch"
