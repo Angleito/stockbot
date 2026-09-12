@@ -1,5 +1,6 @@
 """Global static registry gate: every schema has handler/capability/domain/envelope."""
 
+import pytest
 from collections.abc import Mapping
 
 from app.security.action_policy import TOOL_DOMAINS
@@ -83,7 +84,7 @@ def test_discovery_coordinates_complete():
     assert {m.domain for m in tools.TOOL_DISCOVERY_REGISTRY.values()} <= set(tools.DOMAIN_DESCRIPTIONS)
 
 
-def test_conflicts_reciprocal_and_named():
+def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None:
     reg = tools.TOOL_DISCOVERY_REGISTRY
     assert reg["get_short_interest"].conflicts_with
     for name, meta in reg.items():
@@ -95,47 +96,37 @@ def test_conflicts_reciprocal_and_named():
             assert peer in " ".join(meta.reject_when), (name, peer)
     # one-way probe must fail validation
     import copy
-    probe = {k: copy.deepcopy(v) for k, v in reg.items()}
+    import app.tools as mod
+    probe: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
     victim = probe["get_fundamentals"]
     object.__setattr__(victim, "conflicts_with", tuple(c for c in victim.conflicts_with if c != "get_xbrl_facts"))
-    import app.tools as mod
-    orig = mod.TOOL_DISCOVERY_REGISTRY
-    mod.TOOL_DISCOVERY_REGISTRY = probe  # type: ignore[assignment]
+    monkeypatch.setattr(mod, "TOOL_DISCOVERY_REGISTRY", probe)
     try:
-        try:
-            mod.validate_tool_discovery_registry()
-        except AssertionError as exc:
-            assert "get_fundamentals" in str(exc) and "get_xbrl_facts" in str(exc)
-        else:
-            raise AssertionError("one-way conflict should fail")
-    finally:
-        mod.TOOL_DISCOVERY_REGISTRY = orig
+        mod.validate_tool_discovery_registry()
+    except AssertionError as exc:
+        assert "get_fundamentals" in str(exc) and "get_xbrl_facts" in str(exc)
+    else:
+        raise AssertionError("one-way conflict should fail")
     # unknown peer must fail with both names
-    probe2 = {k: copy.deepcopy(v) for k, v in reg.items()}
+    probe2: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
     object.__setattr__(probe2["get_fundamentals"], "conflicts_with", (*probe2["get_fundamentals"].conflicts_with, "no_such_tool"))
-    mod.TOOL_DISCOVERY_REGISTRY = probe2  # type: ignore[assignment]
+    monkeypatch.setattr(mod, "TOOL_DISCOVERY_REGISTRY", probe2)
     try:
-        try:
-            mod.validate_tool_discovery_registry()
-        except AssertionError as exc:
-            assert "get_fundamentals" in str(exc) and "no_such_tool" in str(exc)
-        else:
-            raise AssertionError("unknown conflict should fail")
-    finally:
-        mod.TOOL_DISCOVERY_REGISTRY = orig
+        mod.validate_tool_discovery_registry()
+    except AssertionError as exc:
+        assert "get_fundamentals" in str(exc) and "no_such_tool" in str(exc)
+    else:
+        raise AssertionError("unknown conflict should fail")
     # self conflict must fail
-    probe3 = {k: copy.deepcopy(v) for k, v in reg.items()}
+    probe3: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
     object.__setattr__(probe3["get_fundamentals"], "conflicts_with", (*probe3["get_fundamentals"].conflicts_with, "get_fundamentals"))
-    mod.TOOL_DISCOVERY_REGISTRY = probe3  # type: ignore[assignment]
+    monkeypatch.setattr(mod, "TOOL_DISCOVERY_REGISTRY", probe3)
     try:
-        try:
-            mod.validate_tool_discovery_registry()
-        except AssertionError as exc:
-            assert "get_fundamentals" in str(exc)
-        else:
-            raise AssertionError("self conflict should fail")
-    finally:
-        mod.TOOL_DISCOVERY_REGISTRY = orig
+        mod.validate_tool_discovery_registry()
+    except AssertionError as exc:
+        assert "get_fundamentals" in str(exc)
+    else:
+        raise AssertionError("self conflict should fail")
 
 
 def test_registry_version_covers_routing_metadata():

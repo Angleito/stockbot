@@ -13,14 +13,18 @@ Bounded text window of one filing document by accession number for targeted exce
 ## Choose when
 
 - Reading a specific section such as MD&A or risk factors from a known accession.
+- What the main document in a filing says; main-document text for a known accession.
 
 ## Reject when
 
+- Do NOT use for filing metadata by accession (get_sec_filing).
+- Do NOT use to list a filing's documents or exhibits (list_sec_documents).
 - Not for what-changed questions.
 
 ## Conflicts with
 
-None
+- get_sec_filing
+- list_sec_documents
 
 ## Related tools
 
@@ -33,7 +37,7 @@ None
 
 ## Required arguments
 
-- `accession_no` (string)
+- `accession_no` (string): SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.
 
 ## Optional arguments
 

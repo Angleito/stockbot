@@ -17,14 +17,17 @@ Deterministic diffs between a holder's consecutive 13D/G filings: share and perc
 ## Reject when
 
 - Not for the current snapshot of holders (get_beneficial_ownership).
+- Not for relationship links in either direction (search_sec_relationships).
 
 ## Conflicts with
 
 - get_beneficial_ownership
+- search_sec_relationships
 
 ## Related tools
 
 - get_beneficial_ownership
+- search_sec_relationships
 
 ## Prerequisites
 

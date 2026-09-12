@@ -12,20 +12,20 @@ Append an operator note or journal entry to a thesis log. Pass the thesis ID as 
 
 ## Choose when
 
-- Logging a dated note or observation against a thesis.
+- Appending an operator note about ongoing monitoring without creating or changing a watch rule.
 
 ## Reject when
 
 - Not for revising claims.
+- Not for setting alerts (thesis_watch).
 
 ## Conflicts with
 
-None
+- thesis_watch
 
 ## Related tools
 
-- thesis_show
-- thesis_refine
+None
 
 ## Prerequisites
 

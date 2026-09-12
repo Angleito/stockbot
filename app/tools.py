@@ -222,7 +222,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Returns one filing's record (filer, subject when known, form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number. When the accession number is unknown, find it with list_sec_filings.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
+                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
                 "required": ["accession_no"]
             }
         }
@@ -234,7 +234,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Lists the documents and exhibits attached to one filing by accession number. When the accession number is unknown, find it with list_sec_filings.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
+                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
                 "required": ["accession_no"]
             }
         }
@@ -246,7 +246,7 @@ TOOLS: list[dict[str, object]] = [
             "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history. When the accession is already known, pass it; use get_material_events only to discover what changed.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string"}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
+                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
                 "required": ["accession_no"]
             }
         }
@@ -2103,9 +2103,12 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_dataset",
         time_mode="current",
         summary="One FINRA dataset's fields, types, filter values, and supported methods.",
-        choose_when=("Learning a named FINRA dataset's fields, types, filters, and coverage before querying.",),
-        reject_when=("Not for analyzed briefings.",),
-        conflicts_with=(),
+        choose_when=("Learning a named FINRA dataset's fields, types, filters, and coverage before querying.", "what is in.", "fields and coverage.",),
+        reject_when=(
+            "Not for finding which dataset covers a question (list_finra_datasets).",
+            "Not for analyzed briefings.",
+        ),
+        conflicts_with=("list_finra_datasets",),
         related_tools=("list_finra_datasets", "query_finra", "get_finra_datapoints",),
         prerequisites=(),
     ),
@@ -2213,9 +2216,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Finding who owns more than 5% of a company.",),
         reject_when=(
             "Not for stake changes over time (get_ownership_changes).",
+            "Not for relationship links in either direction (search_sec_relationships).",
             "Answer from these records; do not open filings or pull changes unless asked.",
         ),
-        conflicts_with=("get_ownership_changes",),
+        conflicts_with=("get_ownership_changes", "search_sec_relationships",),
         related_tools=("get_ownership_changes", "search_sec_relationships",),
         prerequisites=(),
     ),
@@ -2393,9 +2397,12 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="latest_or_as_of",
         summary="Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions.",
         choose_when=("Comparing consecutive 13D/G filings for changes in a holder's stake.",),
-        reject_when=("Not for the current snapshot of holders (get_beneficial_ownership).",),
-        conflicts_with=("get_beneficial_ownership",),
-        related_tools=("get_beneficial_ownership",),
+        reject_when=(
+            "Not for the current snapshot of holders (get_beneficial_ownership).",
+            "Not for relationship links in either direction (search_sec_relationships).",
+        ),
+        conflicts_with=("get_beneficial_ownership", "search_sec_relationships",),
+        related_tools=("get_beneficial_ownership", "search_sec_relationships",),
         prerequisites=(),
     ),
     "get_planned_insider_sales": ToolDiscovery(
@@ -2455,9 +2462,13 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_document",
         time_mode="as_of",
         summary="Bounded text window of one filing document by accession number for targeted excerpt reading.",
-        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.",),
-        reject_when=("Not for what-changed questions.",),
-        conflicts_with=(),
+        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.", "What the main document in a filing says; main-document text for a known accession.",),
+        reject_when=(
+            "Do NOT use for filing metadata by accession (get_sec_filing).",
+            "Do NOT use to list a filing's documents or exhibits (list_sec_documents).",
+            "Not for what-changed questions.",
+        ),
+        conflicts_with=("get_sec_filing", "list_sec_documents",),
         related_tools=("get_sec_filing", "get_material_events",),
         prerequisites=(),
     ),
@@ -2473,9 +2484,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Fetching filing metadata after its accession number is known.",),
         reject_when=(
             "Does not discover filings; list or search for the accession when unknown.",
-            "Answer from the filing record; do not retrieve document text unless the question asks for it.",
+            "Do NOT use for document text windows (get_sec_document).",
+            "Do NOT use to list a filing's documents or exhibits (list_sec_documents).",
         ),
-        conflicts_with=(),
+        conflicts_with=("get_sec_document", "list_sec_documents",),
         related_tools=("list_sec_filings", "list_sec_documents",),
         prerequisites=(),
     ),
@@ -2511,7 +2523,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for exact source values (get_finra_datapoints).",
             "Do NOT use for analyzed briefings or trends over a dataset (query_finra).",
         ),
-        conflicts_with=("get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "query_finra",),
+        conflicts_with=("get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "query_finra", "get_short_interest_leaderboard",),
         related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "get_short_interest_leaderboard",),
         prerequisites=(),
     ),
@@ -2526,7 +2538,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         summary="Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares.",
         choose_when=("Screening which stocks are the most shorted across the market.",),
         reject_when=("Do NOT use for one ticker's short interest (get_short_interest).",),
-        conflicts_with=(),
+        conflicts_with=("get_short_interest",),
         related_tools=("get_short_interest",),
         prerequisites=(),
     ),
@@ -2669,8 +2681,8 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="current",
         summary="Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support.",
         choose_when=("Finding which FINRA dataset covers a question before querying.",),
-        reject_when=("Does not return dataset fields or schemas.",),
-        conflicts_with=(),
+        reject_when=("Does not return dataset fields or schemas (describe_finra_dataset).",),
+        conflicts_with=("describe_finra_dataset",),
         related_tools=("describe_finra_dataset",),
         prerequisites=(),
     ),
@@ -2684,8 +2696,11 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="as_of",
         summary="Index of documents and exhibits attached to one filing, looked up by accession number.",
         choose_when=("Listing documents and exhibits attached to a known filing accession.",),
-        reject_when=("Does not return document text.",),
-        conflicts_with=(),
+        reject_when=(
+            "Do NOT use for document text windows (get_sec_document).",
+            "Do NOT use for filing metadata records (get_sec_filing).",
+        ),
+        conflicts_with=("get_sec_document", "get_sec_filing",),
         related_tools=("get_sec_filing", "get_sec_document", "list_sec_filings",),
         prerequisites=(),
     ),
@@ -2698,7 +2713,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_entity",
         time_mode="date_range_or_as_of",
         summary="List EDGAR filings for an exact ticker or CIK, filterable by form and date range.",
-        choose_when=("Listing filings for an exact ticker or CIK, optionally filtered by form or date.",),
+        choose_when=("Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.",),
         reject_when=(
             "Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.",
             "Do NOT use for disclosure search without known identifier (search_sec_filings).",
@@ -2752,7 +2767,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="multi_entity",
         time_mode="date_range_or_as_of",
         summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
-        choose_when=("Searching SEC filing text or mentions when the accession number is unknown.",),
+        choose_when=("Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.", "SEC filings or filing full-text search when accession is unknown.",),
         reject_when=(
             "Not a filing lister for a known ticker (list_sec_filings).",
             "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",
@@ -2772,10 +2787,12 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="latest_or_as_of",
         summary="Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links.",
         choose_when=("Mapping who owns, holds, or transacts with an entity in either direction.",),
-        reject_when=("Not for current 5%+ stake sizes.",),
-        conflicts_with=(),
+        reject_when=(
+            "Not for current 5%+ stake sizes (get_beneficial_ownership).",
+            "Not for consecutive-filing stake diffs (get_ownership_changes).",
+        ),
+        conflicts_with=("get_beneficial_ownership", "get_ownership_changes",),
         related_tools=("get_beneficial_ownership", "get_ownership_changes",),
-        prerequisites=(),
     ),
     "search_web": ToolDiscovery(
         domain="web",
@@ -2817,10 +2834,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_thesis",
         time_mode="current",
         summary="Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>.",
-        choose_when=("Logging a dated note or observation against a thesis.",),
-        reject_when=("Not for revising claims.",),
-        conflicts_with=(),
-        related_tools=("thesis_show", "thesis_refine",),
+        choose_when=("Appending an operator note about ongoing monitoring without creating or changing a watch rule.",),
+        reject_when=("Not for revising claims.", "Not for setting alerts (thesis_watch).",),
+        conflicts_with=("thesis_watch",),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -2858,15 +2874,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
     "thesis_watch": ToolDiscovery(
         domain="thesis",
         family="lifecycle",
-        intent="add_thesis_watch",
+        intent="list_or_add_thesis_watch",
         output_kind="governed_action",
         source="local",
         entity_scope="single_thesis",
         time_mode="current",
-        summary="Add a monitoring rule that alerts when a thesis condition triggers.",
-        choose_when=("Setting an alert on a thesis invalidator or trigger.",),
-        reject_when=("Not for logging notes.",),
-        conflicts_with=(),
+        summary="List existing watch rules, or add a validated monitoring rule that alerts when a thesis condition triggers.",
+        choose_when=("Listing what is watched for a thesis, or setting an alert on an invalidator or trigger; what am I watching for, watch rules.",),
+        reject_when=("Not for logging notes (thesis_journal).",),
+        conflicts_with=("thesis_journal",),
         related_tools=("thesis_show",),
         prerequisites=(),
         direct_activation=False,
@@ -3076,8 +3092,8 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     name/domain/family/intent/output_kind/summary/choose_when/reject_when/related names
     (1 per token) > domain-name overlap (1). Ties break alphabetically for
     determinism. A relative-noise margin keeps only hits within 4 points of
-    the best score. Returns compact routing cards only: the top 3, plus ranks
-    4-5 while tied with rank 3. Adds ambiguity groups over conflicts_with.
+    the best score. Returns compact routing cards only: the top 3 exact.
+    Confusable siblings surface only via ambiguity groups over conflicts_with.
     """
     del model
     query = str(args.get("query") or "")
@@ -3120,13 +3136,6 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
         return (-hit[0], hit[1])
     scored.sort(key=_rank_key)
     top = scored[:3]
-    if len(scored) > 3:
-        third = scored[2][0]
-        for score, name in scored[3:5]:
-            if score == third:
-                top.append((score, name))
-            else:
-                break
     ranked_names = [name for _, name in top]
     ranked = [_routing_card(name) for name in ranked_names]
     ambiguous, groups = _ambiguity_groups(ranked_names)

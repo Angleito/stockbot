@@ -12,7 +12,7 @@ List EDGAR filings for an exact ticker or CIK, filterable by form and date range
 
 ## Choose when
 
-- Listing filings for an exact ticker or CIK, optionally filtered by form or date.
+- Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.
 
 ## Reject when
 

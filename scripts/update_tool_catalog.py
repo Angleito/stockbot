@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import DOMAIN_DESCRIPTIONS, TOOLS, TOOL_DISCOVERY_REGISTRY, _tool_function  # noqa: E402
+from app.tools import DOMAIN_DESCRIPTIONS, TOOLS, TOOL_DISCOVERY_REGISTRY, _discovery_keywords, _tool_function  # noqa: E402
 
 CATALOG_ROOT = Path(__file__).resolve().parent.parent / ".stockbot" / "tools"
 
@@ -111,6 +111,19 @@ def _sort_key(name: str) -> tuple[str, str, str]:
     return (meta.domain, meta.family, name)
 
 
+def _card_keywords(name: str) -> list[str]:
+    """Routing keywords derived from existing registry fields (no new schema)."""
+    meta = TOOL_DISCOVERY_REGISTRY[name]
+    return sorted(_discovery_keywords(
+        " ".join((
+            name.replace("_", " "),
+            meta.intent.replace("_", " "),
+            meta.summary,
+            " ".join(meta.choose_when),
+        ))
+    ))
+
+
 def index_yaml(names: list[str]) -> str:
     domains = sorted({TOOL_DISCOVERY_REGISTRY[n].domain for n in names})
     lines = ["version: 2\n", "domains:\n"]
@@ -136,6 +149,8 @@ def index_yaml(names: list[str]) -> str:
         lines.append(f"    entity_scope: {meta.entity_scope}\n")
         lines.append(f"    time_mode: {meta.time_mode}\n")
         lines.append(f"    summary: {_yaml_str(meta.summary)}\n")
+        lines.append("    version: 2\n")
+        lines.append(f"    keywords: [{', '.join(_card_keywords(name))}]\n")
     return "".join(lines)
 
 

@@ -16,11 +16,13 @@ Ownership and transaction relationship links for an entity: 13D/G owners, 13F ho
 
 ## Reject when
 
-- Not for current 5%+ stake sizes.
+- Not for current 5%+ stake sizes (get_beneficial_ownership).
+- Not for consecutive-filing stake diffs (get_ownership_changes).
 
 ## Conflicts with
 
-None
+- get_beneficial_ownership
+- get_ownership_changes
 
 ## Related tools
 

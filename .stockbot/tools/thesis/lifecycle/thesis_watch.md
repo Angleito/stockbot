@@ -2,25 +2,25 @@
 
 Domain: thesis
 Family: lifecycle
-Intent: add_thesis_watch
+Intent: list_or_add_thesis_watch
 Output kind: governed_action
 Source: local
 Entity scope: single_thesis
 Time mode: current
 
-Add a monitoring rule that alerts when a thesis condition triggers.
+List existing watch rules, or add a validated monitoring rule that alerts when a thesis condition triggers.
 
 ## Choose when
 
-- Setting an alert on a thesis invalidator or trigger.
+- Listing what is watched for a thesis, or setting an alert on an invalidator or trigger; what am I watching for, watch rules.
 
 ## Reject when
 
-- Not for logging notes.
+- Not for logging notes (thesis_journal).
 
 ## Conflicts with
 
-None
+- thesis_journal
 
 ## Related tools
 

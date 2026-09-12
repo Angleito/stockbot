@@ -13,14 +13,17 @@ One FINRA dataset's fields, types, filter values, and supported methods.
 ## Choose when
 
 - Learning a named FINRA dataset's fields, types, filters, and coverage before querying.
+- what is in.
+- fields and coverage.
 
 ## Reject when
 
+- Not for finding which dataset covers a question (list_finra_datasets).
 - Not for analyzed briefings.
 
 ## Conflicts with
 
-None
+- list_finra_datasets
 
 ## Related tools
 

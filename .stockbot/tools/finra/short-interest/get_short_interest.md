@@ -28,6 +28,7 @@ Biweekly short position for one ticker: FINRA short interest, days to cover, per
 - get_reg_sho_volume
 - get_short_pressure_profile
 - query_finra
+- get_short_interest_leaderboard
 
 ## Related tools
 

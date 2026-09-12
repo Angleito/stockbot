@@ -47,9 +47,10 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
-// Permanent discovery set: always model-visible. Every other registered
-// research schema stays hidden until search_tools activates it; inactive
-// direct schemas are never callable, with call_tool as the active fallback.
+// Stable visible grammar: the model permanently sees only DISCOVERY_TOOLS
+// plus pre-existing host tools. Every other registered research schema stays
+// registered passthrough but inactive behind call_tool; the roster is never
+// mutated after discovery.
 export const DISCOVERY_TOOLS = ["browse_tools", "call_tool", "search_tools"];
 
 // Absolute bridge paths derived from this file's location: Pi's extension
@@ -383,12 +384,12 @@ export function createBridgeClient(
  return { callBridge };
 }
 
-export default async function stockbotExtension(pi: ExtensionAPI) {
+export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: () => ChildProcessWithoutNullStreams) {
  registerYoutubeAnalytics(pi);
- const { callBridge } = createBridgeClient();
+ const { callBridge } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
 
  // --- describe: prompt + RESEARCH tool registry ---
- const describe = await callBridge({ op: "describe" }, 30_000);
+ const [describe, doctor] = await Promise.all([callBridge({ op: "describe" }, 30_000), callBridge({ op: "doctor" }, 30_000)]);
  const systemPrompt = typeof describe.system_prompt === "string" ? describe.system_prompt : "";
  const entries = Array.isArray(describe.tools) ? describe.tools : [];
  // Loud handshake: silent 0-tool mode is unreachable. Any describe/doctor
@@ -399,13 +400,10 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   bridgeDown = true;
   bridgeDetail = typeof describe.error === "string" ? describe.error : "empty prompt/tools";
   console.error(`[stockbot] bridge describe failed: ${bridgeDetail}`);
- } else {
-  const doctor = await callBridge({ op: "doctor" }, 30_000);
-  if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
-   bridgeDown = true;
-   bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
-   console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
-  }
+ } else if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
+  bridgeDown = true;
+  bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
+  console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
  }
  const registeredResearch = new Set<string>();
  for (const entry of bridgeDown ? [] : entries) {
@@ -413,12 +411,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (!fn) continue;
   registeredResearch.add(fn.name);
  }
- // Direct-activation allowlist from the bridge; missing/malformed fails
- // closed to empty, leaving call_tool as the usable route.
- const directRaw: unknown = "direct_tool_names" in describe ? describe.direct_tool_names : undefined;
- const directResearch = new Set<string>(
-  Array.isArray(directRaw) && directRaw.every((n): n is string => typeof n === "string") ? directRaw.filter((n) => registeredResearch.has(n)) : [],
- );
 
  for (const entry of bridgeDown ? [] : entries) {
   const fn = describeFn(entry);
@@ -468,8 +460,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
       .filter((n): n is string => typeof n === "string" && registeredResearch.has(n));
      for (const m of matches) routing.discoveredTools.add(m);
      routing.discoveryHadMatches = matches.length > 0;
-     // Zero matches replaces the previous dynamic slice with none.
-     activateResearch(matches);
     }
     if (fn.name === "browse_tools" && !failed && !invalid) {
      const meta = inner !== undefined && inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : undefined;
@@ -546,11 +536,10 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
-  // Independent prompt boundary: reset routing and drop the previous
-  // dynamic slice. A queued routing continuation reuses its state instead.
+  // Independent prompt boundary: reset routing. A queued routing
+  // continuation reuses its state instead.
   if (!routing.continuationPending) {
    resetRouting();
-   activateResearch([]);
   }
   pendingQuestion = event.prompt;
   if (bridgeDown)
@@ -635,16 +624,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   routing.discoveryHadMatches = false;
   routing.prematureStopDetected = false;
  }
- // Central activation: host tools + permanent discovery + at most three
- // direct-eligible matches. Each search replaces the previous slice, so at
- // most six Stockbot schemas are ever active.
- function activateResearch(names: string[]): void {
-  const slice = names.filter((n) => registeredResearch.has(n) && directResearch.has(n)).slice(0, 3);
-  routing.activeDiscoveredTools = slice;
-  const permanent = DISCOVERY_TOOLS.filter((n) => registeredResearch.has(n));
-  pi.setActiveTools([...new Set([...hostTools, ...permanent, ...slice])]);
-  refreshStatus(lastCtx);
- }
+
  const toolStartedAt = new Map<string, string>();
  function emit(payload: Json): Promise<Json> {
   // ID-correlated like tool calls; never fatal (observability never breaks research).
@@ -677,10 +657,14 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
-  // Capture non-Stockbot host tools once; every activation preserves them
-  // alongside the permanent discovery set.
+  // Capture non-Stockbot host tools once and pin the stable visible grammar:
+  // host tools plus the permanent discovery set. Direct research schemas stay
+  // registered but inactive behind call_tool; the roster never changes after
+  // discovery, keeping the provider prompt cache stable.
   hostTools = pi.getActiveTools().filter((n) => !registeredResearch.has(n));
-  activateResearch([]);
+  const permanent = DISCOVERY_TOOLS.filter((n) => registeredResearch.has(n));
+  pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
+  refreshStatus(lastCtx);
  });
  pi.on("agent_start", () => {
   // A queued routing continuation reuses the same run, recorder/session,
@@ -690,7 +674,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    return;
   }
   resetRouting();
-  activateResearch([]);
   const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
   runId = trustedRunId ? trustedRunId : crypto.randomUUID();
   seq = 0;

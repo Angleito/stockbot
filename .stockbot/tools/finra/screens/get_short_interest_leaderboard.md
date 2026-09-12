@@ -20,7 +20,7 @@ Market-wide most-shorted screen: ranked stocks by short interest as a percent of
 
 ## Conflicts with
 
-None
+- get_short_interest
 
 ## Related tools
 

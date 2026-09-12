@@ -16,11 +16,13 @@ Index of documents and exhibits attached to one filing, looked up by accession n
 
 ## Reject when
 
-- Does not return document text.
+- Do NOT use for document text windows (get_sec_document).
+- Do NOT use for filing metadata records (get_sec_filing).
 
 ## Conflicts with
 
-None
+- get_sec_document
+- get_sec_filing
 
 ## Related tools
 
@@ -34,7 +36,7 @@ None
 
 ## Required arguments
 
-- `accession_no` (string)
+- `accession_no` (string): SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.
 
 ## Optional arguments
 

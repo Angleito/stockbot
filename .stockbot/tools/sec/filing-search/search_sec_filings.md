@@ -12,7 +12,8 @@ General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q rou
 
 ## Choose when
 
-- Searching SEC filing text or mentions when the accession number is unknown.
+- Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.
+- SEC filings or filing full-text search when accession is unknown.
 
 ## Reject when
 

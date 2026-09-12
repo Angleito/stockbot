@@ -16,6 +16,7 @@
     "verify-holdout": "venv/bin/python scripts/verify_pi_tools.py --holdout",
     "verify-pi": "venv/bin/python scripts/verify_pi_tools.py",
     "verify-pi-one": "venv/bin/python scripts/verify_pi_tools.py --tool",
+    "verify:e2e": "FINRA_USE_MOCK=0 venv/bin/python scripts/verify_pi_tools.py --agent-loop",
     "verify-integrity": "venv/bin/python scripts/verify_type_escape_hatches.py",
     "update-tool-inventory": "venv/bin/python scripts/update_tool_inventory.py",
     "update-tool-catalog": "venv/bin/python scripts/update_tool_catalog.py",

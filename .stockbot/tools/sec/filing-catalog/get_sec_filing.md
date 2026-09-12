@@ -17,11 +17,13 @@ One filing's record by accession number: filer, form, dates, primary document, s
 ## Reject when
 
 - Does not discover filings; list or search for the accession when unknown.
-- Answer from the filing record; do not retrieve document text unless the question asks for it.
+- Do NOT use for document text windows (get_sec_document).
+- Do NOT use to list a filing's documents or exhibits (list_sec_documents).
 
 ## Conflicts with
 
-None
+- get_sec_document
+- list_sec_documents
 
 ## Related tools
 
@@ -34,7 +36,7 @@ None
 
 ## Required arguments
 
-- `accession_no` (string)
+- `accession_no` (string): SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.
 
 ## Optional arguments
 

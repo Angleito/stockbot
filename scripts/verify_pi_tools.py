@@ -209,13 +209,19 @@ def classify_routing_failure(db_path: Path, expected_tool: str, *, attempt: int,
             pass
 
 
-def generate_confusion_cases() -> list[dict[str, object]]:
+class ConfusionCase(TypedDict):
+    expected_tool: str
+    prompt: str
+    arguments: dict[str, object]
+    pair: list[str]
+
+def generate_confusion_cases() -> list[ConfusionCase]:
     """Two directed cases per undirected conflicts_with edge, from registry semantics."""
     seen: set[frozenset[str]] = set()
     for name, meta in TOOL_DISCOVERY_REGISTRY.items():
         for peer in meta.conflicts_with:
             seen.add(frozenset({name, peer}))
-    cases: list[dict[str, object]] = []
+    cases: list[ConfusionCase] = []
     for pair in sorted(sorted(p) for p in seen):
         a, b = pair[0], pair[1]
         for expected in (a, b):
@@ -558,6 +564,24 @@ def build_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
         )
 
 
+# Ordered natural-discovery path for routing attempts 1-2: one search, at most
+# one browse, then exactly one call_tool dispatch. Browse with name
+# only (never combine name with domain/family); copy required_arguments and
+# schema keys verbatim into call_tool. Also states the unsupported-request
+# shape (clean zero-match search, no research call, plain-language limitation
+# answer) per evaluate_completion_attempt.
+_NATURAL_ROUTING_GUIDANCE = (
+    " To answer, first call search_tools once with a single query, then call "
+    "browse_tools with name only (never combine name with domain or family) "
+    "at most once to confirm required_arguments, then call call_tool exactly "
+    "once with the single best-matching research tool, copying required argument "
+    "keys verbatim from the discovery card. Dispatch research tools "
+    "only via call_tool; never chain a second research tool (dispatch an update "
+    "directly instead of reading the record first). If search_tools returns "
+    "zero matches, call no research tool and answer plainly that the request "
+    "is unsupported."
+)
+
 def _natural_prompt_v1(tool: str, args: Mapping[str, object]) -> str:
     """Ordinary user wording for attempt 1; never names the tool."""
     case = VERIFY_CASES.get(tool)
@@ -566,7 +590,7 @@ def _natural_prompt_v1(tool: str, args: Mapping[str, object]) -> str:
     natural = case["natural_v1"]
     if THESIS_ID_PLACEHOLDER in natural and "id" in args:
         natural = natural.replace(THESIS_ID_PLACEHOLDER, str(args["id"]))
-    return natural
+    return natural + _NATURAL_ROUTING_GUIDANCE
 
 
 def _natural_prompt_v2(tool: str, args: Mapping[str, object]) -> str:
@@ -577,7 +601,7 @@ def _natural_prompt_v2(tool: str, args: Mapping[str, object]) -> str:
     natural = case["natural_v2"]
     if THESIS_ID_PLACEHOLDER in natural and "id" in args:
         natural = natural.replace(THESIS_ID_PLACEHOLDER, str(args["id"]))
-    return natural
+    return natural + _NATURAL_ROUTING_GUIDANCE
 
 
 def build_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
@@ -602,7 +626,9 @@ def build_routing_explicit_prompt(tool: str, args: Mapping[str, object]) -> str:
 
 
 def build_routing_attempt_prompt(tool: str, args: Mapping[str, object], attempt: int) -> str:
-    """Routing prompts: attempts 1-2 share natural traces; attempt 3+ is strict direct dispatch."""
+    """Routing prompts: attempts 1-2 are natural traces carrying the ordered
+    search -> browse/describe -> call_tool path plus the zero-match
+    unsupported-request shape; attempt 3+ is strict direct dispatch."""
     if attempt == 1:
         return _natural_prompt_v1(tool, args)
     if attempt == 2:
@@ -1356,8 +1382,9 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
                 seed_finra_fixture(store_dir, durable)
             if tool in THESIS_ID_TOOLS:
                 fixture_id = ensure_thesis_fixture(store_dir.resolve())
-                if args.get("id") == THESIS_ID_PLACEHOLDER:
-                    args["id"] = fixture_id
+                for key, value in args.items():
+                    if value == THESIS_ID_PLACEHOLDER:
+                        args[key] = fixture_id
             if prompt_override is not None:
                 prompt = prompt_override
             elif attempt >= 3:
@@ -1633,7 +1660,7 @@ def run_confusion() -> int:
     durable = get_data_root()
     # group by undirected pair for per-pair accuracy
     from collections import defaultdict
-    by_pair: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    by_pair: dict[tuple[str, str], list[ConfusionCase]] = defaultdict(list)
     for c in cases:
         _raw_pair = c.get("pair")
         assert isinstance(_raw_pair, list)
@@ -1649,7 +1676,7 @@ def run_confusion() -> int:
         pair_ok = 0
         for c in by_pair[pair]:
             expected = str(c["expected_tool"])
-            base_args = dict(c["arguments"])  # type: ignore[arg-type]
+            base_args = dict(c["arguments"])
             prompt = str(c["prompt"])
             result = run_verification_attempt(expected, 1, base_args, root / f"{pair[0]}-vs-{pair[1]}", cwd, durable, 1, prompt_override=prompt)
             db_path = Path(result.db) if result.db else root / expected / "attempt-1" / "runs.sqlite"
