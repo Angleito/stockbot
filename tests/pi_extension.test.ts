@@ -1040,6 +1040,13 @@ test("browse_tools round-trips the hierarchy", async () => {
 });
 
 
+function matchNames(details: unknown): string[] {
+	const inner = ((details as Json).result ?? {}) as Json;
+	const meta = (inner.meta ?? {}) as Json;
+	const raw = Array.isArray(meta.matches) ? (meta.matches as unknown[]) : [];
+	return raw.map((m) => (typeof m === "string" ? m : (m as Json).name as string));
+}
+
 test("family browse records candidates without activating them", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
@@ -1050,14 +1057,13 @@ test("family browse records candidates without activating them", async () => {
 	const browse = await bridgeTool(tools, "browse_tools");
 	const before = [...active];
 	await browse.execute("call-browse-fam", { domain: "finra", family: "short-interest" });
-	// Browse surfaces names but never changes the dynamic slice.
+	// Browse surfaces names but never changes the stable roster.
 	expect(active).toEqual(before);
-	// Search still activates at most three direct schemas.
+	// Search returns discovery evidence without touching the roster.
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search", { query: "short interest" });
-	const research = active.filter((n) => !(DISCOVERY_TOOLS as string[]).includes(n) && n !== "builtin-tool");
-	expect(research.length).toBeLessThanOrEqual(3);
-	expect(active).toContain("get_short_interest");
+	const found = await search.execute("call-search", { query: "short interest" });
+	expect(matchNames(found.details)).toContain("get_short_interest");
+	expect(active).toEqual(before);
 	// Inactive research stays reachable through unchanged call_tool fallback.
 	const call = await bridgeTool(tools, "call_tool");
 	const out = await call.execute("call-fallback", { name: "get_finra_datapoints", arguments: { dataset: "otcMarket/consolidatedShortInterest", ticker: "AAPL", limit: 1 } });
@@ -1101,38 +1107,63 @@ test("call_tool rejects unknown names and invalid args without executing", async
 	expect(typeof invalidInner.parameters).toBe("object");
 });
 
-test("search_tools activates matching direct schemas", async () => {
+test("search_tools returns discovery evidence without changing the roster", async () => {
 	const { handlers, pi, tools, active, visible } = fakePiHost();
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
+	active.push("builtin-tool");
 	await handlers["session_start"]({}, ctx);
 	await handlers["before_agent_start"]({ prompt: "short interest" });
 	await handlers["agent_start"]({});
+	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search", { query: "short interest" });
-	expect(active).toContain("get_short_interest");
-	expect(active).toContain("get_short_interest_leaderboard");
+	const found = await search.execute("call-search", { query: "short interest" });
+	const names = matchNames(found.details);
+	expect(names).toContain("get_short_interest");
+	expect(names).toContain("get_short_interest_leaderboard");
+	expect(active).toEqual(before);
 	for (const name of DISCOVERY_TOOLS) expect(active).toContain(name);
-	const research = active.filter((n) => !(DISCOVERY_TOOLS as string[]).includes(n) && n !== "builtin-tool");
-	expect(research.length).toBeLessThanOrEqual(3);
-	for (const t of visible()) expect(active).toContain(t.name);
+	expect(active).toContain("builtin-tool");
+	for (const t of visible()) expect([...DISCOVERY_TOOLS, "builtin-tool"]).toContain(t.name);
 	expect(visible().map((t) => t.name)).not.toContain("get_fundamentals");
+	// Discovered research dispatches via call_tool.
+	const call = await bridgeTool(tools, "call_tool");
+	const out = await call.execute("call-dispatch", { name: "get_finra_datapoints", arguments: { dataset: "otcMarket/consolidatedShortInterest", ticker: "AAPL", limit: 1 } });
+	const inner = (((out.details as Json).result ?? {}) as Json);
+	expect(inner.error_type).not.toBe("unknown_tool");
 });
 
-test("search activation caps the dynamic slice at three", async () => {
+test("search evidence caps matches at three", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
 	await handlers["session_start"]({}, ctx);
 	await handlers["before_agent_start"]({ prompt: "GME" });
 	await handlers["agent_start"]({});
+	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search", { query: "GME short interest" });
-	const research = active.filter((n) => !(DISCOVERY_TOOLS as string[]).includes(n));
-	expect(research.length).toBe(3);
+	const found = await search.execute("call-search", { query: "GME short interest" });
+	expect(matchNames(found.details).length).toBe(3);
+	expect(active).toEqual(before);
 });
 
-test("a second search replaces the previous dynamic slice", async () => {
+test("a second search returns fresh evidence; roster stays permanent", async () => {
+	const { handlers, pi, tools, active } = fakePiHost();
+	await stockbotExtension(pi);
+	const ctx = { ui: { setStatus: () => { } } };
+	await handlers["session_start"]({}, ctx);
+	await handlers["before_agent_start"]({ prompt: "short" });
+	await handlers["agent_start"]({});
+	const before = [...active];
+	const search = await bridgeTool(tools, "search_tools");
+	const first = await search.execute("call-search-1", { query: "short interest" });
+	expect(matchNames(first.details)).toContain("get_short_interest");
+	const second = await search.execute("call-search-2", { query: "What is NVDA EPS?" });
+	expect(matchNames(second.details)).toContain("get_fundamentals");
+	expect(active).toEqual(before);
+});
+
+test("prompts keep the permanent roster", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
@@ -1140,31 +1171,16 @@ test("a second search replaces the previous dynamic slice", async () => {
 	await handlers["before_agent_start"]({ prompt: "short" });
 	await handlers["agent_start"]({});
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search-1", { query: "short interest" });
-	expect(active).toContain("get_short_interest");
-	await search.execute("call-search-2", { query: "What is NVDA EPS?" });
-	expect(active).toContain("get_fundamentals");
-	expect(active).not.toContain("get_short_interest");
-	expect(active).not.toContain("get_short_interest_leaderboard");
-});
-
-test("next prompt resets the dynamic slice", async () => {
-	const { handlers, pi, tools, active } = fakePiHost();
-	await stockbotExtension(pi);
-	const ctx = { ui: { setStatus: () => { } } };
-	await handlers["session_start"]({}, ctx);
-	await handlers["before_agent_start"]({ prompt: "short" });
-	await handlers["agent_start"]({});
-	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search", { query: "short interest" });
-	expect(active).toContain("get_short_interest");
+	const found = await search.execute("call-search", { query: "short interest" });
+	expect(matchNames(found.details)).toContain("get_short_interest");
+	const permanent = [...active];
 	await handlers["before_agent_start"]({ prompt: "something else" });
 	await handlers["agent_start"]({});
-	expect(active).not.toContain("get_short_interest");
+	expect(active).toEqual(permanent);
 	for (const name of DISCOVERY_TOOLS) expect(active).toContain(name);
 });
 
-test("activated direct tools execute; inactive direct calls block", async () => {
+test("research executes via call_tool while direct calls stay blocked", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "stockbot-direct-"));
 	const prevRoot = process.env.STOCKBOT_DATA_DIR;
 	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
@@ -1175,18 +1191,23 @@ test("activated direct tools execute; inactive direct calls block", async () => 
 		await handlers["session_start"]({}, ctx);
 		await handlers["before_agent_start"]({ prompt: "thesis" });
 		await handlers["agent_start"]({});
+		const before = [...active];
 		const blocked = (await handlers["tool_call"]({ toolName: "thesis_show" })) as unknown as Record<string, unknown>;
 		expect(blocked.block).toBe(true);
 		const search = await bridgeTool(tools, "search_tools");
-		await search.execute("call-search", { query: "thesis" });
-		expect(active).toContain("thesis_show");
-		const allowed = (await handlers["tool_call"]({ toolName: "thesis_show" })) as unknown as Record<string, unknown> | undefined;
-		expect(allowed?.block).not.toBe(true);
-		const direct = await bridgeTool(tools, "thesis_show");
-		const out = await direct.execute("call-direct", {});
-		expect(out.content[0].text.length).toBeGreaterThan(0);
-		const stillBlocked = (await handlers["tool_call"]({ toolName: "get_fundamentals" })) as unknown as Record<string, unknown>;
+		const found = await search.execute("call-search", { query: "thesis show" });
+		expect(matchNames(found.details)).toContain("thesis_show");
+		expect(active).toEqual(before);
+		const stillBlocked = (await handlers["tool_call"]({ toolName: "thesis_show" })) as unknown as Record<string, unknown>;
 		expect(stillBlocked.block).toBe(true);
+		const call = await bridgeTool(tools, "call_tool");
+		const out = await call.execute("call-thesis", { name: "thesis_show", arguments: { id: "missing-test-thesis" } });
+		expect(out.content[0].text.length).toBeGreaterThan(0);
+		const inner = (((out.details as Json).result ?? {}) as Json);
+		expect(inner.error_type).not.toBe("unknown_tool");
+		expect(inner.error_type).not.toBe("invalid_tool_arguments");
+		const fundsBlocked = (await handlers["tool_call"]({ toolName: "get_fundamentals" })) as unknown as Record<string, unknown>;
+		expect(fundsBlocked.block).toBe(true);
 	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
@@ -1203,9 +1224,11 @@ test("broker, portfolio, and mutating thesis tools never activate", async () => 
 	await handlers["session_start"]({}, ctx);
 	await handlers["before_agent_start"]({ prompt: "thesis" });
 	await handlers["agent_start"]({});
+	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search", { query: "thesis" });
-	expect(active).toContain("thesis_show");
+	const found = await search.execute("call-search", { query: "thesis" });
+	expect(matchNames(found.details).sort()).toEqual(["thesis_create", "thesis_journal", "thesis_refine"]);
+	expect(active).toEqual(before);
 	for (const name of ["thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"]) {
 		expect(active).not.toContain(name);
 		const blocked = (await handlers["tool_call"]({ toolName: name })) as unknown as Record<string, unknown>;
@@ -1217,18 +1240,20 @@ test("broker, portfolio, and mutating thesis tools never activate", async () => 
 	}
 });
 
-test("zero-match search resets the dynamic slice", async () => {
+test("zero-match search leaves the permanent roster", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
 	await handlers["session_start"]({}, ctx);
 	await handlers["before_agent_start"]({ prompt: "short" });
 	await handlers["agent_start"]({});
+	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
-	await search.execute("call-search-1", { query: "short interest" });
-	expect(active).toContain("get_short_interest");
-	await search.execute("call-search-2", { query: "How do I bake sourdough bread at home?" });
-	expect(active).not.toContain("get_short_interest");
+	const found = await search.execute("call-search-1", { query: "short interest" });
+	expect(matchNames(found.details)).toContain("get_short_interest");
+	const empty = await search.execute("call-search-2", { query: "How do I bake sourdough bread at home?" });
+	expect(matchNames(empty.details)).toEqual([]);
+	expect(active).toEqual(before);
 	for (const name of DISCOVERY_TOOLS) expect(active).toContain(name);
 });
 
