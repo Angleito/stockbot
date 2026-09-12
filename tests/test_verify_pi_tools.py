@@ -897,6 +897,14 @@ def test_explicit_prompt_exact_dispatch_shape() -> None:
     assert "Call the `search_tools` tool" in direct
     assert "call_tool exactly once" not in direct
 
+def test_pi_research_prompt_hidden_dispatch_contract() -> None:
+    from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
+    assert PROMPT_VERSION == "31"
+    assert "dispatch it with call_tool; never call a discovered research tool directly" in PI_RESEARCH_PROMPT
+    assert "Research tools are hidden behind call_tool" in PI_RESEARCH_PROMPT
+    assert "call that tool before answering" not in PI_RESEARCH_PROMPT
+    assert "Use call_tool only when the required research tool cannot be called directly" not in PI_RESEARCH_PROMPT
+
 def test_attempt1_describe_only_passes_before_call_tool(tmp_path: Path) -> None:
     ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="describe_tool"), "get_fundamentals", 0, False, attempt=1)
     assert ok

@@ -3097,8 +3097,7 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     determinism. reject_when and related_tools never score: reject text names
     rivals, so counting it boosts a tool for the queries it must lose.
     A relative-noise margin keeps only hits within 4 points of
-    the best score. Returns compact routing cards only: the top 3 exact.
-    Confusable siblings surface only via ambiguity groups over conflicts_with.
+    the best score. Returns compact routing cards only: up to 3 lexical primaries plus direct conflicts, bounded to 5, ambiguity over the expanded set.
     """
     del model
     query = str(args.get("query") or "")
@@ -3143,8 +3142,14 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     scored.sort(key=_rank_key)
     top = scored[:3]
     ranked_names = [name for _, name in top]
-    ranked = [_routing_card(name) for name in ranked_names]
-    ambiguous, groups = _ambiguity_groups(ranked_names)
+    expanded = list(ranked_names)
+    for name in ranked_names:
+        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
+            if peer not in expanded:
+                expanded.append(peer)
+    expanded = expanded[:5]
+    ranked = [_routing_card(name) for name in expanded]
+    ambiguous, groups = _ambiguity_groups(expanded)
     if not ranked:
         return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
     return {"matches": ranked, "count": len(ranked), "ambiguous": ambiguous, "ambiguity_groups": groups}

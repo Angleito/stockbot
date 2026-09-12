@@ -161,8 +161,11 @@ def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
         "search_tools", {"query": "ownership", "domain": "ownership"}, "test", context=_research_context()
     )
-    found = {m["name"] for m in _as_seq(result["matches"])}
-    assert found == {"search_sec_relationships", "get_beneficial_ownership"}
+    names = [m["name"] for m in _as_seq(result["matches"])]
+    assert names[:2] == ["get_beneficial_ownership", "search_sec_relationships"]
+    assert result["count"] == len(names) <= 5
+    assert len(set(names)) == len(names)
+    assert "get_ownership_changes" in names
     assert "schemas" not in result
 
 
@@ -217,8 +220,8 @@ def test_search_current_vs_historical_share_family_but_differ():
     assert "get_short_interest" in names
     by_name = {m["name"]: m for m in _as_seq(current["matches"])}
     assert by_name["get_short_interest"]["intent"] == "current_reported_short_position"
-    assert current["ambiguous"] is False
-    assert current["ambiguity_groups"] == []
+    assert current["ambiguous"] is True
+    assert any(isinstance(g, dict) and {"get_short_interest", "get_finra_datapoints"} <= set(g.get("candidates") or []) for g in _as_seq(current["ambiguity_groups"]))
     hist = tools.execute_tool(
         "search_tools", {"query": "historical FINRA short-interest trend"}, "test", context=_research_context()
     )
@@ -268,12 +271,23 @@ def test_search_tools_top_three_cap():
         "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
     )
     matches = _as_seq(result["matches"])
-    assert result["count"] == len(matches) == 3
-    assert [m["name"] for m in matches] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
+    assert result["count"] == len(matches) == 5
+    assert [m["name"] for m in matches][:3] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
     narrow = tools.execute_tool(
         "search_tools", {"query": "short interest"}, "test", context=_research_context()
     )
-    assert narrow["count"] == len(_as_seq(narrow["matches"])) == 2
+    assert narrow["count"] == len(_as_seq(narrow["matches"])) == 5
+
+def test_search_tools_expands_direct_conflicts():
+    result = tools.execute_tool(
+        "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
+    )
+    names = [m["name"] for m in _as_seq(result["matches"])]
+    assert names[:3] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
+    assert result["count"] == len(names) <= 5
+    assert len(set(names)) == len(names)
+    assert "query_finra" in names
+    assert any(isinstance(g, dict) and {"get_short_interest", "query_finra"} <= set(g.get("candidates") or []) for g in _as_seq(result["ambiguity_groups"]))
 
 def test_describe_tool_batch_names():
     result = tools.execute_tool(

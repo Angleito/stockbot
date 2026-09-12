@@ -1134,7 +1134,7 @@ test("search_tools returns discovery evidence without changing the roster", asyn
 	expect(inner.error_type).not.toBe("invalid_tool_arguments");
 });
 
-test("search evidence caps matches at three", async () => {
+test("search evidence caps matches at five", async () => {
 	const { handlers, pi, tools, active } = fakePiHost();
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
@@ -1144,7 +1144,7 @@ test("search evidence caps matches at three", async () => {
 	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
 	const found = await search.execute("call-search", { query: "GME short interest" });
-	expect(matchNames(found.details).length).toBe(3);
+	expect(matchNames(found.details).length).toBe(5);
 	expect(active).toEqual(before);
 });
 
@@ -1228,7 +1228,7 @@ test("broker, portfolio, and mutating thesis tools never activate", async () => 
 	const before = [...active];
 	const search = await bridgeTool(tools, "search_tools");
 	const found = await search.execute("call-search", { query: "thesis" });
-	expect(matchNames(found.details).sort()).toEqual(["thesis_create", "thesis_journal", "thesis_refine"]);
+	expect(matchNames(found.details).sort()).toEqual(["thesis_create", "thesis_journal", "thesis_refine", "thesis_watch"]);
 	expect(active).toEqual(before);
 	for (const name of ["thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"]) {
 		expect(active).not.toContain(name);

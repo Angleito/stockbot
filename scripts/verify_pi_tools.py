@@ -1728,11 +1728,11 @@ def run_confusion() -> int:
             })
             print(f"{'PASS' if sel_ok else 'FAIL'}[confusion] {prompt!r} -> {expected} (cat={cat.value if cat else 'none'})")
         pair_lines.append(f"{pair[0]} vs {pair[1]}: {pair_ok}/{pair_total}")
-    print("confusion pair selection accuracy:")
+    print("metadata/conflict consistency pair selection accuracy:")
     for line in pair_lines:
         print(f"  {line}")
-    print(f"confusion selection: {correct}/{total}")
-    print(f"confusion categories: " + ", ".join(f"{k}={v}" for k, v in sorted(cat_totals.items())))
+    print(f"metadata/conflict consistency selection: {correct}/{total}")
+    print(f"metadata/conflict consistency categories: " + ", ".join(f"{k}={v}" for k, v in sorted(cat_totals.items())))
     (root / "summary.json").parent.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps({"cases": summary_cases, "pair_accuracy": pair_lines, "selection": {"correct": correct, "total": total}, "categories": cat_totals}, indent=2))
     return 0 if correct == total else 1
