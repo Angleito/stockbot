@@ -20,12 +20,14 @@ General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q rou
 - Not a filing lister for a known ticker (list_sec_filings).
 - Do NOT use for year-over-year risk-factor changes (diff_risk_factors).
 - Do NOT use for full-filing diffs between accessions (diff_sec_filings).
+- Do NOT use for one filing metadata record by accession (get_sec_filing).
 
 ## Conflicts with
 
 - diff_risk_factors
 - diff_sec_filings
 - list_sec_filings
+- get_sec_filing
 
 ## Related tools
 

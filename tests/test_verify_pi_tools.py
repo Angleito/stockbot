@@ -852,6 +852,57 @@ def test_attempt1_late_discovery_fails(tmp_path: Path) -> None:
     ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
     assert not ok
     assert "precede" in reason
+def test_errored_target_reports_failed_not_ordering() -> None:
+    root = Path(__file__).resolve().parents[1]
+    cases = [("get_xbrl_facts", "get_xbrl_facts-attempt1.sqlite", 1), ("query_finra", "query_finra-attempt2.sqlite", 2)]
+    for tool, fname, attempt in cases:
+        p = root / "tests/fixtures/ordering" / fname
+        assert p.is_file(), f"missing pinned regression fixture {p}"
+        conn = sqlite3.connect(str(p))
+        try:
+            rows = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT tool_name, MIN(started_at), MAX(error_type) FROM tool_calls GROUP BY tool_name").fetchall()}
+        finally:
+            conn.close()
+        assert rows["search_tools"][0] < rows["browse_tools"][0] < rows[tool][0]
+        assert rows[tool][1] is not None
+        routing_ok, routing_reason = v.evaluate_routing_attempt(p, tool, 0, False, attempt=attempt)
+        assert not routing_ok
+        assert "did not precede" not in routing_reason
+        assert "failed-research-call" in routing_reason or "failed execution" in routing_reason or "errored execution" in routing_reason
+        reach_ok, reach_reason = v.evaluate_reachability_attempt(p, tool, 0, False, attempt=attempt)
+        assert not reach_ok
+        assert "did not precede" not in reach_reason
+        assert "errored execution" in reach_reason
+        assert "absent" not in reach_reason
+        comp_ok, comp_reason = v.evaluate_completion_attempt(p, tool, 0, False)
+        assert not comp_ok
+        assert "did not precede" not in comp_reason
+        assert "errored execution" in comp_reason
+        assert "absent" not in comp_reason
+
+
+def test_errored_target_before_discovery_reports_ordering(tmp_path: Path) -> None:
+    p = _ok(tmp_path, disc_at="2026-01-01T00:00:02+00:00", inner_at="2026-01-01T00:00:01+00:00", tool_error="tool_error")
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not routing_ok
+    assert "did not precede" in routing_reason
+    reach_ok, reach_reason = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=1)
+    assert not reach_ok
+    assert "did not precede" in reach_reason
+
+
+def test_attempt3_errored_target_reports_failed_not_bare_absent(tmp_path: Path) -> None:
+    p = _ok(tmp_path, discovery=None, via_call_tool=True, tool_error="tool_error")
+    routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not routing_ok
+    assert "errored execution" in routing_reason
+    assert "absent" not in routing_reason
+    reach_ok, reach_reason = v.evaluate_reachability_attempt(p, "get_fundamentals", 0, False, attempt=3)
+    assert not reach_ok
+    assert "errored execution" in reach_reason
+    assert "absent" not in reach_reason
+
+
 
 
 def test_attempt1_direct_tool_completion_passes(tmp_path: Path) -> None:
@@ -886,6 +937,20 @@ def test_search_tools_directly_verifiable(tmp_path: Path) -> None:
     assert ok1
     p2 = tmp_path / "s3.sqlite"
     _db(p2, tool="search_tools", discovery=None, via_call_tool=False)
+def test_search_tools_capability_path_covered_without_matrix() -> None:
+    schemas = v.tool_schemas()
+    props = schemas["search_tools"].get("properties")
+    assert isinstance(props, dict) and "query" in props
+    req = schemas["search_tools"].get("required")
+    assert isinstance(req, list) and "query" in req
+    assert v.VERIFY_CASES["search_tools"]["arguments"] == {"query": "short interest"}
+    args = {"query": "short interest"}
+    assert v._natural_prompt_v1("search_tools", args).endswith(v._SEARCH_ONLY_GUIDANCE)
+    assert v._natural_prompt_v2("search_tools", args).endswith(v._SEARCH_ONLY_GUIDANCE)
+    from app.prompts import PI_RESEARCH_PROMPT
+    assert "For a capability question asking which tools are available, call search_tools once" in PI_RESEARCH_PROMPT
+    assert len(v.AGENT_LOOP_CASES) == 5
+
 def test_explicit_prompt_exact_dispatch_shape() -> None:
     prompt = v.build_explicit_prompt("get_short_interest", {"ticker": "AAPL"})
     assert "You may use browse_tools, search_tools, or describe_tool" in prompt
@@ -1270,6 +1335,18 @@ def test_aggregate_formulas() -> None:
     assert isinstance(completion, dict) and completion == {"passed": 2, "evaluated": 3, "rate": 2 / 3}
     assert agg["median_discovery_calls"] == 1.0
     assert agg["median_research_calls"] == 0.0
+def test_aggregate_reports_extension_and_verifier_unrelated_separately() -> None:
+    def _verifier_attempt(tool: str, attempt: int, reason_tools: str) -> v.AttemptResult:
+        return v.AttemptResult(tool, attempt, False, "routing failed: x", 0, "", 0.0, False, False, "", False, f"routing failed: unrelated-research-success: unexpected research tool call(s): {reason_tools}", 0, 0, 0, None, "", {"unrelated_research_calls": 0}, terminal_completed=True)
+    single = _verifier_attempt("a", 1, "get_xbrl_facts")
+    agg_single = v.aggregate_results([single])
+    assert agg_single["unrelated_research_calls"] == 0
+    assert agg_single["verifier_unrelated_success"] == {"attempts": 1, "calls": 1}
+    multi = _verifier_attempt("a", 2, "get_xbrl_facts, get_fundamentals")
+    agg_both = v.aggregate_results([single, multi])
+    assert agg_both["unrelated_research_calls"] == 0
+    assert agg_both["verifier_unrelated_success"] == {"attempts": 2, "calls": 2}
+
 
 
 def test_run_agent_loop_main_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1372,8 +1449,8 @@ def test_classify_attempt3_skips_discovery(tmp_path: Path):
 
 def test_generate_confusion_cases_complete():
     cases = v.generate_confusion_cases()
-    # 26 undirected edges -> 52 directed
-    assert len(cases) == 52
+    # 31 undirected edges -> 62 directed (26 prior + 5 new reciprocal pairs)
+    assert len(cases) == 62
     pairs: set[tuple[str, str]] = set()
     for c in cases:
         raw_pair = c["pair"]
@@ -1381,8 +1458,10 @@ def test_generate_confusion_cases_complete():
         pair = tuple(sorted(str(x) for x in raw_pair))
         assert len(pair) == 2
         pairs.add((pair[0], pair[1]))
-    assert len(pairs) == 26
+    assert len(pairs) == 31
     assert ("get_short_interest", "query_finra") in pairs or ("get_finra_datapoints", "query_finra") in pairs
+    for new_pair in [("get_macro_context", "search_web"), ("get_material_events", "list_sec_filings"), ("get_sec_filing", "search_sec_filings"), ("thesis_journal", "thesis_refine"), ("thesis_show", "thesis_watch")]:
+        assert tuple(sorted(new_pair)) in pairs
     for c in cases:
         assert c["prompt"] and c["expected_tool"] and isinstance(c["arguments"], dict)
 

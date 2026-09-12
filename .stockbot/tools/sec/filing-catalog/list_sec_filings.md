@@ -18,16 +18,19 @@ List EDGAR filings for an exact ticker or CIK, filterable by form and date range
 
 - Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.
 - Do NOT use for disclosure search without known identifier (search_sec_filings).
+- Do NOT use for 8-K-derived what-changed event feed since a date (get_material_events).
 
 ## Conflicts with
 
 - search_sec_filings
+- get_material_events
 
 ## Related tools
 
 - get_sec_filing
 - search_sec_filings
 - find_sec_entities
+- get_material_events
 
 ## Prerequisites
 

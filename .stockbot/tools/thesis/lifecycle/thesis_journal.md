@@ -16,16 +16,17 @@ Append an operator note or journal entry to a thesis log. Pass the thesis ID as 
 
 ## Reject when
 
-- Not for revising claims.
+- Not for revising thesis claims or deltas (thesis_refine).
 - Not for setting alerts (thesis_watch).
 
 ## Conflicts with
 
 - thesis_watch
+- thesis_refine
 
 ## Related tools
 
-None
+- thesis_refine
 
 ## Prerequisites
 

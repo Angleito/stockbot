@@ -17,10 +17,11 @@ Macro statistics for a geography such as California: population (how many people
 ## Reject when
 
 - Not for company-specific facts.
+- Do NOT use for outside news, commentary, or why a stock moved (search_web).
 
 ## Conflicts with
 
-None
+- search_web
 
 ## Related tools
 

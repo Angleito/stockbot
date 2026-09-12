@@ -17,10 +17,12 @@ List existing watch rules, or add a validated monitoring rule that alerts when a
 ## Reject when
 
 - Not for logging notes (thesis_journal).
+- Not for reading thesis status and assessment (thesis_show).
 
 ## Conflicts with
 
 - thesis_journal
+- thesis_show
 
 ## Related tools
 

@@ -16,11 +16,11 @@ Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uu
 
 ## Reject when
 
-- Not for routine notes.
+- Not for routine operator notes without changing claims (thesis_journal).
 
 ## Conflicts with
 
-None
+- thesis_journal
 
 ## Related tools
 

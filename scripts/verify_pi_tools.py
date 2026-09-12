@@ -55,13 +55,9 @@ FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
 # tests/test_verify_pi_tools.py::test_prereq_chains_are_documented_in_descriptions.
 PREREQ_CHAINS: dict[str, frozenset[str]] = build_prerequisite_graph_from_tool_metadata()
 # Discovery primitives: first-class citizens on attempts 1-2, never strays.
+# None are ever live-matrix targets.
 DISCOVERY_TOOLS = frozenset({"browse_tools", "call_tool", "list_tool_domains", "search_tools", "describe_tool"})
-# Dispatch primitives: schema-only discovery/dispatch surface (no natural fixture;
-# call_tool has required args). Plus list_tool_domains/describe_tool: not
-# model-visible in TS and forbidden as call_tool inner names, so unreachable by
-# construction. None are ever live-matrix targets.
-_DISPATCH_PRIMITIVES = frozenset({"browse_tools", "call_tool"})
-_MATRIX_EXCLUDED = _DISPATCH_PRIMITIVES | frozenset({"list_tool_domains", "describe_tool"})
+_MATRIX_EXCLUDED = DISCOVERY_TOOLS
 # Routing vs reachability split: routing is intentional dispatch (strict),
 # reachability is eventual navigation (relaxed). Caps: 4-6 meaningful
 # wandering threshold on 47 research tools; 12 is egregious-loop backstop only.
@@ -507,8 +503,8 @@ VERIFY_CASES: dict[str, _VerifyCase] = {
     "search_web": {"arguments": {"query": "Apple 10-K risk factors"}, "natural_v1": "What are outside commentators saying this week about risks to Apple's business?", "natural_v2": "What are people saying about risks to Apple's business?"},
     "list_finra_datasets": {"arguments": {}, "natural_v1": "What FINRA datasets can I pull?", "natural_v2": "Which FINRA datasets are available?"},
     "describe_finra_dataset": {"arguments": {"dataset_id": "otcMarket/consolidatedShortInterest"}, "natural_v1": "What is in the FINRA short-interest dataset?", "natural_v2": "What fields and coverage does the FINRA consolidated short-interest dataset have?"},
-    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_v1": "What are Apple's recent short-interest values from FINRA?", "natural_v2": "Show me Apple's latest FINRA short-position figures."},
-    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_v1": "Has Apple's FINRA short interest changed lately?", "natural_v2": "How has Apple's short interest trended in FINRA data?"},
+    "get_finra_datapoints": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "fields": ["settlementDate", "currentShortPositionQuantity"], "ticker": "AAPL", "limit": 5}, "natural_v1": "What are Apple's recent raw FINRA short-interest values (exact settlementDate + currentShortPositionQuantity rows)?", "natural_v2": "Show me Apple's latest raw FINRA short-position rows with exact field values."},
+    "query_finra": {"arguments": {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 5}, "natural_v1": "Has Apple's FINRA short interest trended up or down lately (analyzed briefing, no raw rows)?", "natural_v2": "How has Apple's short interest trended in FINRA data (deterministic metrics/trends only)?"},
     "find_alternative_signals": {"arguments": {}, "natural_v1": "What alternative signals have been collected?", "natural_v2": "What alternative data signals are available?"},
     "get_trend_evidence": {"arguments": {"start_date": "2026-09-01", "end_date": "2026-09-02", "geos": ["US"], "limit": 25}, "natural_v1": "What trends were picked up in the US around September 1st?", "natural_v2": "What search trends were collected for the US for September 1-2?"},
     "investigate_social_arbitrage_candidate": {"arguments": {"term": "Stanley"}, "natural_v1": "What is the buzz around 'Stanley' as an investment idea?", "natural_v2": "Is 'Stanley' worth a closer look based on social signals?"},
@@ -797,6 +793,14 @@ def _call_tool_has_unparseable(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _has_any_tool_calls(conn: sqlite3.Connection, name: str) -> bool:
+    """True iff any tool_calls row exists for name, clean or errored."""
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE tool_name = ?", (name,)).fetchone()
+    except sqlite3.Error:
+        return False
+    return int(row[0] or 0) > 0
+
 def _tool_success(conn: sqlite3.Connection, name: str, *, attempt: int) -> str | None:
     """None when `name` has a clean success; otherwise a short failure reason."""
     ok_calls = conn.execute(
@@ -950,6 +954,10 @@ def evaluate_reachability_attempt(db_path: Path, required_tool: str, exit_code: 
                     discovery_ok = any(_reachability_tool_success(conn, t, attempt=attempt) is None for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"))
                     if not discovery_ok:
                         return False, "routing failed: no clean discovery before call_tool"
+                    if _early_target == "absent" and _has_any_tool_calls(conn, required_tool):
+                        if not _discovery_before_dispatch(conn, required_tool):
+                            return False, f"routing failed: discovery did not precede call_tool dispatch of '{required_tool}'"
+                        return False, f"target '{required_tool}' failed-research-call (errored execution, no clean run)"
                     if not _target_dispatched(conn, required_tool):
                         return False, f"routing failed: '{required_tool}' not dispatched via call_tool"
                     if not _discovery_before_dispatch(conn, required_tool):
@@ -965,6 +973,8 @@ def evaluate_reachability_attempt(db_path: Path, required_tool: str, exit_code: 
             if target_problem is not None:
                 if _row_errors_transient(conn, [required_tool]):
                     return False, f"transient: target '{required_tool}' {target_problem} (transient error)"
+                if target_problem == "absent" and _has_any_tool_calls(conn, required_tool):
+                    return False, f"target '{required_tool}' failed-research-call (errored execution, no clean run)"
                 return False, f"target '{required_tool}' absent ({target_problem})"
             models = conn.execute("SELECT model FROM model_calls").fetchall()
             if not any((r[0] or "").strip() for r in models):
@@ -1017,6 +1027,10 @@ def evaluate_routing_attempt(db_path: Path, required_tool: str, exit_code: int, 
                     discovery_ok = any(_routing_tool_success(conn, t, attempt=attempt) is None for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"))
                     if not discovery_ok:
                         return False, "routing failed: no clean discovery before call_tool"
+                    if _early_target == "absent" and _has_any_tool_calls(conn, required_tool):
+                        if not _discovery_before_dispatch(conn, required_tool):
+                            return False, f"routing failed: discovery did not precede call_tool dispatch of '{required_tool}'"
+                        return False, f"routing failed: failed-research-call for '{required_tool}' (errored execution, no clean run)"
                     if not _target_dispatched(conn, required_tool):
                         return False, f"routing failed: target-never-dispatched: '{required_tool}' not dispatched via call_tool"
                     if not _discovery_before_dispatch(conn, required_tool):
@@ -1051,6 +1065,8 @@ def evaluate_routing_attempt(db_path: Path, required_tool: str, exit_code: int, 
                     return False, f"transient: target '{required_tool}' {target_problem} (transient error)"
                 if "failed execution present" in target_problem:
                     return False, f"routing failed: failed-research-call for '{required_tool}' (failed execution present)"
+                if target_problem == "absent" and _has_any_tool_calls(conn, required_tool):
+                    return False, f"routing failed: failed-research-call for '{required_tool}' (errored execution, no clean run)"
                 return False, f"target '{required_tool}' absent ({target_problem})"
             models = conn.execute("SELECT model FROM model_calls").fetchall()
             if not any((r[0] or "").strip() for r in models):
@@ -1342,6 +1358,27 @@ def _agg_float(section: dict[str, object], key: str) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+_VERIFIER_TOOL_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _verifier_unrelated_success(pop: list[AttemptResult]) -> dict[str, int]:
+    """Verifier-side unrelated-success: attempts with unrelated-research-success reason plus distinct tool names."""
+    attempts = 0
+    tools: set[str] = set()
+    for r in pop:
+        reason = r.routing_reason or ""
+        if "unrelated-research-success" not in reason:
+            continue
+        attempts += 1
+        tail = reason.split("call(s):", 1)[1] if "call(s):" in reason else reason.rsplit(":", 1)[-1]
+        for part in tail.split(","):
+            name = part.strip().strip("'\"").rstrip(").")
+            if name and _VERIFIER_TOOL_RE.fullmatch(name):
+                tools.add(name)
+    return {"attempts": attempts, "calls": len(tools)}
+
+
+
 def aggregate_results(results: list[AttemptResult]) -> dict[str, object]:
     """Attempt-level aggregates over terminal attempts after transient retries.
 
@@ -1368,6 +1405,7 @@ def aggregate_results(results: list[AttemptResult]) -> dict[str, object]:
     evaluated = [r for r in pop if r.completion_ok is not None]
     completed = [r for r in evaluated if r.completion_ok]
     failure_counts: dict[str, int] = {c.value: sum(1 for r in pop if r.failure_category == c) for c in RoutingFailureCategory}
+    verifier_unrelated = _verifier_unrelated_success(pop)
     return {
         "population": total,
         "failure_category_counts": failure_counts,
@@ -1380,6 +1418,7 @@ def aggregate_results(results: list[AttemptResult]) -> dict[str, object]:
         "median_research_calls": _median([r.research_calls for r in pop]),
         "invalid_tool_call_rate": {"invalid_calls": invalid_total, "routed_calls": routed_total, "invalid_attempts": len(invalid_attempts), "total": total, "rate": invalid_rate},
         "unrelated_research_calls": unrelated_total,
+        "verifier_unrelated_success": verifier_unrelated,
         "completion": {"passed": len(completed), "evaluated": len(evaluated), "rate": (len(completed) / len(evaluated)) if evaluated else None},
     }
 
@@ -1440,13 +1479,13 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
         return AttemptResult(tool, attempt, False, f"attempt error: {exc}", 124, fallback, elapsed)
 
 def _discovery_before_dispatch(conn: sqlite3.Connection, expected_tool: str) -> bool:
-    """True iff a clean discovery call started before the expected inner dispatch."""
+    """True iff a clean discovery call started before the expected dispatch (any row, clean or errored)."""
     try:
         disc = conn.execute(
             "SELECT MIN(started_at) FROM tool_calls WHERE tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains') AND error_type IS NULL"
         ).fetchone()[0]
         inner = conn.execute(
-            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name = ? AND error_type IS NULL", (expected_tool,)
+            "SELECT MIN(started_at) FROM tool_calls WHERE tool_name = ?", (expected_tool,)
         ).fetchone()[0]
     except sqlite3.Error:
         return False
@@ -1582,6 +1621,8 @@ def evaluate_completion_attempt(db_path: Path, expected_tool: str | None, exit_c
                 return False, "routing failed: no clean discovery before research"
             target_problem = _routing_tool_success(conn, expected_tool, attempt=1)
             if target_problem is not None:
+                if target_problem == "absent" and _has_any_tool_calls(conn, expected_tool):
+                    return False, f"target '{expected_tool}' failed-research-call (errored execution, no clean run)"
                 return False, f"target '{expected_tool}' absent ({target_problem})"
             if not _discovery_before_dispatch(conn, expected_tool):
                 return False, f"routing failed: discovery did not precede research dispatch of '{expected_tool}'"
@@ -1645,7 +1686,8 @@ def run_agent_loop_main() -> int:
             failed += 1
     wall = time.monotonic() - loop_start
     aggregates = aggregate_results(results)
-    print(f"Agent-loop completion: {len(results) - failed}/{len(results)} cases complete [{wall:.1f}s]")
+    loop_verifier = _agg_section(aggregates, "verifier_unrelated_success")
+    print(f"Agent-loop completion: {len(results) - failed}/{len(results)} cases complete [{wall:.1f}s] | extension unrelated research calls: {aggregates.get('unrelated_research_calls', 0)} | verifier unrelated-success: {loop_verifier.get('attempts', 0)} attempts / {loop_verifier.get('calls', 0)} calls")
     summary = {"cases": [{"prompt": case["prompt"], "expected_tool": case["expected_tool"], "ok": r.ok, "reason": r.reason, "completion_ok": r.completion_ok, "completion_reason": r.completion_reason, "db": r.db, "duration_seconds": r.duration_seconds, "discovery_calls": r.discovery_calls, "research_calls": r.research_calls, "direct_tool_calls": r.direct_tool_calls, "routing_metrics": r.routing_metrics} for r, case in zip(results, AGENT_LOOP_CASES)], "aggregates": aggregates, "wall_seconds": wall}
     _fc = aggregates.get("failure_category_counts")
     summary["failure_category_counts"] = _fc if isinstance(_fc, dict) else {}
@@ -1927,8 +1969,9 @@ def main() -> int:
     prem = _agg_section(aggregates, "premature_stop_rate")
     recov = _agg_section(aggregates, "continuation_recovery")
     comp = _agg_section(aggregates, "completion")
+    verifier_unrelated = _agg_section(aggregates, "verifier_unrelated_success")
     print(f"Discovery-to-research conversion: {conv.get('with_research', 0)}/{conv.get('with_discovery', 0)} ({_agg_float(conv, 'rate'):.0%}) | premature stops: {prem.get('premature', 0)}/{prem.get('total', 0)} ({_agg_float(prem, 'rate'):.0%}) | continuation recovery: {recov.get('recovered', 0)}/{recov.get('injected', 0)} ({_agg_float(recov, 'rate'):.0%})")
-    print(f"Median discovery calls: {_agg_float(aggregates, 'median_discovery_calls'):.1f} | median research calls: {_agg_float(aggregates, 'median_research_calls'):.1f} | unrelated research calls: {aggregates.get('unrelated_research_calls', 0)} | completion: {comp.get('passed', 0)}/{comp.get('evaluated', 0)}")
+    print(f"Median discovery calls: {_agg_float(aggregates, 'median_discovery_calls'):.1f} | median research calls: {_agg_float(aggregates, 'median_research_calls'):.1f} | extension unrelated research calls: {aggregates.get('unrelated_research_calls', 0)} | verifier unrelated-success: {verifier_unrelated.get('attempts', 0)} attempts / {verifier_unrelated.get('calls', 0)} calls | completion: {comp.get('passed', 0)}/{comp.get('evaluated', 0)}")
     _raw_cats = aggregates.get("failure_category_counts")
     cats: dict[str, int] = dict(_raw_cats) if isinstance(_raw_cats, dict) else {}
     if cats:

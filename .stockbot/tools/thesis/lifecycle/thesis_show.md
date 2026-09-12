@@ -17,16 +17,18 @@ Read a thesis: its status, assessment, and current state. Pass the thesis ID as 
 ## Reject when
 
 - Not for changing a thesis.
+- Not for listing or adding monitoring rules and alerts (thesis_watch).
 
 ## Conflicts with
 
-None
+- thesis_watch
 
 ## Related tools
 
 - thesis_create
 - thesis_refine
 - thesis_journal
+- thesis_watch
 
 ## Prerequisites
 

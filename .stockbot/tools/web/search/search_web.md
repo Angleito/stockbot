@@ -17,15 +17,17 @@ External web news and commentary for price moves, headlines, and industry develo
 ## Reject when
 
 - Not for FINRA short data.
+- Do NOT use for bounded geography statistics like population or rates (get_macro_context).
 
 ## Conflicts with
 
-None
+- get_macro_context
 
 ## Related tools
 
 - get_material_events
 - query_finra
+- get_macro_context
 
 ## Prerequisites
 

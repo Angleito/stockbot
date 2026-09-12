@@ -18,16 +18,18 @@ Deterministic 8-K-derived recent event feed with accession citations for what ch
 
 - Does not cover market reaction or news commentary.
 - Answer from the event feed; do not open filing documents unless the question needs document text.
+- Do NOT use for a full filing list by ticker or form (list_sec_filings).
 
 ## Conflicts with
 
-None
+- list_sec_filings
 
 ## Related tools
 
 - get_sec_document
 - search_web
 - get_recent_ownership_filings
+- list_sec_filings
 
 ## Prerequisites
 

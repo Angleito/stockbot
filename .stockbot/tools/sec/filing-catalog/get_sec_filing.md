@@ -19,16 +19,19 @@ One filing's record by accession number: filer, form, dates, primary document, s
 - Does not discover filings; list or search for the accession when unknown.
 - Do NOT use for document text windows (get_sec_document).
 - Do NOT use to list a filing's documents or exhibits (list_sec_documents).
+- Does not search filing text; use full-text search when accession is unknown (search_sec_filings).
 
 ## Conflicts with
 
 - get_sec_document
 - list_sec_documents
+- search_sec_filings
 
 ## Related tools
 
 - list_sec_filings
 - list_sec_documents
+- search_sec_filings
 
 ## Prerequisites
 
