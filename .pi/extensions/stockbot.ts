@@ -10,6 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type Advance, advanceOnAgentEnd, clearResearchRun, setResearchBridge, startResearch } from "../lib/research-director.ts";
 import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -140,7 +141,7 @@ function spawnPythonBridge(): ChildProcessWithoutNullStreams {
 
 export function createBridgeClient(
  spawnBridge: () => ChildProcessWithoutNullStreams = spawnPythonBridge,
-): { callBridge: (req: Json, timeoutMs?: number, fatal?: boolean) => Promise<Json> } {
+): { callBridge: (req: Json, timeoutMs?: number, fatal?: boolean) => Promise<Json>; close: () => void } {
  // --- bridge process (JSONL stdio; ID-correlated, 4 concurrent tool calls) ---
  let proc: ChildProcessWithoutNullStreams | null = null;
  let buf = "";
@@ -150,6 +151,7 @@ export function createBridgeClient(
  const permitQueue: Array<() => void> = [];
  const terminatedRuns = new Map<string, Promise<void>>();
  const terminatedMessages = new Map<string, string>();
+ let closed = false;
 
  function acquire(): Promise<number> {
   if (permits > 0) {
@@ -203,6 +205,15 @@ export function createBridgeClient(
   }
   pending.clear();
  }
+ function close(): void {
+  if (closed) return;
+  closed = true;
+  const child = proc;
+  if (child) recycle(child);
+  permits = 4;
+  const queued = permitQueue.splice(0);
+  for (const resume of queued) resume();
+ }
 
  function pump(child: ChildProcessWithoutNullStreams) {
   child.stdout.on("data", (chunk) => {
@@ -237,8 +248,8 @@ export function createBridgeClient(
   child.on("close", dead);
   child.on("error", dead);
  }
-
  function ensureBridge(): boolean {
+  if (closed) return false;
   if (proc) return true;
   try {
    proc = spawnBridge();
@@ -381,12 +392,20 @@ export function createBridgeClient(
   }
  }
 
- return { callBridge };
+ return { callBridge, close };
 }
 
 export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: () => ChildProcessWithoutNullStreams) {
  registerYoutubeAnalytics(pi);
- const { callBridge } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
+ const { callBridge, close } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
+ setResearchBridge((req) => callBridge(req));
+ pi.on("session_shutdown", () => {
+  try {
+   close();
+  } catch {
+   // already closed
+  }
+ });
 
  // --- describe: prompt + RESEARCH tool registry ---
  const [describe, doctor] = await Promise.all([callBridge({ op: "describe" }, 30_000), callBridge({ op: "doctor" }, 30_000)]);
@@ -611,6 +630,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   return q.trim().split(/\s+/).length <= 2;
  }
  const dataRoots = new Map<string, string>();
+ const stagedResearchRuns = new Set<string>();
  const doneFiles = new Map<string, string>();
  const asOfs = new Map<string, string>();
  let seq = 0;
@@ -702,35 +722,66 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   refreshStatus(lastCtx);
  });
 
- // --- operator slash commands: thin delegation into research tools ---
- // Pi owns the agent loop; these commands only phrase the tool call and let
- // the agent run it. No state, policy, or synthesis lives here.
+ // --- operator slash commands ---
+ // /research delegates to the staged ResearchDirector driver (internal create +
+ // follow-up prompts); /research-status only phrases the tool call and lets the
+ // agent run it. No policy or synthesis lives here.
  pi.registerCommand("research", {
-  description: "Start a persisted research session: /research <question> (delegates to research_start)",
+  description: 'Start a persisted research session: /research <question> (staged driver: create, fetch, freeze, trio, finalize)',
   handler: async (args) => {
    const question = args.trim();
-   await pi.sendMessage(
-    {
-     customType: "stockbot-research-command",
-     content: question
-      ? `Use the research_start tool with question: ${question}`
-      : "Ask the operator for a research question, then use the research_start tool with it.",
-     display: true,
-    },
-    { triggerTurn: true, deliverAs: "followUp" },
-   );
+   if (!question) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-command",
+      content: 'Ask the operator for a research question, then call call_tool with name="research_start" and arguments={"question": ...}.',
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+   }
+   // Establish the trusted run before staging: the follow-up turn's
+   // agent_start must preserve (not rotate) this id and its data root.
+   clearResearchRun(runId);
+   stagedResearchRuns.delete(runId);
+   const stagedId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = stagedId ? stagedId : crypto.randomUUID();
+   const stagedRoot = (process.env.STOCKBOT_DATA_DIR ?? "").trim();
+   if (stagedRoot) dataRoots.set(runId, stagedRoot);
+   else dataRoots.delete(runId);
+   const stagedAsOf = (process.env.STOCKBOT_AS_OF ?? "").trim();
+   if (stagedAsOf) asOfs.set(runId, stagedAsOf);
+   else asOfs.delete(runId);
+   stagedResearchRuns.add(runId);
+   try {
+    const { prompt } = await startResearch(question, runId, dataRoots.get(runId), asOfs.get(runId));
+    await pi.sendMessage(
+     { customType: "stockbot-research-command", content: prompt, display: true },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch (err) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-command",
+      content: `Research start failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only.`,
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   }
   },
  });
  pi.registerCommand("research-status", {
-  description: "Show a research session: /research-status <session_id> (delegates to research_status)",
+  description: 'Show a research session: /research-status <session_id> (Call call_tool with name="research_status")',
   handler: async (args) => {
    const sessionId = args.trim();
    await pi.sendMessage(
     {
      customType: "stockbot-research-status-command",
      content: sessionId
-      ? `Use the research_status tool with session_id: ${sessionId}`
-      : "Ask the operator for a research session id, then use the research_status tool with it.",
+      ? `Call call_tool with name="research_status" and arguments={"session_id": "${sessionId}"}.`
+      : 'Ask the operator for a research session id, then call call_tool with name="research_status" and arguments={"session_id": ...}.',
      display: true,
     },
     { triggerTurn: true, deliverAs: "followUp" },
@@ -746,8 +797,11 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    return;
   }
   resetRouting();
-  const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
-  runId = trustedRunId ? trustedRunId : crypto.randomUUID();
+  if (!stagedResearchRuns.has(runId)) {
+   clearResearchRun(runId);
+   const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = trustedRunId ? trustedRunId : crypto.randomUUID();
+  }
   seq = 0;
   toolStartedAt.clear();
   // Routing/completion bind from process environment only. Prompt text
@@ -846,10 +900,32 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   const assistants = messages.filter((m) => m.role === "assistant");
   const last = assistants[assistants.length - 1] as Json | undefined;
   const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
-  const answer = blocks
+  let answer = blocks
    .filter((b) => b.type === "text" && typeof b.text === "string")
    .map((b) => b.text as string)
    .join("\n");
+  // Staged ResearchDirector: null when no /research run is staged for this
+  // run id, so non-driver turns fall through untouched. A stage prompt queues
+  // one follow-up turn (mirroring the routing continuation above); completion
+  // falls through with the authoritative kernel answer.
+  let driver: Advance = null;
+  try {
+   driver = await advanceOnAgentEnd(runId, answer, dataRoots.get(runId), asOfs.get(runId));
+  } catch (err) {
+   console.error(`[stockbot] research director advance failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (driver && !driver.done) {
+   try {
+    pi.sendMessage(
+     { customType: "stockbot-research-stage", content: driver.prompt, display: false },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch {
+    // best-effort follow-up; the next turn re-drives the same stage
+   }
+   return;
+  }
+  if (driver && driver.done && driver.answer) answer = driver.answer;
   const hasEvidence = routing.successfulResearchToolNames.length > 0;
   await emit({
    event: "routing_metrics",
@@ -884,6 +960,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     // observability never breaks research
    }
   }
+  stagedResearchRuns.delete(runId);
   doneFiles.delete(runId);
   dataRoots.delete(runId);
   asOfs.delete(runId);

@@ -49,6 +49,8 @@
   "list_sec_filings",
   "list_tool_domains",
   "query_finra",
+  "research_add_analysis",
+  "research_add_evidence",
   "research_cancel",
   "research_read",
   "research_resume",

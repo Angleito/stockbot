@@ -56,15 +56,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.pi_gateway import PiSessionContext, execute_pi_tool
+from app.pi_gateway import PiSessionContext, _override_context, execute_pi_tool
 from app.research import service as _kernel  # eventual rename target: kernel_rpc.py (name only; transport stays)
-from app.policy import Capability
+from app.research.models import default_policy
+from app.research.repository import ResearchRepository
+from app.policy import Capability, RequestContext
 from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
 from app.runtime import EventType
 from app.storage.runs import RunRecorder, finalize_failed_run, reset_current_recorder, set_current_recorder
 from app.tools import TOOL_REGISTRY_VERSION, dynamically_activatable_tool_names, tools_for_capabilities
 
 logger = logging.getLogger(__name__)
+
+
+def _bridge_ctx(request: Mapping[str, object]) -> RequestContext:
+    """Invocation context from wire data_root/as_of; untrusted shapes fall back."""
+    data_root = request.get("data_root")
+    as_of = request.get("as_of")
+    return _override_context(
+        data_root if isinstance(data_root, (str, Path)) else None,
+        as_of if isinstance(as_of, str) else None,
+    )
 
 _sessions: dict[str, PiSessionContext] = {}
 _recorders: dict[str, RunRecorder] = {}
@@ -405,18 +417,18 @@ def _op_research_session_create(request: Mapping[str, object], protocol_id: str)
     question = request.get("question")
     objective = request.get("objective")
     as_of = request.get("as_of")
-    policy = request.get("policy")
+    ctx = _bridge_ctx(request)
     try:
         session_id = _kernel.create_research(
             question if isinstance(question, str) else "",
             objective if isinstance(objective, str) and objective.strip() else None,
             as_of=as_of if isinstance(as_of, str) else None,
-            policy=policy if isinstance(policy, dict) else None,  # type: ignore[arg-type]
+            policy=default_policy(),
+            repo=ResearchRepository(data_root=ctx.data_root),
         )
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": {"session_id": session_id}}
-
 
 def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.job.start -> service.start_job."""
@@ -427,6 +439,11 @@ def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> d
     source = request.get("source")
     parent = request.get("parent")
     budget = request.get("budget")
+    raw_wave = request.get("wave_id", 1)
+    wave_id = raw_wave if raw_wave is not None else 1
+    if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'wave_id' must be an int >= 1"}
+    ctx = _bridge_ctx(request)
     try:
         job = _kernel.start_job(
             session_id,
@@ -434,6 +451,8 @@ def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> d
             source if isinstance(source, str) and source else None,
             parent if isinstance(parent, str) and parent else None,
             budget if isinstance(budget, dict) else None,
+            repo=ResearchRepository(data_root=ctx.data_root),
+            wave_id=wave_id,
         )
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
@@ -441,15 +460,19 @@ def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> d
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": job}
 
-
 def _op_research_job_complete(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.job.complete -> service.complete_job."""
     job_id = request.get("job_id")
     if not isinstance(job_id, str) or not job_id:
         return {"id": protocol_id, "error": "missing_arg"}
     outcome = request.get("outcome")
+    ctx = _bridge_ctx(request)
     try:
-        job = _kernel.complete_job(job_id, outcome if isinstance(outcome, dict) else None)
+        job = _kernel.complete_job(
+            job_id,
+            outcome if isinstance(outcome, dict) else None,
+            repo=ResearchRepository(data_root=ctx.data_root),
+        )
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
     except ValueError as exc:
@@ -468,8 +491,11 @@ def _op_research_evidence_add(request: Mapping[str, object], protocol_id: str) -
     item = request.get("item")
     if not isinstance(item, dict):
         return {"id": protocol_id, "error": "invalid_arg", "detail": "'item' must be a mapping"}
+    ctx = _bridge_ctx(request)
     try:
-        record = _kernel.record_evidence(session_id, job_id, item)
+        record = _kernel.record_evidence(
+            session_id, job_id, item, repo=ResearchRepository(data_root=ctx.data_root)
+        )
     except _kernel.ResearchNotFound as exc:
         if "unknown job_id" in str(exc):
             return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
@@ -478,14 +504,14 @@ def _op_research_evidence_add(request: Mapping[str, object], protocol_id: str) -
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": record}
 
-
 def _op_research_session_inspect(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.session.inspect -> service.inspect_research."""
     session_id = request.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
     try:
-        state = _kernel.inspect_research(session_id)
+        state = _kernel.inspect_research(session_id, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": state}
@@ -496,11 +522,69 @@ def _op_research_session_cancel(request: Mapping[str, object], protocol_id: str)
     session_id = request.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
     try:
-        session = _kernel.cancel_research(session_id)
+        session = _kernel.cancel_research(session_id, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": session}
+
+def _op_research_freeze_create(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.freeze.create -> service.freeze_session (internal-only)."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    wave_id = request.get("wave_id", 1)
+    if isinstance(wave_id, bool) or not isinstance(wave_id, int):
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'wave_id' must be an int >= 1"}
+    ctx = _bridge_ctx(request)
+    try:
+        freeze = _kernel.freeze_session(
+            session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root)
+        )
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": freeze}
+
+
+def _op_research_wave2_decide(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.wave2.decide -> service.decide_wave2 (internal-only)."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        decision = _kernel.decide_wave2(session_id, repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": decision}
+
+
+def _op_research_session_finalize(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.session.finalize -> service.finalize_session (internal-only)."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    answer = request.get("answer")
+    if not isinstance(answer, str):
+        return {"id": protocol_id, "error": "missing_arg"}
+    claims = request.get("claims")
+    if not isinstance(claims, list):
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'claims' must be a list"}
+    ctx = _bridge_ctx(request)
+    try:
+        final = _kernel.finalize_session(
+            session_id, answer, claims, repo=ResearchRepository(data_root=ctx.data_root)
+        )
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": final}
 
 
 def _run_tool_invoke(request: Mapping[str, object]) -> None:
@@ -587,6 +671,12 @@ def _handle(line: str) -> dict[str, object] | None:
         return _op_research_session_inspect(request, protocol_id)
     if op == "research.session.cancel":
         return _op_research_session_cancel(request, protocol_id)
+    if op == "research.freeze.create":
+        return _op_research_freeze_create(request, protocol_id)
+    if op == "research.wave2.decide":
+        return _op_research_wave2_decide(request, protocol_id)
+    if op == "research.session.finalize":
+        return _op_research_session_finalize(request, protocol_id)
     return {"id": protocol_id, "error": "unknown_op"}
 
 

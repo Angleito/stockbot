@@ -13,6 +13,7 @@
     "smoke": "bun run smoke-mock && bun run smoke-prod",
     "clean-env": "rm -rf venv",
     "verify-tools": "venv/bin/python scripts/verify_tool_registry.py",
+    "verify-tool-health": "venv/bin/python scripts/verify_tool_health.py",
     "verify-holdout": "venv/bin/python scripts/verify_pi_tools.py --holdout",
     "verify-pi": "venv/bin/python scripts/verify_pi_tools.py --routing",
     "verify-confusion": "venv/bin/python scripts/verify_pi_tools.py --confusion",

@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import jobs as _jobs
 from . import session as _session
@@ -24,13 +25,24 @@ from .evidence import (
 from .models import JSONValue, default_policy, utcnow
 from .repository import ResearchRepository, pending_next_action
 
+if TYPE_CHECKING:
+    from .agents.bearbot import BearAnalysis
+    from .agents.bullbot import BullAnalysis
+    from .agents.stockbot import StockbotAnalysis
+    from .director import Wave1Result
+    from .models import Job, ResearchSession
+
 __all__ = [
     "ResearchNotFound",
     "cancel_research",
     "complete_job",
     "create_research",
+    "decide_wave2",
+    "finalize_session",
+    "freeze_session",
     "inspect_research",
     "list_research",
+    "record_committee_analysis",
     "record_evidence",
     "resume_research",
     "retry_job",
@@ -370,3 +382,313 @@ def retry_job(
     store.save_session(updated)
     store.save_job(replacement)
     return replacement.to_dict()
+
+def _wave1_state(
+    store: ResearchRepository,
+    found: ResearchSession,
+) -> tuple[Wave1Result, dict[str, object]]:
+    """Rebuild the trio Wave1Result from the latest freeze's committee-run jobs."""
+    from .agents import parse_committee_output
+    from .agents.bearbot import BearAnalysis
+    from .agents.bullbot import BullAnalysis
+    from .agents.stockbot import StockbotAnalysis
+    from .director import Wave1Result
+    from .synthesis.committee import compute_disagreement
+
+    sid = found.session_id
+    if not found.freeze_ids:
+        raise ValueError(f"committee: session {sid!r} has no freeze")
+    fid = found.freeze_ids[-1]
+    try:
+        frozen = store.get_freeze(fid)
+    except KeyError:
+        raise ValueError(f"committee: unknown freeze_id: {fid!r}") from None
+    raw_ids = frozen.get("evidence_ids")
+    ids = [e for e in raw_ids if isinstance(e, str)] if isinstance(raw_ids, list) else []
+    wave_raw = frozen.get("wave_id")
+    wave = wave_raw if isinstance(wave_raw, int) and not isinstance(wave_raw, bool) and wave_raw >= 1 else 1
+    as_of = found.as_of.isoformat() if isinstance(found.as_of, datetime) else "unbounded"
+    run_jobs: list[str] = []
+    for entry in found.committee_runs:
+        if isinstance(entry, dict) and entry.get("freeze_id") == fid:
+            got = entry.get("jobs", [])
+            if isinstance(got, list):
+                run_jobs.extend(j for j in got if isinstance(j, str))
+    by_role: dict[str, tuple[Job, dict[str, JSONValue]]] = {}
+    for jid in run_jobs:
+        try:
+            job = store.get_job(jid)
+        except KeyError:
+            continue
+        res = job.result
+        if job.status != "completed" or not isinstance(res, dict):
+            continue
+        if not isinstance(res.get("claims"), list):
+            continue
+        by_role.setdefault(job.job_type, (job, res))
+    stock: StockbotAnalysis | None = None
+    bull: BullAnalysis | None = None
+    bear: BearAnalysis | None = None
+    for role in ("stockbot", "bullbot", "bearbot"):
+        hit = by_role.get(role)
+        if hit is None:
+            continue
+        _, res = hit
+        claims, follow_ups = parse_committee_output(json.dumps(dict(res)), frozen=ids, agent=role)
+        prose = "\n".join(c.text for c in claims).strip() or "No grounded claims in freeze."
+        raw_unks = res.get("unknowns", [])
+        unknowns = [u for u in raw_unks if isinstance(u, str)] if isinstance(raw_unks, list) else []
+        raw_chg = res.get("what_would_change", [])
+        changes = [u for u in raw_chg if isinstance(u, str)] if isinstance(raw_chg, list) else []
+        if role == "stockbot":
+            stock = StockbotAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=found.query, answer=prose, base_case=prose, unknowns=unknowns, what_would_change=changes, claims=claims, research_requests=follow_ups)
+        elif role == "bullbot":
+            bull = BullAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=found.query, stance="bullish", bull_case=prose, unknowns=unknowns, what_would_change=changes, claims=claims, research_requests=follow_ups)
+        else:
+            bear = BearAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=found.query, stance="bearish", bear_case=prose, unknowns=unknowns, what_would_change=changes, claims=claims, research_requests=follow_ups)
+    disagreement = compute_disagreement(stock, bull, bear) if stock is not None and bull is not None and bear is not None else None
+    wave1 = Wave1Result(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), stock=stock, bull=bull, bear=bear, disagreement=disagreement)
+    return wave1, {"freeze_id": fid, "evidence_ids": ids, "wave_id": wave, "as_of": as_of}
+
+
+def freeze_session(
+    session_id: str,
+    wave_id: int = 1,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, object]:
+    """Freeze wave evidence (PIT-checked) and move RESEARCHING -> FREEZING."""
+    from . import freeze as _freeze
+    from .evidence import evidence_from_dict
+    from .models import SessionStatus
+
+    if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
+        raise ValueError(f"freeze_session: 'wave_id' must be an int >= 1, got {wave_id!r}")
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    # Pi bootstrap mirrors runner C->P->R; service.create_research leaves CREATED.
+    if found.status == SessionStatus.CREATED.value:
+        found = _session.transition_session(found, SessionStatus.PLANNING)
+        store.save_session(found)
+    if found.status == SessionStatus.PLANNING.value:
+        found = _session.transition_session(found, SessionStatus.RESEARCHING)
+        store.save_session(found)
+    if wave_id >= 2 and found.status == SessionStatus.TARGETED_RESEARCH.value:
+        pass  # T->FREEZING via the transition below (runner R|T->F mirror).
+    elif found.status != SessionStatus.RESEARCHING.value:
+        raise ValueError(f"freeze_session: session {session_id!r} status is {found.status!r} (RESEARCHING required)")
+    recs = [evidence_from_dict(record) for record in store.list_evidence(session_id)]
+    wave_recs = [e for e in recs if e.wave_id <= wave_id]
+    if not wave_recs:
+        raise ValueError(f"freeze_session: session {session_id!r} wave {wave_id} has no evidence")
+    fid = f"{session_id}:{wave_id}:freeze"
+    frozen = _freeze.create_freeze(freeze_id=fid, session_id=session_id, wave_id=wave_id, records=wave_recs, as_of=found.as_of)
+    _freeze.verify_freeze(frozen, wave_recs)
+    try:
+        store.save_freeze(_freeze.freeze_to_dict(frozen))
+    except ValueError:
+        pass
+    out = _session.transition_session(found, SessionStatus.FREEZING)
+    if fid not in out.freeze_ids:
+        out = replace(out, freeze_ids=[*out.freeze_ids, fid], updated_at=utcnow())
+    store.save_session(out)
+    return _freeze.freeze_to_dict(frozen)
+
+
+def record_committee_analysis(
+    session_id: str,
+    job_id: str,
+    role: str,
+    analysis: dict[str, object],
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Validate one trio analysis against the freeze, persist it, complete the job."""
+    from .agents import parse_committee_output
+    from .models import SessionStatus, validate_json_value
+
+    if role not in ("stockbot", "bullbot", "bearbot"):
+        raise ValueError(f"record_committee_analysis: role must be stockbot|bullbot|bearbot, got {role!r}")
+    if not isinstance(analysis, Mapping):
+        raise ValueError(f"record_committee_analysis: 'analysis' must be a mapping, got {type(analysis).__name__}")
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    job = _require_job(store, job_id)
+    if job.session_id != found.session_id:
+        raise ValueError(f"record_committee_analysis: job {job_id!r} belongs to {job.session_id!r}")
+    if job.status != "running":
+        raise ValueError(f"record_committee_analysis: job {job_id!r} status is {job.status!r} (running required)")
+    if not found.freeze_ids:
+        raise ValueError(f"record_committee_analysis: session {session_id!r} has no freeze")
+    fid = found.freeze_ids[-1]
+    try:
+        frozen = store.get_freeze(fid)
+    except KeyError:
+        raise ValueError(f"record_committee_analysis: unknown freeze_id: {fid!r}") from None
+    raw_ids = frozen.get("evidence_ids")
+    freeze_ids = [e for e in raw_ids if isinstance(e, str)] if isinstance(raw_ids, list) else []
+    try:
+        envelope = json.dumps(dict(analysis))
+    except TypeError as exc:
+        raise ValueError(f"record_committee_analysis: 'analysis' must be JSON-able: {exc}") from exc
+    parse_committee_output(envelope, frozen=freeze_ids, agent=role)
+    done = _jobs.complete_job(job, result=dict(analysis))
+    store.save_job(done)
+    cur = found
+    if cur.status == SessionStatus.FREEZING.value:
+        cur = _session.transition_session(cur, SessionStatus.ANALYZING)
+    runs: list[JSONValue] = list(cur.committee_runs)
+    for i, entry in enumerate(runs):
+        if isinstance(entry, dict) and entry.get("freeze_id") == fid:
+            got = entry.get("jobs", [])
+            known: list[str] = [j for j in got if isinstance(j, str)] if isinstance(got, list) else []
+            if job_id not in known:
+                known.append(job_id)
+            merged: dict[str, JSONValue] = {
+                "freeze_id": fid,
+                "wave_id": entry.get("wave_id", job.wave_id),
+                "jobs": validate_json_value(known, "<service>"),
+            }
+            runs[i] = merged
+            break
+    else:
+        fresh: dict[str, JSONValue] = {
+            "freeze_id": fid,
+            "wave_id": job.wave_id,
+            "jobs": validate_json_value([job_id], "<service>"),
+        }
+        runs.append(fresh)
+    cur = replace(cur, committee_runs=runs, updated_at=utcnow())
+    store.save_session(cur)
+    return done.to_dict()
+
+
+def decide_wave2(
+    session_id: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, object]:
+    """Gate one targeted wave; persists the stop reason either way."""
+    from .director import DirectorBudgets, DirectorDeps, Wave1Result, decide_wave2 as _decide
+
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    jobs = store.list_jobs(session_id)
+    wave1: Wave1Result | None = None
+    try:
+        wave1, _ = _wave1_state(store, found)
+    except ValueError:
+        pass
+    if wave1 is None:
+        wave1 = Wave1Result(session_id=session_id, wave_id=1, freeze_id="", evidence_ids=[], stock=None, bull=None, bear=None, disagreement=None)
+        waves_used = 1
+    else:
+        waves_used = max(1, len(found.freeze_ids))
+    raw_used = found.budget.get("tool_calls_used")
+    tool_used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
+    elapsed = (utcnow() - found.created_at).total_seconds() if isinstance(found.created_at, datetime) else 0.0
+
+    def _record_stop(sid: str, reason: str) -> None:
+        from .journal import append_event, hydrate
+
+        hydrate(sid, store.list_events(sid))
+        store.save_event(append_event(sid, "wave.stopped", "service", "service", {"reason": reason}))
+
+    def _no_create_session(_question: str, _as_of: str) -> str:
+        raise AssertionError("decide_wave2: create_session is not sequenced in service")
+
+    def _no_fetch(_sid: str) -> list[str]:
+        raise AssertionError("decide_wave2: fetch_wave_evidence is not sequenced in service")
+
+    def _no_freeze(_sid: str) -> str:
+        raise AssertionError("decide_wave2: create_freeze is not sequenced in service")
+
+    def _no_committee(_sid: str) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
+        raise AssertionError("decide_wave2: run_committee is not sequenced in service")
+
+    deps = DirectorDeps(
+        create_session=_no_create_session,
+        fetch_wave_evidence=_no_fetch,
+        create_freeze=_no_freeze,
+        run_committee=_no_committee,
+        record_stop=_record_stop,
+    )
+    decision = _decide(wave1, deps=deps, budgets=DirectorBudgets(), waves_used=waves_used, jobs_used=len(jobs), tool_calls_used=tool_used, elapsed_s=elapsed)
+    if decision.authorized:
+        from .models import SessionStatus
+
+        cur = store.get_session(session_id)
+        if cur.status == SessionStatus.ANALYZING.value:
+            cur = _session.transition_session(cur, SessionStatus.TARGETED_RESEARCH)
+            cur = replace(cur, current_wave=2, updated_at=utcnow())
+            store.save_session(cur)
+    return {
+        "authorized": decision.authorized,
+        "stop_reason": decision.stop_reason,
+        "reason_detail": decision.reason_detail,
+        "targeted_question": decision.targeted_question,
+        "targeted_domain": decision.targeted_domain,
+    }
+
+
+def finalize_session(
+    session_id: str,
+    answer: str,
+    claims: list[object],
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, object]:
+    """Persist the trio-joined synthesis and move to COMPLETED."""
+    from .agents import parse_grounded_claims
+    from .models import SessionStatus, validate_json_value
+    from .synthesis.final import synthesize_final
+
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    if found.status in _session.TERMINAL_STATUSES:
+        raise ValueError(f"finalize_session: session {session_id!r} status is {found.status!r} (terminal)")
+    wave1, meta = _wave1_state(store, found)
+    fid = meta["freeze_id"]
+    assert isinstance(fid, str)
+    missing = [name for name, present in (("stockbot", wave1.stock), ("bullbot", wave1.bull), ("bearbot", wave1.bear)) if present is None]
+    if missing:
+        raise ValueError(f"finalize_session: missing committee analyses for {missing} on freeze {fid!r}")
+    assert wave1.stock is not None and wave1.bull is not None and wave1.bear is not None
+    disagreement = wave1.disagreement
+    if disagreement is None:
+        raise ValueError(f"finalize_session: missing disagreement on freeze {fid!r}")
+    if not isinstance(claims, list):
+        raise ValueError(f"finalize_session: 'claims' must be a list, got {type(claims).__name__}")
+    narrowed: list[dict[str, object]] = []
+    for item in claims:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"finalize_session: each claim must be a mapping, got {type(item).__name__}")
+        refs = item.get("evidence_ids", [])
+        narrowed.append({"text": item.get("text", item.get("claim_text", item.get("claim", ""))), "evidence_ids": [e for e in refs] if isinstance(refs, (list, tuple)) else []})
+    try:
+        envelope = json.dumps(narrowed)
+    except TypeError as exc:
+        raise ValueError(f"finalize_session: 'claims' must be JSON-able: {exc}") from exc
+    ids_raw = meta["evidence_ids"]
+    assert isinstance(ids_raw, list)
+    grounded = parse_grounded_claims(envelope, frozen=[e for e in ids_raw if isinstance(e, str)])
+    wave_raw = meta["wave_id"]
+    as_of_raw = meta["as_of"]
+    assert isinstance(wave_raw, int) and isinstance(as_of_raw, str)
+    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=answer if isinstance(answer, str) and answer.strip() else None)
+    final_claims = grounded if grounded else synth.claims
+    claims_json: list[JSONValue] = []
+    for claim in final_claims:
+        row: dict[str, JSONValue] = {"text": claim.text, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
+        claims_json.append(row)
+    final: dict[str, JSONValue] = {"answer": synth.answer, "freeze_id": fid, "claims": claims_json}
+    cur = store.get_session(session_id)
+    if cur.status == SessionStatus.ANALYZING.value:
+        cur = _session.transition_session(cur, SessionStatus.SYNTHESIZING)
+        store.save_session(cur)
+    cur = replace(store.get_session(session_id), final_result=final, updated_at=utcnow())
+    store.save_session(cur)
+    if cur.status == SessionStatus.SYNTHESIZING.value:
+        cur = _session.transition_session(cur, SessionStatus.COMPLETED)
+        store.save_session(cur)
+    return {"session_id": session_id, "freeze_id": fid, "status": cur.status}

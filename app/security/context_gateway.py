@@ -128,6 +128,8 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "research_status": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "research_cancel": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "research_read": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_add_evidence": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_add_analysis": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     # Robinhood market data (account-connected, public observations).
     "get_market_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
     "get_option_chain": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),

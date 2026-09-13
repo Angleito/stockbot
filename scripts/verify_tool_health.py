@@ -57,6 +57,7 @@ from app.tools import (  # noqa: E402
     TOOL_CAPABILITIES,
     _FINRA_HANDLERS,
     _MODEL_HANDLERS,
+    _RESEARCH_HANDLERS,
     _ROBINHOOD_HANDLERS,
     _THESIS_HANDLERS,
     _canonical_tool_schema,
@@ -203,6 +204,8 @@ def handler_owner(name: str) -> object | None:
         return _FINRA_HANDLERS
     if name in _ROBINHOOD_HANDLERS:
         return _ROBINHOOD_HANDLERS
+    if name in _RESEARCH_HANDLERS:
+        return _RESEARCH_HANDLERS
     return None
 
 
@@ -247,12 +250,13 @@ _LOCAL_HANDLER_TOOLS = frozenset({
     "thesis_refine",
     "thesis_watch",
     "thesis_journal",
+    "thesis_status",
     "get_sec_search_coverage",
     "find_alternative_signals",
     "get_macro_context",
     "get_trend_evidence",
     "search_company_patents",
-})
+}) | frozenset(_RESEARCH_HANDLERS)
 
 # Google collectors check enabled flags first (trends.collect_trends:_bq_ready,
 # datacommons.get_macro_context, patents.search_company_patents:_data_enabled,

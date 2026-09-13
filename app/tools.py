@@ -1233,6 +1233,39 @@ TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
+            "name": "research_add_evidence",
+            "description": "Records one finding on a research job; provenance, point-in-time, and IDs are kernel-validated.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "job_id": {"type": "string", "description": "Running job ID the finding belongs to."},
+                    "item": {"type": "object", "description": "Finding with content, source, and provenance fields."},
+                },
+                "required": ["session_id", "job_id", "item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_add_analysis",
+            "description": "Records one committee analysis (stockbot, bullbot, or bearbot) on a running job; claim refs are validated against the frozen evidence.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "job_id": {"type": "string", "description": "Running job ID the analysis belongs to."},
+                    "role": {"type": "string", "enum": ["stockbot", "bullbot", "bearbot"], "description": "Committee role authoring the analysis."},
+                    "analysis": {"type": "object", "description": "Committee output with claims grounded in frozen evidence IDs."},
+                },
+                "required": ["session_id", "job_id", "role", "analysis"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_alternative_signals",
             "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
             "parameters": {
@@ -3079,6 +3112,38 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         prerequisites=(),
         direct_activation=False,
     ),
+    "research_add_evidence": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="add_research_evidence",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Record one finding on a research job; provenance, point-in-time, and IDs are kernel-validated.",
+        choose_when=("Recording a finding from a dispatched research job.",),
+        reject_when=("Not for session state overviews (research_status).",),
+        conflicts_with=(),
+        related_tools=("research_status",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_add_analysis": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="add_committee_analysis",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Record one committee analysis (stockbot, bullbot, or bearbot); claim refs are validated against frozen evidence.",
+        choose_when=("Recording a trio analysis grounded in the frozen evidence.",),
+        reject_when=("Not for session state overviews (research_status).",),
+        conflicts_with=(),
+        related_tools=("research_status",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
 }
 
 
@@ -4060,6 +4125,8 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "research_status": Capability.RESEARCH,
     "research_cancel": Capability.RESEARCH,
     "research_read": Capability.RESEARCH,
+    "research_add_evidence": Capability.RESEARCH,
+    "research_add_analysis": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
     "get_option_chain": Capability.BROKER_MARKET_READ,
     "analyze_option_contract": Capability.BROKER_MARKET_READ,
@@ -4168,7 +4235,7 @@ def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: Reques
 
 
 _PIT_INSTANT_TOOLS = frozenset({"thesis_show", "research_status", "research_resume", "research_read"})
-_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_add_analysis"})
 
 
 def _pit_day(cutoff: str) -> str | None:
@@ -4520,6 +4587,39 @@ def _research_read(arguments: dict[str, object], context: RequestContext) -> dic
     return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
 
 
+def _research_add_evidence(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    job_id = str(arguments["job_id"])
+    item = arguments["item"]
+    if not isinstance(item, dict):
+        raise ValueError(f"research_add_evidence: 'item' must be an object, got {type(item).__name__}")
+    try:
+        return dict(research_service.record_evidence(session_id, job_id, item, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
+def _research_add_analysis(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    job_id = str(arguments["job_id"])
+    role = str(arguments["role"])
+    if role not in ("stockbot", "bullbot", "bearbot"):
+        raise ValueError(f"research_add_analysis: role must be stockbot|bullbot|bearbot, got {role!r}")
+    analysis = arguments["analysis"]
+    if not isinstance(analysis, dict):
+        raise ValueError(f"research_add_analysis: 'analysis' must be an object, got {type(analysis).__name__}")
+    try:
+        return dict(research_service.record_committee_analysis(session_id, job_id, role, analysis, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
 _THESIS_HANDLERS: dict[str, ContextHandler] = {
     "thesis_create": _thesis_create,
     "thesis_show": _thesis_show,
@@ -4535,6 +4635,8 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
     "research_status": _research_status,
     "research_cancel": _research_cancel,
     "research_read": _research_read,
+    "research_add_evidence": _research_add_evidence,
+    "research_add_analysis": _research_add_analysis,
 }
 
 # Thesis/research tools are direct local dispatch (no broker) but take

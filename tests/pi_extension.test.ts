@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stockbotExtension from "../.pi/extensions/stockbot.ts";
@@ -560,6 +560,11 @@ import {
 	fetchYoutubeAnalytics,
 	type YoutubeAnalyticsRequest,
 } from "../.pi/lib/youtube-analytics.ts";
+import {
+	advanceOnAgentEnd,
+	setResearchBridge,
+	startResearch,
+} from "../.pi/lib/research-director.ts";
 
 const YT_MARKER = "ZxqUniqueTitleMarker";
 const YT_SECRET = "ZxqSecretKeyMaterial";
@@ -948,16 +953,27 @@ test("stockbot extension registers youtube-analytics command once", async () => 
 });
 
 test("stockbot extension registers research operator commands", async () => {
-	const { commands, pi, sent } = fakePiHost();
-	await stockbotExtension(pi);
-	for (const name of ["research", "research-status"]) expect(typeof commands[name]?.handler).toBe("function");
-	await commands["research"].handler("NVDA inference growth", {});
-	await commands["research-status"].handler("rs:abc", {});
-	expect(sent.length).toBe(2);
-	const first = sent[0]?.message as { content?: unknown };
-	expect(String(first.content)).toContain("research_start");
-	const second = sent[1]?.message as { content?: unknown };
-	expect(String(second.content)).toContain("research_status");
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-cmd-"));
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	try {
+		const { commands, handlers, pi, sent } = fakePiHost();
+		await stockbotExtension(pi);
+		await handlers["agent_start"]({});
+		await commands["research"].handler("NVDA inference growth", {});
+		await commands["research-status"].handler("rs:abc", {});
+		expect(sent.length).toBe(2);
+		const first = sent[0]?.message as { content?: unknown };
+		expect(String(first.content)).toContain("call_tool");
+		expect(String(first.content)).toContain("research_add_evidence");
+		expect(String(first.content)).toContain("rs:");
+		const second = sent[1]?.message as { content?: unknown };
+		expect(String(second.content)).toContain("call_tool");
+		expect(String(second.content)).toContain("research_status");
+	} finally {
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+	}
 });
 
 test("every registered bridge tool carries its parameter schema", async () => {
@@ -1355,6 +1371,286 @@ test("success, zero-match, and terminal failure never inject a continuation", as
 	} finally {
 		if (prevDone === undefined) delete process.env.STOCKBOT_DONE_FILE;
 		else process.env.STOCKBOT_DONE_FILE = prevDone;
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+	}
+});
+
+test("research director stages fetch, freeze, gate, and finalize via stubbed bridge", async () => {
+	const ops: string[] = [];
+	const SID = "rs:driver1";
+	const FID = `${SID}:1:freeze`;
+	let evidence: string[] = [];
+	let freezes: string[] = [];
+	let committee: { freeze_id: string; wave_id: number; jobs: string[] }[] = [];
+	let spawned: { job_id: string; job_type: string }[] = [];
+	let spawnN = 0;
+	let finalized = false;
+	setResearchBridge(async (req: Json) => {
+		ops.push(String(req.op));
+		switch (req.op) {
+			case "research.session.create":
+				return { result: { session_id: SID } };
+			case "research.session.inspect":
+				if (String(req.session_id) !== SID) return { error: "unknown_session" };
+				return {
+					result: {
+						session: finalized
+							? { session_id: SID, status: "completed", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: { answer: "kernel synthesis", freeze_id: FID, claims: [] } }
+							: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
+						jobs: [
+							{ job_id: "job:src", session_id: SID, status: "queued", wave_id: 1, job_type: "source_agent" },
+							...spawned.map((s) => ({ job_id: s.job_id, session_id: SID, status: committee.some((c) => c.jobs.includes(s.job_id)) ? "completed" : "running", wave_id: 1, job_type: s.job_type })),
+						],
+						pending_next_action: null,
+					},
+				};
+			case "research.freeze.create":
+				freezes = [FID];
+				return { result: { freeze_id: FID } };
+			case "research.job.start":
+				spawnN += 1;
+				const jid = `job:auto-${spawnN}`;
+				const jtype = String(req.type ?? "stockbot");
+				spawned.push({ job_id: jid, job_type: jtype });
+				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: 1, job_type: jtype } };
+			case "research.wave2.decide":
+				return { result: { authorized: false, stop_reason: "no_disagreement", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
+			case "research.session.finalize":
+				expect(Array.isArray(req.claims)).toBe(true);
+				finalized = true;
+				return { result: { session_id: SID, freeze_id: FID, status: "synthesizing" } };
+			default:
+				return { error: "unknown_op" };
+		}
+	});
+	const runId = "run-driver-stage-1";
+	const transitions = () => ops.filter((o) => o !== "research.session.inspect");
+	const started = await startResearch("Will NVDA beat earnings?", runId);
+	expect(started.sessionId).toBe(SID);
+	expect(started.prompt).toContain("call_tool");
+	expect(started.prompt).toContain("research_add_evidence");
+	expect(started.prompt).toContain(SID);
+	// Fetch stage: no evidence yet, so no transition RPC fires.
+	let adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) expect(adv.prompt).toContain("research_add_evidence");
+	expect(transitions()).toEqual(["research.session.create"]);
+	// Evidence arrives: freeze fires, then the driver seeds the first committee
+	// job (real create_research leaves only a queued source_agent).
+	evidence = [`${SID}:ev:1`];
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("research_add_analysis");
+		expect(adv.prompt).toContain("job:auto-1");
+		expect(adv.prompt).toContain('"role": "stockbot"');
+		expect(adv.prompt).not.toContain("source_agent");
+	}
+	expect(transitions()).toEqual(["research.session.create", "research.freeze.create", "research.job.start"]);
+	// Trio tops up one job per turn; prompts never go empty.
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("job:auto-2");
+		expect(adv.prompt).toContain('"role": "bullbot"');
+	}
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("job:auto-3");
+		expect(adv.prompt).toContain('"role": "bearbot"');
+	}
+	expect(transitions()).toEqual(["research.session.create", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start"]);
+	// Full trio recorded: the gate decides wave-2 (declined here).
+	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2", "job:auto-3"] }];
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	expect(transitions()).toEqual(["research.session.create", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	// Declined wave-2: finalize completes and clears the entry.
+	adv = await advanceOnAgentEnd(runId, "model synthesis text");
+	expect(adv?.done).toBe(true);
+	if (adv && adv.done) expect(adv.answer).toBe("kernel synthesis");
+	expect(transitions()).toEqual([
+		"research.session.create",
+		"research.freeze.create",
+		"research.job.start",
+		"research.job.start",
+		"research.job.start",
+		"research.wave2.decide",
+		"research.session.finalize",
+	]);
+	expect(await advanceOnAgentEnd(runId, "")).toBeNull();
+});
+
+test("bridge close kills child, settles inflight, fails fast", async () => {
+	const kids: ChildProcessWithoutNullStreams[] = [];
+	const { callBridge, close } = createBridgeClient(() => {
+		const child = spawnScript(HEALTHY_SCRIPT);
+		kids.push(child);
+		return child;
+	});
+	const res = await callBridge({ op: "describe" }, 5000, false);
+	expect((res as Json).ok).toBe(true);
+	close();
+	close();
+	expect(await settledKilled(kids[0])).toBe(true);
+	const after = await callBridge({ op: "describe" }, 1000, false);
+	expect((after as Json).error).toBe("bridge_unavailable");
+	const silentKids: ChildProcessWithoutNullStreams[] = [];
+	const silent = createBridgeClient(() => {
+		const child = spawnScript(SILENT_SCRIPT);
+		silentKids.push(child);
+		return child;
+	});
+	const inflight = silent.callBridge({ op: "describe" }, 5000, false);
+	expect(silentKids.length).toBe(1);
+	silent.close();
+	const settled = await inflight;
+	expect((settled as Json).error).toBe("bridge_unavailable");
+	expect(await settledKilled(silentKids[0])).toBe(true);
+});
+
+test("extension registers session_shutdown bridge cleanup", async () => {
+	const { handlers, pi } = fakePiHost();
+	await stockbotExtension(pi);
+	expect(typeof handlers["session_shutdown"]).toBe("function");
+	await handlers["session_shutdown"]({ type: "session_shutdown", reason: "quit" });
+	await handlers["session_shutdown"]({ type: "session_shutdown", reason: "quit" });
+});
+
+test("research director provisions wave-2 source job on authorization", async () => {
+	const ops: { op: string; wave_id?: unknown; job_type?: unknown }[] = [];
+	const SID = "rs:driver2";
+	const FID1 = `${SID}:1:freeze`;
+	const FID2 = `${SID}:2:freeze`;
+	const ev1 = `${SID}:ev:1`;
+	const ev2 = `${SID}:ev:2`;
+	let evidence: string[] = [ev1];
+	let freezes: string[] = [FID1];
+	let committee: { freeze_id: string; wave_id: number; jobs: string[] }[] = [
+		{ freeze_id: FID1, wave_id: 1, jobs: ["job:1", "job:2", "job:3"] },
+	];
+	let w2job = "";
+	setResearchBridge(async (req: Json) => {
+		ops.push({ op: String(req.op), wave_id: req.wave_id, job_type: (req as Json).type });
+		switch (req.op) {
+			case "research.session.create":
+				return { result: { session_id: SID } };
+			case "research.session.inspect":
+				return {
+					result: {
+						session: { session_id: SID, status: "analyzing", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
+						jobs: [
+							{ job_id: "job:1", session_id: SID, status: "completed", wave_id: 1, job_type: "stockbot" },
+							{ job_id: "job:2", session_id: SID, status: "completed", wave_id: 1, job_type: "bullbot" },
+							{ job_id: "job:3", session_id: SID, status: "completed", wave_id: 1, job_type: "bearbot" },
+							{ job_id: "job:src", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" },
+							...(w2job ? [{ job_id: w2job, session_id: SID, status: "running", wave_id: 2, job_type: "source_agent" }] : []),
+						],
+						pending_next_action: null,
+					},
+				};
+			case "research.wave2.decide":
+				return { result: { authorized: true, stop_reason: "continue", reason_detail: "follow-up requested", targeted_question: "How did Q3 go?", targeted_domain: "SEC" } };
+			case "research.job.start":
+				w2job = "job:w2";
+				return { result: { job_id: w2job, session_id: SID, status: "running", wave_id: 2, job_type: "source_agent" } };
+			case "research.freeze.create":
+				freezes = [FID1, FID2];
+				return { result: { freeze_id: FID2 } };
+			default:
+				return { error: "unknown_op" };
+		}
+	});
+	const runId = "run-driver-stage-2";
+	await startResearch("Will NVDA grow?", runId);
+	let adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("job:w2");
+		expect(adv.prompt).toContain("research_add_evidence");
+	}
+	const starts = ops.filter((o) => o.op === "research.job.start");
+	expect(starts.length).toBe(1);
+	expect(starts[0].wave_id).toBe(2);
+	evidence = [ev1, ev2];
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	const frozen = ops.filter((o) => o.op === "research.freeze.create");
+	expect(frozen.length).toBe(1);
+	expect(frozen[0].wave_id).toBe(2);
+});
+
+test("research command stages run that agent_start preserves", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-order-"));
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevAsOf = process.env.STOCKBOT_AS_OF;
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_AS_OF = "2025-06-30";
+	try {
+		const { commands, handlers, pi, sent } = fakePiHost();
+		await stockbotExtension(pi);
+		const ops: string[] = [];
+		let createAsOf: unknown = null;
+		setResearchBridge(async (req: Json) => {
+			ops.push(String(req.op));
+			if (req.op === "research.session.create") { createAsOf = req.as_of ?? null; return { result: { session_id: "rs:order1" } }; }
+			if (req.op === "research.session.inspect") {
+				return {
+					result: {
+						session: { session_id: "rs:order1", status: "researching", evidence_ids: [], freeze_ids: [], committee_runs: [], final_result: null },
+						jobs: [{ job_id: "job:1", session_id: "rs:order1", status: "queued", wave_id: 1, job_type: "source_agent" }],
+						pending_next_action: null,
+					},
+				};
+			}
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("Will ordering hold?", {});
+		expect(ops.filter((o) => o === "research.session.create").length).toBe(1);
+		expect(createAsOf).toBe("2025-06-30");
+		await handlers["agent_start"]({});
+		await handlers["agent_end"]({ messages: [{ role: "assistant", content: [{ type: "text", text: "working" }] }] });
+		expect(ops.filter((o) => o === "research.session.create").length).toBe(1);
+		expect(ops).toContain("research.session.inspect");
+		const customs = sent.map((s) => (s.message as { customType?: unknown }).customType);
+		expect(customs).toContain("stockbot-research-stage");
+	} finally {
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevAsOf === undefined) delete process.env.STOCKBOT_AS_OF;
+		else process.env.STOCKBOT_AS_OF = prevAsOf;
+	}
+});
+
+test("research command writes isolated data root, default db untouched", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-isolation-"));
+	const tmpData = join(dir, "data");
+	const defaultDb = join(ROOT, "data", "research.sqlite");
+	let before: string;
+	try {
+		const s = statSync(defaultDb);
+		before = `${s.size}:${s.mtimeMs}`;
+	} catch {
+		before = "missing";
+	}
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	process.env.STOCKBOT_DATA_DIR = tmpData;
+	try {
+		const { commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		await commands["research"].handler("Isolation probe question?", {});
+		expect(existsSync(join(tmpData, "research.sqlite"))).toBe(true);
+		let after: string;
+		try {
+			const s = statSync(defaultDb);
+			after = `${s.size}:${s.mtimeMs}`;
+		} catch {
+			after = "missing";
+		}
+		expect(after).toBe(before);
+	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
 	}

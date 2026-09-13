@@ -768,6 +768,22 @@ def _cmd_trace(session_id: str) -> None:
             print(f"    ... {len(events) - 50} more")
 
 
+def _cmd_herdr(args: argparse.Namespace) -> None:
+    """Live Herdr reads (read-only; WorkerId->pane map stays local)."""
+    sub = getattr(args, "herdr_command", None)
+    if sub == "raw-logs":
+        from app.services.herdr_client import HerdrClient
+
+        try:
+            print(HerdrClient().pane_read(args.pane, source=args.source, lines=args.lines), end="")
+        except (ConnectionError, FileNotFoundError) as exc:
+            raise SystemExit(f"herdr: cannot reach Herdr socket ({exc})") from None
+        except KeyError as exc:
+            raise SystemExit(f"herdr: unexpected response shape (missing {exc})") from None
+    else:
+        raise SystemExit("herdr: choose from raw-logs")
+
+
 def _cmd_eval(args: argparse.Namespace) -> None:
     """Deterministic agent-scenario evals (own store: data/eval_runs.sqlite)."""
     sub = getattr(args, "eval_command", None)
@@ -933,6 +949,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     trace_parser = subparsers.add_parser("trace", help="show persisted traces for a research session")
     trace_parser.add_argument("session_id", help="research session id")
+    herdr_parser = subparsers.add_parser("herdr", help="live Herdr pane output (read-only)")
+    herdr_sub = herdr_parser.add_subparsers(dest="herdr_command")
+    raw_logs = herdr_sub.add_parser("raw-logs", help="print a pane's recent output (RAW LOGS)")
+    raw_logs.add_argument("pane", help="pane id, e.g. wC:p1")
+    raw_logs.add_argument("--lines", type=int, default=200, help="max lines (default 200)")
+    raw_logs.add_argument("--source", default="recent",
+                          choices=["visible", "recent", "recent-unwrapped"],
+                          help="terminal snapshot source (default: recent)")
 
     eval_common = argparse.ArgumentParser(add_help=False)
     eval_common.add_argument("--scenario", default=None, help="one scenario (default: all)")
@@ -1011,13 +1035,15 @@ def main() -> None:
         _cmd_research(args)
     elif args.command == "trace":
         _cmd_trace(args.session_id)
+    elif args.command == "herdr":
+        _cmd_herdr(args)
     elif args.command == "eval":
         _cmd_eval(args)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
             "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
-            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data, research, trace, eval)"
+            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data, research, trace, herdr, eval)"
         )
 
 

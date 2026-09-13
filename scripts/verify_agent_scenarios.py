@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.research.evals.evaluators import EvalInput, evaluate  # noqa: E402
-from app.research.evals.scenarios import list_scenarios  # noqa: E402
+from app.research.evals.scenarios import Scenario, list_scenarios  # noqa: E402
 
 
 def _resolve_provider_model(args: argparse.Namespace) -> tuple[str, str]:
@@ -116,7 +116,7 @@ def _pi_dispatch_callable(provider: str, model: str):
     return _dispatch
 
 
-def _run_live_scenario(scenario, provider: str, model: str, prompt_version: str) -> EvalInput:  # type: ignore[no-untyped-def]
+def _run_live_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str) -> EvalInput:
     import tempfile
 
     from app.research.director import DirectorBudgets
@@ -185,9 +185,12 @@ def _run_live_scenario(scenario, provider: str, model: str, prompt_version: str)
                             if isinstance(answer, str) and answer.strip():
                                 break
                 failed = sum(1 for j in jobs if j.status == "failed")
+                completed = sess.status == "completed" and isinstance(answer, str) and bool(answer.strip()) and bool(evidence_ids)
+                recovered = failed if completed else 0
                 return EvalInput(
                     scenario_name=scenario.name, answer_text=answer if isinstance(answer, str) else "",
                     tool_calls=tuple(trace_tool_names), job_count=len(jobs), failed_count=failed,
+                    recovered_count=recovered,
                     evidence_ids=evidence_ids, as_of=scenario.as_of,
                     requires_evidence=scenario.requires_evidence,
                     wall_clock_ms=wall_ms, budget_used=len(trace_tool_names), budget_cap=60,

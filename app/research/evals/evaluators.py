@@ -165,8 +165,12 @@ class ScenarioResult:
     metrics: EvalMetrics
 
 
-def _v_execution_failure(inp: EvalInput) -> str | None:
-    if inp.scenario_crashed or inp.failed_count > 0:
+def _v_scenario_crashed(inp: EvalInput) -> str | None:
+    return "scenario-crashed" if inp.scenario_crashed else None
+
+
+def _v_unrecovered_failure(inp: EvalInput) -> str | None:
+    if inp.failed_count > inp.recovered_count:
         return "scenario-execution-failed"
     return None
 
@@ -228,7 +232,8 @@ def _v_no_evidence(inp: EvalInput) -> str | None:
 
 
 _CHECKS: tuple[Callable[[EvalInput], str | None], ...] = (
-    _v_execution_failure,
+    _v_scenario_crashed,
+    _v_unrecovered_failure,
     _v_future_crossing,
     _v_fabricated_id,
     _v_fabricated_source,

@@ -460,6 +460,7 @@ def test_describe_direct_tool_names_parity():
     assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
         "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status",
         "research_start", "research_resume", "research_status", "research_cancel", "research_read",
+        "research_add_evidence", "research_add_analysis",
     }
 
 

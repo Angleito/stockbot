@@ -475,6 +475,30 @@ tools:
     summary: "Company patent search: publications, assignees, counts, and classifications."
     version: 2
     keywords: [assignee, classification, company, count, filed, finding, lately, patent, patented, publication, search]
+  - name: research_add_analysis
+    domain: research
+    family: session
+    path: "/research/session/research_add_analysis"
+    intent: add_committee_analysis
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Record one committee analysis (stockbot, bullbot, or bearbot); claim refs are validated against frozen evidence."
+    version: 2
+    keywords: [add, against, analysi, bearbot, bullbot, claim, committee, evidence, frozen, grounded, one, record, recording, ref, research, stockbot, trio, validated]
+  - name: research_add_evidence
+    domain: research
+    family: session
+    path: "/research/session/research_add_evidence"
+    intent: add_research_evidence
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Record one finding on a research job; provenance, point-in-time, and IDs are kernel-validated."
+    version: 2
+    keywords: [add, dispatched, evidence, finding, ids, job, kernel, one, point, provenance, record, recording, research, time, validated]
   - name: research_cancel
     domain: research
     family: session
