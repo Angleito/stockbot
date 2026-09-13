@@ -9,6 +9,9 @@ scripts.verify_tool_registry.get_registry_sets, never a hand list), checks:
   dispatch    - canonical execute_tool path invokes the registered handler
                 (proven by sentinel-swapping the handler entry; the live
                 network is never needed for this proof).
+  handler     - real handler body via canonical execute_tool with provider
+                boundaries replaced by deterministic doubles (no network);
+                same dict/serializable/structured-error shape as live.
   live        - execute_tool with fixture args returns a dict that
                 json.dumps accepts; a structured {"error": ...} counts as
                 pass (data variance is not a plumbing failure), but a raise,
@@ -23,19 +26,22 @@ All invocation is programmatic via app.tools.execute_tool, never via Pi LLM.
 Exit 0 when every tool passes, 1 with per-tool failures listed otherwise.
 Stdlib + repo venv only.
 """
-
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import json
+import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import tools as tools_mod  # noqa: E402
 from app.policy import Capability, RequestContext  # noqa: E402
+from app.sec.discovery import service as sec_discovery_service  # noqa: E402
 from app.tools import (  # noqa: E402
     TOOLS,
     TOOL_CAPABILITIES,
@@ -213,6 +219,192 @@ def check_dispatch(name: str, fixture: dict[str, object], ctx: RequestContext) -
     return None
 
 
+# Handler-stage cliff: one missed network leg must not hang the default suite.
+HANDLER_CALL_TIMEOUT_S = 60
+
+# Tools whose required-only fixture dies in arg validation before the handler
+# runs (found empirically by running each fixture through execute_tool).
+EXTRA_FIXTURE_OVERRIDES: dict[str, dict[str, object]] = {
+    "diff_sec_filings": {"ticker": "AAPL"},
+    "search_sec_filings": {"query": "Apple"},
+    "get_finra_datapoints": {"ticker": "AAPL"},
+}
+
+# Pure-local tools: no provider seam to double, call the handler directly.
+_LOCAL_HANDLER_TOOLS = frozenset({
+    "thesis_create",
+    "thesis_show",
+    "thesis_refine",
+    "thesis_watch",
+    "thesis_journal",
+    "get_sec_search_coverage",
+    "find_alternative_signals",
+    "get_macro_context",
+    "get_trend_evidence",
+    "search_company_patents",
+})
+
+# Google collectors check enabled flags first (trends.collect_trends:_bq_ready,
+# datacommons.get_macro_context, patents.search_company_patents:_data_enabled,
+# all via app/google_data/_lazy_config.py, read per call), so forcing the flag
+# off makes them return fast disabled dicts with zero HTTP calls.
+_GOOGLE_DISABLED_ENV_TOOLS = frozenset({
+    "get_macro_context",
+    "get_trend_evidence",
+    "search_company_patents",
+})
+
+
+def _swap(target: object, attr: str, value: object, saved: list[tuple[object, str, object]]) -> None:
+    saved.append((target, attr, getattr(target, attr)))
+    setattr(target, attr, value)
+
+
+def _swap_env(saved: list[tuple[str, str | None]], key: str, value: str) -> None:
+    saved.append((key, os.environ.get(key)))
+    os.environ[key] = value
+
+
+def _fake_empty_list(*args: object, **kwargs: object) -> list[object]:
+    return []
+
+
+def _fake_empty_dict(*args: object, **kwargs: object) -> dict[str, object]:
+    return {}
+
+
+def _fake_search_envelope(*args: object, **kwargs: object) -> object:
+    return SimpleNamespace(to_dict=lambda: {})
+
+
+def _fake_entities_empty(*args: object, **kwargs: object) -> object:
+    return SimpleNamespace(entities=[])
+
+
+def _fake_exa_search(query: object = "", **kwargs: object) -> dict[str, object]:
+    return {"result_type": "web_search", "query": query, "evidence": []}
+
+
+
+class _FakeDiscoveryService:
+    """Mirrors tests/test_sec_tools.py::_FakeService: serves one empty result."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def search(self, _request: object) -> object:
+        return SimpleNamespace(to_dict=lambda: {})
+
+
+# Provider seams (what each handler calls one level down), never handler
+# entries: check_dispatch already proves entry wiring via sentinel. Empty
+# fakes keep the real coercion/envelope code running; a structured {"error"}
+# from the handler counts as pass, same as check_live.
+_SEAM_MAP: dict[str, list[tuple[object, str, object]]] = {
+    "list_sec_filings": [(tools_mod.sec, "list_sec_filings", _fake_empty_list)],
+    "get_sec_filing": [(tools_mod.sec, "get_sec_filing", _fake_search_envelope)],
+    "list_sec_documents": [(tools_mod.sec, "list_sec_documents", _fake_empty_list)],
+    "get_sec_document": [(tools_mod.sec, "get_sec_document", _fake_empty_dict)],
+    "diff_sec_filings": [
+        (tools_mod.sec, "list_sec_filings", _fake_empty_list),
+        (tools_mod.sec, "diff_filings", _fake_empty_dict),
+    ],
+    "find_sec_entities": [(tools_mod.sec, "find_sec_entities", _fake_search_envelope)],
+    "search_sec_filings": [(tools_mod.sec, "SECDiscoveryService", _FakeDiscoveryService)],
+    "search_sec_relationships": [(tools_mod.sec, "search_sec_relationships", _fake_empty_dict)],
+    "get_material_events": [(tools_mod.sec, "get_material_events", _fake_empty_list)],
+    "get_beneficial_ownership": [(tools_mod.sec, "get_beneficial_ownership", _fake_empty_list)],
+    "get_ownership_changes": [(tools_mod.sec, "get_ownership_changes", _fake_empty_list)],
+    "get_insider_activity": [(tools_mod.sec, "get_insider_activity", _fake_empty_list)],
+    "get_planned_insider_sales": [(tools_mod.sec, "get_planned_insider_sales", _fake_empty_list)],
+    "get_offering_history": [(tools_mod.sec, "get_offering_history", _fake_empty_list)],
+    "get_dilution_profile": [(tools_mod.sec, "get_dilution_profile", _fake_empty_dict)],
+    "get_governance_events": [(tools_mod.sec, "get_governance_events", _fake_empty_list)],
+    "get_transaction_status": [(tools_mod.sec, "get_transaction_status", _fake_empty_list)],
+    "get_short_pressure_profile": [(tools_mod.sec, "get_short_pressure_context", _fake_empty_dict)],
+    "get_recent_ownership_filings": [
+        (tools_mod.edgar_client, "get_recent_ownership_filings", _fake_empty_dict)
+    ],
+    "diff_risk_factors": [(tools_mod.edgar_client, "diff_risk_factors", _fake_empty_dict)],
+    "get_financial_statements": [(tools_mod.edgar_client, "get_financial_statements", _fake_empty_dict)],
+    "get_fundamentals": [(tools_mod.sec_facts, "get_fundamentals", _fake_empty_dict)],
+    "get_xbrl_facts": [(tools_mod.sec_facts, "get_xbrl_facts", _fake_empty_dict)],
+    "get_analyst_estimates": [(tools_mod.analyst_client, "get_analyst_estimates", _fake_empty_dict)],
+    "get_sp500_weight": [(tools_mod.analyst_client, "get_sp500_weight", _fake_empty_dict)],
+    "get_obligations": [(tools_mod.obligations, "get_obligations", _fake_empty_dict)],
+    "get_valuation_metrics": [(tools_mod.valuation, "get_valuation_metrics", _fake_empty_dict)],
+    "search_web": [(tools_mod.exa_client, "search", _fake_exa_search)],
+    "query_finra": [(tools_mod.finra_client, "query_dataset", _fake_empty_dict)],
+    "list_finra_datasets": [(tools_mod.finra_client, "list_datasets", _fake_empty_dict)],
+    "describe_finra_dataset": [(tools_mod.finra_client, "describe_dataset", _fake_empty_dict)],
+    "get_finra_datapoints": [(tools_mod.finra_client, "get_finra_datapoints", _fake_empty_dict)],
+    "get_short_interest": [(tools_mod.finra_client, "get_short_interest", _fake_empty_dict)],
+    "get_reg_sho_volume": [(tools_mod.finra_client, "get_reg_sho_volume", _fake_empty_dict)],
+    "get_threshold_securities": [(tools_mod.finra_client, "get_threshold_securities", _fake_empty_dict)],
+    "get_short_interest_leaderboard": [
+        (tools_mod.screens, "get_short_interest_leaderboard", _fake_empty_dict)
+    ],
+    "investigate_social_arbitrage_candidate": [
+        (sec_discovery_service, "find_sec_entities", _fake_entities_empty)
+    ],
+}
+
+
+def _handler_swaps(name: str) -> list[tuple[object, str, object]] | None:
+    """Provider seams to double for `name`; [] when purely local, None when unknown."""
+    if name in _LOCAL_HANDLER_TOOLS:
+        return []
+    return _SEAM_MAP.get(name)
+
+
+def check_handler(name: str, fixture: dict[str, object], ctx: RequestContext) -> str | None:
+    """Execute the REAL handler via canonical execute_tool with provider doubles."""
+    swaps = _handler_swaps(name)
+    if swaps is None:
+        return "no deterministic provider seam"
+    args = dict(fixture)
+    extra = EXTRA_FIXTURE_OVERRIDES.get(name)
+    if extra:
+        args.update(extra)
+    saved: list[tuple[object, str, object]] = []
+    for target, attr, fake in swaps:
+        _swap(target, attr, fake, saved)
+    saved_env: list[tuple[str, str | None]] = []
+    if name in _GOOGLE_DISABLED_ENV_TOOLS:
+        _swap_env(saved_env, "GOOGLE_DATA_ENABLED", "")
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(execute_tool, name, args, MODEL, context=ctx)
+        result = future.result(timeout=HANDLER_CALL_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        return f"timed out after {HANDLER_CALL_TIMEOUT_S}s"
+    except Exception as e:  # execute_tool contract: never raises
+        return f"raised {type(e).__name__}: {e}"
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        for target, attr, original in reversed(saved):
+            setattr(target, attr, original)
+        for key, original in reversed(saved_env):
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+    if not isinstance(result, dict):
+        return f"handler result not a dict: {type(result).__name__}"
+    try:
+        json.dumps(result)
+    except (TypeError, ValueError) as e:
+        return f"handler result not JSON-serializable: {e}"
+    if "error" in result:
+        if not isinstance(result["error"], str) or not result["error"].strip():
+            return "handler error is not a non-empty string"
+        error_type = result.get("error_type")
+        if error_type is not None and (not isinstance(error_type, str) or not error_type):
+            return "handler error_type is not a string"
+    return None
+
+
+
 def check_live(
     name: str,
     fixture: dict[str, object],
@@ -316,6 +508,8 @@ def verify_one(
         failures.append(f"fixture: {invalid}")
     if (problem := check_dispatch(name, fixture, ctx)) is not None:
         failures.append(f"dispatch: {problem}")
+    if (problem := check_handler(name, fixture, ctx)) is not None:
+        failures.append(f"handler: {problem}")
     if live and (problem := check_live(name, fixture, ctx, pool)) is not None:
         failures.append(f"live: {problem}")
     if (problem := check_security(name, fixture, ctx, deny)) is not None:
