@@ -127,9 +127,10 @@ def test_evaluate_envelope_structured_error_pass_and_worker_fail() -> None:
 
 def test_check_handler_timeout_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(tmp_path)
+    before = {p.pid for p in multiprocessing.active_children()}
     monkeypatch.setattr(vth, "HANDLER_CALL_TIMEOUT_S", 0)
     reason = check_handler("thesis_create", {"user_thesis": "NVDA AI demand stays strong."}, ctx)
     assert reason == "timed out after 0s"
-    assert multiprocessing.active_children() == []
+    assert {p.pid for p in multiprocessing.active_children()} <= before
     monkeypatch.undo()
     assert check_handler("thesis_create", {"user_thesis": "NVDA AI demand stays strong."}, _ctx(tmp_path)) is None
