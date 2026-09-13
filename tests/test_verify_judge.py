@@ -267,7 +267,7 @@ def test_pit_scoped_args_warn_pass():
     assert ok and "WARNING" in reason
 
 def test_args_echo_excused():
-    t1 = call("get_sec_document", "sec", "document_text")
+    t1 = call("get_sec_filing", "sec", "record")
     ev = {"t1": "Balance sheet document rendering retrieval text with paged offsets."}
     t = trace("accession_meta_vs_doc", "Paged document rendering retrieval at offsets 0 and 64000.",
               [t1], ev, ["record"], targs={"t1": '{"accession_no": "0000320193-25-000079", "offset": 64000}'})
@@ -531,3 +531,14 @@ def test_concurrent_order_preserved():
             by_index[i] = future.result()
     ordered = [by_index[i]["id"] for i in sorted(by_index)]
     assert ordered == ids
+
+
+def test_pit_filing_irrelevant_search_does_not_satisfy() -> None:
+    ev = {"t1": "Apple 10-K risk factors revenue $383.29B filed 2023-10-26.",
+          "t2": "Web search Apple revenue $383.29B."}
+    calls = [call("list_sec_filings", "sec", "filing_series", "2023-10-26", cid="t1"),
+             call("search_web", "web", "search_results", "2023-10-26", cid="t2")]
+    t = trace("pit_filing", "Revenue was $383.29B per the 10-K risk section.",
+              calls, ev, ["filing_series", "search_results"])
+    ok, reason = check(t)
+    assert not ok and "missing evidence" in reason

@@ -31,11 +31,20 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Protocol
+
+
+class _SendChannel(Protocol):
+    """Pipe end the handler child sends its result dict through."""
+
+    def send(self, obj: object) -> None: ...
+    def close(self) -> None: ...
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -357,38 +366,95 @@ def _handler_swaps(name: str) -> list[tuple[object, str, object]] | None:
     return _SEAM_MAP.get(name)
 
 
+def _handler_worker(
+    conn: _SendChannel,
+    name: str,
+    args: dict[str, object],
+    principal_id: str,
+    capability_names: list[str],
+    data_root_str: str,
+) -> None:
+    """Child-side handler run: install the doubles here, never in the parent."""
+    try:
+        ctx = RequestContext(
+            principal_id,
+            frozenset({Capability(c) for c in capability_names}),
+            data_root=Path(data_root_str),
+        )
+        swaps = _handler_swaps(name)
+        if swaps is None:
+            try:
+                conn.send({"error": "no deterministic provider seam"})
+            except Exception:
+                pass
+            return
+        saved: list[tuple[object, str, object]] = []
+        for target, attr, fake in swaps:
+            _swap(target, attr, fake, saved)
+        saved_env: list[tuple[str, str | None]] = []
+        if name in _GOOGLE_DISABLED_ENV_TOOLS:
+            _swap_env(saved_env, "GOOGLE_DATA_ENABLED", "")
+        try:
+            result = execute_tool(name, args, MODEL, context=ctx)
+        except Exception as e:  # double leaked; keep the failure structured
+            result = {"error": f"raised {type(e).__name__}: {e}"}
+        try:
+            conn.send(result)
+        except Exception as e:
+            try:
+                conn.send({"error": f"handler result not sendable: {type(e).__name__}: {e}"})
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            conn.send({"error": f"handler child failed: {type(e).__name__}: {e}"})
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def check_handler(name: str, fixture: dict[str, object], ctx: RequestContext) -> str | None:
-    """Execute the REAL handler via canonical execute_tool with provider doubles."""
-    swaps = _handler_swaps(name)
-    if swaps is None:
+    """Execute the REAL handler via canonical execute_tool with provider doubles.
+
+    The handler runs in a spawned child that installs the doubles; the parent
+    installs nothing, so a hanging handler dies with terminate() and there is
+    no parent-side seam to restore on timeout.
+    """
+    if _handler_swaps(name) is None:
         return "no deterministic provider seam"
     args = dict(fixture)
     extra = EXTRA_FIXTURE_OVERRIDES.get(name)
     if extra:
         args.update(extra)
-    saved: list[tuple[object, str, object]] = []
-    for target, attr, fake in swaps:
-        _swap(target, attr, fake, saved)
-    saved_env: list[tuple[str, str | None]] = []
-    if name in _GOOGLE_DISABLED_ENV_TOOLS:
-        _swap_env(saved_env, "GOOGLE_DATA_ENABLED", "")
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    mp_ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = mp_ctx.Pipe(duplex=False)
+    proc = mp_ctx.Process(
+        target=_handler_worker,
+        args=(child_conn, name, args, ctx.principal_id, [c.value for c in ctx.capabilities], str(ctx.data_root)),
+    )
+    proc.start()
+    child_conn.close()
     try:
-        future = pool.submit(execute_tool, name, args, MODEL, context=ctx)
-        result = future.result(timeout=HANDLER_CALL_TIMEOUT_S)
-    except concurrent.futures.TimeoutError:
-        return f"timed out after {HANDLER_CALL_TIMEOUT_S}s"
-    except Exception as e:  # execute_tool contract: never raises
-        return f"raised {type(e).__name__}: {e}"
+        proc.join(HANDLER_CALL_TIMEOUT_S)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+            return f"timed out after {HANDLER_CALL_TIMEOUT_S}s"
+        # Child has exited, so its send (if any) is already in the pipe.
+        if parent_conn.poll(10):
+            result: object = parent_conn.recv()
+        else:
+            return "handler child produced no result"
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-        for target, attr, original in reversed(saved):
-            setattr(target, attr, original)
-        for key, original in reversed(saved_env):
-            if original is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = original
+        parent_conn.close()
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+        proc.close()
     if not isinstance(result, dict):
         return f"handler result not a dict: {type(result).__name__}"
     try:
