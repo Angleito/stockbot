@@ -34,6 +34,7 @@ import json
 import multiprocessing
 import os
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -376,38 +377,49 @@ def _handler_worker(
 ) -> None:
     """Child-side handler run: install the doubles here, never in the parent."""
     try:
-        ctx = RequestContext(
-            principal_id,
-            frozenset({Capability(c) for c in capability_names}),
-            data_root=Path(data_root_str),
-        )
-        swaps = _handler_swaps(name)
-        if swaps is None:
+        try:
+            ctx = RequestContext(
+                principal_id,
+                frozenset({Capability(c) for c in capability_names}),
+                data_root=Path(data_root_str),
+            )
+            swaps = _handler_swaps(name)
+            if swaps is None:
+                try:
+                    conn.send({"worker_ok": False, "reason": "no deterministic provider seam"})
+                except Exception:
+                    pass
+                return
+            saved: list[tuple[object, str, object]] = []
+            for target, attr, fake in swaps:
+                _swap(target, attr, fake, saved)
+            saved_env: list[tuple[str, str | None]] = []
+            if name in _GOOGLE_DISABLED_ENV_TOOLS:
+                _swap_env(saved_env, "GOOGLE_DATA_ENABLED", "")
+        except Exception as e:
             try:
-                conn.send({"error": "no deterministic provider seam"})
+                conn.send({"worker_ok": False, "reason": f"handler setup failed: {type(e).__name__}: {e}"})
             except Exception:
                 pass
             return
-        saved: list[tuple[object, str, object]] = []
-        for target, attr, fake in swaps:
-            _swap(target, attr, fake, saved)
-        saved_env: list[tuple[str, str | None]] = []
-        if name in _GOOGLE_DISABLED_ENV_TOOLS:
-            _swap_env(saved_env, "GOOGLE_DATA_ENABLED", "")
         try:
             result = execute_tool(name, args, MODEL, context=ctx)
-        except Exception as e:  # double leaked; keep the failure structured
-            result = {"error": f"raised {type(e).__name__}: {e}"}
-        try:
-            conn.send(result)
         except Exception as e:
             try:
-                conn.send({"error": f"handler result not sendable: {type(e).__name__}: {e}"})
+                conn.send({"worker_ok": False, "reason": f"execute_tool raised {type(e).__name__}: {e}"})
+            except Exception:
+                pass
+            return
+        try:
+            conn.send({"worker_ok": True, "result": result})
+        except Exception as e:
+            try:
+                conn.send({"worker_ok": False, "reason": f"handler result not sendable: {type(e).__name__}: {e}"})
             except Exception:
                 pass
     except Exception as e:
         try:
-            conn.send({"error": f"handler child failed: {type(e).__name__}: {e}"})
+            conn.send({"worker_ok": False, "reason": f"handler child failed: {type(e).__name__}: {e}"})
         except Exception:
             pass
     finally:
@@ -415,6 +427,30 @@ def _handler_worker(
             conn.close()
         except Exception:
             pass
+
+
+def _evaluate_envelope(message: object) -> str | None:
+    if not isinstance(message, dict):
+        return f"handler worker message not a dict: {type(message).__name__}"
+    if message.get("worker_ok") is not True:
+        reason = message.get("reason")
+        if isinstance(reason, str):
+            return f"handler worker failed: {reason}"
+        return "handler worker failed: unknown reason"
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return f"handler result not a dict: {type(result).__name__}"
+    try:
+        json.dumps(result)
+    except (TypeError, ValueError) as e:
+        return f"handler result not JSON-serializable: {e}"
+    if "error" in result:
+        if not isinstance(result["error"], str) or not result["error"].strip():
+            return "handler error is not a non-empty string"
+        error_type = result.get("error_type")
+        if error_type is not None and (not isinstance(error_type, str) or not error_type):
+            return "handler error_type is not a string"
+    return None
 
 
 def check_handler(name: str, fixture: dict[str, object], ctx: RequestContext) -> str | None:
@@ -439,35 +475,39 @@ def check_handler(name: str, fixture: dict[str, object], ctx: RequestContext) ->
     proc.start()
     child_conn.close()
     try:
-        proc.join(HANDLER_CALL_TIMEOUT_S)
+        deadline = time.monotonic() + HANDLER_CALL_TIMEOUT_S
+        envelope: object = None
+        got_envelope = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if parent_conn.poll(min(1.0, remaining)):
+                envelope = parent_conn.recv()
+                got_envelope = True
+                break
+            if not proc.is_alive():
+                break
+        if not got_envelope and parent_conn.poll():
+            envelope = parent_conn.recv()
+            got_envelope = True
+        if not got_envelope:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+                return f"timed out after {HANDLER_CALL_TIMEOUT_S}s"
+            return "handler child produced no result"
+        proc.join(10)
         if proc.is_alive():
             proc.terminate()
             proc.join()
-            return f"timed out after {HANDLER_CALL_TIMEOUT_S}s"
-        # Child has exited, so its send (if any) is already in the pipe.
-        if parent_conn.poll(10):
-            result: object = parent_conn.recv()
-        else:
-            return "handler child produced no result"
+        return _evaluate_envelope(envelope)
     finally:
         parent_conn.close()
         if proc.is_alive():
             proc.terminate()
             proc.join()
         proc.close()
-    if not isinstance(result, dict):
-        return f"handler result not a dict: {type(result).__name__}"
-    try:
-        json.dumps(result)
-    except (TypeError, ValueError) as e:
-        return f"handler result not JSON-serializable: {e}"
-    if "error" in result:
-        if not isinstance(result["error"], str) or not result["error"].strip():
-            return "handler error is not a non-empty string"
-        error_type = result.get("error_type")
-        if error_type is not None and (not isinstance(error_type, str) or not error_type):
-            return "handler error_type is not a string"
-    return None
 
 
 
