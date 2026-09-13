@@ -516,6 +516,18 @@ def _op_research_session_inspect(request: Mapping[str, object], protocol_id: str
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": state}
 
+def _op_research_session_resume(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.session.resume -> service.resume_research."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        state = _kernel.resume_research(session_id, repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    return {"id": protocol_id, "result": state}
+
 
 def _op_research_session_cancel(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.session.cancel -> service.cancel_research."""
@@ -575,6 +587,8 @@ def _op_research_session_finalize(request: Mapping[str, object], protocol_id: st
     claims = request.get("claims")
     if not isinstance(claims, list):
         return {"id": protocol_id, "error": "invalid_arg", "detail": "'claims' must be a list"}
+    if not claims:
+        return {"id": protocol_id, "error": "claims_required"}
     ctx = _bridge_ctx(request)
     try:
         final = _kernel.finalize_session(
@@ -665,10 +679,10 @@ def _handle(line: str) -> dict[str, object] | None:
         return _op_research_job_start(request, protocol_id)
     if op == "research.job.complete":
         return _op_research_job_complete(request, protocol_id)
-    if op == "research.evidence.add":
-        return _op_research_evidence_add(request, protocol_id)
     if op == "research.session.inspect":
         return _op_research_session_inspect(request, protocol_id)
+    if op == "research.session.resume":
+        return _op_research_session_resume(request, protocol_id)
     if op == "research.session.cancel":
         return _op_research_session_cancel(request, protocol_id)
     if op == "research.freeze.create":

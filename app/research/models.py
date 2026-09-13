@@ -304,6 +304,8 @@ class ResearchSession:
     dossier_ids: list[str] = field(default_factory=list)
     committee_runs: list[JSONValue] = field(default_factory=list)
     unresolved_questions: list[str] = field(default_factory=list)
+    targeted_question: str | None = None
+    targeted_domain: str | None = None
     final_result: dict[str, JSONValue] | None = None
     failure: Failure | None = None
 
@@ -320,6 +322,10 @@ class ResearchSession:
             raise ValueError(f"{where}: 'current_wave' must be an int")
         if self.current_wave < 0:
             raise ValueError(f"{where}: 'current_wave' must be >= 0, got {self.current_wave}")
+        if self.targeted_question is not None and not isinstance(self.targeted_question, str):
+            raise ValueError(f"{where}: 'targeted_question' must be a string or null")
+        if self.targeted_domain is not None and not isinstance(self.targeted_domain, str):
+            raise ValueError(f"{where}: 'targeted_domain' must be a string or null")
         if self.failure is not None:
             self.failure.validate(f"{where}: failure")
 
@@ -342,6 +348,8 @@ class ResearchSession:
             "dossier_ids": _json_str_list(self.dossier_ids),
             "committee_runs": [validate_json_value(x, "<session>: 'committee_runs'") for x in self.committee_runs],
             "unresolved_questions": _json_str_list(self.unresolved_questions),
+            "targeted_question": self.targeted_question,
+            "targeted_domain": self.targeted_domain,
             "final_result": validate_json_mapping(self.final_result, "<session>: 'final_result'") if self.final_result is not None else None,
             "failure": self.failure.to_dict() if self.failure is not None else None,
         }
@@ -386,6 +394,8 @@ class ResearchSession:
             dossier_ids=_req_list_str(d, "dossier_ids", where),
             committee_runs=[validate_json_value(x, f"{where}: 'committee_runs'") for x in raw_runs],
             unresolved_questions=_req_list_str(d, "unresolved_questions", where),
+            targeted_question=_opt_str(d.get("targeted_question"), "targeted_question", where),
+            targeted_domain=_opt_str(d.get("targeted_domain"), "targeted_domain", where),
             final_result=final_result,
             failure=failure,
         )

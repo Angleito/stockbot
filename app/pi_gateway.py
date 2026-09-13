@@ -223,6 +223,7 @@ class PiSessionContext:
     """Per-Pi-session grant + labels + budget. Deny-by-default."""
 
     session_id: str
+    active_research_session_id: str | None = None
     authorization: SessionAuthorization = field(default_factory=SessionAuthorization)
     security_state: SessionSecurityState = field(default_factory=SessionSecurityState)
     run_security: RunSecurityContext = field(init=False)
@@ -406,6 +407,33 @@ def _execute_pi_tool(
         _args_json(arguments) if isinstance(arguments, dict) else json.dumps(str(arguments))
     )
 
+    # Stage gate: research sessions derive capability sets from persisted
+    # session+jobs; violations return before any budget is consumed.
+    # Discovery tools always pass (not enforced here).
+    if name not in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"):
+        _raw_sid: object = arguments.get("session_id") if isinstance(arguments, dict) else None
+        if not isinstance(_raw_sid, str) or not _raw_sid:
+            _raw_sid = getattr(session, "active_research_session_id", None)
+        if isinstance(_raw_sid, str) and _raw_sid:
+            _sid: str = _raw_sid
+            try:
+                from app.research import stage as _stage
+            except ImportError:
+                _stage = None  # type: ignore[assignment]
+            if _stage is not None:
+                from app.research.repository import ResearchRepository as _RR
+                try:
+                    _root = Path(data_root) if isinstance(data_root, str) and data_root else (data_root if isinstance(data_root, Path) else None)
+                    _store = _RR(data_root=_root)
+                    _found = _store.get_session(_sid)
+                except KeyError:
+                    pass
+                else:
+                    _st = _stage.stage_for_session(_found, _store.list_jobs(_sid))
+                    try:
+                        _stage.check_stage_tool(_st, name)
+                    except ValueError as exc:
+                        return {"error": str(exc)}
     # Gate 1: RESEARCH-only permit filter; unlisted tools are denied.
     if name not in RESEARCH_TOOL_NAMES or not tool_is_permitted(name, LOCAL_CONTEXT):
         _record_security(
@@ -426,14 +454,38 @@ def _execute_pi_tool(
             "error_type": "invalid_tool_arguments",
         }
 
-    # Gate 8 (reserve): one budget slot per call before any external work.
+    # Gate 8 (reserve): research calls carrying session_id+job_id consume one
+    # job slot atomically via the kernel; everything else keeps the legacy
+    # session-budget reserve below. The outer call_tool wrapper returns before
+    # this point, so only the inner call consumes.
+    _dispatch_consumed = False
+    _raw_csid: object = arguments.get("session_id") if isinstance(arguments, dict) else None
+    _raw_jid: object = arguments.get("job_id") if isinstance(arguments, dict) else None
+    if isinstance(_raw_csid, str) and _raw_csid and isinstance(_raw_jid, str) and _raw_jid:
+        try:
+            from app.research import service as _svc
+            _consume = getattr(_svc, "authorize_and_consume_dispatch", None)
+        except ImportError:
+            _consume = None
+        if _consume is not None:
+            try:
+                _consume(_raw_csid, _raw_jid, name, repo=data_root)
+            except ValueError as exc:
+                _cmsg = str(exc).lower()
+                if "budget" in _cmsg or "exhaust" in _cmsg or "quota" in _cmsg:
+                    return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+                return {"error": str(exc)}
+            _dispatch_consumed = True
+    # one budget slot per call before any external work.
     # search_web draws from its dedicated pool, not the generic tool pool.
     # Session lock held only for the reserve; the handler below runs unlocked.
-    with session._lock:
-        if name != "search_web":
-            reserved = session.budget.reserve_tool_call()
-        else:
-            reserved = session.budget.reserve_search_call()
+    reserved = True
+    if not _dispatch_consumed:
+        with session._lock:
+            if name != "search_web":
+                reserved = session.budget.reserve_tool_call()
+            else:
+                reserved = session.budget.reserve_search_call()
     if not reserved:
         return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
 

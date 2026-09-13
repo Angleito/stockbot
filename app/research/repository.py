@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   job_ids TEXT NOT NULL, evidence_ids TEXT NOT NULL,
   freeze_ids TEXT NOT NULL, dossier_ids TEXT NOT NULL,
   committee_runs TEXT NOT NULL, unresolved_questions TEXT NOT NULL,
+  targeted_question TEXT, targeted_domain TEXT,
   final_result TEXT, failure TEXT);
 CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, wave_id INTEGER NOT NULL,
@@ -176,6 +177,12 @@ class ResearchRepository:
         conn = sqlite3.connect(str(self._path))
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
+        # ponytail: lazy ALTER for pre-targeted DBs; drop once all DBs migrate.
+        for col in ("targeted_question", "targeted_domain"):
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
+            except sqlite3.Error:
+                pass
         return conn
 
     # -- sessions ------------------------------------------------------
@@ -189,8 +196,9 @@ class ResearchRepository:
             conn.execute(
                 "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
                 " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
-                " dossier_ids, committee_runs, unresolved_questions, final_result, failure)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
+                " final_result, failure)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
                     session.query, session.objective,
@@ -202,6 +210,7 @@ class ResearchRepository:
                     json.dumps(session.to_dict()["dossier_ids"], sort_keys=True),
                     json.dumps(session.to_dict()["committee_runs"], sort_keys=True),
                     json.dumps(session.to_dict()["unresolved_questions"], sort_keys=True),
+                    session.targeted_question, session.targeted_domain,
                     json.dumps(session.to_dict()["final_result"], sort_keys=True)
                     if session.final_result is not None else None,
                     json.dumps(session.to_dict()["failure"], sort_keys=True)
@@ -255,6 +264,10 @@ class ResearchRepository:
             value = row[key]
             raw_opt: object = json.loads(str(value)) if value is not None else None
             doc[key] = raw_opt
+        # ponytail: pre-targeted rows lack the columns; default None (from_dict agrees).
+        names = set(row.keys())
+        doc["targeted_question"] = row["targeted_question"] if "targeted_question" in names else None
+        doc["targeted_domain"] = row["targeted_domain"] if "targeted_domain" in names else None
         return ResearchSession.from_dict(doc, "<research.sqlite>")
 
     # -- jobs ----------------------------------------------------------
@@ -263,6 +276,55 @@ class ResearchRepository:
         """Upsert one job row."""
         job.validate("<research.sqlite>")
         with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
+                " source_domain, status, created_at, started_at, completed_at, deadline, model,"
+                " token_budget, tool_budget, child_budget, result, diagnostics, failure)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job.job_id, job.session_id, job.wave_id, job.parent_job_id, job.job_type, job.owner,
+                    job.source_domain, job.status, job.created_at.isoformat(),
+                    job.started_at.isoformat() if job.started_at is not None else None,
+                    job.completed_at.isoformat() if job.completed_at is not None else None,
+                    job.deadline.isoformat() if job.deadline is not None else None,
+                    job.model, job.token_budget, job.tool_budget, job.child_budget,
+                    json.dumps(job.to_dict()["result"], sort_keys=True) if job.result is not None else None,
+                    json.dumps(job.to_dict()["diagnostics"], sort_keys=True),
+                    json.dumps(job.to_dict()["failure"], sort_keys=True) if job.failure is not None else None,
+                ),
+            )
+
+    def save_session_and_job(self, session: ResearchSession, job: Job) -> None:
+        """Upsert one session + one job in a single SQLite transaction."""
+        session.validate("<research.sqlite>")
+        job.validate("<research.sqlite>")
+        policy = json.dumps(validate_json_mapping(session.policy, "<session>"), sort_keys=True)
+        budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
+                " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
+                " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
+                " final_result, failure)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
+                    session.query, session.objective,
+                    session.as_of.isoformat() if session.as_of is not None else None,
+                    session.status, session.current_wave, policy, budget,
+                    json.dumps(session.to_dict()["job_ids"], sort_keys=True),
+                    json.dumps(session.to_dict()["evidence_ids"], sort_keys=True),
+                    json.dumps(session.to_dict()["freeze_ids"], sort_keys=True),
+                    json.dumps(session.to_dict()["dossier_ids"], sort_keys=True),
+                    json.dumps(session.to_dict()["committee_runs"], sort_keys=True),
+                    json.dumps(session.to_dict()["unresolved_questions"], sort_keys=True),
+                    session.targeted_question, session.targeted_domain,
+                    json.dumps(session.to_dict()["final_result"], sort_keys=True)
+                    if session.final_result is not None else None,
+                    json.dumps(session.to_dict()["failure"], sort_keys=True)
+                    if session.failure is not None else None,
+                ),
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
                 " source_domain, status, created_at, started_at, completed_at, deadline, model,"

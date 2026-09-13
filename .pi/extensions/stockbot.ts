@@ -10,7 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, clearResearchRun, setResearchBridge, startResearch } from "../lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
 import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -611,6 +611,21 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    blocks++;
    return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
   }
+  // Stage gate (UX-only; the kernel gate is authoritative): staged research runs
+  // may only use stage-appropriate tools. Unknown stages fail open.
+  try {
+   const rawArgs: unknown = (event as unknown as Json).args ?? (event as unknown as Json).params;
+   const inner: unknown = event.toolName === "call_tool" && rawArgs && typeof rawArgs === "object" ? (rawArgs as Json).name : undefined;
+   const target = typeof inner === "string" && inner ? inner : event.toolName;
+   const reason = blockReasonForRun(runId, target);
+   if (reason) {
+    emit({ event: "security_block", tool: target, reason });
+    blocks++;
+    return { block: true, reason };
+   }
+  } catch {
+   // fail open; the kernel gate still enforces.
+  }
  });
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
@@ -786,6 +801,52 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     },
     { triggerTurn: true, deliverAs: "followUp" },
    );
+  },
+ });
+ pi.registerCommand("research-resume", {
+  description: 'Re-attach to a persisted research session: /research-resume <session_id> (staged driver resumes: fetch, trio, or final prompt)',
+  handler: async (args) => {
+   const sessionId = args.trim();
+   if (!sessionId) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-resume-command",
+      content: 'Ask the operator for a research session id, then run /research-resume <session_id>.',
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+   }
+   // Same trusted-run setup as /research: the follow-up turn's agent_start
+   // must preserve (not rotate) this id and its data root.
+   clearResearchRun(runId);
+   stagedResearchRuns.delete(runId);
+   const stagedId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = stagedId ? stagedId : crypto.randomUUID();
+   const stagedRoot = (process.env.STOCKBOT_DATA_DIR ?? "").trim();
+   if (stagedRoot) dataRoots.set(runId, stagedRoot);
+   else dataRoots.delete(runId);
+   const stagedAsOf = (process.env.STOCKBOT_AS_OF ?? "").trim();
+   if (stagedAsOf) asOfs.set(runId, stagedAsOf);
+   else asOfs.delete(runId);
+   stagedResearchRuns.add(runId);
+   try {
+    const { prompt } = await resumeResearch(sessionId, runId, dataRoots.get(runId), asOfs.get(runId));
+    await pi.sendMessage(
+     { customType: "stockbot-research-resume-command", content: prompt, display: true },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch (err) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-resume-command",
+      content: `Research resume failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only.`,
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   }
   },
  });
 

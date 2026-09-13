@@ -745,3 +745,136 @@ def test_run_resume_produce_complete_append_only_trace(tmp_path: Path, monkeypat
     from app.research.evals.traces import get_trace
     header = get_trace(tid)
     assert header is not None and header.status == "completed" and header.conclusion
+
+def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, str]:
+    from app.research import service as _svc
+    sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jobs = repo.list_jobs(sid)
+    repo.save_job(_jobs.start_job(jobs[0]))
+    return sid, jobs[0].job_id
+
+def _svc_item(eid: str, wave: int = 1) -> dict[str, object]:
+    return {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid, "claim_text": "c", "subject": "NVDA", "source_name": "SEC", "source_uri": "https://sec.gov/x", "source_record_id": "r", "known_at": "2025-06-29T00:00:00+00:00"}
+
+def _svc_ana(eid: str) -> dict[str, object]:
+    return {"claims": [{"text": "finding", "evidence_ids": [eid]}], "follow_ups": []}
+
+def _svc_trio(repo: ResearchRepository, sid: str, eid: str) -> None:
+    from app.research import service as _svc
+    for role in ("stockbot", "bullbot", "bearbot"):
+        jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
+        _svc.record_committee_analysis(sid, jid, role, _svc_ana(eid), repo=repo)
+
+def test_committee_cannot_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    out = execute_pi_tool("search_web", {"query": "x", "session_id": sid}, PiSessionContext(session_id="t1"))
+    assert "forbids" in str(out.get("error", ""))
+
+def test_committee_cannot_add_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    bear = str(_svc.start_job(sid, "bearbot", repo=repo, wave_id=1)["job_id"])
+    with pytest.raises(ValueError):
+        _svc.record_evidence(sid, bear, _svc_item(f"{sid}:ev:2"), repo=repo)
+    with pytest.raises(ValueError, match="forbids"):
+        _svc.authorize_and_consume_dispatch(sid, bear, "search_web", repo=repo)
+
+def test_role_job_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    stock = str(_svc.start_job(sid, "stockbot", repo=repo, wave_id=1)["job_id"])
+    with pytest.raises(ValueError, match="!="):
+        _svc.record_committee_analysis(sid, stock, "bearbot", _svc_ana(eid), repo=repo)
+
+def test_evidence_rejected_on_completed_or_committee_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    with pytest.raises(ValueError, match="running"):
+        _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:9"), repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    bull = str(_svc.start_job(sid, "bullbot", repo=repo, wave_id=1)["job_id"])
+    with pytest.raises(ValueError):
+        _svc.record_evidence(sid, bull, _svc_item(f"{sid}:ev:3"), repo=repo)
+
+def test_restart_after_e1_resume_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    fresh = ResearchRepository()
+    assert _svc.resume_research(sid, repo=fresh)["session"] is not None
+    _svc_trio(fresh, sid, eid)
+    _svc.decide_wave2(sid, repo=fresh)
+    out = _svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=fresh)
+    assert out["freeze_id"] == f"{sid}:1:freeze"
+
+def test_restart_after_2_of_3_committee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    ids = [str(_svc.start_job(sid, r, repo=repo, wave_id=1)["job_id"]) for r in ("stockbot", "bullbot", "bearbot")]
+    for jid, role in zip(ids[:2], ("stockbot", "bullbot")):
+        _svc.record_committee_analysis(sid, jid, role, _svc_ana(eid), repo=repo)
+    fresh = ResearchRepository()
+    _svc.record_committee_analysis(sid, ids[2], "bearbot", _svc_ana(eid), repo=fresh)
+    out = _svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=fresh)
+    assert out["freeze_id"] == f"{sid}:1:freeze"
+
+def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:1"), repo=repo)
+    with pytest.raises(ValueError, match="still open"):
+        _svc.freeze_session(sid, 1, repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    assert _svc.freeze_session(sid, 1, repo=repo)["freeze_id"] == f"{sid}:1:freeze"
+
+def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jid = str(_svc.start_job(sid, "source_agent", budget={"tool_budget": 1}, repo=repo, wave_id=1)["job_id"])
+    ctx = PiSessionContext(session_id="t-budget")
+    first = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx)
+    assert "error" not in first
+    second = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:2")}, ctx)
+    assert second.get("error_type") == "budget_exhausted"
+    assert repo.get_session(sid).budget.get("tool_calls_used") == 1

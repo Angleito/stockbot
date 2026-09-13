@@ -1386,7 +1386,9 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	let spawned: { job_id: string; job_type: string }[] = [];
 	let spawnN = 0;
 	let finalized = false;
-	setResearchBridge(async (req: Json) => {
+	let decided = false;
+	let bridgeFn: (req: Json) => Promise<Json> = async () => ({ error: "unset" });
+	setResearchBridge((bridgeFn = async (req: Json) => {
 		ops.push(String(req.op));
 		switch (req.op) {
 			case "research.session.create":
@@ -1397,7 +1399,9 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 					result: {
 						session: finalized
 							? { session_id: SID, status: "completed", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: { answer: "kernel synthesis", freeze_id: FID, claims: [] } }
-							: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
+							: decided
+								? { session_id: SID, status: "synthesizing", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null }
+								: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
 						jobs: [
 							{ job_id: "job:src", session_id: SID, status: "queued", wave_id: 1, job_type: "source_agent" },
 							...spawned.map((s) => ({ job_id: s.job_id, session_id: SID, status: committee.some((c) => c.jobs.includes(s.job_id)) ? "completed" : "running", wave_id: 1, job_type: s.job_type })),
@@ -1415,15 +1419,24 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 				spawned.push({ job_id: jid, job_type: jtype });
 				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: 1, job_type: jtype } };
 			case "research.wave2.decide":
+				decided = true;
 				return { result: { authorized: false, stop_reason: "no_disagreement", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
-			case "research.session.finalize":
-				expect(Array.isArray(req.claims)).toBe(true);
+			case "research.session.finalize": {
+				const claims = (req as Json).claims;
+				if (!Array.isArray(claims) || claims.length === 0) return { error: "claims_required" };
+				const frozen = new Set(evidence);
+				for (const c of claims as Json[]) {
+					const ids = (c as Json).evidence_ids;
+					expect(Array.isArray(ids)).toBe(true);
+					for (const id of (ids as unknown) as string[]) expect(frozen.has(id)).toBe(true);
+				}
 				finalized = true;
 				return { result: { session_id: SID, freeze_id: FID, status: "synthesizing" } };
+			}
 			default:
 				return { error: "unknown_op" };
 		}
-	});
+	}));
 	const runId = "run-driver-stage-1";
 	const transitions = () => ops.filter((o) => o !== "research.session.inspect");
 	const started = await startResearch("Will NVDA beat earnings?", runId);
@@ -1467,19 +1480,25 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	expect(transitions()).toEqual(["research.session.create", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
-	// Declined wave-2: finalize completes and clears the entry.
+	// Declined wave-2: director prompts Pi to finalize (no auto-finalize); Pi calls
+	// research.session.finalize via call_tool, then the next turn completes.
+	adv = await advanceOnAgentEnd(runId, "model synthesis text");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) expect(adv.prompt).toContain("research.session.finalize");
+	expect(transitions()).toEqual(["research.session.create", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
+	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
+	expect(rejected.error).toBe("claims_required");
+	expect(finalized).toBe(false);
+	adv = await advanceOnAgentEnd(runId, "model synthesis text");
+	expect(adv?.done).toBe(false);
+	// Pi's finalize with frozen-ids-only claims succeeds; next turn completes.
+	const accepted = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "model synthesis text", claims: [{ text: "finding", evidence_ids: evidence }] });
+	expect((accepted.result as Json).freeze_id).toBe(FID);
+	expect(finalized).toBe(true);
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(true);
 	if (adv && adv.done) expect(adv.answer).toBe("kernel synthesis");
-	expect(transitions()).toEqual([
-		"research.session.create",
-		"research.freeze.create",
-		"research.job.start",
-		"research.job.start",
-		"research.job.start",
-		"research.wave2.decide",
-		"research.session.finalize",
-	]);
 	expect(await advanceOnAgentEnd(runId, "")).toBeNull();
 });
 

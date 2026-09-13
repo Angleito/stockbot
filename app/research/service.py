@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ResearchNotFound",
+    "authorize_and_consume_dispatch",
     "cancel_research",
     "complete_job",
     "create_research",
@@ -270,6 +271,12 @@ def record_evidence(
     job = _require_job(store, job_id)
     if job.session_id != found.session_id:
         raise ValueError(f"record_evidence: job {job_id!r} belongs to {job.session_id!r}")
+    if job.status != "running":
+        raise ValueError(f"record_evidence: job {job_id!r} status is {job.status!r} (running required)")
+    if job.job_type not in ("source_agent", "scout"):
+        raise ValueError(f"record_evidence: job {job_id!r} job_type {job.job_type!r} (source_agent|scout required)")
+    if found.status in _session.TERMINAL_STATUSES:
+        raise ValueError(f"record_evidence: session {session_id!r} status is {found.status!r} (terminal)")
     data = dict(item)
     content_raw = data.get("content")
     claim = data.get("claim_text", data.get("claim", ""))
@@ -283,7 +290,17 @@ def record_evidence(
     if not content:
         content = "{}"
     wave_raw = data.get("wave_id", job.wave_id)
-    wave = wave_raw if isinstance(wave_raw, int) and not isinstance(wave_raw, bool) else job.wave_id
+    if isinstance(wave_raw, bool) or not isinstance(wave_raw, int):
+        wave_raw = job.wave_id
+    if wave_raw != job.wave_id:
+        raise ValueError(f"record_evidence: item wave {wave_raw!r} != job wave {job.wave_id!r}")
+    wave = job.wave_id
+    # ponytail: current_wave stays 0 on the Pi path until wave 2; floor at 1 via freeze count.
+    live_wave = max(found.current_wave, len(found.freeze_ids) + 1, 1)
+    if job.wave_id != live_wave:
+        raise ValueError(f"record_evidence: job wave {job.wave_id!r} != current wave {live_wave!r}")
+    if f"{session_id}:{job.wave_id}:freeze" in found.freeze_ids:
+        raise ValueError(f"record_evidence: wave {job.wave_id} already frozen for {session_id!r}")
     evidence_id_raw = data.get("evidence_id")
     evidence_id = (
         evidence_id_raw
@@ -461,11 +478,15 @@ def freeze_session(
     from . import freeze as _freeze
     from .evidence import evidence_from_dict
     from .models import SessionStatus
-
     if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
         raise ValueError(f"freeze_session: 'wave_id' must be an int >= 1, got {wave_id!r}")
     store = _repo(repo)
     found = _require_session(store, session_id)
+    raw_section: object = found.policy.get("research", {})
+    research: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
+    max_waves = research.get("max_waves", 2)
+    if isinstance(max_waves, int) and not isinstance(max_waves, bool) and wave_id > max_waves:
+        raise ValueError(f"freeze_session: wave {wave_id} exceeds max_waves {max_waves}")
     # Pi bootstrap mirrors runner C->P->R; service.create_research leaves CREATED.
     if found.status == SessionStatus.CREATED.value:
         found = _session.transition_session(found, SessionStatus.PLANNING)
@@ -481,6 +502,11 @@ def freeze_session(
     wave_recs = [e for e in recs if e.wave_id <= wave_id]
     if not wave_recs:
         raise ValueError(f"freeze_session: session {session_id!r} wave {wave_id} has no evidence")
+    open_src = [j.job_id for j in store.list_jobs(session_id)
+                if j.wave_id == wave_id and j.job_type in ("source_agent", "scout")
+                and j.status in ("queued", "running")]
+    if open_src:
+        raise ValueError(f"freeze_session: {len(open_src)} source jobs still open for wave {wave_id}: {open_src}")
     fid = f"{session_id}:{wave_id}:freeze"
     frozen = _freeze.create_freeze(freeze_id=fid, session_id=session_id, wave_id=wave_id, records=wave_recs, as_of=found.as_of)
     _freeze.verify_freeze(frozen, wave_recs)
@@ -518,6 +544,8 @@ def record_committee_analysis(
         raise ValueError(f"record_committee_analysis: job {job_id!r} belongs to {job.session_id!r}")
     if job.status != "running":
         raise ValueError(f"record_committee_analysis: job {job_id!r} status is {job.status!r} (running required)")
+    if job.job_type != role:
+        raise ValueError(f"record_committee_analysis: job {job_id!r} job_type {job.job_type!r} != role {role!r}")
     if not found.freeze_ids:
         raise ValueError(f"record_committee_analysis: session {session_id!r} has no freeze")
     fid = found.freeze_ids[-1]
@@ -527,6 +555,9 @@ def record_committee_analysis(
         raise ValueError(f"record_committee_analysis: unknown freeze_id: {fid!r}") from None
     raw_ids = frozen.get("evidence_ids")
     freeze_ids = [e for e in raw_ids if isinstance(e, str)] if isinstance(raw_ids, list) else []
+    frozen_wave = frozen.get("wave_id")
+    if isinstance(frozen_wave, int) and not isinstance(frozen_wave, bool) and job.wave_id != frozen_wave:
+        raise ValueError(f"record_committee_analysis: job wave {job.wave_id!r} != freeze wave {frozen_wave!r}")
     try:
         envelope = json.dumps(dict(analysis))
     except TypeError as exc:
@@ -620,8 +651,25 @@ def decide_wave2(
         cur = store.get_session(session_id)
         if cur.status == SessionStatus.ANALYZING.value:
             cur = _session.transition_session(cur, SessionStatus.TARGETED_RESEARCH)
-            cur = replace(cur, current_wave=2, updated_at=utcnow())
+            cur = replace(
+                cur,
+                current_wave=2,
+                targeted_question=decision.targeted_question or None,
+                targeted_domain=decision.targeted_domain or None,
+                updated_at=utcnow(),
+            )
             store.save_session(cur)
+        from .journal import append_event, hydrate as _hydrate
+
+        _hydrate(session_id, store.list_events(session_id))
+        store.save_event(append_event(session_id, "wave.authorized", "service", "service", {
+            "question": decision.targeted_question, "domain": decision.targeted_domain,
+        }))
+    else:
+        from .models import SessionStatus as _SS
+        cur = store.get_session(session_id)
+        if cur.status == _SS.ANALYZING.value:
+            store.save_session(_session.transition_session(cur, _SS.SYNTHESIZING))
     return {
         "authorized": decision.authorized,
         "stop_reason": decision.stop_reason,
@@ -659,6 +707,13 @@ def finalize_session(
         raise ValueError(f"finalize_session: missing disagreement on freeze {fid!r}")
     if not isinstance(claims, list):
         raise ValueError(f"finalize_session: 'claims' must be a list, got {type(claims).__name__}")
+    if not claims:
+        raise ValueError("finalize_session: 'claims' must be a non-empty grounded list")
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("finalize_session: 'answer' must be a non-empty string")
+    open_all = [j.job_id for j in store.list_jobs(session_id) if j.status in ("queued", "running")]
+    if open_all:
+        raise ValueError(f"finalize_session: {len(open_all)} jobs still open: {open_all}")
     narrowed: list[dict[str, object]] = []
     for item in claims:
         if not isinstance(item, Mapping):
@@ -675,10 +730,11 @@ def finalize_session(
     wave_raw = meta["wave_id"]
     as_of_raw = meta["as_of"]
     assert isinstance(wave_raw, int) and isinstance(as_of_raw, str)
-    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=answer if isinstance(answer, str) and answer.strip() else None)
-    final_claims = grounded if grounded else synth.claims
+    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=answer)
+    if not synth.answer.strip():
+        raise ValueError("finalize_session: synthesis produced an empty answer")
     claims_json: list[JSONValue] = []
-    for claim in final_claims:
+    for claim in grounded:
         row: dict[str, JSONValue] = {"text": claim.text, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
         claims_json.append(row)
     final: dict[str, JSONValue] = {"answer": synth.answer, "freeze_id": fid, "claims": claims_json}
@@ -692,3 +748,55 @@ def finalize_session(
         cur = _session.transition_session(cur, SessionStatus.COMPLETED)
         store.save_session(cur)
     return {"session_id": session_id, "freeze_id": fid, "status": cur.status}
+
+
+def authorize_and_consume_dispatch(
+    session_id: str,
+    job_id: str,
+    tool_name: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, object]:
+    """Authorize one tool dispatch, then atomically consume job + global budget slots."""
+    from .models import Failure, normalize_time
+    from .stage import check_stage_tool, stage_for_session
+
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    job = _require_job(store, job_id)
+    if job.session_id != found.session_id:
+        raise ValueError(f"dispatch: job {job_id!r} belongs to {job.session_id!r}")
+    if job.status != "running":
+        raise ValueError(f"dispatch: job {job_id!r} status is {job.status!r} (running required)")
+    if job.deadline is not None:
+        deadline = normalize_time(job.deadline)
+        if utcnow() > deadline:
+            timed = replace(job, status="timed_out", completed_at=utcnow(),
+                            failure=Failure(category="timeout", message=f"deadline {job.deadline.isoformat()} expired"))
+            store.save_job(timed)
+            raise ValueError(f"dispatch: job {job_id!r} deadline expired")
+    jobs = store.list_jobs(session_id)
+    check_stage_tool(stage_for_session(found, jobs), tool_name)
+    if job.source_domain is not None and not tool_name.startswith("research"):
+        if job.source_domain.upper() == "SEC":
+            from .agents.source_agent import is_sec_tool
+
+            if not is_sec_tool(tool_name):
+                raise ValueError(f"dispatch: tool {tool_name!r} outside SEC domain for job {job_id!r}")
+    if job.tool_budget is not None and job.tool_budget <= 0:
+        raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
+    from .director import DirectorBudgets
+
+    raw_section: object = found.policy.get("research", {})
+    section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
+    raw_max: object = section.get("max_tool_calls", DirectorBudgets().max_tool_calls)
+    max_calls = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else DirectorBudgets().max_tool_calls
+    raw_used: object = found.budget.get("tool_calls_used", 0)
+    used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
+    if used >= max_calls:
+        raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
+    spent = replace(job, tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None)
+    billed = replace(found, budget={**found.budget, "tool_calls_used": used + 1}, updated_at=utcnow())
+    store.save_session_and_job(billed, spent)
+    return {"session_id": session_id, "job_id": job_id, "tool_name": tool_name,
+            "tool_budget": spent.tool_budget, "tool_calls_used": used + 1}
