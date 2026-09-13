@@ -5,9 +5,9 @@ against a fixed rule catalog. Hard categories (instruction_override,
 secret_extraction, exfiltration) always BLOCK; any other rule match is at
 least QUARANTINE; scores are capped at 100 and >= 80 is BLOCK.
 
-Documented limitation: inspection operates on the first 8192 characters of
-the normalized text (spec's 8 KB cap); hostile payloads beyond the window
-are not detected. Nested double-encoding is never decoded (depth 1).
+Documented limitation: inputs over 2 MiB UTF-8 are not scanned and return
+QUARANTINE with size_limit:oversized_input; everything at or under the
+limit is scanned in full. Nested double-encoding is never decoded (depth 1).
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 
-# Scan window in characters of the normalized text (spec's 8 KB cap).
-SCAN_WINDOW = 8192
+# Maximum scannable input size in bytes (2 MiB UTF-8).
+MAX_SCAN_BYTES = 2 * 1024 * 1024
 
 _ZERO_WIDTH_RE = re.compile("[\u200b-\u200d\ufeff]")
 # C0/C1 control chars (and DEL); newline is collapsed to a space with the rest.
@@ -124,7 +124,7 @@ def normalize_text(text: str) -> str:
     """Normalize untrusted text for deterministic scanning.
 
     NFKC, HTML-entity unescape, zero-width strip, control-char removal,
-    whitespace collapse — then bounded to the first SCAN_WINDOW characters.
+    whitespace collapse.
     """
     if not isinstance(text, str):
         text = str(text)
@@ -136,7 +136,7 @@ def normalize_text(text: str) -> str:
     text = _ZERO_WIDTH_RE.sub(" ", text)
     text = _CONTROL_RE.sub(" ", text)
     text = _WS_RE.sub(" ", text).strip()
-    return text[:SCAN_WINDOW]
+    return text
 
 
 def _decoding_candidates(text: str) -> list[str]:
@@ -173,6 +173,14 @@ def _decoding_candidates(text: str) -> list[str]:
 
 def assess(text: str) -> InjectionAssessment:
     """Score and classify untrusted free-form text."""
+    raw = text if isinstance(text, str) else str(text)
+    if len(raw.encode("utf-8")) > MAX_SCAN_BYTES:
+        return InjectionAssessment(
+            score=100,
+            verdict="QUARANTINE",
+            reasons=("input exceeds 2 MiB scan limit",),
+            matched_rules=("size_limit:oversized_input",),
+        )
     normalized = normalize_text(text)
     matched: list[tuple[str, str, int]] = []
     seen: set[tuple[str, str]] = set()

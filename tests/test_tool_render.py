@@ -286,7 +286,7 @@ def _portfolio_snapshot_result(n_positions: int = 3, omitted: int = 0):
             "as_of": "2026-08-25",
             "sec_latest_filed_at": "2026-08-20",
             "finra_settlement_date": "2026-08-14",
-            "finra_known_at": "2026-08-17T12:00:00Z",
+            "finra_retrieved_at": "2026-08-17T12:00:00Z",
         },
     }
 

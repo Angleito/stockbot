@@ -446,3 +446,77 @@ def test_abort_run_reports_unconfirmed_finalization(monkeypatch: pytest.MonkeyPa
         assert run_id not in pi_bridge._recorders
     finally:
         _teardown_run(run_id)
+
+
+def test_describe_direct_tool_names_parity():
+    from app.tools import TOOL_DISCOVERY_REGISTRY, dynamically_activatable_tool_names
+    describe = pi_bridge._describe()
+    direct = describe["direct_tool_names"]
+    assert isinstance(direct, list)
+    tools = describe["tools"]
+    assert isinstance(tools, list)
+    assert set(direct) <= {pi_bridge._tool_name(t) for t in tools if isinstance(t, dict)}
+    assert "thesis_show" in direct
+    assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
+        "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal",
+    }
+
+
+def _routing_event_roundtrip(run_id: str, event: str, extra: dict[str, object]) -> tuple[str, dict[str, object]]:
+    stub = _StubRecorder()
+    pi_bridge._recorders[run_id] = stub
+    try:
+        response = pi_bridge._pi_event({"run_id": run_id, "event": event, **extra})
+    finally:
+        pi_bridge._recorders.pop(run_id, None)
+    assert response == {"ok": True}
+    assert stub.failed_events
+    return stub.failed_events[-1]
+
+
+def test_routing_continuation_persists():
+    run_id = _run_id("routing-cont")
+    _start_session(run_id)
+    try:
+        event_type, kwargs = _routing_event_roundtrip(
+            run_id, "routing_continuation",
+            {"reason": "discovery_without_research", "discovered_tools": ["get_fundamentals"], "continuation_number": 1},
+        )
+        assert event_type == "routing_continuation"
+        metadata = kwargs.get("metadata")
+        assert isinstance(metadata, dict)
+        assert metadata["reason"] == "discovery_without_research"
+        assert metadata["discovered_tools"] == ["get_fundamentals"]
+    finally:
+        _teardown_run(run_id)
+
+
+def test_routing_continuation_failed_persists():
+    run_id = _run_id("routing-cont-failed")
+    _start_session(run_id)
+    try:
+        event_type, _ = _routing_event_roundtrip(run_id, "routing_continuation_failed", {})
+        assert event_type == "routing_continuation_failed"
+    finally:
+        _teardown_run(run_id)
+
+
+def test_routing_metrics_persists():
+    run_id = _run_id("routing-metrics")
+    _start_session(run_id)
+    try:
+        event_type, kwargs = _routing_event_roundtrip(
+            run_id, "routing_metrics",
+            {"discovery_calls": 1, "discovered_tool_count": 2, "research_calls": 1,
+             "failed_research_calls": 0, "call_tool_count": 0, "direct_tool_calls": 1,
+             "invalid_tool_calls": 0, "premature_stop_detected": False,
+             "continuation_injected": False, "continuation_succeeded": False,
+             "unrelated_research_calls": 0, "final_answer_after_evidence": True},
+        )
+        assert event_type == "routing_metrics"
+        metadata = kwargs.get("metadata")
+        assert isinstance(metadata, dict)
+        assert metadata["discovery_calls"] == 1
+        assert metadata["final_answer_after_evidence"] is True
+    finally:
+        _teardown_run(run_id)

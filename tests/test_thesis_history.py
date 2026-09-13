@@ -181,6 +181,17 @@ def test_same_effective_at_higher_version_wins(tmp_path: Path) -> None:
     assert snap.thesis["scope"] == "second"
 
 
+def test_mixed_offset_snapshot_orders_by_absolute_time(tmp_path: Path) -> None:
+    # "2026-01-02T01:00:00+02:00" (23:00Z Jan 1) sorts lexically after
+    # "2026-01-02T00:30:00+00:00" (00:30Z Jan 2) but is chronologically earlier.
+    r = _repo(tmp_path)
+    tid = _make(tmp_path).thesis_id
+    r.update_thesis(tid, scope="utc", effective_at="2026-01-02T00:30:00+00:00")
+    r.update_thesis(tid, scope="plus-two", effective_at="2026-01-02T01:00:00+02:00")
+    snap = r.load_state_as_of(tid, T2)
+    assert snap.thesis["scope"] == "utc"
+
+
 def test_legacy_lazy_migration(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
@@ -209,7 +220,7 @@ def test_build_context_pit_regression(tmp_path: Path) -> None:
         "run:t3", effective_at=T3)
     r.apply_research_result(tid, {"claim_updates": [
         {"claim_id": "claim:c1", "status": "challenged"}]}, "run:t4", effective_at=T4)
-    trig = r.create_trigger(tid, canonical_refs=["ev:A"], summary="filing")
+    trig = r.create_trigger(tid, canonical_refs=["ev:A"], summary="filing", summary_origin="deterministic")
 
     ctx = build_context(r, tid, trig, known_at=T1)
     state = ctx.thesis_packet["state"]
@@ -287,7 +298,7 @@ def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path: Path) -> None:
 def test_journal_gate_binds_known_at(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
-    trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
+    trig = r.create_trigger(tid, canonical_refs=[], summary="filing", summary_origin="deterministic")
     r.append_journal_entry(tid, {"trigger_id": trig.trigger_id, "title": "Run note",
                                  "body": "Processed.", "known_at": T3})
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2) is False
@@ -312,7 +323,7 @@ def test_historical_memory_stamps_effective_at(tmp_path: Path) -> None:
     assert isinstance(_mems, list)
     mems = [m for m in _mems if isinstance(m, dict)]
     assert next(m for m in mems if m["memory_id"] == "m1")["created_at"] == T1
-    trig = r.create_trigger(tid, canonical_refs=[], summary="filing")
+    trig = r.create_trigger(tid, canonical_refs=[], summary="filing", summary_origin="deterministic")
     assert "m1" in build_context(r, tid, trig, known_at=T1).included_ids
     # T0 predates the memory (BEFORE raises: no snapshot exists yet, covered above).
     assert "m1" not in build_context(r, tid, trig, known_at=T0).included_ids
@@ -398,7 +409,7 @@ def test_historical_watch_list_and_trigger_journal_known_at(tmp_path: Path) -> N
                                       "statement": "NVDA demand stays strong"}],
                              effective_at=T0).thesis_id
     repo.apply_research_result(tid, {"watch_add": [_filing_rule("rule:r1")]}, "", effective_at=T1)
-    trig = repo.create_trigger(tid, claim_ids=["claim:c1"])
+    trig = repo.create_trigger(tid, claim_ids=["claim:c1"], summary_origin="deterministic")
     repo.close_thesis(tid)
     assert repo.load_thesis(tid).status == "closed"
     ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),

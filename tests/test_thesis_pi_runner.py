@@ -12,6 +12,10 @@ import app.thesis.pi_runner as pi_runner
 from app.thesis.pi_runner import _done_complete, _run_complete, run_thesis_pi
 
 
+def _which_pi(_name: str) -> str | None:
+    return "/bin/pi"
+
+
 def test_completion_signals(tmp_path: Path) -> None:
     db = tmp_path / "runs.sqlite"
     done = tmp_path / "done.json"
@@ -50,26 +54,30 @@ def _fake_proc(mode: str) -> type:
             env = kw.get("env")
             assert isinstance(env, dict)
             type(self).captured = {"cmd": cmd, "env": env, "cwd": kw.get("cwd")}
-            if mode in ("ok", "linger"):
+            if mode in ("ok", "linger", "done_only", "done_failed_row"):
                 done_file = env.get("STOCKBOT_DONE_FILE")
                 assert isinstance(done_file, str)
                 done_p = Path(done_file)
                 done_p.parent.mkdir(parents=True, exist_ok=True)
                 done_p.write_text(json.dumps({"status": "completed", "answer": "ok"}))
-                db_path = env.get("RUNS_DB_PATH")
-                assert isinstance(db_path, (str, Path))
-                db_p = Path(str(db_path))
-                db_p.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db_p))
-                conn.execute("CREATE TABLE IF NOT EXISTS agent_runs (run_id TEXT, status TEXT)")
-                passed_run_id = env.get("STOCKBOT_RUN_ID")
-                if isinstance(passed_run_id, str) and passed_run_id:
-                    conn.execute("INSERT INTO agent_runs VALUES (?, 'completed')", (passed_run_id,))
-                conn.commit()
-                conn.close()
+                # done_only writes no recorder row; done_failed_row writes a failed row.
+                status = {"ok": "completed", "linger": "completed",
+                          "done_failed_row": "failed"}.get(mode)
+                if status is not None:
+                    db_path = env.get("RUNS_DB_PATH")
+                    assert isinstance(db_path, (str, Path))
+                    db_p = Path(str(db_path))
+                    db_p.parent.mkdir(parents=True, exist_ok=True)
+                    conn = sqlite3.connect(str(db_p))
+                    conn.execute("CREATE TABLE IF NOT EXISTS agent_runs (run_id TEXT, status TEXT)")
+                    passed_run_id = env.get("STOCKBOT_RUN_ID")
+                    if isinstance(passed_run_id, str) and passed_run_id:
+                        conn.execute("INSERT INTO agent_runs VALUES (?, ?)", (passed_run_id, status))
+                    conn.commit()
+                    conn.close()
             # ponytail: absurd pid can never exist, so the linger SIGKILL is a
             # no-op ProcessLookupError instead of a real signal.
-            self.pid, self.returncode = 2**30, (0 if mode == "ok" else 1)
+            self.pid, self.returncode = 2**30, (0 if mode in ("ok", "done_only", "done_failed_row") else 1)
             self._mode = mode
 
         def poll(self) -> int | None:
@@ -87,6 +95,8 @@ def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str
         return "/bin/pi"
     monkeypatch.setattr(pi_runner.shutil, "which", _which)
     monkeypatch.setattr(subprocess, "Popen", fake)
+    monkeypatch.delenv("STOCKBOT_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("STOCKBOT_PI_MODEL", raising=False)
     root = data_root if data_root is not None else tmp_path / "data"
     out = run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1", prompt=prompt,
                         data_root=root, timeout_s=timeout_s, run_id=run_id)
@@ -94,17 +104,43 @@ def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str
     return _as_dict(fake.captured)
 
 
-def test_builds_canonical_command_with_read_only_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+
+def test_builds_canonical_command_with_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cap = _run(monkeypatch, tmp_path, "Do research")
     cmd = _as_list(cap["cmd"])
-    assert cmd[:5] == ["pi", "-p", "--no-session", "--extension",
-                       ".pi/extensions/stockbot.ts"]
-    assert "--exclude-tools" in cmd
-    assert cmd[cmd.index("--exclude-tools") + 1] == "bash,edit,write,powershell"
+    assert cmd[:11] == ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+                       "--no-prompt-templates", "--no-context-files", "--extension",
+                       ".pi/extensions/stockbot.ts", "--"]
+    assert cmd[11] == "Do research"
     assert "--tools" not in cmd
-    assert cmd[-2] == "--"
-    assert cmd[-1] == "Do research"
+    assert "--no-builtin-tools" in cmd
+
     assert cap["cwd"] == str(pi_runner._repo_root())
+
+def test_provider_model_flags_inserted_before_separator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("STOCKBOT_PI_PROVIDER", "openai")
+    monkeypatch.setenv("STOCKBOT_PI_MODEL", "gpt-4o")
+    fake = _fake_proc("ok")
+    monkeypatch.setattr(pi_runner.shutil, "which", _which_pi)
+    monkeypatch.setattr(subprocess, "Popen", fake)
+    run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
+                  data_root=tmp_path / "data", run_id="run:test")
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["pi", "-p", "--no-session", "--no-builtin-tools",
+        "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+        "--extension", ".pi/extensions/stockbot.ts", "--provider", "openai", "--model", "gpt-4o", "--", "Do research"]
+
+
+def test_empty_provider_model_adds_no_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("STOCKBOT_PI_PROVIDER", "   ")
+    monkeypatch.setenv("STOCKBOT_PI_MODEL", "")
+    fake = _fake_proc("ok")
+    monkeypatch.setattr(pi_runner.shutil, "which", _which_pi)
+    monkeypatch.setattr(subprocess, "Popen", fake)
+    run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
+                  data_root=tmp_path / "data", run_id="run:test")
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["pi", "-p", "--no-session", "--no-builtin-tools",
+        "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+        "--extension", ".pi/extensions/stockbot.ts", "--", "Do research"]
 
 
 def test_binds_env_not_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -121,8 +157,16 @@ def test_binds_env_not_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 
 
 def test_no_run_id_leaves_env_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    cap = _run(monkeypatch, tmp_path, "Do research", run_id=None)
-    env = _as_dict(cap["env"])
+    # Fail closed: without a run_id no recorder row can correlate, so even a
+    # completed done.json is a failure, not success.
+    fake = _fake_proc("ok")
+    monkeypatch.setattr(pi_runner.shutil, "which", _which_pi)
+    monkeypatch.setattr(subprocess, "Popen", fake)
+    monkeypatch.setattr(pi_runner, "_RECORDER_GRACE_S", 0.0)
+    with pytest.raises(RuntimeError, match="without recorder"):
+        run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1",
+                       prompt="Do research", data_root=tmp_path / "data", run_id=None)
+    env = _as_dict(_as_dict(fake.captured)["env"])
     assert "STOCKBOT_RUN_ID" not in env
 
 
@@ -164,6 +208,7 @@ def test_lingering_pi_after_completion_counts_as_success(monkeypatch: pytest.Mon
 def test_failed_run_after_completed_run_still_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     _run(monkeypatch, tmp_path, "Do research", mode="ok", run_id="run:one", data_root=data_root)
+
     fake = _fake_proc("fail")
     def _which_ok(_name: str) -> str | None:
         return "/bin/pi"
@@ -172,3 +217,18 @@ def test_failed_run_after_completed_run_still_raises(monkeypatch: pytest.MonkeyP
     with pytest.raises(RuntimeError, match="exit 1"):
         run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1",
                        prompt="Do research", data_root=data_root, run_id="run:two")
+
+
+@pytest.mark.parametrize("mode", ["done_only", "done_failed_row"])
+def test_done_completed_without_recorder_is_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str
+) -> None:
+    # Regression: completed done.json with an absent (done_only) or failed
+    # (done_failed_row) recorder row must fail, never count as success.
+    fake = _fake_proc(mode)
+    monkeypatch.setattr(pi_runner.shutil, "which", _which_pi)
+    monkeypatch.setattr(subprocess, "Popen", fake)
+    monkeypatch.setattr(pi_runner, "_RECORDER_GRACE_S", 0.0)
+    with pytest.raises(RuntimeError, match="without recorder|durable"):
+        run_thesis_pi(thesis_id="thesis:t", trigger_id="trigger:1",
+                       prompt="Do research", data_root=tmp_path / "data", run_id="run:test")

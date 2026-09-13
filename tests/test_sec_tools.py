@@ -149,20 +149,167 @@ def test_thesis_domains_split_from_sec_suite():
     assert "error" in result
 
 
-def test_search_tools_insider_sale_returns_two_schemas_only():
+def test_search_tools_insider_sale_includes_both_insider_tools():
     result = tools.execute_tool(
         "search_tools", {"query": "insider sale"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
-    assert found == {"get_insider_activity", "get_planned_insider_sales"}
-
+    found = {m["name"] for m in _as_seq(result["matches"])}
+    assert {"get_insider_activity", "get_planned_insider_sales"} <= found
+    assert "schemas" not in result
 
 def test_search_tools_domain_browse_returns_ownership_pack():
     result = tools.execute_tool(
-        "search_tools", {"domain": "ownership"}, "test", context=_research_context()
+        "search_tools", {"query": "ownership", "domain": "ownership"}, "test", context=_research_context()
     )
-    found = {schema["function"]["name"] for schema in _as_seq(result["schemas"])}
-    assert found == {"search_sec_relationships", "get_beneficial_ownership", "get_ownership_changes"}
+    names = [m["name"] for m in _as_seq(result["matches"])]
+    assert names[:2] == ["get_beneficial_ownership", "search_sec_relationships"]
+    assert result["count"] == len(names) <= 5
+    assert len(set(names)) == len(names)
+    assert "get_ownership_changes" in names
+    assert "schemas" not in result
+
+
+def test_search_tools_returns_compact_routing_cards():
+    result = tools.execute_tool(
+        "search_tools", {"query": "short interest"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    assert result["count"] == len(matches) <= 5
+    assert "schemas" not in result and "total" not in result and "offset" not in result
+    for match in matches:
+        card = _as_dict(match)
+        assert set(card) == {"name", "domain", "family", "summary", "intent", "output_kind", "source", "entity_scope", "time_mode", "choose_when", "reject_when", "required", "optional"}
+        assert "parameters" not in card
+    assert "ambiguous" in result and "ambiguity_groups" in result
+
+
+def test_search_tools_domain_filter_uses_same_ranking_cap():
+    result = tools.execute_tool(
+        "search_tools", {"query": "filings", "domain": "sec"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    assert result["count"] == len(matches) <= 5
+    for match in matches:
+        assert _as_dict(match)["domain"] == "sec"
+    assert "schemas" not in result
+
+
+def test_search_tools_empty_query_returns_zero_matches():
+    blank = tools.execute_tool(
+        "search_tools", {"query": ""}, "test", context=_research_context()
+    )
+    assert _as_seq(blank["matches"]) == []
+    assert blank["count"] == 0
+    assert blank["ambiguous"] is False
+    assert blank["ambiguity_groups"] == []
+    blank_domain = tools.execute_tool(
+        "search_tools", {"query": "", "domain": "ownership"}, "test", context=_research_context()
+    )
+    assert _as_seq(blank_domain["matches"]) == []
+    assert blank_domain["count"] == 0
+    assert blank_domain["ambiguity_groups"] == []
+
+
+def test_search_current_vs_historical_share_family_but_differ():
+    current = tools.execute_tool(
+        "search_tools", {"query": "current reported short position for one security"}, "test", context=_research_context()
+    )
+    names = {m["name"] for m in _as_seq(current["matches"])}
+    assert "get_short_interest" in names
+    by_name = {m["name"]: m for m in _as_seq(current["matches"])}
+    assert by_name["get_short_interest"]["intent"] == "current_reported_short_position"
+    assert current["ambiguous"] is True
+    assert any(isinstance(g, dict) and {"get_short_interest", "get_finra_datapoints"} <= set(g.get("candidates") or []) for g in _as_seq(current["ambiguity_groups"]))
+    hist = tools.execute_tool(
+        "search_tools", {"query": "historical FINRA short-interest trend"}, "test", context=_research_context()
+    )
+    hnames = {m["name"] for m in _as_seq(hist["matches"])}
+    assert "query_finra" in hnames
+    hby = {m["name"]: m for m in _as_seq(hist["matches"])}
+    assert hby["query_finra"]["intent"] == "analyze_historical_finra_records"
+    assert hby["query_finra"]["output_kind"] != by_name["get_short_interest"]["output_kind"]
+    assert hist["ambiguous"] is True
+    hgroups = hist["ambiguity_groups"]
+    assert isinstance(hgroups, list) and hgroups
+    first = hgroups[0]
+    assert isinstance(first, dict)
+    q = first["distinguishing_question"]
+    assert isinstance(q, str)
+    assert q.startswith("Which outcome do you need:")
+    assert "query_finra" in q and "get_short_interest" in q
+
+
+
+def test_search_tools_routes_named_natural_intents():
+    gopro = tools.execute_tool(
+        "search_tools", {"query": "Why did GoPro stock shoot up over the last 30 days?"}, "test", context=_research_context()
+    )
+    assert "search_web" in {m["name"] for m in _as_seq(gopro["matches"])}
+    eps = tools.execute_tool(
+        "search_tools", {"query": "What is NVDA EPS?"}, "test", context=_research_context()
+    )
+    assert "get_fundamentals" in {m["name"] for m in _as_seq(eps["matches"])}
+    short = tools.execute_tool(
+        "search_tools", {"query": "What's GME short interest?"}, "test", context=_research_context()
+    )
+    assert "get_short_interest" in {m["name"] for m in _as_seq(short["matches"])}
+    amd = tools.execute_tool(
+        "search_tools", {"query": "What changed at AMD recently?"}, "test", context=_research_context()
+    )
+    assert "get_material_events" in {m["name"] for m in _as_seq(amd["matches"])}
+    orthogonal = tools.execute_tool(
+        "search_tools", {"query": "How do I bake sourdough bread at home?"}, "test", context=_research_context()
+    )
+    assert _as_seq(orthogonal["matches"]) == []
+    assert orthogonal["count"] == 0
+
+
+def test_search_tools_top_three_cap():
+    result = tools.execute_tool(
+        "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert result["count"] == len(matches) == 5
+    assert [m["name"] for m in matches][:3] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
+    narrow = tools.execute_tool(
+        "search_tools", {"query": "short interest"}, "test", context=_research_context()
+    )
+    assert narrow["count"] == len(_as_seq(narrow["matches"])) == 5
+
+def test_search_tools_expands_direct_conflicts():
+    result = tools.execute_tool(
+        "search_tools", {"query": "GME short interest"}, "test", context=_research_context()
+    )
+    names = [m["name"] for m in _as_seq(result["matches"])]
+    assert names[:3] == ["get_finra_datapoints", "get_short_interest", "get_short_interest_leaderboard"]
+    assert result["count"] == len(names) <= 5
+    assert len(set(names)) == len(names)
+    assert "query_finra" in names
+    assert any(isinstance(g, dict) and {"get_short_interest", "query_finra"} <= set(g.get("candidates") or []) for g in _as_seq(result["ambiguity_groups"]))
+
+
+def test_search_conflict_expansion_respects_domain_filter():
+    result = tools.execute_tool(
+        "search_tools", {"query": "analyst estimates", "domain": "analyst"}, "test", context=_research_context()
+    )
+    matches = _as_seq(result["matches"])
+    assert matches
+    for match in matches:
+        assert _as_dict(match)["domain"] == "analyst"
+
+def test_describe_tool_batch_names():
+    result = tools.execute_tool(
+        "describe_tool",
+        {"names": ["get_sec_filing", "get_sec_document", "nope"]},
+        "test",
+        context=_research_context(),
+    )
+    entries = _as_seq(result["tools"])
+    assert [e.get("name") for e in entries] == ["get_sec_filing", "get_sec_document", "nope"]
+    assert entries[2].get("error") == "unknown_tool"
+
 
 
 def test_list_sec_filings_dispatch_wraps_records(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,28 +715,36 @@ def test_search_tools_discovery_queries_and_domain_order() -> None:
     found = tools.execute_tool(
         "search_tools", {"query": "private issuer CIK"}, "test", context=_research_context()
     )
-    assert "find_sec_entities" in {s["function"]["name"] for s in _as_seq(found["schemas"])}
-    assert "find_sec_company" not in {s["function"]["name"] for s in _as_seq(found["schemas"])}
+    assert "find_sec_entities" in {m["name"] for m in _as_seq(found["matches"])}
+    assert "find_sec_company" not in {m["name"] for m in _as_seq(found["matches"])}
     fts = tools.execute_tool(
         "search_tools", {"query": "founder filing full text"}, "test", context=_research_context()
     )
-    assert {s["function"]["name"] for s in _as_seq(fts["schemas"])} == {"search_sec_filings"}
+    assert "search_sec_filings" in {m["name"] for m in _as_seq(fts["matches"])}
     pack = tools.execute_tool(
-        "search_tools", {"domain": "filings"}, "test", context=_research_context()
+        "search_tools", {"query": "SEC filings", "domain": "sec"}, "test", context=_research_context()
     )
-    names = [s["function"]["name"] for s in _as_seq(pack["schemas"])]
-    assert names[:3] == ["find_sec_entities", "search_sec_filings", "get_sec_search_coverage"]
-    listed = next(s for s in _as_seq(pack["schemas"]) if s["function"]["name"] == "list_sec_filings")
-    function = _as_dict(listed["function"])
+    names = {m["name"] for m in _as_seq(pack["matches"])}
+    assert "search_sec_filings" in names
+    listed = next(t for t in tools.TOOLS if _as_dict(_as_dict(t)["function"])["name"] == "list_sec_filings")
+    function = _as_dict(_as_dict(listed)["function"])
     parameters = _as_dict(function["parameters"])
     assert "identifier" in _as_dict(parameters["properties"])
     description = function["description"]
     assert isinstance(description, str)
-    assert "Does NOT search company names" in description
+    assert "does NOT search company names" in description
     rel = tools.execute_tool(
         "search_tools", {"query": "inverse 13F manager holdings"}, "test", context=_research_context()
     )
-    assert "search_sec_relationships" in {s["function"]["name"] for s in _as_seq(rel["schemas"])}
+    assert "search_sec_relationships" in {m["name"] for m in _as_seq(rel["matches"])}
+    short = tools.execute_tool(
+        "search_tools", {"query": "apple short percentage"}, "test", context=_research_context()
+    )
+    assert "get_short_interest" in {m["name"] for m in _as_seq(short["matches"])}
+    cheap = tools.execute_tool(
+        "search_tools", {"query": "P/E cheap"}, "test", context=_research_context()
+    )
+    assert "get_valuation_metrics" in {m["name"] for m in _as_seq(cheap["matches"])}
 
 
 def test_get_sec_document_dispatch_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:

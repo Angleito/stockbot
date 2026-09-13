@@ -1,0 +1,16 @@
+opencode.ai:443
+www.sec.gov:443
+data.sec.gov:443
+efts.sec.gov:443
+api.finra.org:443
+ews.fip.finra.org:443
+api.exa.ai:443
+agent.robinhood.com:443
+query2.finance.yahoo.com:443
+fc.yahoo.com:443
+www.slickcharts.com:443
+api.datacommons.org:443
+bigquery.googleapis.com:443
+cloudbilling.googleapis.com:443
+oauth2.googleapis.com:443
+www.googleapis.com:443

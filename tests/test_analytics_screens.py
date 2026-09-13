@@ -61,10 +61,10 @@ def _seed_facts(data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]
             parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
+def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=SETTLEMENT, known_at=known_at,
-        retrieved_at=known_at, content_hash=content_hash,
+        rows, settlement_date=SETTLEMENT,
+        retrieved_at=retrieved_at, content_hash=content_hash,
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
     )
@@ -305,7 +305,10 @@ def test_read_is_bounded_by_limit(data_root: Path) -> None:
 
 def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
     _seed_default(data_root)
-    result = screens.get_short_interest_leaderboard(settlement_date="2025-01-15", data_root=data_root)
+    # Historical reproduction never fetches: a missing cycle stays an error.
+    result = screens.get_short_interest_leaderboard(
+        settlement_date="2025-01-15", as_of="2026-08-14", data_root=data_root
+    )
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
@@ -440,7 +443,7 @@ def test_stale_settlement_is_surfaced(data_root: Path) -> None:
     _seed_facts(data_root, _default_facts())
     stale_date = "2025-01-15"
     datasets = normalize_finra_short_interest(
-        _default_rows(), settlement_date=stale_date, known_at="2025-01-20T12:00:00Z",
+        _default_rows(), settlement_date=stale_date,
         retrieved_at="2025-01-20T12:00:00Z", content_hash="snapshot-hash-2",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{stale_date}",
@@ -458,18 +461,55 @@ def test_stale_settlement_is_surfaced(data_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_snapshot_not_knowable_at_as_of_is_rejected(data_root: Path) -> None:
-    """A snapshot archived after as_of is invisible to that as_of."""
+def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+    """A settlement after as_of is invisible to that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-30T12:00:00Z")
+    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
 
-    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    result = screens.materialize_short_interest_screen("2026-08-29", as_of="2026-08-14", data_root=data_root)
 
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
     assert "knowable on or before 2026-08-14" in error
+
+
+def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+    """Retrieval-gated: settlement 08-14 retrieved 08-30 is invisible at
+    as_of 08-20, visible once as_of reaches retrieval."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    assert "error" in early
+
+    visible = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
+    entries = visible["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+
+    pre = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-10", data_root=data_root)
+    assert "error" in pre
+
+def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
+    """FINRA Dec-15-2025 settlement published Dec-24: invisible at 12-20, visible at 12-24."""
+    _seed_tickers(data_root, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_facts(data_root, {
+        1: [{"end": "2025-09-30", "val": 100, "accn": "a1", "filed": "2025-11-01"}],
+        2: [{"end": "2025-09-30", "val": 200, "accn": "b1", "filed": "2025-11-01"}],
+        3: [{"end": "2025-09-30", "val": 10, "accn": "c1", "filed": "2025-11-01"}],
+    }, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_cycle(data_root, "2025-12-15", _default_rows(), retrieved_at="2025-12-24T12:00:00Z")
+
+    hidden = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-20", data_root=data_root)
+    assert "error" in hidden
+
+    shown = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-24", data_root=data_root)
+    shown_entries = shown["entries"]
+    assert isinstance(shown_entries, list)
+    assert [e["ticker"] for e in shown_entries] == ["CCC", "AAA", "BBB"]
 
 
 def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
@@ -497,24 +537,24 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
     assert [e["ticker"] for e in later_entries] == ["CCC", "AAA", "BBB"]
 
 
-def test_corrected_snapshot_versions_selected_by_as_of(data_root: Path) -> None:
-    """A corrected snapshot is a new source version: the earlier as-of uses
-    the original values, the later as-of uses the correction."""
+def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path) -> None:
+    """Two source versions: only versions retrieved on/before as_of are
+    knowable; the newest knowable retrieved_at wins per symbol."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
     corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
-    _seed_short_interest(data_root, corrected, known_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
+    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
-    assert early_entries[1]["short_shares"] == 20  # original version
+    assert early_entries[1]["short_shares"] == 20  # correction not yet knowable at 08-14
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     later_entries = later["entries"]
@@ -575,13 +615,13 @@ def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
     older 13:00+01:00 version must lose to the 12:30Z correction."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T13:00:00+01:00")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T13:00:00+01:00")
     corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
-    _seed_short_interest(data_root, corrected, known_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
+    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -629,11 +669,11 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
 def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -647,12 +687,12 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> No
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
-        known_at="2026-08-10T12:00:00Z",
+        retrieved_at="2026-08-10T12:00:00Z",
     )
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        known_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert "error" in result
@@ -694,10 +734,10 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], known_at: str = "2026-08-10T12:00:00Z") -> None:
+def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z") -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=settlement_date, known_at=known_at,
-        retrieved_at=known_at, content_hash=f"snapshot-{settlement_date}",
+        rows, settlement_date=settlement_date,
+        retrieved_at=retrieved_at, content_hash=f"snapshot-{settlement_date}",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
     )
@@ -763,8 +803,8 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
-    ], known_at="2026-08-10T12:00:00Z")
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-10T12:00:00Z")
+    ], retrieved_at="2026-08-10T12:00:00Z")
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
     early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     early_entries = early["entries"]
@@ -790,14 +830,173 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     assert aaa["shares_change_abs"] == 300.0
 
 
-def test_change_slice_honors_finra_known_at(data_root: Path) -> None:
-    """A snapshot archived after as_of is not knowable at that as_of."""
+def test_change_slice_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+    """A settlement after as_of is not knowable at that as_of."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), known_at="2026-08-30T12:00:00Z")
+    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
     result = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
     assert "knowable" in error
+
+
+def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+    """Retrieval-gated: the change slice sees a 08-14 cycle retrieved 08-30
+    once as_of reaches retrieval."""
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    _seed_cycle(data_root, "2026-08-07", [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
+    ])
+    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+
+    result = screens.short_interest_change_screen("2026-08-30", data_root=data_root)
+    assert result["settlement_current"] == SETTLEMENT
+
+# ---------------------------------------------------------------------------
+# Fetch-on-empty: live screens fetch from FINRA, historical screens never do
+# ---------------------------------------------------------------------------
+
+
+def _install_finra_fetch_fake(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, object]]) -> None:
+    """Serve discovery probes (limit 1) and full snapshots from one fake.
+
+    The first probe reports no published rows so discovery must skip it;
+    later probes report rows.  Full fetches return AAA/BBB/CCC rows for the
+    requested settlement date.
+    """
+    probed = {"count": 0}
+
+    def fake(
+        group: str, dataset_name: str, payload: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        calls.append(payload)
+        raw_filters = payload.get("compareFilters", [])
+        assert isinstance(raw_filters, list)
+        filters = {
+            f.get("fieldName"): f.get("fieldValue")
+            for f in raw_filters
+            if isinstance(f, dict)
+        }
+        settlement = str(filters.get("settlementDate"))
+        if payload.get("limit") == 1:  # discovery probe: existence only
+            probed["count"] += 1
+            total = 3 if probed["count"] > 1 else 0
+            return b"[]", [], {"record-total": str(total)}
+        rows: list[dict[str, object]] = [
+            {"symbolCode": symbol, "issueName": symbol, "settlementDate": settlement,
+             "currentShortPositionQuantity": position}
+            for symbol, position in (("AAA", 20), ("BBB", 20), ("CCC", 5))
+        ]
+        return (
+            json.dumps(rows).encode(), rows,
+            {"record-total": str(len(rows))},
+        )
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", fake)
+
+
+def test_live_leaderboard_empty_store_discovers_and_fetches_once(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(data_root=data_root)
+
+    assert "error" not in result
+    entries = result["entries"]
+    assert isinstance(entries, list)
+    assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    probes = [c for c in calls if c.get("limit") == 1]
+    full = [c for c in calls if c.get("limit") != 1]
+    assert len(probes) == 2  # newest candidate empty, next one hits
+    assert len(full) == 1  # exactly one full fetch
+    full_filters = full[0]["compareFilters"]
+    assert isinstance(full_filters, list) and full_filters
+    full_first = full_filters[0]
+    assert isinstance(full_first, dict)
+    probe_filters = probes[1]["compareFilters"]
+    assert isinstance(probe_filters, list) and probe_filters
+    probe_first = probe_filters[0]
+    assert isinstance(probe_first, dict)
+    assert full_first["fieldValue"] == probe_first["fieldValue"]
+    assert result["settlement_date"] == full_first["fieldValue"]
+
+
+def test_live_leaderboard_explicit_date_fetches_exactly_that_date(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+
+    assert "error" not in result
+    assert result["settlement_date"] == SETTLEMENT
+    assert len(calls) == 1  # no discovery probes, one exact-date fetch
+    filters = calls[0]["compareFilters"]
+    assert isinstance(filters, list) and filters
+    first = filters[0]
+    assert isinstance(first, dict)
+    assert first["fieldValue"] == SETTLEMENT
+
+
+def test_historical_leaderboard_empty_store_never_fetches(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_finra_fetch_fake(monkeypatch, calls)
+
+    result = screens.get_short_interest_leaderboard(as_of="2026-08-14", data_root=data_root)
+
+    assert calls == []
+    assert "error" in result
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "knowable on or before 2026-08-14" in error
+
+
+def test_discovery_probe_uses_mock_dataset_in_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FINRA_USE_MOCK", "1")
+    names: list[str] = []
+
+    def fake(
+        group: str, dataset_name: str, payload: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        names.append(dataset_name)
+        return b"[]", [], {"record-total": "0"}
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", fake)
+
+    assert screens._discover_latest_published_settlement_date(date(2026, 9, 9)) is None
+    assert len(names) == screens._FETCH_DISCOVERY_CYCLES
+    assert all(name == "consolidatedShortInterestMock" for name in names)
+
+
+def test_live_fetch_failure_returns_error_not_raise(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(data_root)
+    _seed_facts(data_root, _default_facts())
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(screens.finra_client, "ingestion_post_query", boom)
+
+    result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
+
+    assert "error" in result
+    error = result["error"]
+    assert isinstance(error, str)
+    assert "network down" in error

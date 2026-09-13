@@ -10,7 +10,7 @@ def google_data_enabled() -> bool:
         _cfg = None
     if _cfg is not None:
         try:
-            return bool(_cfg.google_data_enabled())
+            return _cfg.google_data_enabled()
         except Exception:
             return False
     return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
@@ -24,7 +24,7 @@ def get_datacommons_api_key() -> str | None:
         try:
             value = _cfg.get_datacommons_api_key()
             if value:
-                return str(value)
+                return value
         except Exception:
             pass
     return (os.getenv("DATACOMMONS_API_KEY") or "").strip() or None

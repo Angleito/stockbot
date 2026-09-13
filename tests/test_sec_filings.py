@@ -153,6 +153,21 @@ def test_documents_list_get_text_primary(monkeypatch: pytest.MonkeyPatch) -> Non
     with pytest.raises(ValueError):
         documents.get_sec_document("0003", "missing.htm")
 
+def test_normalize_accession_tolerates_variants() -> None:
+    assert documents._normalize_accession("  0000320193-25-000079\n") == "0000320193-25-000079"
+    assert documents._normalize_accession("000032019325000079") == "0000320193-25-000079"
+    assert documents._normalize_accession("0003") == "0003"
+
+
+def test_missing_document_names_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    atts = [_FakeAttachment("primary.htm", text="hello")]
+    fake = _FakeFiling(accession="0003", attachments=atts)
+    def _fake_by_accession(acc: str) -> object:
+        return fake
+    monkeypatch.setattr(documents, "get_by_accession_number", _fake_by_accession)
+    with pytest.raises(ValueError, match="primary.htm"):
+        documents.get_sec_document("0003", "missing.htm")
+
 
 def test_find_sec_company_normalizes_and_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
     import pandas as pd

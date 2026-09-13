@@ -551,7 +551,7 @@ def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...
     return tuple(str(row.get(key) or "") for key in keys)
 
 
-def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
+def read_table(name: str, root: Optional[Path] = None, columns: Optional[list[str]] = None) -> pa.Table:
     """Read a full dataset (all partitions) as a pyarrow Table."""
     root = Path(root) if root else get_data_root() / "parquet"
     ds = dataset(name)
@@ -561,7 +561,7 @@ def read_table(name: str, root: Optional[Path] = None) -> pa.Table:
     files = sorted(p for p in directory.rglob("*.parquet") if p.is_file())
     if not files:
         return ds.schema.empty_table()
-    tables = [pq.read_table(str(p)) for p in files]
+    tables = [pq.read_table(str(p), columns=columns) for p in files]
     return pa.concat_tables(tables, promote_options="permissive")
 
 

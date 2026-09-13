@@ -9,6 +9,12 @@ No broker, price, Greeks, or options monitoring exists here on purpose: rules
 without a reliable canonical backing stay ``enabled: false``/``unsupported``
 and are never queried. Never fake data: production services with no resolvable
 targets return no events instead of inventing any.
+
+Feed contract: new feed builders MUST build summaries from bounded typed fields
+plus canonical refs with origin ``"deterministic"``; raw post/article/feed text
+MUST NEVER enter ``summary`` or ``metadata`` — only a canonical ref — and raw
+text stays retrievable solely through a guarded Stockbot tool (built with the
+feeds, out of scope here).
 """
 
 from __future__ import annotations
@@ -568,6 +574,8 @@ def tick(repository: ThesisRepository, thesis_id: str, source_services: Mapping[
             tid, trigger_type=g["rule"].rule_type, importance=_importance(g["rule"].rule_type),
             claim_ids=sorted(g["claims"]), expression_ids=sorted(g["exprs"]),
             canonical_refs=[ref], summary=g["event"].summary,
+            summary_origin=("recycled" if (g["event"].source == "stored"
+                                           or ref.startswith("invalidator:")) else "deterministic"),
             metadata={"event_id": g["event"].event_id, "source": g["event"].source,
                       "content_hash": g["digest"], "entity": g["event"].entity,
                       "event_known_at": g["event"].known_at,

@@ -104,3 +104,37 @@ def test_diff_truncated_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(documents, "get_sec_filing_text", boom)
     assert "error" in diffs.diff_filings("n", "o")
+
+def test_diff_section_full_uses_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec import filings
+
+    seen: list[object] = []
+
+    def _fake_text(accession_no: str, document: object = None) -> str:
+        seen.append(document)
+        return "x\n"
+
+    def _fake_filing(accession_no: str) -> object:
+        return SimpleNamespace(form="10-K")
+    monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
+    monkeypatch.setattr(documents, "get_sec_filing_text", _fake_text)
+    out = diffs.diff_filings("n", "o", section="full")
+    assert "error" not in out
+    assert seen == [None, None]
+
+def test_diff_section_miss_names_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec import filings
+
+    docs = [SimpleNamespace(document_name="aapl-20250927.htm"),
+            SimpleNamespace(document_name="exhibit211.htm")]
+    def _fake_docs(accession_no: str) -> object:
+        return docs
+    def _fake_filing(accession_no: str) -> object:
+        return SimpleNamespace(form="10-K")
+    monkeypatch.setattr(documents, "list_sec_documents", _fake_docs)
+    monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
+    out = diffs.diff_filings("n", "o", section="risk_factors")
+    err = out["error"]
+    assert isinstance(err, str)
+    assert "aapl-20250927.htm" in err
+    assert "risk_factors" in err

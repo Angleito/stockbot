@@ -4,6 +4,11 @@ All analytical queries must go through :func:`query`, which enforces the
 point-in-time rule: a query at ``as_of`` can never observe records whose
 ``known_at`` is later than ``as_of``.
 
+Two clocks: ``known_at`` is the global public-knowledge date (the PIT
+horizon — filing date, settlement date, or other source publication date);
+``retrieved_at`` is the local fetch wall-clock (provenance/freshness only,
+never PIT-gated). Rows with no public date keep ``known_at == retrieved_at``.
+
 ``known_at`` is stored as ISO-8601.  When ``as_of`` is a plain date
 (YYYY-MM-DD), comparisons are made at day granularity (``CAST(known_at AS
 DATE) <= DATE ?``), so a fact filed on the as-of date itself is visible on

@@ -1,0 +1,676 @@
+version: 2
+domains:
+  alternative:
+    description: "Alternative and non-filing signals outside standard SEC and market feeds."
+    families:
+      - signal-discovery:
+        path: "/alternative/signal-discovery"
+      - social-arbitrage:
+        path: "/alternative/social-arbitrage"
+      - trend-evidence:
+        path: "/alternative/trend-evidence"
+  analyst:
+    description: "Analyst estimates and expectations for earnings, revenue, and price targets."
+    families:
+      - estimates:
+        path: "/analyst/estimates"
+  events:
+    description: "Material company events derived from 8-K and filing activity."
+    families:
+      - company-events:
+        path: "/events/company-events"
+      - ownership-filings:
+        path: "/events/ownership-filings"
+  finra:
+    description: "FINRA short interest, short volume, and threshold-securities data."
+    families:
+      - catalog:
+        path: "/finra/catalog"
+      - screens:
+        path: "/finra/screens"
+      - short-interest:
+        path: "/finra/short-interest"
+      - short-sale-volume:
+        path: "/finra/short-sale-volume"
+      - threshold-securities:
+        path: "/finra/threshold-securities"
+  fundamentals:
+    description: "Reported numeric fundamentals such as EPS, dividends, and balance-sheet items."
+    families:
+      - metrics:
+        path: "/fundamentals/metrics"
+      - obligations:
+        path: "/fundamentals/obligations"
+      - statements:
+        path: "/fundamentals/statements"
+  governance:
+    description: "Proxy, meeting, vote, and board-compensation records."
+    families:
+      - events:
+        path: "/governance/events"
+  insider:
+    description: "Insider transactions and planned sales from Forms 3/4/5 and 144."
+    families:
+      - trades:
+        path: "/insider/trades"
+  macro:
+    description: "Macroeconomic context such as employment, inflation, and rates."
+    families:
+      - statistics:
+        path: "/macro/statistics"
+  market:
+    description: "Market data such as index weights, option contracts, and trend evidence."
+    families:
+      - index-membership:
+        path: "/market/index-membership"
+  offerings:
+    description: "Financing history, offering terms, and dilution math."
+    families:
+      - capital-raising:
+        path: "/offerings/capital-raising"
+  ownership:
+    description: "Beneficial ownership stakes, holder changes, and relationship links."
+    families:
+      - stakes:
+        path: "/ownership/stakes"
+  patents:
+    description: "Patent records and innovation activity."
+    families:
+      - search:
+        path: "/patents/search"
+  sec:
+    description: "SEC filing discovery, retrieval, and document reading via EDGAR."
+    families:
+      - entity-discovery:
+        path: "/sec/entity-discovery"
+      - filing-catalog:
+        path: "/sec/filing-catalog"
+      - filing-diff:
+        path: "/sec/filing-diff"
+      - filing-search:
+        path: "/sec/filing-search"
+  thesis:
+    description: "Thesis tracking, refinement, obligations, and operator notes."
+    families:
+      - lifecycle:
+        path: "/thesis/lifecycle"
+  transactions:
+    description: "Transaction status and mandate evaluation for deals."
+    families:
+      - deals:
+        path: "/transactions/deals"
+  valuation:
+    description: "Valuation multiples and financial-statement analysis."
+    families:
+      - multiples:
+        path: "/valuation/multiples"
+  web:
+    description: "General web search for facts outside structured financial sources."
+    families:
+      - search:
+        path: "/web/search"
+tools:
+  - name: find_alternative_signals
+    domain: alternative
+    family: signal-discovery
+    path: "/alternative/signal-discovery/find_alternative_signals"
+    intent: discover_emerging_signals
+    output_kind: ranked_candidates
+    source: google_trends
+    entity_scope: market_wide
+    time_mode: latest_or_as_of
+    summary: "Discovery scan for rising search-term and diffusion signals worth investigating."
+    version: 2
+    keywords: [acros, alternative, attention, diffusion, discover, discovery, emerging, find, investigating, rising, scan, screening, search, signal, term, trend, worth]
+  - name: investigate_social_arbitrage_candidate
+    domain: alternative
+    family: social-arbitrage
+    path: "/alternative/social-arbitrage/investigate_social_arbitrage_candidate"
+    intent: assess_attention_demand_gap
+    output_kind: derived_analysis
+    source: google_trends
+    entity_scope: single_topic
+    time_mode: latest_or_as_of
+    summary: "Enrichment of one social-arbitrage candidate with corroboration and exposure gap. Social signals vetting."
+    version: 2
+    keywords: [arbitrage, around, asses, attention, candidate, correspond, corroboration, demand, enrichment, exposure, gap, investigate, one, online, real, signal, social, testing, vetting, whether]
+  - name: get_trend_evidence
+    domain: alternative
+    family: trend-evidence
+    path: "/alternative/trend-evidence/get_trend_evidence"
+    intent: retrieve_known_trend_evidence
+    output_kind: evidence_series
+    source: google_trends
+    entity_scope: single_topic
+    time_mode: date_range
+    summary: "Evidence for one known trend: search interest, rising queries, and geography."
+    version: 2
+    keywords: [backing, claim, dated, evidence, geography, get, interest, known, one, query, retrieve, rising, search, specific, trend]
+  - name: get_analyst_estimates
+    domain: analyst
+    family: estimates
+    path: "/analyst/estimates/get_analyst_estimates"
+    intent: retrieve_forward_consensus
+    output_kind: forecast_snapshot
+    source: yahoo_finance
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Forward sell-side consensus expectations: targets, ratings, forward EPS/revenue, revisions."
+    version: 2
+    keywords: [analyst, consensu, eps, estimate, expect, expectation, forward, get, one, rating, retrieve, revenue, revision, sell, side, target, ticker]
+  - name: get_material_events
+    domain: events
+    family: company-events
+    path: "/events/company-events/get_material_events"
+    intent: retrieve_recent_material_events
+    output_kind: event_series
+    source: sec
+    entity_scope: single_security
+    time_mode: since_or_as_of
+    summary: "Deterministic 8-K-derived recent event feed with accession citations for what changed since a date."
+    version: 2
+    keywords: [accession, change, citation, company, date, derived, deterministic, event, feed, finding, get, material, recent, recently, retrieve, since]
+  - name: get_recent_ownership_filings
+    domain: events
+    family: ownership-filings
+    path: "/events/ownership-filings/get_recent_ownership_filings"
+    intent: retrieve_latest_ownership_filings
+    output_kind: filing_series
+    source: sec
+    entity_scope: market_wide
+    time_mode: latest
+    summary: "Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours."
+    version: 2
+    keywords: [13d, 13g, 24, came, feed, filed, filing, finding, get, given, hour, just, last, latest, market, most, newly, no, out, ownership, recent, retrieve, roughly, sc, ticker, wide]
+  - name: describe_finra_dataset
+    domain: finra
+    family: catalog
+    path: "/finra/catalog/describe_finra_dataset"
+    intent: inspect_finra_dataset_schema
+    output_kind: schema
+    source: finra
+    entity_scope: single_dataset
+    time_mode: current
+    summary: "One FINRA dataset's fields, types, filter values, and supported methods."
+    version: 2
+    keywords: [before, coverage, dataset, describe, field, filter, finra, inspect, learning, method, named, one, querying, schema, supported, type, value]
+  - name: list_finra_datasets
+    domain: finra
+    family: catalog
+    path: "/finra/catalog/list_finra_datasets"
+    intent: discover_finra_dataset
+    output_kind: catalog
+    source: finra
+    entity_scope: dataset_catalog
+    time_mode: current
+    summary: "Catalog of public FINRA datasets with canonical ids, groups, and ticker/date support."
+    version: 2
+    keywords: [before, canonical, catalog, cover, dataset, date, discover, finding, finra, group, ids, list, public, querying, question, support, ticker]
+  - name: get_short_interest_leaderboard
+    domain: finra
+    family: screens
+    path: "/finra/screens/get_short_interest_leaderboard"
+    intent: rank_short_interest
+    output_kind: leaderboard
+    source: finra_sec
+    entity_scope: market_wide
+    time_mode: latest_or_as_of
+    summary: "Market-wide most-shorted screen: ranked stocks by short interest as a percent of SEC shares."
+    version: 2
+    keywords: [acros, get, interest, leaderboard, market, most, percent, rank, ranked, screen, screening, sec, share, short, shorted, stock, wide]
+  - name: get_finra_datapoints
+    domain: finra
+    family: short-interest
+    path: "/finra/short-interest/get_finra_datapoints"
+    intent: retrieve_finra_records
+    output_kind: raw_records
+    source: finra
+    entity_scope: single_dataset
+    time_mode: date_range_or_latest
+    summary: "Exact raw rows from any named FINRA dataset: only the requested fields, up to 25 rows."
+    version: 2
+    keywords: [25, any, data, datapoint, dataset, exact, explicit, field, finra, get, named, only, raw, record, request, requested, retrieve, row, up, value]
+  - name: get_short_interest
+    domain: finra
+    family: short-interest
+    path: "/finra/short-interest/get_short_interest"
+    intent: current_reported_short_position
+    output_kind: current_snapshot
+    source: finra
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Biweekly short position for one ticker: FINRA short interest, days to cover, percent change."
+    version: 2
+    keywords: [biweekly, change, cover, current, day, finra, float, get, interest, one, percent, position, reported, short, ticker]
+  - name: get_short_pressure_profile
+    domain: finra
+    family: short-interest
+    path: "/finra/short-interest/get_short_pressure_profile"
+    intent: assess_short_pressure
+    output_kind: derived_composite
+    source: finra_sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Short pressure vs shares outstanding for one ticker: FINRA positioning plus SEC shares and ratio."
+    version: 2
+    keywords: [asses, finra, get, one, outstanding, plu, positioning, pressure, profile, ratio, relative, sec, share, short, ticker, vs]
+  - name: query_finra
+    domain: finra
+    family: short-interest
+    path: "/finra/short-interest/query_finra"
+    intent: analyze_historical_finra_records
+    output_kind: distribution_or_trend
+    source: finra
+    entity_scope: single_dataset
+    time_mode: date_range
+    summary: "Analyzed FINRA briefing with trends and metrics over any named dataset, no raw rows."
+    version: 2
+    keywords: [analyze, analyzed, analyzing, any, briefing, change, coverage, dataset, distribution, finra, historical, metric, named, no, over, query, raw, record, row, time, trend]
+  - name: get_reg_sho_volume
+    domain: finra
+    family: short-sale-volume
+    path: "/finra/short-sale-volume/get_reg_sho_volume"
+    intent: daily_short_sale_volume
+    output_kind: daily_series
+    source: finra
+    entity_scope: single_security
+    time_mode: date_range_or_latest
+    summary: "Self-contained daily short-sale volume by venue for one ticker: FINRA Reg SHO volume, rolling 12 months."
+    version: 2
+    keywords: [12, breakdown, contained, daily, finra, get, month, one, reg, rolling, sale, self, sho, short, ticker, venue, volume]
+  - name: get_threshold_securities
+    domain: finra
+    family: threshold-securities
+    path: "/finra/threshold-securities/get_threshold_securities"
+    intent: retrieve_threshold_status
+    output_kind: status_series
+    source: finra
+    entity_scope: single_security_or_market
+    time_mode: date_or_latest
+    summary: "FINRA OTC Regulation SHO threshold securities, optionally filtered by ticker and date."
+    version: 2
+    keywords: [appear, checking, date, filtered, finra, get, list, optionally, otc, reg, regulation, retrieve, security, sho, statu, threshold, ticker, whether]
+  - name: get_fundamentals
+    domain: fundamentals
+    family: metrics
+    path: "/fundamentals/metrics/get_fundamentals"
+    intent: retrieve_reported_metric
+    output_kind: metric_snapshot
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding."
+    version: 2
+    keywords: [balance, basic, diluted, dividend, eps, fundamental, get, historical, item, metric, numeric, one, outstanding, reported, retrieve, share, sheet, single, specific, ticker, ttm]
+  - name: get_xbrl_facts
+    domain: fundamentals
+    family: metrics
+    path: "/fundamentals/metrics/get_xbrl_facts"
+    intent: retrieve_xbrl_concept
+    output_kind: fact_records
+    source: sec
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Single XBRL-tagged fact by concept name: revenue, net income, cash, debt, or equity."
+    version: 2
+    keywords: [cash, concept, debt, equity, exact, fact, get, income, item, line, name, net, one, retrieve, revenue, single, tagged, value, xbrl]
+  - name: get_obligations
+    domain: fundamentals
+    family: obligations
+    path: "/fundamentals/obligations/get_obligations"
+    intent: retrieve_future_obligations
+    output_kind: obligation_schedule
+    source: sec
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language."
+    version: 2
+    keywords: [10, 10k, amount, cash, certainty, commitment, company, contract, future, get, horizon, including, language, note, obligated, obligation, one, pay, retrieve, ticker]
+  - name: get_financial_statements
+    domain: fundamentals
+    family: statements
+    path: "/fundamentals/statements/get_financial_statements"
+    intent: retrieve_financial_statement
+    output_kind: statement
+    source: sec
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Full parsed statements for one ticker: income statement, balance sheet, and cash flow."
+    version: 2
+    keywords: [balance, cash, financial, flow, full, get, income, metric, numeric, one, parsed, rather, retrieve, sheet, statement, than, ticker]
+  - name: get_governance_events
+    domain: governance
+    family: events
+    path: "/governance/events/get_governance_events"
+    intent: retrieve_governance_events
+    output_kind: event_series
+    source: sec
+    entity_scope: single_security
+    time_mode: since_or_as_of
+    summary: "Proxy and governance filing context (DEF 14A, meetings, votes) with retrieval pointers."
+    version: 2
+    keywords: [14a, board, compensation, context, def, event, filing, finding, get, governance, meeting, pointer, proxy, record, retrieval, retrieve, shareholder, vote]
+  - name: get_insider_activity
+    domain: insider
+    family: trades
+    path: "/insider/trades/get_insider_activity"
+    intent: retrieve_executed_insider_trades
+    output_kind: transaction_series
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Executed insider buys/sells for one ticker: actual purchases and sales from Forms 3/4/5."
+    version: 2
+    keywords: [activity, actual, buy, director, executed, executive, form, get, insider, one, purchase, retrieve, sale, sell, ticker, trade]
+  - name: get_planned_insider_sales
+    domain: insider
+    family: trades
+    path: "/insider/trades/get_planned_insider_sales"
+    intent: retrieve_planned_insider_sales
+    output_kind: notice_series
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Planned Form 144 sale notices not yet executed: proposed insider sales for one ticker."
+    version: 2
+    keywords: [144, executed, form, get, insider, not, notice, one, planned, proposed, reported, retrieve, sale, ticker, yet]
+  - name: get_macro_context
+    domain: macro
+    family: statistics
+    path: "/macro/statistics/get_macro_context"
+    intent: retrieve_macro_statistics
+    output_kind: statistic_series
+    source: datacommons
+    entity_scope: geography
+    time_mode: latest
+    summary: "Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates."
+    version: 2
+    keywords: [california, context, gdp, geography, get, inflation, labor, live, macro, many, people, population, rate, retrieve, retrieving, statistic, such, there, unemployment]
+  - name: get_sp500_weight
+    domain: market
+    family: index-membership
+    path: "/market/index-membership/get_sp500_weight"
+    intent: retrieve_sp500_weight
+    output_kind: current_snapshot
+    source: slickcharts
+    entity_scope: single_security
+    time_mode: latest
+    summary: "A company's current weight and rank in the S&P 500 index from the constituent list."
+    version: 2
+    keywords: [500, answering, company, constituent, current, get, index, list, percent, rank, represent, retrieve, sp500, ticker, weight]
+  - name: get_dilution_profile
+    domain: offerings
+    family: capital-raising
+    path: "/offerings/capital-raising/get_dilution_profile"
+    intent: calculate_dilution
+    output_kind: derived_analysis
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Deterministic dilution math for diluted shareholders: inputs, formula, and source accessions always shown."
+    version: 2
+    keywords: [accession, alway, calculate, convert, count, deterministic, diluted, dilution, formula, get, impact, input, math, offering, profile, quantifying, share, shareholder, shown, source, warrant]
+  - name: get_offering_history
+    domain: offerings
+    family: capital-raising
+    path: "/offerings/capital-raising/get_offering_history"
+    intent: retrieve_offering_history
+    output_kind: offering_series
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Offering history from S-1/S-3/424B filings: offering terms with source-registration links."
+    version: 2
+    keywords: [424b, context, convert, count, filing, get, history, impact, including, ipo, link, offering, past, registration, retrieve, reviewing, share, shelf, source, term, ticker, warrant]
+  - name: get_beneficial_ownership
+    domain: ownership
+    family: stakes
+    path: "/ownership/stakes/get_beneficial_ownership"
+    intent: retrieve_current_beneficial_owners
+    output_kind: current_snapshot
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Current 5%+ beneficial-ownership stakes (SC 13D/G): holder, shares, percent, voting powers."
+    version: 2
+    keywords: [13d, beneficial, company, current, finding, get, holder, more, own, owner, ownership, percent, power, retrieve, sc, share, stake, than, voting]
+  - name: get_ownership_changes
+    domain: ownership
+    family: stakes
+    path: "/ownership/stakes/get_ownership_changes"
+    intent: compare_ownership_stakes
+    output_kind: change_series
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes, changed stakes and positions."
+    version: 2
+    keywords: [13d, between, change, compare, comparing, consecutive, deterministic, diff, filing, get, holder, ownership, percent, position, share, stake]
+  - name: search_sec_relationships
+    domain: ownership
+    family: stakes
+    path: "/ownership/stakes/search_sec_relationships"
+    intent: search_ownership_relationships
+    output_kind: relationship_records
+    source: sec
+    entity_scope: single_entity
+    time_mode: latest_or_as_of
+    summary: "Ownership and transaction relationship links for an entity: 13D/G owners, 13F holdings, deal links."
+    version: 2
+    keywords: [13d, 13f, deal, direction, either, entity, hold, holding, link, mapping, own, owner, ownership, relationship, search, sec, transact, transaction]
+  - name: search_company_patents
+    domain: patents
+    family: search
+    path: "/patents/search/search_company_patents"
+    intent: search_company_patents
+    output_kind: patent_records
+    source: google_patents
+    entity_scope: single_company
+    time_mode: date_range_or_latest
+    summary: "Company patent search: publications, assignees, counts, and classifications."
+    version: 2
+    keywords: [assignee, classification, company, count, filed, finding, lately, patent, patented, publication, search]
+  - name: find_sec_entities
+    domain: sec
+    family: entity-discovery
+    path: "/sec/entity-discovery/find_sec_entities"
+    intent: resolve_sec_entity
+    output_kind: candidate_records
+    source: sec
+    entity_scope: entity_query
+    time_mode: current
+    summary: "Resolve a company name, ticker, or CIK to verified SEC entity candidates with CIKs and tickers."
+    version: 2
+    keywords: [candidate, cik, company, entity, exact, find, known, name, not, resolve, sec, starting, ticker, verified]
+  - name: get_sec_document
+    domain: sec
+    family: filing-catalog
+    path: "/sec/filing-catalog/get_sec_document"
+    intent: read_filing_document
+    output_kind: text_window
+    source: sec
+    entity_scope: single_document
+    time_mode: as_of
+    summary: "Bounded text window of one filing document by accession number for targeted excerpt reading."
+    version: 2
+    keywords: [accession, bounded, document, excerpt, factor, filing, get, known, main, md, number, one, read, reading, risk, say, sec, section, specific, such, targeted, text, window]
+  - name: get_sec_filing
+    domain: sec
+    family: filing-catalog
+    path: "/sec/filing-catalog/get_sec_filing"
+    intent: retrieve_filing_metadata
+    output_kind: record
+    source: sec
+    entity_scope: single_filing
+    time_mode: as_of
+    summary: "One filing's record by accession number: filer, form, dates, primary document, source URL."
+    version: 2
+    keywords: [accession, after, date, document, fetching, filer, filing, form, get, known, metadata, number, one, primary, record, retrieve, sec, source, url]
+  - name: list_sec_documents
+    domain: sec
+    family: filing-catalog
+    path: "/sec/filing-catalog/list_sec_documents"
+    intent: list_filing_documents
+    output_kind: record_series
+    source: sec
+    entity_scope: single_filing
+    time_mode: as_of
+    summary: "Index of documents and exhibits attached to one filing, looked up by accession number."
+    version: 2
+    keywords: [accession, attached, document, exhibit, filing, index, known, list, listing, looked, number, one, sec, up]
+  - name: list_sec_filings
+    domain: sec
+    family: filing-catalog
+    path: "/sec/filing-catalog/list_sec_filings"
+    intent: list_entity_filings
+    output_kind: filing_series
+    source: sec
+    entity_scope: single_entity
+    time_mode: date_range_or_as_of
+    summary: "List EDGAR filings for an exact ticker or CIK, filterable by form and date range."
+    version: 2
+    keywords: [cik, company, date, edgar, entity, exact, filed, filing, filterable, filtered, form, lately, list, listing, optionally, range, recent, sec, ticker]
+  - name: diff_risk_factors
+    domain: sec
+    family: filing-diff
+    path: "/sec/filing-diff/diff_risk_factors"
+    intent: compare_risk_factors
+    output_kind: diff
+    source: sec
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Self-contained Risk Factors year-over-year diff for one ticker: what is new or changed."
+    version: 2
+    keywords: [change, company, compare, contained, diff, disclosure, factor, new, one, over, risk, self, ticker, year]
+  - name: diff_sec_filings
+    domain: sec
+    family: filing-diff
+    path: "/sec/filing-diff/diff_sec_filings"
+    intent: compare_full_filings
+    output_kind: diff
+    source: sec
+    entity_scope: filing_pair_or_security
+    time_mode: latest_or_as_of
+    summary: "Self-contained full-filing diff for one ticker or two accessions: amendment versus prior version."
+    version: 2
+    keywords: [accession, amendment, change, compare, comparing, contained, diff, filing, full, known, latest, one, predecessor, prior, restatement, sec, self, ticker, two, version, versu]
+  - name: get_sec_search_coverage
+    domain: sec
+    family: filing-search
+    path: "/sec/filing-search/get_sec_search_coverage"
+    intent: inspect_ingestion_coverage
+    output_kind: coverage_status
+    source: sec
+    entity_scope: dataset_partition
+    time_mode: current
+    summary: "Persisted SEC ingestion coverage and backfill-job status for a form, source, or date partition."
+    version: 2
+    keywords: [backfill, before, checking, coverage, covered, date, form, get, ingestion, inspect, job, partition, persisted, queued, search, searching, sec, source, statu, still, whether]
+  - name: search_sec_filings
+    domain: sec
+    family: filing-search
+    path: "/sec/filing-search/search_sec_filings"
+    intent: search_filing_text
+    output_kind: search_results
+    source: sec
+    entity_scope: multi_entity
+    time_mode: date_range_or_as_of
+    summary: "General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions."
+    version: 2
+    keywords: [10, 10k, accession, acros, disclosed, disclosure, edgar, eft, entity, factor, filing, full, general, language, mention, number, risk, route, search, searching, sec, text, unknown]
+  - name: thesis_create
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_create"
+    intent: create_thesis
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "Start a new investment thesis proposal with scope, claims, and open questions."
+    version: 2
+    keywords: [claim, create, creating, investment, new, open, proposal, question, scope, start, test, thesi, track]
+  - name: thesis_journal
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_journal"
+    intent: append_thesis_journal
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>."
+    version: 2
+    keywords: [about, append, appending, changing, creating, entry, id, journal, log, monitoring, note, ongoing, operator, pas, rule, thesi, uuid, watch, without]
+  - name: thesis_refine
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_refine"
+    intent: refine_thesis
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "Update a thesis with clarifications and deltas. Pass the thesis ID as thesis:<uuid>."
+    version: 2
+    keywords: [after, clarification, delta, evidence, feedback, id, new, pas, refine, revising, thesi, update, uuid]
+  - name: thesis_show
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_show"
+    intent: retrieve_thesis
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_thesis
+    time_mode: latest_or_as_of
+    summary: "Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>."
+    version: 2
+    keywords: [assessment, checking, current, id, pas, read, retrieve, state, statu, thesi, uuid]
+  - name: thesis_watch
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_watch"
+    intent: list_or_add_thesis_watch
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "List existing watch rules, or add a validated monitoring rule that alerts when a thesis condition triggers."
+    version: 2
+    keywords: [add, alert, am, condition, existing, invalidator, list, listing, monitoring, rule, setting, thesi, trigger, validated, watch, watched, watching]
+  - name: get_transaction_status
+    domain: transactions
+    family: deals
+    path: "/transactions/deals/get_transaction_status"
+    intent: retrieve_transaction_status
+    output_kind: event_series
+    source: sec
+    entity_scope: single_security
+    time_mode: latest_or_as_of
+    summary: "M&A filing context: tender offers, 14D-9 recommendations, S-4s, and merger proxies."
+    version: 2
+    keywords: [14d, 4s, acquisition, checking, context, filing, get, merger, offer, proxy, recommendation, retrieve, statu, tender, ticker, transaction]
+  - name: get_valuation_metrics
+    domain: valuation
+    family: multiples
+    path: "/valuation/multiples/get_valuation_metrics"
+    intent: calculate_valuation_multiples
+    output_kind: derived_snapshot
+    source: yahoo_finance_sec
+    entity_scope: single_security
+    time_mode: latest
+    summary: "Cheap-vs-expensive earnings multiples at live price: trailing plus forward P/E."
+    version: 2
+    keywords: [calculate, cheap, company, earning, expensive, forward, get, live, metric, multiple, one, pe, plu, price, ticker, trailing, valuation, vs, whether]
+  - name: search_web
+    domain: web
+    family: search
+    path: "/web/search/search_web"
+    intent: search_external_web
+    output_kind: search_results
+    source: exa
+    entity_scope: open_query
+    time_mode: latest
+    summary: "External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks."
+    version: 2
+    keywords: [announcement, busines, catalyst, commentary, commentator, development, external, fell, finding, headline, industry, market, move, moved, new, outside, people, price, reaction, recent, risk, rose, saying, search, source, stock, structured, web, why]

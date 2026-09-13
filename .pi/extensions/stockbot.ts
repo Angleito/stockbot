@@ -47,6 +47,11 @@ export function bridgeModelText(bridge: Json): string {
  }
  return JSON.stringify(bridge);
 }
+// Stable visible grammar: the model permanently sees only DISCOVERY_TOOLS
+// plus pre-existing host tools. Every other registered research schema stays
+// registered passthrough but inactive behind call_tool; the roster is never
+// mutated after discovery.
+export const DISCOVERY_TOOLS = ["browse_tools", "call_tool", "search_tools"];
 
 // Absolute bridge paths derived from this file's location: Pi's extension
 // host cwd is not the repo root, so relative venv/scripts paths ENOENT.
@@ -60,7 +65,6 @@ const TOOL_TIMEOUT_MS = 120_000;
 // (as_of/known_at) + source labels when the payload carries them.
 const CARD_TOOLS: Record<string, { title: string; argKeys: string[] }> = {
  get_fundamentals: { title: "Fundamentals", argKeys: ["ticker"] },
- get_filing_section: { title: "Filing section", argKeys: ["ticker", "form", "accession_number"] },
  get_recent_ownership_filings: { title: "Recent 13D/G", argKeys: ["form_type", "limit"] },
  get_financial_statements: { title: "Financial statements", argKeys: ["ticker", "form"] },
  get_xbrl_facts: { title: "XBRL facts", argKeys: ["ticker", "concept"] },
@@ -380,12 +384,12 @@ export function createBridgeClient(
  return { callBridge };
 }
 
-export default async function stockbotExtension(pi: ExtensionAPI) {
+export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: () => ChildProcessWithoutNullStreams) {
  registerYoutubeAnalytics(pi);
- const { callBridge } = createBridgeClient();
+ const { callBridge } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
 
  // --- describe: prompt + RESEARCH tool registry ---
- const describe = await callBridge({ op: "describe" }, 30_000);
+ const [describe, doctor] = await Promise.all([callBridge({ op: "describe" }, 30_000), callBridge({ op: "doctor" }, 30_000)]);
  const systemPrompt = typeof describe.system_prompt === "string" ? describe.system_prompt : "";
  const entries = Array.isArray(describe.tools) ? describe.tools : [];
  // Loud handshake: silent 0-tool mode is unreachable. Any describe/doctor
@@ -396,21 +400,24 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   bridgeDown = true;
   bridgeDetail = typeof describe.error === "string" ? describe.error : "empty prompt/tools";
   console.error(`[stockbot] bridge describe failed: ${bridgeDetail}`);
- } else {
-  const doctor = await callBridge({ op: "doctor" }, 30_000);
-  if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
-   bridgeDown = true;
-   bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
-   console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
-  }
+ } else if (typeof doctor.error === "string" || doctor.bridge_ok !== true || doctor.tool_count !== entries.length) {
+  bridgeDown = true;
+  bridgeDetail = typeof doctor.error === "string" ? doctor.error : "doctor not ok";
+  console.error(`[stockbot] bridge doctor failed: ${bridgeDetail}`);
  }
- const research = new Set<string>();
-
+ const registeredResearch = new Set<string>();
  for (const entry of bridgeDown ? [] : entries) {
   const fn = describeFn(entry);
   if (!fn) continue;
-  research.add(fn.name);
+  registeredResearch.add(fn.name);
+ }
+
+ for (const entry of bridgeDown ? [] : entries) {
+  const fn = describeFn(entry);
+  if (!fn || !registeredResearch.has(fn.name)) continue;
   const cardSpec = CARD_TOOLS[fn.name];
+  const isDiscoveryTool = (DISCOVERY_TOOLS as string[]).includes(fn.name);
+  const isDirectTool = !isDiscoveryTool && fn.name !== "call_tool";
   pi.registerTool({
    name: fn.name,
    label: fn.name,
@@ -418,10 +425,73 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    parameters: Type.Unsafe(fn.parameters),
    async execute(toolCallId, params) {
     toolCalls++;
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, params as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    if (fn.name === "browse_tools" || fn.name === "search_tools") routing.discoveryCalls++;
+    if (fn.name === "call_tool") routing.callToolCount++;
+    if (isDirectTool) routing.directToolCalls++;
+    // call_tool research target: params.name when it names a registered
+    // non-discovery tool; otherwise this call is not a research attempt.
+    const callTarget = fn.name === "call_tool" && typeof (params as Json).name === "string" ? ((params as Json).name as string) : undefined;
+    const researchTarget = isDirectTool ? fn.name : callTarget && registeredResearch.has(callTarget) && !(DISCOVERY_TOOLS as string[]).includes(callTarget) ? callTarget : undefined;
+    if (researchTarget) {
+     routing.researchCalls++;
+     routing.researchToolNames.push(researchTarget);
+    }
+    // Transparent query assistance: ticker-only/short searches cannot rank.
+    // Native full-question passes stay untouched; assisted calls are tagged
+    // in the returned text and counted separately (bridge only persists
+    // routing_metrics/agent tool rows, so no separate event is emitted).
+    let effParams = params;
+    let searchAssisted = false;
+    let searchOriginalQuery = "";
+    if (fn.name === "search_tools") {
+     const bag = params as Json;
+     const q: unknown = typeof bag === "object" && bag !== null && "query" in bag ? bag.query : undefined;
+     const stored = runQuestions.get(runId) ?? "";
+     if (isShortQuery(q) && stored.length > q.trim().length + 10) {
+      searchAssisted = true;
+      searchOriginalQuery = q.trim();
+      effParams = { ...(bag as Record<string, unknown>), query: stored } as typeof params;
+      routing.assistedSearchCalls++;
+     }
+    }
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
+    const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
+    const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");
+    if (researchTarget) {
+     if (failed) routing.failedResearchCalls++;
+     if (invalid) {
+      routing.invalidToolCalls++;
+      routing.invalidToolNames.push(researchTarget);
+     }
+     if (!failed && !invalid) routing.successfulResearchToolNames.push(researchTarget);
+    } else if (invalid) {
+     routing.invalidToolCalls++;
+     const suspect = fn.name === "call_tool" && typeof (params as Json).name === "string" ? ((params as Json).name as string) : fn.name;
+     routing.invalidToolNames.push(suspect);
+    }
+    if (fn.name === "search_tools" && !failed && !invalid) {
+     const meta = inner !== undefined && inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : undefined;
+     const rawMatches = meta !== undefined && Array.isArray(meta.matches) ? (meta.matches as unknown[]) : [];
+     const matches = rawMatches
+      .map((m) => (typeof m === "string" ? m : m && typeof m === "object" ? ((m as Json).name as unknown) : undefined))
+      .filter((n): n is string => typeof n === "string" && registeredResearch.has(n));
+     for (const m of matches) routing.discoveredTools.add(m);
+     if (searchAssisted) for (const m of matches) routing.assistedDiscoveredTools.push(m);
+     routing.discoveryHadMatches = matches.length > 0;
+    }
+    if (fn.name === "browse_tools" && !failed && !invalid) {
+     const meta = inner !== undefined && inner.meta && typeof inner.meta === "object" ? (inner.meta as Json) : undefined;
+     const rawTools = meta !== undefined && Array.isArray(meta.tools) ? (meta.tools as unknown[]) : [];
+     const surfaced = rawTools
+      .map((m) => (typeof m === "string" ? m : m && typeof m === "object" ? ((m as Json).name as unknown) : undefined))
+      .filter((n): n is string => typeof n === "string" && registeredResearch.has(n));
+     for (const m of surfaced) routing.discoveredTools.add(m);
+     if (surfaced.length > 0) routing.discoveryHadMatches = true;
+    }
     refreshStatus(lastCtx);
     return {
-     content: [{ type: "text", text: bridgeModelText(bridge) }],
+     content: [{ type: "text", text: bridgeModelText(bridge) + (searchAssisted ? `\n\nStockbot note: short search query "${searchOriginalQuery}" was expanded with the session question for this call (assisted search; native passes stay unassisted).` : "") }],
      details: bridge,
     };
    },
@@ -485,6 +555,11 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  // --- prompt replacement (coding prompt -> research prompt) ---
  pi.on("before_agent_start", async (event) => {
+  // Independent prompt boundary: reset routing. A queued routing
+  // continuation reuses its state instead.
+  if (!routing.continuationPending) {
+   resetRouting();
+  }
   pendingQuestion = event.prompt;
   if (bridgeDown)
    return {
@@ -501,12 +576,40 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
  });
 
- // Built-in tool availability is constrained by Pi launch/config; Stockbot custom-tool authorization remains in bridge/policy.
+ // --- RESEARCH gate: registered tools only, and only while active ---
+ // Inactive direct schemas stay uncallable (hallucinated direct calls
+ // block); call_tool remains the active fallback. Non-research host tools
+ // keep the pre-existing RESEARCH-only block.
+ pi.on("tool_call", (event) => {
+  let isActive = false;
+  try {
+   isActive = pi.getActiveTools().includes(event.toolName);
+  } catch {
+   isActive = false;
+  }
+  if (!registeredResearch.has(event.toolName) || !isActive) {
+   emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
+   blocks++;
+   return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
+  }
+ });
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
  // run_id per agent turn-chain, monotonic sequence; drops if bridge down.
  let runId: string = crypto.randomUUID();
  let pendingQuestion = "";
+ const runQuestions = new Map<string, string>();
+ function baseQuestion(prompt: string): string {
+  // Harness natural prompts append routing guidance after the user wording;
+  // direct runs carry the bare question. Either way the leading text is the
+  // user's own question.
+  const i = prompt.indexOf(" To answer,");
+  return (i < 0 ? prompt : prompt.slice(0, i)).trim();
+ }
+ function isShortQuery(q: unknown): q is string {
+  if (typeof q !== "string" || !q.trim()) return false;
+  return q.trim().split(/\s+/).length <= 2;
+ }
  const dataRoots = new Map<string, string>();
  const doneFiles = new Map<string, string>();
  const asOfs = new Map<string, string>();
@@ -515,6 +618,48 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  let toolCalls = 0;
  let blocks = 0;
  let lastCtx: ExtensionContext | null = null;
+ // Non-Stockbot tools active in the host: preserved across activation slices.
+ let hostTools: string[] = [];
+ // One request's discover -> execute -> answer tracking, reset per prompt.
+ const routing = {
+  discoveredTools: new Set<string>(),
+  activeDiscoveredTools: [] as string[],
+  researchToolNames: [] as string[],
+  successfulResearchToolNames: [] as string[],
+  invalidToolNames: [] as string[],
+  discoveryCalls: 0,
+  researchCalls: 0,
+  failedResearchCalls: 0,
+  invalidToolCalls: 0,
+  callToolCount: 0,
+  directToolCalls: 0,
+  assistedSearchCalls: 0,
+  assistedDiscoveredTools: [] as string[],
+  continuationInjected: false,
+  continuationPending: false,
+  discoveryHadMatches: false,
+  prematureStopDetected: false,
+ };
+ function resetRouting(): void {
+  routing.discoveredTools.clear();
+  routing.activeDiscoveredTools = [];
+  routing.researchToolNames = [];
+  routing.successfulResearchToolNames = [];
+  routing.invalidToolNames = [];
+  routing.discoveryCalls = 0;
+  routing.researchCalls = 0;
+  routing.failedResearchCalls = 0;
+  routing.invalidToolCalls = 0;
+  routing.callToolCount = 0;
+  routing.directToolCalls = 0;
+  routing.assistedSearchCalls = 0;
+  routing.assistedDiscoveredTools = [];
+  routing.continuationInjected = false;
+  routing.continuationPending = false;
+  routing.discoveryHadMatches = false;
+  routing.prematureStopDetected = false;
+ }
+
  const toolStartedAt = new Map<string, string>();
  function emit(payload: Json): Promise<Json> {
   // ID-correlated like tool calls; never fatal (observability never breaks research).
@@ -528,11 +673,17 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
  function refreshStatus(ctx: ExtensionContext | null) {
   if (!ctx) return;
   try {
+   let activeResearch = 0;
+   try {
+    activeResearch = pi.getActiveTools().filter((n) => registeredResearch.has(n)).length;
+   } catch {
+    activeResearch = 0;
+   }
    ctx.ui.setStatus(
     "stockbot",
     bridgeDown
      ? "stockbot · bridge unavailable (0 tools)"
-     : `stockbot · ${research.size} tools · ${turns} turns · ${toolCalls} calls · ${blocks} blocked`,
+     : `stockbot · ${registeredResearch.size} registered · ${activeResearch} research active · ${toolCalls} calls · ${blocks} blocked`,
    );
   } catch {
    // non-TUI modes without status: ignore
@@ -541,9 +692,23 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
 
  pi.on("session_start", (_event, ctx) => {
   lastCtx = ctx;
-  refreshStatus(ctx);
+  // Capture non-Stockbot host tools once and pin the stable visible grammar:
+  // host tools plus the permanent discovery set. Direct research schemas stay
+  // registered but inactive behind call_tool; the roster never changes after
+  // discovery, keeping the provider prompt cache stable.
+  hostTools = pi.getActiveTools().filter((n) => !registeredResearch.has(n));
+  const permanent = DISCOVERY_TOOLS.filter((n) => registeredResearch.has(n));
+  pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
+  refreshStatus(lastCtx);
  });
  pi.on("agent_start", () => {
+  // A queued routing continuation reuses the same run, recorder/session,
+  // active tools, and routing state instead of starting a second bridge run.
+  if (routing.continuationPending) {
+   routing.continuationPending = false;
+   return;
+  }
+  resetRouting();
   const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
   runId = trustedRunId ? trustedRunId : crypto.randomUUID();
   seq = 0;
@@ -557,6 +722,7 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   if (envDoneFile) doneFiles.set(runId, envDoneFile);
   const envAsOf = process.env.STOCKBOT_AS_OF;
   if (envAsOf) asOfs.set(runId, envAsOf);
+  runQuestions.set(runId, baseQuestion(pendingQuestion));
   void emit({ event: "agent_start", question: pendingQuestion });
   pendingQuestion = "";
  });
@@ -615,6 +781,30 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   refreshStatus(ctx);
  });
  pi.on("agent_end", async (event) => {
+  // One-shot routing continuation: discovery found tools but none ran.
+  // Flags are set before queueing so re-entry cannot loop. The first end
+  // returns without bridge teardown; the continuation turn reuses the run.
+  if (routing.discoveryHadMatches && routing.researchCalls === 0 && !routing.continuationInjected) {
+   routing.prematureStopDetected = true;
+   routing.continuationInjected = true;
+   routing.continuationPending = true;
+   const candidates = [...routing.discoveredTools];
+   await emit({ event: "routing_continuation", reason: "discovery_without_research", discovered_tools: candidates, continuation_number: 1 });
+   const content =
+    "Stockbot routing continuation:\n\nTool discovery found relevant research tools, but no research tool has been executed yet.\n\nAvailable candidates:\n" +
+    candidates.map((c) => `- ${c}`).join("\n") +
+    "\n\nUse one of the discovered tools now. Discovery results are not evidence and are not a completed answer.\n\nDo not explain which tool you intend to call. Call it.\n\nIf none of the discovered tools can actually answer the request, state that after evaluating them.";
+   try {
+    pi.sendMessage(
+     { customType: "stockbot-routing-continuation", content, display: false, details: { discovered_tools: candidates, continuation_number: 1 } },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+   } catch {
+    routing.continuationPending = false;
+    await emit({ event: "routing_continuation_failed" });
+   }
+  }
   const messages = Array.isArray(event.messages) ? (event.messages as unknown as Json[]) : [];
   const assistants = messages.filter((m) => m.role === "assistant");
   const last = assistants[assistants.length - 1] as Json | undefined;
@@ -623,6 +813,31 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
    .filter((b) => b.type === "text" && typeof b.text === "string")
    .map((b) => b.text as string)
    .join("\n");
+  const hasEvidence = routing.successfulResearchToolNames.length > 0;
+  await emit({
+   event: "routing_metrics",
+   discovery_calls: routing.discoveryCalls,
+   discovered_tool_count: routing.discoveredTools.size,
+   discovered_tools: [...routing.discoveredTools],
+   research_tools: [...routing.researchToolNames],
+   successful_research_tools: [...routing.successfulResearchToolNames],
+   invalid_tool_names: [...routing.invalidToolNames],
+   research_calls: routing.researchCalls,
+   failed_research_calls: routing.failedResearchCalls,
+   call_tool_count: routing.callToolCount,
+   direct_tool_calls: routing.directToolCalls,
+   assisted_search_calls: routing.assistedSearchCalls,
+   assisted_discovered_tools: [...routing.assistedDiscoveredTools],
+   invalid_tool_calls: routing.invalidToolCalls,
+   premature_stop_detected: routing.prematureStopDetected,
+   continuation_injected: routing.continuationInjected,
+   continuation_succeeded: routing.continuationInjected && hasEvidence,
+   unrelated_research_calls:
+    routing.discoveredTools.size === 0
+     ? 0
+     : routing.successfulResearchToolNames.filter((n) => !routing.discoveredTools.has(n)).length,
+   final_answer_after_evidence: answer.trim().length > 0 && hasEvidence,
+  });
   await emit({ event: "agent_end", status: "completed", answer });
   const doneFile = doneFiles.get(runId);
   if (doneFile) {
@@ -635,5 +850,6 @@ export default async function stockbotExtension(pi: ExtensionAPI) {
   doneFiles.delete(runId);
   dataRoots.delete(runId);
   asOfs.delete(runId);
+  runQuestions.delete(runId);
  });
 }

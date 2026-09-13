@@ -101,8 +101,7 @@ def check_case(case, detailed, response):
     must = [s.lower() for s in expected.get("must_contain", [])]
     must_not = [s.lower() for s in expected.get("must_not_contain", [])]
     checks = {
-        "expected_tools": (not expected.get("expected_tools")
-                           or any(t in trace for t in expected["expected_tools"])),
+        "expected_tools": all(t in trace for t in expected.get("expected_tools", [])),
         "required_tools": all(t in trace for t in expected.get("required_tools", [])),
         "sequence": _is_ordered_subsequence(
             expected.get("required_tool_sequence", []), trace),
@@ -112,10 +111,13 @@ def check_case(case, detailed, response):
             for arg in args for call in detailed if call["name"] == tool),
         "forbidden_tools": not any(
             t in trace for t in expected.get("forbidden_tools", [])),
-        "must_contain": (not must or any(s in resp for s in must)),
+        "must_contain": all(s in resp for s in must),
         "must_not_contain": not any(s in resp for s in must_not),
     }
     failed = [k for k, ok in checks.items() if not ok]
+    if not (expected.get("expected_tools") or expected.get("required_tools")
+            or expected.get("required_tool_sequence") or must):
+        failed.append("empty_assertions")
     return not failed, f"tools called={trace}" + (f" (failed: {failed})" if failed else "")
 
 

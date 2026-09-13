@@ -29,6 +29,18 @@ def test_round_trip_create_load_list_update(tmp_path: Path) -> None:
     assert updated.scope == "NVDA datacenter" and updated.thesis_id == t.thesis_id
 
 
+def test_relative_repository_root_writes_to_expected_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    repo = ThesisRepository("data/thesis")
+    thesis = repo.create_thesis("NVDA thesis", scope="NVDA", claims=["demand remains strong"])
+    assert repo.root == (tmp_path / "data/thesis").resolve()
+    assert (tmp_path / "data/thesis" / thesis.slug / "thesis.yaml").is_file()
+    assert not (tmp_path / "data/thesis/data/thesis").exists()
+
+
 def test_zero_and_multiple_expressions(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t0 = r.create_thesis("undecided thesis", scope="NVDA", claims=["c"])
@@ -118,6 +130,24 @@ def test_traversal_and_symlink_escape_rejected(tmp_path: Path) -> None:
     assert not (outside / "evil.yaml").exists()
 
 
+def test_symlinked_thesis_dir_quarantined_no_lock_outside(tmp_path: Path) -> None:
+    import shutil
+    r = ThesisRepository(tmp_path / "theses")
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["demand remains strong"])
+    real = tmp_path / "theses" / t.slug
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.move(str(real), str(outside / "real"))
+    (outside / "real" / ".lock").unlink(missing_ok=True)
+    real.symlink_to(outside / "real", target_is_directory=True)
+    with pytest.raises(ValueError):
+        r.update_thesis(t.thesis_id, scope="CHANGED")
+    assert t.slug in r.list_quarantine()
+    assert not (outside / "real" / ".lock").exists()
+    assert not (outside / ".lock").exists()
+    assert list((outside / "real" / "journal").glob("*.md")) == []
+
+
 def test_concurrent_writes_serialized(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("concurrent thesis", scope="NVDA", claims=["c"])
@@ -152,7 +182,7 @@ def test_cross_thesis_refs_rejected(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
     with pytest.raises(ValueError):
-        r.create_trigger(t.thesis_id, claim_ids=["claim:absent"], canonical_refs=["x"], summary="s")
+        r.create_trigger(t.thesis_id, claim_ids=["claim:absent"], canonical_refs=["x"], summary="s", summary_origin="deterministic")
     with pytest.raises(ValueError):
         r.apply_research_result(t.thesis_id, {"watch_add": [{
             "rule_id": "rule:x", "rule_type": "new_external_evidence",
@@ -170,7 +200,7 @@ def test_pause_resume_close_transitions_enforced(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         r.resume_thesis(t.thesis_id)
     with pytest.raises(ValueError):
-        r.create_trigger(t.thesis_id, canonical_refs=["x"], summary="s")
+        r.create_trigger(t.thesis_id, canonical_refs=["x"], summary="s", summary_origin="deterministic")
 
 
 def test_quarantine_lists_corrupt_child_while_healthy_ids_proceed(tmp_path: Path) -> None:
@@ -262,7 +292,7 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path: 
          "known_at": "2026-01-01T09:00:00+00:00"},
         {"evidence_id": "ev:future", "canonical_ref": "F", "summary": "f",
          "known_at": "2026-02-01T00:00:00+00:00"}]}, "run:seed")
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["V"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["V"], summary="s", summary_origin="deterministic")
     with pytest.raises(ValueError, match="foreign canonical_ref"):
         r.apply_research_result(t.thesis_id, {"trigger_id": trig.trigger_id,
             "evidence_refs": [{"evidence_id": "ev:forged", "canonical_ref": "F",
@@ -277,5 +307,17 @@ def test_provenance_bound_rejects_forged_future_ref_but_keeps_visible(tmp_path: 
     assert out["evidence"] == 1
     stored = _evidence_files(r, t.thesis_id)
     assert _as_dict(stored["ev:ok"])["canonical_ref"] == "V"
+
+
+def test_file_symlink_ignored_not_quarantined(tmp_path: Path) -> None:
+    r = _repo(tmp_path)
+    t = r.create_thesis("NVDA thesis", scope="NVDA", claims=["c"])
+    (tmp_path / "theses").mkdir(exist_ok=True)
+    target = tmp_path / "theses" / t.slug / "thesis.yaml"
+    (tmp_path / "theses" / "README.link").symlink_to(target)
+    assert "README.link" not in r.list_quarantine()
+    assert r.load_thesis(t.thesis_id).slug == t.slug
+    with pytest.raises(KeyError):
+        r.load_thesis("thesis:absent")
 
 

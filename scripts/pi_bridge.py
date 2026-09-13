@@ -50,7 +50,7 @@ from app.policy import Capability
 from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
 from app.runtime import EventType
 from app.storage.runs import RunRecorder, finalize_failed_run, reset_current_recorder, set_current_recorder
-from app.tools import TOOL_REGISTRY_VERSION, tools_for_capabilities
+from app.tools import TOOL_REGISTRY_VERSION, dynamically_activatable_tool_names, tools_for_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ def _describe() -> dict[str, object]:
     return {
         "system_prompt": PI_RESEARCH_PROMPT,
         "tools": tools_for_capabilities(frozenset({Capability.RESEARCH})),
+        "direct_tool_names": dynamically_activatable_tool_names(),
     }
 
 
@@ -359,6 +360,8 @@ def _pi_event(request: Mapping[str, object]) -> dict[str, object]:
                 score=None, verdict=None, rule_ids=None,
                 decision="denied", reason=str(request.get("reason") or "pi tool_call gate"),
             )
+        elif event in ("routing_continuation", "routing_continuation_failed", "routing_metrics"):
+            recorder.record_event(event, metadata=meta)
         elif event in ("turn_start", "turn_end", "message_end"):
             recorder.record_event(event, round=_as_int(request.get("turn")), metadata=meta or None)
         else:

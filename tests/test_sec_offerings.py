@@ -61,6 +61,25 @@ def test_missing_terms_yield_none_fields(monkeypatch: pytest.MonkeyPatch) -> Non
     assert shelf.has_warrants is None and shelf.has_convertibles is None
     assert shelf.source_registration is None and shelf.status == "filed"
 
+def test_terms_forms_skips_unconsumed_fetches(monkeypatch: pytest.MonkeyPatch) -> None:
+    filings = [_filing("S-3", "2024-01-10", "s3"),
+               _filing("424B5", "2024-02-01", "b5")]
+    fetched: list[str] = []
+
+    def _fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
+        return filings
+
+    def _fake_terms(accession_no: str) -> dict[str, str]:
+        fetched.append(accession_no)
+        return {"shares": "1,000"}
+
+    monkeypatch.setattr(offerings, "list_sec_filings", _fake_list)
+    monkeypatch.setattr(offerings, "load_terms", _fake_terms)
+    out = offerings.get_offering_history("ACME", terms_forms={"424B5"})
+    assert fetched == ["b5"]
+    assert [o.accession_no for o in out] == ["s3", "b5"]
+    assert next(o for o in out if o.accession_no == "s3").shares is None
+
 
 def test_atm_detected_from_type_text() -> None:
     rec = offerings.normalize_offering("a", "424B5", issuer="ACME",

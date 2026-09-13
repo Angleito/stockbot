@@ -106,7 +106,7 @@ def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path: Path, m
     full = r.load_thesis(t.thesis_id)
     eid = full.expressions[0].expression_id
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            expression_ids=[eid], canonical_refs=["ev:m"], summary="s")
+                            expression_ids=[eid], canonical_refs=["ev:m"], summary="s", summary_origin="deterministic")
 
     def _write(tid: str, trig_id: str, run_id: str) -> None:
         r.apply_research_result(tid, {
@@ -134,7 +134,7 @@ def test_bullish_equity_asks_no_options_questions(tmp_path: Path, monkeypatch: p
                                    "status": "active"}])
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            canonical_refs=["ev:e"], summary="s")
+                            canonical_refs=["ev:e"], summary="s", summary_origin="deterministic")
     def _journal_ok(tid: str, trig_id: str, run_id: str) -> None:
         r.append_journal_entry(
             tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id})
@@ -151,7 +151,7 @@ def test_covered_call_without_portfolio_leaves_ownership_unresolved(tmp_path: Pa
                                    "structure": "covered call", "status": "active"}])
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            canonical_refs=["ev:c"], summary="s")
+                            canonical_refs=["ev:c"], summary="s", summary_origin="deterministic")
 
     def _write(tid: str, trig_id: str, run_id: str) -> None:
         r.apply_research_result(tid, {
@@ -174,7 +174,7 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path: Pat
                                    "structure": "long puts", "status": "active"}])
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            canonical_refs=["ev:p"], summary="s")
+                            canonical_refs=["ev:p"], summary="s", summary_origin="deterministic")
 
     def _write(tid: str, trig_id: str, run_id: str) -> None:
         r.apply_research_result(tid, {
@@ -198,7 +198,7 @@ def test_unknown_and_processed_triggers_raise(tmp_path: Path, monkeypatch: pytes
     fake = _pi(monkeypatch)
     with pytest.raises(KeyError):
         run_trigger(r, t.thesis_id, "trigger:nope", known_at=T2)
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
     def _journal_ok2(tid: str, trig_id: str, run_id: str) -> None:
         r.append_journal_entry(
             tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id})
@@ -387,7 +387,7 @@ def test_two_theses_stay_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 def test_tight_budget_fails_explicitly(tmp_path: Path) -> None:
     r, t = _make(tmp_path)
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
     with pytest.raises(ContextBudgetExceeded):
         build_context(r, t.thesis_id, trig, known_at=T2, max_tokens=5)
     ok = build_context(r, t.thesis_id, trig, known_at=T2)
@@ -397,7 +397,7 @@ def test_large_monitor_checkpoint_not_in_pi_context(tmp_path: Path) -> None:
     r, t = _make(tmp_path)
     r.save_checkpoint(t.thesis_id, {"thesis_id": t.thesis_id, "sources": {},
                                     "recent_hashes": ["a" * 64 for _ in range(1000)]})
-    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s")
+    trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
     ctx = build_live_context(r, t.thesis_id, trig, data_cutoff=T2)
     assert "checkpoint" not in ctx.thesis_packet
     assert ctx.estimated_tokens < 8000
@@ -407,7 +407,7 @@ def test_evidence_refs_stay_compact_and_reject_bodies(tmp_path: Path, monkeypatc
     r, t = _make(tmp_path)
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            canonical_refs=["ev:b"], summary="s")
+                            canonical_refs=["ev:b"], summary="s", summary_origin="deterministic")
 
     def _bad(tid: str, trig_id: str) -> None:
         r.apply_research_result(tid, {
@@ -435,7 +435,7 @@ def test_stored_pool_skips_missing_and_future_known_at(tmp_path: Path) -> None:
                            "summary": "analyst warns of demand collapse scenario for NVDA",
                            "known_at": ka}, tmp_path / "theses")
     trig = r.create_trigger(t.thesis_id, canonical_refs=["seed:2"],
-                            summary="demand collapse scenario unfolding for NVDA")
+                            summary="demand collapse scenario unfolding for NVDA", summary_origin="deterministic")
     r.mark_trigger_processed(t.thesis_id, trig.trigger_id, "run:seed")
     res = tick(r, t.thesis_id, {}, known_at="2020-01-01T00:00:00+00:00")
     assert res.triggers_created == [] and res.no_op
@@ -535,7 +535,7 @@ def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path: P
     r, t = _make(tmp_path)
     full = r.load_thesis(t.thesis_id)
     trig = r.create_trigger(t.thesis_id, claim_ids=[full.claims[0].claim_id],
-                            canonical_refs=["ev:m"], summary="s")
+                            canonical_refs=["ev:m"], summary="s", summary_origin="deterministic")
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     def _fake_search(*args: object, **kwargs: object) -> dict[str, object]:
         calls.append((args, dict(kwargs)))

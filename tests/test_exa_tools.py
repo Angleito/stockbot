@@ -252,7 +252,7 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
         for _ in range(first.budget.max_tool_calls):
             assert first.budget.reserve_tool_call()
         assert first.budget.reserve_tool_call() is False
-        refused = execute_pi_tool("search_tools", {}, first)
+        refused = execute_pi_tool("search_tools", {"query": "budget probe"}, first)
         assert refused.get("error_type") == "budget_exhausted"
         assert _end_run(run_one) == {"ok": True}
         assert _start_run(run_two) == {"ok": True}
