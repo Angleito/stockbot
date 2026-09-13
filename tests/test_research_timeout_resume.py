@@ -20,11 +20,13 @@ def test_timeout_closes_failed_and_resume_has_no_dup(tmp_path: Path, monkeypatch
     sid = excinfo.value.session_id
     assert repo.get_session(sid).status == "failed"
     jobs = repo.list_jobs(sid)
-    assert len(jobs) == 1 and jobs[0].status == "failed"
-    assert jobs[0].failure is not None and jobs[0].failure.category == "timeout"
+    assert len(jobs) == 2  # source + first scout (serial abort on failure)
+    by_type = {j.job_type: j for j in jobs if j.job_type in ("source_agent", "scout")}
+    assert by_type["source_agent"].status == "failed"
+    assert by_type["source_agent"].failure is not None and by_type["source_agent"].failure.category == "timeout"
     kinds = [e.event_type for e in repo.list_events(sid)]
     assert "job.failed" in kinds and "model.failed" in kinds
     assert "research.failed" in kinds and "wave.stopped" in kinds
     assert repo.resume(sid).session.status == "failed"
     assert repo.resume(sid).open_job_ids == []
-    assert len(repo.list_jobs(sid)) == 1
+    assert len(repo.list_jobs(sid)) == 2

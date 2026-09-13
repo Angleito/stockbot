@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from . import ResearchRequest
+from . import GroundedClaim, ModelOutputFailure, ResearchRequest, claims_refs
 from .scout import ScoutAssignment, ScoutResult, ScoutRole
 
 # SEC-only allowlist: discovery wrappers + SEC/financial-statement tools.
@@ -86,8 +86,7 @@ class SourceDossier:
     session_id: str
     wave_id: int
     as_of: str
-    evidence_ids: list[str] = field(default_factory=list)
-    finding_ids: list[str] = field(default_factory=list)
+    findings: list[GroundedClaim] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     coverage_notes: list[str] = field(default_factory=list)
@@ -131,26 +130,6 @@ def decompose_question(
         for role in roles
     ]
 
-
-def validate_refs(
-    evidence_ids: Sequence[str],
-    known_ids: Sequence[str],
-    *,
-    session_id: str,
-    journal: Callable[[str, dict[str, object]], None] | None = None,
-) -> list[str]:
-    """Keep only refs present in the known-evidence set; journal rejects."""
-    known = set(known_ids)
-    kept: list[str] = []
-    for eid in evidence_ids:
-        if eid in known:
-            if eid not in kept:
-                kept.append(eid)
-        elif journal is not None:
-            journal("evidence.rejected", {"session_id": session_id, "evidence_id": eid})
-    return kept
-
-
 def assemble_dossier(
     *,
     dossier_id: str,
@@ -163,40 +142,48 @@ def assemble_dossier(
 ) -> SourceDossier:
     """Merge bounded scout outputs into one validated dossier (wave_id stored as int)."""
     wave = _coerce_wave(wave_id)
-    evidence_ids: list[str] = []
-    finding_ids: list[str] = []
+    known_set = set(e for e in known_evidence_ids if isinstance(e, str) and e)
+    findings: list[GroundedClaim] = []
     unknowns: list[str] = []
     limitations: list[str] = []
     coverage_notes: list[str] = []
-    follow_ups: list[ResearchRequest] = []
     for result in results:
         coverage_notes.append(result.coverage)
-        finding_ids.extend(result.finding_ids)
         unknowns.extend(result.unknowns)
         limitations.extend(result.limitations)
-        follow_ups.extend(result.follow_up_requests)
-        evidence_ids.extend(
-            validate_refs(result.evidence_ids, known_evidence_ids, session_id=session_id, journal=journal)
-        )
-    _ = follow_ups  # surfaced via committee research_requests, not the dossier.
+        result_findings = list(result.findings or [])
+        if not result_findings:
+            continue
+        for claim in result_findings:
+            if not claim.text.strip():
+                raise ModelOutputFailure("each claim needs non-empty text")
+            if not claim.evidence_ids:
+                raise ModelOutputFailure(f"uncited finding: {claim.text[:120]!r}")
+            for eid in claim.evidence_ids:
+                if eid not in known_set:
+                    if journal is not None:
+                        journal("evidence.rejected", {"session_id": session_id, "evidence_id": eid})
+                    raise ModelOutputFailure(f"unknown evidence id {eid!r}")
+            prior = next((c for c in findings if c.text == claim.text), None)
+            if prior is None:
+                findings.append(GroundedClaim(text=claim.text, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
+            else:
+                merged_ids = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
+                findings[findings.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged_ids)
     return SourceDossier(
         dossier_id=dossier_id,
         session_id=session_id,
         wave_id=wave,
         as_of=as_of,
-        evidence_ids=list(dict.fromkeys(evidence_ids)),
-        finding_ids=list(dict.fromkeys(finding_ids)),
+        findings=findings,
         unknowns=list(dict.fromkeys(unknowns)),
         limitations=list(dict.fromkeys(limitations)),
         coverage_notes=coverage_notes,
     )
-
-
 __all__ = [
     "SEC_TOOLS",
     "SourceDossier",
     "assemble_dossier",
     "decompose_question",
     "is_sec_tool",
-    "validate_refs",
 ]

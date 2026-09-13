@@ -59,14 +59,18 @@ def compute_disagreement(
     bear: BearAnalysis,
 ) -> CommitteeDisagreement:
     """Deterministic merge: shared evidence agrees, stance split disagrees."""
-    shared = [eid for eid in stock.key_evidence if eid in bull.key_evidence and eid in bear.key_evidence]
+    from app.research.agents import claims_refs
+    stock_refs = claims_refs(stock.claims)
+    bull_refs = claims_refs(bull.claims)
+    bear_refs = claims_refs(bear.claims)
+    shared = [eid for eid in stock_refs if eid in bull_refs and eid in bear_refs]
     agreement = [f"all three cite {eid}" for eid in shared]
     disagreement = [
         f"bull ({bull.stance}) vs bear ({bear.stance}) on: {stock.question}",
-        f"base cites {len(stock.key_evidence)} items; bull {len(bull.key_evidence)}; bear {len(bear.key_evidence)}",
+        f"base cites {len(stock_refs)} items; bull {len(bull_refs)}; bear {len(bear_refs)}",
     ]
-    only_bull = [eid for eid in bull.key_evidence if eid not in bear.key_evidence]
-    only_bear = [eid for eid in bear.key_evidence if eid not in bull.key_evidence]
+    only_bull = [eid for eid in bull_refs if eid not in bear_refs]
+    only_bear = [eid for eid in bear_refs if eid not in bull_refs]
     if only_bull:
         disagreement.append(f"bull-only evidence: {', '.join(only_bull[:5])}")
     if only_bear:

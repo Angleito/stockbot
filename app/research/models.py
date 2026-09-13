@@ -110,7 +110,7 @@ class JobStatus(StrEnum):
 
 
 class FailureCategory(StrEnum):
-    """Closed failure vocabulary (15 values); free text lives in message."""
+    """Closed failure vocabulary (16 values); free text lives in message."""
 
     TIMEOUT = "timeout"
     TOKEN_BUDGET_EXHAUSTED = "token_budget_exhausted"
@@ -122,12 +122,12 @@ class FailureCategory(StrEnum):
     POLICY_DENIED = "policy_denied"
     TOOL_ERROR = "tool_error"
     MODEL_ERROR = "model_error"
+    MODEL_OUTPUT_FAILURE = "model_output_failure"
     NO_EVIDENCE = "no_evidence"
     PIT_VIOLATION = "pit_violation"
     FREEZE_MISMATCH = "freeze_mismatch"
     COMMITTEE_DEADLOCK = "committee_deadlock"
     SYNTHESIS_FAILED = "synthesis_failed"
-
 
 # ponytail: single nested defaults dict; per-job overrides only via explicit
 # create_job kwargs. Add sections when a new job type needs children/tools.
@@ -235,6 +235,22 @@ def pit_violated(as_of: datetime | str | None, known_at: datetime | str | None) 
     if start is None or known is None:
         return False
     return known > start
+
+
+def pit_unverified(as_of: datetime | str | None, known_at: datetime | str | None) -> bool:
+    """True when historical as_of requires PIT proof but known_at is missing."""
+    if known_at is not None:
+        return False
+    if as_of is None:
+        return False
+    if isinstance(as_of, str):
+        text = as_of.strip().lower()
+        if not text or text == "unbounded":
+            return False
+        return True
+    if isinstance(as_of, datetime):
+        return True
+    return False
 
 
 @dataclass(frozen=True)

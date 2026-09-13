@@ -8,7 +8,7 @@ from datetime import datetime
 from hashlib import sha256
 
 from .evidence import Evidence
-from .models import normalize_time, pit_violated, utcnow
+from .models import normalize_time, pit_unverified, pit_violated, utcnow
 
 __all__ = [
     "EvidenceFreeze",
@@ -91,6 +91,8 @@ def create_freeze(
             )
     frozen_as_of = _coerce_time(as_of, "as_of")
     for record in recs:
+        if pit_unverified(frozen_as_of, record.known_at):
+            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} unverified PIT (known_at unknown for historical as_of)")
         if pit_violated(frozen_as_of, record.known_at):
             raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} violates PIT (known_at > as_of)")
     ids = tuple(sorted({record.evidence_id for record in recs}))

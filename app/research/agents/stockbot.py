@@ -5,7 +5,8 @@ only, never calls tools). Model decides the balanced case; infra validates
 refs against the freeze and packages ``research_requests``.
 
 Fake-model sketch (no live calls): fake ``model(prompt)`` returns canned
-text; call ``run_stockbot`` with a freeze id + evidence ids; assert refs are
+text with per-claim citations like ``CLAIM: <text> [EV-1]``; call
+``run_stockbot`` with a freeze id + evidence ids; assert refs are
 a subset of the freeze and ``research_requests`` carry requesting_agents.
 """
 
@@ -14,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from . import ResearchRequest
+from . import GroundedClaim, ResearchRequest, parse_committee_output
 from .scout import ModelFn
 
 
@@ -46,25 +47,13 @@ class StockbotAnalysis:
     question: str
     answer: str
     base_case: str
-    key_evidence: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     what_would_change: list[str] = field(default_factory=list)
-    refs: list[str] = field(default_factory=list)
+    claims: list[GroundedClaim] = field(default_factory=list)
     research_requests: list[ResearchRequest] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave(self.wave_id)
-    freeze_id: str
-    evidence_ids: list[str]
-    as_of: str
-    question: str
-    answer: str
-    base_case: str
-    key_evidence: list[str] = field(default_factory=list)
-    unknowns: list[str] = field(default_factory=list)
-    what_would_change: list[str] = field(default_factory=list)
-    refs: list[str] = field(default_factory=list)
-    research_requests: list[ResearchRequest] = field(default_factory=list)
 
 
 def run_stockbot(
@@ -77,7 +66,6 @@ def run_stockbot(
     as_of: str,
     model: ModelFn,
     follow_ups: Sequence[ResearchRequest] | None = None,
-    report: Callable[[str], Sequence[ResearchRequest]] | None = None,
     evidence_text: str = "",
 ) -> StockbotAnalysis:
     """Balanced synthesis over the frozen evidence set (no tool calls; wave_id stored as int)."""
@@ -85,16 +73,24 @@ def run_stockbot(
     frozen = list(evidence_ids)
     prompt = (
         f"Balanced read (no forced recommendation). Question: {question}\n"
-        f"Freeze: {freeze_id} as of {as_of} evidence={len(frozen)}"
+        f"Freeze: {freeze_id} as of {as_of} evidence={len(frozen)}\n"
+        'Respond with one JSON object only: {"claims": [{"text": "<finding>", "evidence_ids": ["<freeze-id>", ...]}], "follow_ups": ["<question>?", ...]}. '
+        "Cite only freeze ids for each factual claim; follow_ups are SEC follow-up questions (may be [])."
     )
     if evidence_text.strip():
         prompt += f"\nEvidence (cite ids; do not invent):\n{evidence_text.strip()}"
     text = model(prompt).strip()
-    extra: list[ResearchRequest] = list(report(text) if report is not None else (follow_ups or []))
+    extra: list[ResearchRequest] = list(follow_ups or [])
     for request in extra:
         if "stockbot" not in request.requesting_agents:
             request.requesting_agents.append("stockbot")
-    refs = [eid for eid in frozen]
+    claims, envelope_follow = parse_committee_output(text, frozen=frozen, agent="stockbot")
+    unknowns: list[str] = [] if claims or frozen else ["freeze holds no evidence"]
+    prose = "\n".join(c.text for c in claims).strip()
+    if not prose:
+        prose = "No grounded claims in freeze." if frozen else "Freeze holds no evidence."
+    text = prose
+    extra = list(envelope_follow) + list(extra)
     return StockbotAnalysis(
         session_id=session_id,
         wave_id=wave,
@@ -104,10 +100,9 @@ def run_stockbot(
         question=question,
         answer=text,
         base_case=text,
-        key_evidence=refs[:5],
-        unknowns=[] if refs else ["freeze holds no evidence"],
+        unknowns=unknowns,
         what_would_change=[],
-        refs=refs,
+        claims=claims,
         research_requests=extra,
     )
 

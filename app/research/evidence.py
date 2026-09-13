@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
-from .models import JSONValue, pit_violated, validate_json_mapping
+from .models import JSONValue, pit_unverified, pit_violated, validate_json_mapping
 
 __all__ = [
     "Evidence",
@@ -178,11 +178,14 @@ def ingest_evidence(
         reason, detail = "PROVENANCE_FAILURE", f"missing: {', '.join(missing)}"
     else:
         try:
-            violated = pit_violated(as_of, evidence.known_at)
+            unverified = pit_unverified(as_of, evidence.known_at)
+            violated = False if unverified else pit_violated(as_of, evidence.known_at)
         except ValueError as exc:
             reason, detail = "PROVENANCE_FAILURE", f"bad timestamp: {exc}"
         else:
-            if violated:
+            if unverified:
+                reason, detail = "PIT_UNVERIFIED", f"known_at unknown for historical as_of {_iso(as_of)}"
+            elif violated:
                 reason, detail = "PIT_VIOLATION", f"known_at {_iso(evidence.known_at)} > as_of {_iso(as_of)}"
     if reason:
         payload: dict[str, object] = {

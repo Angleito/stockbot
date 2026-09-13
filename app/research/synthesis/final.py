@@ -4,7 +4,7 @@ The synthesizer never issues a forced buy/sell/hold call; ``answer``
 summarizes what the frozen evidence supports and names what would change it.
 
 Fake-model sketch (no live calls): canned trio of analyses -> canned
-``CommitteeDisagreement`` -> ``synthesize_final``; assert ``refs`` stay
+``CommitteeDisagreement`` -> ``synthesize_final``; assert claims stay
 within the freeze and ``answer`` is non-empty with no invented evidence.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.research.agents import GroundedClaim
 from app.research.agents.bearbot import BearAnalysis
 from app.research.agents.bullbot import BullAnalysis
 from app.research.agents.stockbot import StockbotAnalysis
@@ -30,10 +31,9 @@ class FinalSynthesis:
     bull_case: str
     bear_case: str
     disagreement: CommitteeDisagreement
-    key_evidence: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     what_would_change: list[str] = field(default_factory=list)
-    refs: list[str] = field(default_factory=list)
+    claims: list[GroundedClaim] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave_id(self.wave_id)
@@ -57,15 +57,16 @@ def synthesize_final(
     ``model`` is accepted for API symmetry but unused: final text is the
     deterministic join below so synthesis stays reproducible. Pass a string
     to override the joined answer (e.g. a canned model draft in tests).
+    Cited ids derive only from accepted per-claim mappings, never the whole freeze.
     """
-    frozen: list[str] = []
-    for eid in (*stock.refs, *bull.refs, *bear.refs):
-        if eid not in frozen:
-            frozen.append(eid)
-    key_evidence: list[str] = []
-    for eid in (*stock.key_evidence, *bull.key_evidence, *bear.key_evidence):
-        if eid in frozen and eid not in key_evidence:
-            key_evidence.append(eid)
+    claims: list[GroundedClaim] = []
+    for claim in (*getattr(stock, "claims", []), *getattr(bull, "claims", []), *getattr(bear, "claims", [])):
+        prior = next((c for c in claims if c.text == claim.text), None)
+        if prior is None:
+            claims.append(GroundedClaim(text=claim.text, evidence_ids=list(claim.evidence_ids)))
+        else:
+            merged = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
+            claims[claims.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged)
     unknowns: list[str] = []
     for unknown in (*stock.unknowns, *bull.unknowns, *bear.unknowns):
         if unknown not in unknowns:
@@ -90,10 +91,9 @@ def synthesize_final(
         bull_case=bull.bull_case,
         bear_case=bear.bear_case,
         disagreement=disagreement,
-        key_evidence=key_evidence,
         unknowns=unknowns or list(disagreement.critical_uncertainties),
         what_would_change=changes,
-        refs=frozen,
+        claims=claims,
     )
 
 

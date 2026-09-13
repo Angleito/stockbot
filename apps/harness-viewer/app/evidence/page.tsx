@@ -1,15 +1,23 @@
-import { listFailureRecords } from "../../convex/queries";
+import { listResearchRuns } from "../../convex/queries";
 
 export default function EvidenceDrillPage(): JSX.Element {
-  const failures = listFailureRecords("");
+  const runs = listResearchRuns();
+  const rows = runs.flatMap((run) =>
+    run.evidence.map((ev) => ({ run, ev })),
+  );
   return (
     <main>
       <h1>Evidence drill</h1>
-      <p>{failures.length} untraceable-claim records (projection stub: failureRecords)</p>
+      {rows.length === 0 ? (
+        <p>No freeze-contained evidence persisted yet.</p>
+      ) : (
+        <p>{rows.length} evidence records with freeze-contained claim links below.</p>
+      )}
       <ul>
-        {failures.map((failure) => (
-          <li key={failure.failureId}>
-            {failure.scenarioName}: {failure.violation}
+        {rows.map(({ run, ev }) => (
+          <li key={`${run.sessionId}:${ev.evidenceId}`}>
+            <a href={`evidence://${ev.evidenceId}`}>{ev.evidenceId}</a> {ev.subject} [{ev.knownAt ?? "known_at unknown"}]{" "}
+            <a href={`research://${run.sessionId}`}>{run.sessionId}</a>
           </li>
         ))}
       </ul>

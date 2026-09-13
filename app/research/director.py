@@ -51,7 +51,7 @@ WAVE2_ID = 2
 @dataclass
 class DirectorBudgets:
     max_waves: int = 2
-    max_jobs: int = 10
+    max_jobs: int = 20
     max_tool_calls: int = 60
     runtime_budget_s: float = 900.0
 

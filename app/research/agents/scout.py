@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from . import ResearchRequest
+from . import GroundedClaim, ResearchRequest, parse_grounded_claims
 
 ScoutRole = Literal["filings", "financials", "risk"]
 
@@ -43,7 +43,7 @@ MAX_CHILDREN = 0
 ALLOWED_DOMAIN = "SEC"
 
 _ROLE_TOOLS: dict[str, tuple[tuple[str, dict[str, str]], ...]] = {
-    # Role -> bounded (tool, extra-args); ticker/as_of/since bound at call time.
+    # ponytail: hard-coded role tools (deterministic, policy-gated); model-driven discovery/selection/execution if broad live coverage requires it.
     "filings": (("search_sec_filings", {}), ("list_sec_filings", {}),
                 ("get_material_events", {})),
     "financials": (("search_sec_filings", {}), ("get_xbrl_facts", {"concept": "Revenues"}),
@@ -55,8 +55,12 @@ _ROLE_TOOLS: dict[str, tuple[tuple[str, dict[str, str]], ...]] = {
 
 def _role_arguments(tool: str, ticker: str, as_of: str) -> dict[str, object]:
     """Schema-correct args: ticker identity, as_of PIT, since window, XBRL concept."""
-    args: dict[str, object] = {"ticker": ticker, "identifier": ticker, "as_of": as_of}
-    if tool == "get_material_events":
+    args: dict[str, object] = {"ticker": ticker, "identifier": ticker}
+    text = as_of.strip() if isinstance(as_of, str) else ""
+    bounded = bool(text) and text.lower() != "unbounded"
+    if bounded:
+        args["as_of"] = as_of
+    if tool == "get_material_events" and bounded:
         args["since"] = _window_start(as_of)
     if tool == "get_xbrl_facts":
         args["concept"] = "Revenues"
@@ -97,12 +101,10 @@ class ScoutResult:
     assignment_id: str
     session_id: str
     coverage: str
-    finding_ids: list[str] = field(default_factory=list)
-    evidence_ids: list[str] = field(default_factory=list)
+    findings: list[GroundedClaim] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     follow_up_requests: list[ResearchRequest] = field(default_factory=list)
-
 
 def build_scout_prompt(assignment: ScoutAssignment) -> str:
     """Deterministic prompt for one assignment: role template + scope."""
@@ -111,17 +113,27 @@ def build_scout_prompt(assignment: ScoutAssignment) -> str:
     return (
         f"{template}\nQuestion: {assignment.question}\n"
         f"Tickers: {tickers}\nAs of: {assignment.as_of} (PIT cutoff; "
-        "ignore anything knowable only after this date.)"
+        "ignore anything knowable only after this date.)\n"
+        'Respond with JSON only: [{"text": "<finding>", "evidence_ids": ["<id>", ...]}, ...]. '
+        "Cite only the acquired ids listed below, one or more per claim; gaps as UNKNOWN: <text> (no citation needed)."
     )
 
 
 def _is_pit_eligible(known_at: object, as_of: str) -> bool:
-    """known_at > as_of rejects; None stays eligible-but-unverified (never invent)."""
+    """Shared PIT rule (parsed): historical as_of + unknown known_at is ineligible."""
+    from app.research.models import pit_unverified, pit_violated
     if known_at is None:
-        return True
+        return not pit_unverified(as_of, None)
     if isinstance(known_at, str):
-        return known_at <= as_of
-    return True
+        if not known_at.strip():
+            return not pit_unverified(as_of, None)
+        try:
+            if pit_unverified(as_of, known_at):
+                return False
+            return not pit_violated(as_of, known_at)
+        except ValueError:
+            return False
+    return False
 
 
 def run_scout(
@@ -165,7 +177,10 @@ def run_scout(
                 if eid_raw not in evidence_ids:
                     evidence_ids.append(eid_raw)
                     known = candidate.get("known_at")
-                    acquired.append(f"{eid_raw} (known_at={known})" if known else eid_raw)
+                    header = f"{eid_raw} (known_at={known})" if known else eid_raw
+                    snippet = candidate.get("claim_text") or candidate.get("content_snippet")
+                    text = snippet.strip().replace("\n", " ")[:300] if isinstance(snippet, str) and snippet.strip() else ""
+                    acquired.append(f"{header} :: {text}" if text else header)
             else:
                 if eid_raw not in rejected:
                     rejected.append(eid_raw)
@@ -192,22 +207,15 @@ def run_scout(
     if acquired:
         prompt += "\nAcquired evidence (cite only these ids):\n" + "\n".join(f"- {line}" for line in acquired)
     text = model(prompt)
+    findings: list[GroundedClaim] = parse_grounded_claims(text, frozen=evidence_ids)
     unknowns: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        lowered = line.lower()
-        if lowered.startswith(("unknown:", "gap:", "limitation:", "follow-up:", "follow up:")):
-            unknowns.append(line[:300])
-            if len(unknowns) >= 5:
-                break
     if not evidence_ids:
         unknowns.insert(0, "no PIT-eligible SEC evidence returned")
     return ScoutResult(
         assignment_id=assignment.assignment_id,
         session_id=assignment.session_id,
         coverage=f"role={assignment.role} tickers={len(assignment.tickers)} tool_calls={tools_used}",
-        finding_ids=[f"{assignment.assignment_id}:f{i}" for i in range(len(evidence_ids))],
-        evidence_ids=evidence_ids,
+        findings=findings,
         unknowns=unknowns,
         limitations=rejected,
         follow_up_requests=[],

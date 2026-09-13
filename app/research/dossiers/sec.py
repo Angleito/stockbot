@@ -107,26 +107,38 @@ def create_dossier(
     as_of: datetime | str | None = None,
     coverage: Mapping[str, object] | None = None,
     findings: Sequence[Mapping[str, object]] = (),
-    evidence_ids: Sequence[str] = (),
-    supporting_evidence_ids: Sequence[str] = (),
     contradicting_evidence_ids: Sequence[str] = (),
     unknowns: Sequence[str] = (),
     limitations: Sequence[str] = (),
     open_questions: Sequence[str] = (),
 ) -> SECDossier:
-    """Pure constructor, no I/O. ``evidence_ids`` aliases ``supporting_evidence_ids``.
+    """Pure constructor, no I/O. Supporting set derives from findings only.
 
-    Accepts the source-agent call shape (``as_of``/``evidence_ids``) and the full
-    canonical shape; inputs are copied so later caller mutation cannot leak in.
+    Each finding must be ``{"text": str, "evidence_ids": [str, ...]}`` with a
+    non-empty citation set; free-text or whole-freeze citations are rejected.
+    Inputs are copied so later caller mutation cannot leak in.
     """
-    supporting = list(dict.fromkeys(supporting_evidence_ids)) or list(dict.fromkeys(evidence_ids))
+    supporting: list[str] = []
+    grounded: list[dict[str, object]] = []
+    supporting = []
+    for finding in findings:
+        text = finding.get("text")
+        ids = finding.get("evidence_ids")
+        if not isinstance(text, str) or not text.strip():
+            raise DossierIntegrityError(f"dossier {dossier_id}: finding 'text' must be a non-empty string")
+        if not isinstance(ids, list) or not ids or any(not isinstance(e, str) or not e for e in ids):
+            raise DossierIntegrityError(f"dossier {dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
+        grounded.append({"text": text, "evidence_ids": list(dict.fromkeys(ids))})
+        for eid in dict.fromkeys(ids):
+            if eid not in supporting:
+                supporting.append(eid)
     return SECDossier(
         dossier_id=dossier_id,
         session_id=session_id,
         wave_id=_coerce_wave(wave_id),
         subject=subject,
         coverage=deepcopy(dict(coverage)) if coverage is not None else default_coverage(),
-        findings=[dict(finding) for finding in findings],
+        findings=grounded,
         supporting_evidence_ids=supporting,
         contradicting_evidence_ids=list(dict.fromkeys(contradicting_evidence_ids)),
         unknowns=list(unknowns),
@@ -143,7 +155,7 @@ def _require_str_list(coverage: Mapping[str, object], key: str, dossier_id: str)
 
 
 def validate_dossier(dossier: SECDossier, ledger_ids: Collection[str]) -> None:
-    """Coverage contract + every supporting/contradicting id must exist in the ledger."""
+    """Coverage contract + every supporting/contradicting/finding id must exist in the ledger."""
     if not dossier.dossier_id:
         raise DossierIntegrityError("dossier: 'dossier_id' must be non-empty")
     if not dossier.session_id:
@@ -171,3 +183,15 @@ def validate_dossier(dossier: SECDossier, ledger_ids: Collection[str]) -> None:
     dangling = sorted(cited - known)
     if dangling:
         raise DossierIntegrityError(f"dossier {dossier.dossier_id}: unknown evidence ids {dangling[:5]}")
+    supporting_set = set(dossier.supporting_evidence_ids)
+    for finding in dossier.findings:
+        if not isinstance(finding, dict):
+            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding must be a mapping")
+        ids = finding.get("evidence_ids")
+        if not isinstance(ids, list) or not ids or any(not isinstance(e, str) for e in ids):
+            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
+        for eid in ids:
+            if eid not in known:
+                raise DossierIntegrityError(f"dossier {dossier.dossier_id}: unknown evidence ids {[eid][:5]}")
+            if eid not in supporting_set:
+                raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding cites id outside supporting set: {eid!r}")

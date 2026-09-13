@@ -43,7 +43,6 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
     try:
         entities: list[str] = []
         forms: list[str] = []
-        supporting = list(fallback.evidence_ids)
         coverage: dict[str, object] = {
             "entities": entities,
             "forms": forms,
@@ -52,10 +51,16 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
             "complete": False,
             "exclusions": [],
         }
+        fallback_findings = list(getattr(fallback, "findings", []) or [])
         findings: list[dict[str, object]] = [
-            {"finding_id": fid, "evidence_ids": supporting}
-            for fid in fallback.finding_ids
+            {"text": claim.text, "evidence_ids": list(claim.evidence_ids)}
+            for claim in fallback_findings
         ]
+        supporting: list[str] = []
+        for claim in fallback_findings:
+            for eid in claim.evidence_ids:
+                if eid not in supporting:
+                    supporting.append(eid)
         dossier = factory(
             dossier_id=fallback.dossier_id,
             session_id=fallback.session_id,
@@ -63,7 +68,6 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
             as_of=fallback.as_of,
             coverage=coverage,
             findings=findings,
-            supporting_evidence_ids=supporting,
             unknowns=list(fallback.unknowns),
             limitations=list(fallback.limitations),
         )
@@ -84,22 +88,19 @@ def run_sec_assignment(
     tickers: Sequence[str],
     dispatch: DispatchFn,
     model: ModelFn,
-    spawn: Callable[[ScoutAssignment], ScoutResult] | None = None,
+    spawn: Callable[[ScoutAssignment], ScoutResult],
     journal: Callable[[str, dict[str, object]], None] | None = None,
     known_evidence_ids: Sequence[str] | None = None,
 ) -> object:
     """Decompose via catalog discovery, run 3 bounded scouts, validate refs.
 
-    ``spawn`` defaults to inline ``run_scout`` (jobs.py ``create_job`` path
-    plugs in here when available). Returns canonical ``SECDossier`` when the
-    dossiers module is importable, else the local ``SourceDossier``.
-    ``wave_id`` accepts int>=1 or a numeric str and is stored as int.
+    ``spawn`` is required and must be Job-backed in production (runner-owned
+    SCOUT child Jobs); unit callers pass an explicit synchronous adapter.
+    Returns canonical ``SECDossier`` when the dossiers module is importable,
+    else the local ``SourceDossier``. ``wave_id`` accepts int>=1 or numeric str.
     """
     wave = _coerce_wave(wave_id)
-
-    def run_inline(assignment: ScoutAssignment) -> ScoutResult:
-        return run_scout(assignment, dispatch=dispatch, model=model, journal=journal)
-    run_one = spawn if spawn is not None else run_inline
+    run_one = spawn
     # Serial: Pi providers serve parallel=1, so concurrent scout model calls
     # contend on one slot and all hit the call timeout together.
     results = [run_one(assignment) for assignment in assignments_for(question, session_id, as_of, tickers, dispatch)]
@@ -109,9 +110,10 @@ def run_sec_assignment(
     else:
         seen: list[str] = []
         for result in results:
-            for eid in result.evidence_ids:
-                if eid not in seen:
-                    seen.append(eid)
+            for claim in result.findings:
+                for eid in claim.evidence_ids:
+                    if eid not in seen:
+                        seen.append(eid)
         known = seen
     dossier = assemble_dossier(
         dossier_id=f"{session_id}:{wave}:sec",

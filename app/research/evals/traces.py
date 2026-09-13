@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS eval_traces (
   trace_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
   wave_id INTEGER NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'fake',
   model TEXT NOT NULL,
   prompt_version TEXT NOT NULL,
   harness_version TEXT NOT NULL,
@@ -64,6 +65,7 @@ class TraceHeader:
     trace_id: str
     session_id: str
     wave_id: int
+    provider: str
     model: str
     prompt_version: str
     harness_version: str
@@ -101,6 +103,12 @@ def _db_path(data_root: Path | None) -> Path:
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.executescript(_SCHEMA)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(eval_traces)")}
+        if "provider" not in cols:
+            conn.execute("ALTER TABLE eval_traces ADD COLUMN provider TEXT NOT NULL DEFAULT 'fake'")
+    except Exception:
+        pass
     return conn
 
 
@@ -270,8 +278,9 @@ def create_trace(
     *,
     session_id: str,
     wave_id: int | str,
-    model: str,
-    prompt_version: str,
+    provider: str = "fake",
+    model: str = "fake",
+    prompt_version: str = "v1",
     git_sha: str,
     data_root: Path | None = None,
     job_parent: str | None = None,
@@ -295,13 +304,14 @@ def create_trace(
         db.parent.mkdir(parents=True, exist_ok=True)
         with _connect(db) as conn:
             conn.execute(
-                "INSERT INTO eval_traces (trace_id, session_id, wave_id, model,"
+                "INSERT INTO eval_traces (trace_id, session_id, wave_id, provider, model,"
                 " prompt_version, harness_version, git_sha, started_at, status)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trace_id,
                     session_id,
                     wave,
+                    provider,
                     model,
                     prompt_version,
                     HARNESS_VERSION,
@@ -322,15 +332,16 @@ def _header_from_row(row: tuple[object, ...]) -> TraceHeader:
         trace_id=_as_str(row[0]),
         session_id=_as_str(row[1]),
         wave_id=_coerce_wave(row[2]),
-        model=_as_str(row[3]),
-        prompt_version=_as_str(row[4]),
-        harness_version=_as_str(row[5]),
-        git_sha=_as_str(row[6]),
-        started_at=_as_str(row[7]),
-        completed_at=_as_opt_str(row[8]),
-        duration_ms=_as_opt_float(row[9]),
-        conclusion=_as_opt_str(row[10]),
-        status=_as_str(row[11]),
+        provider=_as_str(row[3]) if len(row) > 12 else "fake",
+        model=_as_str(row[4]) if len(row) > 12 else _as_str(row[3]),
+        prompt_version=_as_str(row[5]) if len(row) > 12 else _as_str(row[4]),
+        harness_version=_as_str(row[6]) if len(row) > 12 else _as_str(row[5]),
+        git_sha=_as_str(row[7]) if len(row) > 12 else _as_str(row[6]),
+        started_at=_as_str(row[8]) if len(row) > 12 else _as_str(row[7]),
+        completed_at=_as_opt_str(row[9]) if len(row) > 12 else _as_opt_str(row[8]),
+        duration_ms=_as_opt_float(row[10]) if len(row) > 12 else _as_opt_float(row[9]),
+        conclusion=_as_opt_str(row[11]) if len(row) > 12 else _as_opt_str(row[10]),
+        status=_as_str(row[12]) if len(row) > 12 else _as_str(row[11]),
     )
 
 
@@ -338,7 +349,7 @@ def get_trace(trace_id: str, data_root: Path | None = None) -> TraceHeader | Non
     """Fetch one trace header; None when absent."""
     with _connect(_db_path(data_root)) as conn:
         row = conn.execute(
-            "SELECT trace_id, session_id, wave_id, model, prompt_version,"
+            "SELECT trace_id, session_id, wave_id, provider, model, prompt_version,"
             " harness_version, git_sha, started_at, completed_at, duration_ms,"
             " conclusion, status FROM eval_traces WHERE trace_id = ?",
             (trace_id,),
@@ -355,14 +366,14 @@ def list_traces(
     with _connect(_db_path(data_root)) as conn:
         if session_id is None:
             rows = conn.execute(
-                "SELECT trace_id, session_id, wave_id, model, prompt_version,"
+                "SELECT trace_id, session_id, wave_id, provider, model, prompt_version,"
                 " harness_version, git_sha, started_at, completed_at, duration_ms,"
                 " conclusion, status FROM eval_traces ORDER BY started_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT trace_id, session_id, wave_id, model, prompt_version,"
+                "SELECT trace_id, session_id, wave_id, provider, model, prompt_version,"
                 " harness_version, git_sha, started_at, completed_at, duration_ms,"
                 " conclusion, status FROM eval_traces WHERE session_id = ?"
                 " ORDER BY started_at DESC LIMIT ?",

@@ -32,7 +32,8 @@ from app.research.agents import ResearchRequest
 from app.research.agents.bearbot import BearAnalysis, run_bearbot
 from app.research.agents.bullbot import BullAnalysis, run_bullbot
 from app.research.agents.sec_agent import run_sec_assignment
-from app.research.agents.source_agent import SourceDossier
+from app.research.agents.scout import ScoutAssignment, ScoutResult
+from app.research.agents.source_agent import is_sec_tool
 from app.research.agents.stockbot import StockbotAnalysis, run_stockbot
 from app.research.director import (
     DirectorBudgets,
@@ -66,6 +67,7 @@ from app.research.models import (
     utcnow,
 )
 from app.research.repository import ResearchRepository
+from app.research.evals.traces import TraceRecorder, create_trace, get_trace_events, list_traces
 
 __all__ = ["LiveModelError", "resume_live", "run_live"]
 
@@ -148,38 +150,6 @@ def _extract_source_ref(raw: Mapping[str, object]) -> tuple[str | None, str | No
     return uri, ref
 
 
-def _parse_follow_ups(text: str, agent: str) -> list[ResearchRequest]:
-    """Extract committee follow-up questions from model prose (max 3).
-    Only single-line ``Follow-up: <question>?`` shapes count; anything else
-    is prose, never a research request. The committee gate still decides
-    whether any follow-up is material, actionable, and within budget.
-    """
-    _ = agent
-    out: list[ResearchRequest] = []
-    for raw_line in text.splitlines():
-        if len(out) >= 3:
-            break
-        line: str = raw_line.strip()
-        if len(line) < 12 or len(line) > 500 or not line.endswith("?"):
-            continue
-        lowered: str = line.lower()
-        if not (
-            lowered.startswith("follow-up:")
-            or lowered.startswith("follow up:")
-            or lowered.startswith("next research:")
-            or lowered.startswith("research next:")
-        ):
-            continue
-        question: str = line.split(":", 1)[1].strip()
-        if not question.endswith("?"):
-            continue
-        out.append(ResearchRequest(
-            question=question, why_material="committee follow-up",
-            requested_source_domain="SEC", expected_gain="medium",
-            requesting_agents=[agent],
-        ))
-    return out
-
 
 def _merge_disagreement(
     first: CommitteeDisagreement, second: CommitteeDisagreement,
@@ -204,6 +174,31 @@ def _merge_disagreement(
             [*first.critical_uncertainties, *second.critical_uncertainties]))[:20],
         requested_research=list(seen.values()),
     )
+
+class BudgetLedger:
+    """One authoritative run budget: atomic consume, read-only total."""
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._used = 0
+        self._lock = threading.Lock()
+    def consume_research_dispatch(self) -> bool:
+        """Increment once before a real research dispatch; False when exhausted."""
+        with self._lock:
+            if self._used >= self._limit:
+                return False
+            self._used += 1
+            return True
+    def hydrate(self, used: int) -> None:
+        """Seed cumulative total on resume; never rewinds below current."""
+        with self._lock:
+            if isinstance(used, bool):
+                return
+            if isinstance(used, int) and used > self._used:
+                self._used = used
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
 
 
 class LiveModelError(RuntimeError):
@@ -243,6 +238,8 @@ class _LiveRun:
         limits: DirectorBudgets,
         wave_id: int = 1,
         actor: str = "run_live",
+        provider: str = "fake",
+        model_name: str | None = None,
     ) -> None:
         self.store = store
         self.question = question
@@ -258,16 +255,63 @@ class _LiveRun:
         self.ledger: EvidenceLedger = EvidenceLedger()
         self.dossier_ids: list[str] = []
         self.source_jobs: list[str] = []
-        self.tool_calls: list[int] = [0]
+        self.budget = BudgetLedger(limits.max_tool_calls)
         self.t0: float = monotonic()
         self._lock = threading.Lock()
-
+        self.trace: TraceRecorder | None = None
+        self.trace_id: str | None = None
+        self._scout_deadline: datetime | None = None
+        self.provider = provider or "fake"
+        _mn = model_name.strip() if isinstance(model_name, str) and model_name.strip() else getattr(model, "__name__", "live") or "live"
+        self.model_name = str(_mn)[:120]
     def _emit(self, session_id: str, event_type: str, payload: Mapping[str, object]) -> None:
         with self._lock:
             prior: list[JournalEvent] = self.store.list_events(session_id)
             hydrate(session_id, prior)
             event: JournalEvent = append_event(session_id, event_type, "runner", self._actor, dict(payload))
             self.store.save_event(event)
+        self._trace_record(event_type, payload)
+
+    def _save_budget_used(self, session_id: str, *, strict: bool = False) -> None:
+        """Persist cumulative research dispatches so resume hydrates the same total."""
+        if strict:
+            with self._lock:
+                used = self.budget.used
+                sess = self.store.get_session(session_id)
+                budget = dict(sess.budget)
+                budget["tool_calls_used"] = used
+                self.store.save_session(replace(sess, budget=budget, updated_at=utcnow()))
+            return
+        try:
+            with self._lock:
+                used = self.budget.used
+                sess = self.store.get_session(session_id)
+                budget = dict(sess.budget)
+                budget["tool_calls_used"] = used
+                self.store.save_session(replace(sess, budget=budget, updated_at=utcnow()))
+        except Exception:
+            pass
+    def _trace_record(self, event_type: str, payload: Mapping[str, object] | None = None, duration_ms: float | None = None) -> None:
+        tr = self.trace
+        if tr is None:
+            return
+        try:
+            from app.redact import redact_json as _rj
+            import json as _json
+            flat: dict[str, str | int | float | bool | None] = {}
+            for k, v in (payload or {}).items():
+                if v is None or isinstance(v, (str, int, float, bool)):
+                    flat[k] = _rj(str(v)) if isinstance(v, str) else v
+                else:
+                    try:
+                        flat[k] = _rj(_json.dumps(v, sort_keys=True, default=str))[:2000]
+                    except Exception:
+                        flat[k] = str(v)[:2000]
+            with self._lock:
+                tr.record(event_type, flat, duration_ms)
+        except Exception:
+            pass
+
 
     def _persist_model_failure(self, session_id: str, job_id: str, stage: str, exc: Exception) -> str:
         """Fail one RUNNING job (TIMEOUT) + journal + session failure; return the message."""
@@ -305,14 +349,27 @@ class _LiveRun:
             "reason": "timeout:model-call",
         })
         self._emit(session_id, "wave.stopped", {"reason": "timeout:model-call", "stage": stage})
+        try:
+            if self.trace is not None:
+                self.trace.finish(message[:2000], "failed")
+        except Exception:
+            pass
         return detail
 
     def _model_at_stage(self, stage: str, session_id: str, job_id: str) -> Callable[[str], str]:
         """Wrap the live model so a failure persists before it propagates."""
         def _call(prompt: str) -> str:
+            from time import perf_counter as _pc
+            from app.redact import redact_text as _rt
+            _t0 = _pc()
             try:
-                return self.model(prompt)
+                out = self.model(prompt)
+                _dur = (_pc() - _t0) * 1000.0
+                self._trace_record("model.completed", {"provider": self.provider, "model": self.model_name, "stage": stage, "job_id": job_id, "prompt": _rt(prompt)[:2000], "output": _rt(out)[:2000]}, _dur)
+                return out
             except Exception as exc:
+                _dur2 = (_pc() - _t0) * 1000.0
+                self._trace_record("model.failed", {"provider": self.provider, "model": self.model_name, "stage": stage, "job_id": job_id, "error": str(exc)[:2000]}, _dur2)
                 detail: str = self._persist_model_failure(session_id, job_id, stage, exc)
                 raise LiveModelError(session_id, stage, detail) from exc
         return _call
@@ -330,15 +387,34 @@ class _LiveRun:
         sess = _session.create_session(q, self.objective or q, as_of=eff_as_of, policy=policy)
         sess = replace(sess, current_wave=self.wave_id)
         self.store.save_session(sess)
+        try:
+            import subprocess as _sp
+            try:
+                _sha = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, timeout=2).strip() or "unknown"
+            except Exception:
+                _sha = "unknown"
+            tr = create_trace(session_id=sess.session_id, wave_id=self.wave_id, provider=self.provider, model=self.model_name, prompt_version="v1", git_sha=_sha)
+            self.trace, self.trace_id = tr, tr.trace_id
+            try:
+                with self._lock:
+                    cur = self.store.get_session(sess.session_id)
+                    b = dict(cur.budget)
+                    b["trace_id"] = tr.trace_id
+                    self.store.save_session(replace(cur, budget=b, updated_at=utcnow()))
+            except Exception:
+                pass
+            self._trace_record("trace.opened", {"trace_id": tr.trace_id, "session_id": sess.session_id})
+        except Exception:
+            pass
         self._emit(sess.session_id, "session.created", {"question": q, "wave_id": self.wave_id})
         sess = _session.transition_session(sess, SessionStatus.PLANNING)
         self.store.save_session(sess)
         sess = _session.transition_session(sess, SessionStatus.RESEARCHING)
         self.store.save_session(sess)
-        self._open_source_job(sess.session_id, self.wave_id)
+        self._open_source_job(sess.session_id, self.wave_id, self.question)
         return sess.session_id
 
-    def _open_source_job(self, session_id: str, wave: int) -> str:
+    def _open_source_job(self, session_id: str, wave: int, question: str | None = None) -> str:
         """Create + start one SEC source_agent job for a wave; persist both sides."""
         sess = self.store.get_session(session_id)
         existing: list[Job] = self.store.list_jobs(session_id)
@@ -346,6 +422,9 @@ class _LiveRun:
             sess, existing, job_type=JobType.SOURCE_AGENT, owner="runner",
             wave_id=wave, source_domain="SEC",
         )
+        q = question if isinstance(question, str) and question.strip() else self.question
+        tickers_json: list[JSONValue] = [t for t in self.scoped]
+        job = replace(job, diagnostics={"tickers": tickers_json, "question": q[:500], "as_of": self.as_of_str})
         self.store.save_session(updated)
         self.store.save_job(job)
         self._emit(session_id, "job.created", {"job_id": job.job_id, "job_type": job.job_type})
@@ -361,39 +440,43 @@ class _LiveRun:
             self._emit(sid, event_type, payload)
 
         def _live_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
-            raw: dict[str, object] = self.dispatch(name, args)
-            if name == "search_tools" or name == "browse_tools":
-                found: object = raw.get("matches")
-                if not isinstance(found, list):
-                    meta: object = raw.get("meta")
-                    if isinstance(meta, dict):
-                        inner_meta: object = meta.get("matches")
-                        if isinstance(inner_meta, list):
-                            found = inner_meta
-                    names: list[dict[str, object]] = []
-                    if isinstance(found, list):
-                        for item in found:
-                            if isinstance(item, str) and item:
-                                names.append({"name": item})
-                            elif isinstance(item, dict):
-                                cand: object = item.get("name")
-                                if isinstance(cand, str) and cand:
-                                    names.append({"name": cand})
-                else:
-                    names = []
-                    for item in found:
-                        if isinstance(item, str) and item:
-                            names.append({"name": item})
-                        elif isinstance(item, dict):
-                            cand = item.get("name")
-                            if isinstance(cand, str) and cand:
-                                names.append({"name": cand})
-                return {"matches": names}
             if name == "call_tool":
-                if "error" in raw:
-                    return {"evidence_ids": []}
                 inner_obj: object = args.get("name")
                 inner: str = inner_obj if isinstance(inner_obj, str) and inner_obj else "unknown_tool"
+                if not is_sec_tool(inner):
+                    self._emit(sid, "policy.denied", {"tool": inner, "reason": "POLICY_DENIED"})
+                    raise ValueError(f"POLICY_DENIED: non-SEC tool {inner!r}")
+                if not self.budget.consume_research_dispatch():
+                    self._emit(sid, "budget.exhausted", {"tool": inner, "reason": "TOOL_BUDGET_EXHAUSTED"})
+                    raise ValueError("TOOL_BUDGET_EXHAUSTED: run tool budget exhausted")
+                self._save_budget_used(sid, strict=True)
+                from time import perf_counter as _pc
+                _t0 = _pc()
+                try:
+                    raw: dict[str, object] = self.dispatch(name, args)
+                except Exception as exc:
+                    _dur_e = (_pc() - _t0) * 1000.0
+                    self._trace_record("tool.failed", {"tool": inner, "args": args, "error": str(exc)[:2000]}, _dur_e)
+                    raise
+                _dur = (_pc() - _t0) * 1000.0
+                try:
+                    _sdl = self._scout_deadline
+                    if _sdl is not None:
+                        from datetime import datetime as _dts, timezone as _tzs
+                        _nows = _dts.now(_tzs.utc)
+                        _sdlc = _sdl if _sdl.tzinfo is not None else _sdl.replace(tzinfo=_tzs.utc)
+                        if _nows >= _sdlc:
+                            self._emit(sid, "tool.failed", {"tool": inner, "error": "scout deadline exceeded"})
+                            self._trace_record("tool.failed", {"tool": inner, "args": args, "error": "scout deadline exceeded"}, _dur)
+                            raise TimeoutError("scout deadline exceeded after dispatch")
+                except TimeoutError:
+                    raise
+                except Exception:
+                    pass
+                if "error" in raw:
+                    self._emit(sid, "tool.failed", {"tool": inner, "error": str(raw.get("error"))[:2000]})
+                    self._trace_record("tool.failed", {"tool": inner, "args": args, "error": str(raw.get("error"))[:2000]}, _dur)
+                    raise ValueError(f"TOOL_ERROR: {inner} failed: {raw.get('error')}")
                 counter[0] += 1
                 eid: str = f"{sid}:{wave}:sec:{counter[0]}"
                 content_obj: object = raw.get("content")
@@ -422,7 +505,8 @@ class _LiveRun:
                 )
                 try:
                     ingest_evidence(self.ledger, record, as_of=self.as_of, on_reject=_on_reject)
-                except EvidenceRejectedError:
+                except EvidenceRejectedError as exc:
+                    self._trace_record("tool.failed", {"tool": inner, "args": args, "error": f"evidence.rejected:{exc.reason if hasattr(exc, 'reason') else exc}"[:2000]}, _dur)
                     return {"evidence_ids": []}
                 try:
                     with self._lock:
@@ -430,7 +514,37 @@ class _LiveRun:
                 except ValueError:
                     pass
                 self._emit(sid, "evidence.ingested", {"evidence_id": eid, "tool": inner})
-                return {"evidence_ids": [{"evidence_id": eid, "known_at": known_at.isoformat() if known_at else None}]}
+                self._trace_record("tool.completed", {"tool": inner, "args": args, "evidence_id": eid}, _dur)
+                return {"evidence_ids": [{"evidence_id": eid, "known_at": known_at.isoformat() if known_at else None, "claim_text": claim[:500], "content_snippet": content[:500]}]}
+            from time import perf_counter as _pc2
+            _t1 = _pc2()
+            raw: dict[str, object] = self.dispatch(name, args)
+            _d1 = (_pc2() - _t1) * 1000.0
+            self._trace_record("discovery.completed", {"tool": name, "args": args, "matches": raw.get("matches")}, _d1)
+            if name == "search_tools" or name == "browse_tools":
+                found: object = raw.get("matches")
+                names: list[dict[str, object]] = []
+                if isinstance(found, list):
+                    for item in found:
+                        if isinstance(item, str) and item:
+                            names.append({"name": item})
+                        elif isinstance(item, dict):
+                            cand: object = item.get("name")
+                            if isinstance(cand, str) and cand:
+                                names.append({"name": cand})
+                else:
+                    meta: object = raw.get("meta")
+                    if isinstance(meta, dict):
+                        inner_meta: object = meta.get("matches")
+                        if isinstance(inner_meta, list):
+                            for item in inner_meta:
+                                if isinstance(item, str) and item:
+                                    names.append({"name": item})
+                                elif isinstance(item, dict):
+                                    cand2: object = item.get("name")
+                                    if isinstance(cand2, str) and cand2:
+                                        names.append({"name": cand2})
+                return {"matches": names}
             return raw
         scout_calls: list[int] = [0]
         def _scout_journal(event_type: str, payload: dict[str, object]) -> None:
@@ -439,10 +553,231 @@ class _LiveRun:
             scout_calls[0] += 1
             stage: str = f"{prefix}scout-{scout_calls[0]}"
             return self._model_at_stage(stage, sid, src_job_id)(prompt)
-        dossier_obj: object = run_sec_assignment(
-            q, session_id=sid, wave_id=wave, as_of=self.as_of_str or "unbounded",
-            tickers=self.scoped, dispatch=_live_dispatch, model=_scout_model, journal=_scout_journal,
-        )
+        def _spawn_scout(assignment: ScoutAssignment) -> ScoutResult:
+            from datetime import timedelta
+            from app.research.agents import ResearchRequest as _RR
+            from app.research.agents.scout import run_scout as _run_one
+            existing_jobs: list[Job] = self.store.list_jobs(sid)
+            for child in existing_jobs:
+                if child.parent_job_id != src_job_id or child.job_type != JobType.SCOUT.value:
+                    continue
+                res = child.result or {}
+                if res.get("assignment_id") == assignment.assignment_id and child.status == "completed" and "findings" in res:
+                    from app.research.agents import GroundedClaim as _GC
+                    raw_findings = res.get("findings")
+                    findings_list: list[_GC] = []
+                    if isinstance(raw_findings, list):
+                        for item in raw_findings:
+                            if not isinstance(item, dict):
+                                continue
+                            txt = item.get("text")
+                            ids = item.get("evidence_ids")
+                            if not isinstance(txt, str) or not txt.strip():
+                                continue
+                            if not isinstance(ids, list) or not ids:
+                                continue
+                            eids = [e for e in ids if isinstance(e, str) and e]
+                            if not eids:
+                                continue
+                            findings_list.append(_GC(text=txt.strip()[:500], evidence_ids=eids))
+                    unk_raw = res.get("unknowns")
+                    lim_raw = res.get("limitations")
+                    req_raw = res.get("follow_up_requests")
+                    unk_list = [e for e in unk_raw if isinstance(e, str)] if isinstance(unk_raw, list) else []
+                    lim_list = [e for e in lim_raw if isinstance(e, str)] if isinstance(lim_raw, list) else []
+                    req_list: list[_RR] = []
+                    if isinstance(req_raw, list):
+                        for item in req_raw:
+                            if not isinstance(item, dict):
+                                continue
+                            try:
+                                raw_agents: object = item.get("requesting_agents")
+                                agents: list[str] = [a for a in raw_agents if isinstance(a, str)] if isinstance(raw_agents, list) else []
+                                req_list.append(_RR(question=str(item.get("question", "")), why_material=str(item.get("why_material", "")), requested_source_domain=str(item.get("requested_source_domain", "SEC")), expected_gain=str(item.get("expected_gain", "medium")), requesting_agents=agents))
+                            except Exception:
+                                continue
+                    self._emit(sid, "scout.reused", {"job_id": child.job_id, "assignment_id": assignment.assignment_id})
+                    self._trace_record("scout.reused", {"job_id": child.job_id, "assignment_id": assignment.assignment_id})
+                    return ScoutResult(assignment_id=assignment.assignment_id, session_id=sid, coverage=str(res.get("coverage", "reused")), findings=findings_list, unknowns=unk_list, limitations=lim_list, follow_up_requests=req_list)
+            reusable = next((c for c in existing_jobs if c.parent_job_id == src_job_id and c.job_type == JobType.SCOUT.value and (c.diagnostics or {}).get("assignment_id") == assignment.assignment_id and c.status in ("queued", "running")), None)
+            if reusable is not None:
+                scout_job = reusable
+                if scout_job.status == "queued":
+                    self.store.save_job(_jobs.start_job(scout_job))
+                    self._emit(sid, "job.started", {"job_id": scout_job.job_id})
+                self._emit(sid, "scout.retried", {"job_id": scout_job.job_id, "assignment_id": assignment.assignment_id})
+                self._trace_record("scout.retried", {"job_id": scout_job.job_id, "assignment_id": assignment.assignment_id})
+            else:
+                sess_now = self.store.get_session(sid)
+                deadline = (utcnow() + timedelta(seconds=assignment.time_budget_s)).isoformat()
+                sess_upd, scout_job = _jobs.create_job(sess_now, existing_jobs, job_type=JobType.SCOUT, owner="runner", wave_id=wave, parent_job_id=src_job_id, source_domain="SEC", tool_budget=assignment.max_tool_calls, deadline=deadline)
+                tickers_j: list[JSONValue] = [t for t in assignment.tickers]
+                scout_job = replace(scout_job, diagnostics={"assignment_id": assignment.assignment_id, "role": assignment.role, "question": assignment.question[:500], "tickers": tickers_j, "as_of": assignment.as_of, "max_tool_calls": assignment.max_tool_calls, "time_budget_s": assignment.time_budget_s, "allowed_domain": assignment.allowed_domain, "session_id": assignment.session_id})
+                self.store.save_session(sess_upd)
+                self.store.save_job(scout_job)
+                self._emit(sid, "job.created", {"job_id": scout_job.job_id, "job_type": scout_job.job_type, "assignment_id": assignment.assignment_id})
+                self.store.save_job(_jobs.start_job(scout_job))
+            try:
+                _dl = scout_job.deadline
+            except Exception:
+                _dl = None
+            if _dl is None:
+                from datetime import timedelta as _td
+                _dl = utcnow() + _td(seconds=assignment.time_budget_s)
+            self._scout_deadline = _dl
+            def _tagged_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
+                try:
+                    _dl2 = self._scout_deadline
+                    if _dl2 is not None:
+                        try:
+                            from datetime import datetime as _dt2, timezone as _tz2
+                            _now2 = _dt2.now(_tz2.utc)
+                            _dlc = _dl2 if _dl2.tzinfo is not None else _dl2.replace(tzinfo=_tz2.utc)
+                            if _now2 >= _dlc:
+                                raise TimeoutError(f"scout deadline exceeded before dispatch {name}")
+                        except TimeoutError:
+                            raise
+                        except Exception:
+                            pass
+                    return _live_dispatch(name, args)
+                except Exception as exc:
+                    setattr(exc, "_scout_origin", "tool")
+                    raise
+            def _tagged_model(prompt: str) -> str:
+                scout_calls[0] += 1
+                from time import perf_counter as _pc
+                from app.redact import redact_text as _rt
+                _t0 = _pc()
+                try:
+                    _dl3 = self._scout_deadline
+                    if _dl3 is not None:
+                        try:
+                            from datetime import datetime as _dt3, timezone as _tz3
+                            if _dt3.now(_tz3.utc) >= (_dl3 if _dl3.tzinfo is not None else _dl3.replace(tzinfo=_tz3.utc)):
+                                raise TimeoutError("scout deadline exceeded before model call")
+                        except TimeoutError:
+                            raise
+                        except Exception:
+                            pass
+                    out = self.model(prompt)
+                    try:
+                        _dl4 = self._scout_deadline
+                        if _dl4 is not None:
+                            from datetime import datetime as _dt4, timezone as _tz4
+                            if _dt4.now(_tz4.utc) >= (_dl4 if _dl4.tzinfo is not None else _dl4.replace(tzinfo=_tz4.utc)):
+                                raise TimeoutError("scout deadline exceeded after model call")
+                    except TimeoutError:
+                        raise
+                    except Exception:
+                        pass
+                    _dur = (_pc() - _t0) * 1000.0
+                    self._trace_record("model.completed", {"provider": self.provider, "model": self.model_name, "stage": f"{prefix}scout", "job_id": scout_job.job_id, "prompt": _rt(prompt)[:2000], "output": _rt(out)[:2000]}, _dur)
+                    return out
+                except Exception as exc:
+                    _dur2 = (_pc() - _t0) * 1000.0
+                    self._trace_record("model.failed", {"provider": self.provider, "model": self.model_name, "stage": f"{prefix}scout", "job_id": scout_job.job_id, "error": str(exc)[:2000]}, _dur2)
+                    setattr(exc, "_scout_origin", "model")
+                    raise
+            try:
+                try:
+                    result = _run_one(assignment, dispatch=_tagged_dispatch, model=_tagged_model, journal=_scout_journal)
+                finally:
+                    self._scout_deadline = None
+            except Exception as exc:
+                origin = getattr(exc, "_scout_origin", "")
+                pre_cat = getattr(exc, "_failure_category", None)
+                msg = str(exc)[:2000] or type(exc).__name__
+                low = (type(exc).__name__ + " " + msg).lower()
+                cancelled = "cancel" in type(exc).__name__.lower() or "cancelled" in low or "canceled" in low or bool(getattr(exc, "_scout_cancelled", False))
+                if cancelled:
+                    try:
+                        cur = self.store.get_job(scout_job.job_id)
+                        if cur.status in ("queued", "running"):
+                            self.store.save_job(_jobs.cancel_job(cur))
+                        self._emit(sid, "job.cancelled", {"job_id": scout_job.job_id})
+                    except Exception:
+                        pass
+                    setattr(exc, "_failure_category", pre_cat if isinstance(pre_cat, FailureCategory) else FailureCategory.TOOL_ERROR)
+                    setattr(exc, "_scout_cancelled", True)
+                    raise
+                if isinstance(pre_cat, FailureCategory):
+                    cat = pre_cat
+                elif "timeout" in low or "timed_out" in low or "expired" in low:
+                    cat = FailureCategory.TIMEOUT
+                elif "budget" in low:
+                    cat = FailureCategory.TOOL_BUDGET_EXHAUSTED
+                elif "policy" in low or "denied" in low:
+                    cat = FailureCategory.POLICY_DENIED
+                else:
+                    cat = FailureCategory.MODEL_ERROR if origin == "model" else FailureCategory.TOOL_ERROR
+                try:
+                    cur2 = self.store.get_job(scout_job.job_id)
+                    if cur2.status in ("queued", "running"):
+                        self.store.save_job(_jobs.fail_job(cur2, cat, f"scout:{type(exc).__name__}:{msg}"[:2000]))
+                    self._emit(sid, "job.failed", {"job_id": scout_job.job_id, "failure_category": cat.value})
+                except Exception:
+                    pass
+                setattr(exc, "_failure_category", cat)
+                raise
+            req_out: list[JSONValue] = []
+            for req in result.follow_up_requests:
+                agents_out: list[JSONValue] = [a for a in req.requesting_agents]
+                req_out.append({"question": req.question, "why_material": req.why_material, "requested_source_domain": req.requested_source_domain, "expected_gain": req.expected_gain, "requesting_agents": agents_out})
+            findings_out: list[JSONValue] = [{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in result.findings]
+            self.store.save_job(_jobs.complete_job(self.store.get_job(scout_job.job_id), result={"assignment_id": assignment.assignment_id, "findings": findings_out, "coverage": result.coverage, "unknowns": list(result.unknowns), "limitations": list(result.limitations), "follow_up_requests": req_out}))
+            self._emit(sid, "job.completed", {"job_id": scout_job.job_id})
+            return result
+        try:
+            dossier_obj: object = run_sec_assignment(
+                q, session_id=sid, wave_id=wave, as_of=self.as_of_str or "unbounded",
+                tickers=self.scoped, dispatch=_live_dispatch, model=_scout_model, journal=_scout_journal, spawn=_spawn_scout,
+            )
+        except Exception as exc:
+            cat_raw = getattr(exc, "_failure_category", None)
+            if isinstance(cat_raw, FailureCategory):
+                cat = cat_raw
+            else:
+                low_all = (type(exc).__name__ + " " + str(exc)).lower()
+                if "timeout" in low_all or "expired" in low_all or "timed_out" in low_all:
+                    cat = FailureCategory.TIMEOUT
+                elif "budget" in low_all:
+                    cat = FailureCategory.TOOL_BUDGET_EXHAUSTED
+                elif "policy" in low_all or "denied" in low_all:
+                    cat = FailureCategory.POLICY_DENIED
+                else:
+                    cat = FailureCategory.TOOL_ERROR
+            cancelled = bool(getattr(exc, "_scout_cancelled", False))
+            detail = f"{type(exc).__name__}: {exc}"[:2000]
+            message = f"source-scout: {detail}"[:2000]
+            try:
+                src_job = self.store.get_job(src_job_id)
+                if src_job.status in ("queued", "running"):
+                    if cancelled:
+                        self.store.save_job(_jobs.cancel_job(src_job))
+                        self._emit(sid, "job.cancelled", {"job_id": src_job_id})
+                    else:
+                        self.store.save_job(_jobs.fail_job(src_job, cat, message))
+                        self._emit(sid, "job.failed", {"job_id": src_job_id, "stage": "source-scout", "failure_category": cat.value, "error": str(exc)[:2000]})
+            except Exception:
+                pass
+            self._emit(sid, "model.failed", {"stage": "source-scout", "job_id": src_job_id, "error_type": type(exc).__name__, "error": str(exc)[:2000]})
+            try:
+                sess_fail = self.store.get_session(sid)
+                sess_fail = replace(sess_fail, failure=Failure(category=cat.value, message=message), updated_at=utcnow())
+                if sess_fail.status not in ("failed", "completed", "cancelled"):
+                    sess_fail = _session.transition_session(sess_fail, SessionStatus.FAILED)
+                self.store.save_session(sess_fail)
+            except Exception:
+                pass
+            self._emit(sid, "research.failed", {"stage": "source-scout", "failure_category": cat.value, "reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else f"scout:{cat.value}"})
+            self._emit(sid, "wave.stopped", {"reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else f"failed:source-scout", "stage": "source-scout"})
+            self._save_budget_used(sid)
+            try:
+                if self.trace is not None:
+                    self.trace.finish(message[:2000], "failed")
+            except Exception:
+                pass
+            raise LiveModelError(sid, "source-scout", detail) from exc
         ids: list[str] = []
         did: str = ""
         if isinstance(dossier_obj, SECDossier):
@@ -453,30 +788,8 @@ class _LiveRun:
                 self.store.save_dossier(dossier_to_dict(dossier_obj))
             except ValueError:
                 pass
-        elif isinstance(dossier_obj, SourceDossier):
-            ids = list(dossier_obj.evidence_ids)
-            did = dossier_obj.dossier_id
-            known: set[str] = set(self.ledger.ids())
-            for cited in ids:
-                if cited not in known:
-                    raise ValueError(f"runner: dossier cites unknown evidence {cited!r}")
-            try:
-                self.store.save_dossier({
-                    "dossier_id": did, "session_id": sid, "wave_id": wave,
-                    "type": "SourceDossier",
-                    "subject": "", "coverage": {"notes": list(dossier_obj.coverage_notes)},
-                    "findings": [{"finding_id": fid} for fid in dossier_obj.finding_ids],
-                    "supporting_evidence_ids": ids, "contradicting_evidence_ids": [],
-                    "unknowns": list(dossier_obj.unknowns),
-                    "limitations": list(dossier_obj.limitations),
-                    "open_questions": [],
-                    "as_of": dossier_obj.as_of,
-                    "created_at": utcnow().isoformat(),
-                })
-            except ValueError:
-                pass
         else:
-            raise ValueError(f"runner: unexpected dossier type {type(dossier_obj).__name__}")
+            raise ValueError(f"runner: unexpected dossier type {type(dossier_obj).__name__} (SECDossier required)")
         sess = self.store.get_session(sid)
         sess = replace(
             sess,
@@ -491,6 +804,7 @@ class _LiveRun:
             self.store.save_job(_jobs.complete_job(job, result={"dossier_id": did, "evidence_ids": ids}))
             self._emit(sid, "job.completed", {"job_id": src_job_id})
         self.dossier_ids.append(did)
+        self._save_budget_used(sid)
         return ids
 
     def _fetch(self, session_id: str) -> list[str]:
@@ -560,18 +874,12 @@ class _LiveRun:
             pending.append(started)
             ran.append(started.job_id)
         shared_text = self._freeze_evidence_text(session_id, ev_ids)
-        def _rep_stock(text: str) -> Sequence[ResearchRequest]:
-            return _parse_follow_ups(text, "stockbot")
-        def _rep_bull(text: str) -> Sequence[ResearchRequest]:
-            return _parse_follow_ups(text, "bullbot")
-        def _rep_bear(text: str) -> Sequence[ResearchRequest]:
-            return _parse_follow_ups(text, "bearbot")
         def _run_stock() -> StockbotAnalysis:
             analysis = run_stockbot(
                 self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
                 evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
                 model=self._model_at_stage(f"{prefix}committee-stockbot", session_id, ran[0]),
-                report=_rep_stock, evidence_text=shared_text,
+                evidence_text=shared_text,
             )
             with self._lock:
                 self.store.save_job(_jobs.complete_job(self.store.get_job(ran[0]), result={"freeze_id": fid}))
@@ -581,7 +889,7 @@ class _LiveRun:
                 self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
                 evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
                 model=self._model_at_stage(f"{prefix}committee-bullbot", session_id, ran[1]),
-                report=_rep_bull, evidence_text=shared_text,
+                evidence_text=shared_text,
             )
             with self._lock:
                 self.store.save_job(_jobs.complete_job(self.store.get_job(ran[1]), result={"freeze_id": fid}))
@@ -591,7 +899,7 @@ class _LiveRun:
                 self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
                 evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
                 model=self._model_at_stage(f"{prefix}committee-bearbot", session_id, ran[2]),
-                report=_rep_bear, evidence_text=shared_text,
+                evidence_text=shared_text,
             )
             with self._lock:
                 self.store.save_job(_jobs.complete_job(self.store.get_job(ran[2]), result={"freeze_id": fid}))
@@ -604,13 +912,27 @@ class _LiveRun:
                 stock = stock_f.result()
                 bull = bull_f.result()
                 bear = bear_f.result()
-        except Exception:
+        except Exception as exc:
+            pre = getattr(exc, "_failure_category", None)
+            cat = pre if isinstance(pre, FailureCategory) else FailureCategory.TIMEOUT
+            msg = str(exc)[:1500] or type(exc).__name__
+            low = (type(exc).__name__ + " " + msg).lower()
+            if not isinstance(pre, FailureCategory):
+                if "budget" in low:
+                    cat = FailureCategory.TOOL_BUDGET_EXHAUSTED
+                elif "policy" in low or "denied" in low:
+                    cat = FailureCategory.POLICY_DENIED
+                elif "model_output" in low or "unknown evidence" in low or "uncited" in low:
+                    cat = FailureCategory.MODEL_OUTPUT_FAILURE
+                elif "tool_error" in low or "tool failed" in low:
+                    cat = FailureCategory.TOOL_ERROR
             for jid in ran:
                 with self._lock:
                     leftover: Job = self.store.get_job(jid)
                     if leftover.status in ("queued", "running"):
                         self.store.save_job(_jobs.fail_job(
-                            leftover, FailureCategory.TIMEOUT, "committee: model call failed"))
+                            leftover, cat, f"committee:{type(exc).__name__}:{msg}"[:2000]))
+                    self._emit(session_id, "job.failed", {"job_id": jid, "failure_category": cat.value})
             raise
         self._emit(session_id, "committee.completed", {"freeze_id": fid, "evidence_ids": ev_ids})
         entry_jobs: list[JSONValue] = []
@@ -628,18 +950,37 @@ class _LiveRun:
     def _record_stop(self, session_id: str, reason: str) -> None:
         self._emit(session_id, "wave.stopped", {"reason": reason})
 
-    def _store_final(self, session_id: str, freeze_id: str, answer: str, refs: Sequence[str]) -> None:
+    def _store_final(self, session_id: str, freeze_id: str, answer: str, claims: Sequence[object]) -> None:
         """Persist the synthesis answer, then close the session as completed."""
-        refs_json: list[JSONValue] = []
-        for rid in refs:
-            refs_json.append(rid)
-        final: dict[str, JSONValue] = {"answer": answer, "freeze_id": freeze_id, "refs": refs_json}
+        from app.research.agents import GroundedClaim as _GC
+        claims_json: list[JSONValue] = []
+        for claim in claims:
+            if isinstance(claim, _GC):
+                claims_json.append({"text": claim.text, "evidence_ids": list(claim.evidence_ids)})
+        final: dict[str, JSONValue] = {"answer": answer, "freeze_id": freeze_id, "claims": claims_json}
         cur = self.store.get_session(session_id)
         cur = replace(cur, final_result=final, updated_at=utcnow())
         self.store.save_session(cur)
         if cur.status == SessionStatus.SYNTHESIZING.value:
             cur = _session.transition_session(cur, SessionStatus.COMPLETED)
             self.store.save_session(cur)
+
+    def _store_empty_terminal(self, session_id: str) -> None:
+        """Persist completed no-evidence result (empty claims) and finish trace."""
+        try:
+            empty: dict[str, JSONValue] = {"answer": "", "freeze_id": "", "claims": []}
+            cur = self.store.get_session(session_id)
+            cur = replace(cur, final_result=empty, updated_at=utcnow())
+            if cur.status not in ("failed", "completed", "cancelled"):
+                cur = _session.transition_session(cur, SessionStatus.COMPLETED)
+            self.store.save_session(cur)
+        except Exception:
+            pass
+        try:
+            if self.trace is not None:
+                self.trace.finish("no_questions:empty-wave1", "completed")
+        except Exception:
+            pass
 
     def _run_wave2(self, wave1: Wave1Result, targeted: str) -> dict[str, object] | None:
         """One targeted SEC wave: fetch E2 -> freeze -> committee; None when E2 is empty."""
@@ -654,7 +995,7 @@ class _LiveRun:
         sess = replace(self.store.get_session(sid), current_wave=2, updated_at=utcnow())
         self.store.save_session(sess)
         self._emit(sid, "wave.started", {"wave_id": 2, "targeted_question": targeted})
-        src2: str = self._open_source_job(sid, 2)
+        src2: str = self._open_source_job(sid, 2, targeted or self.question)
         e2: list[str] = self._fetch_wave(sid, 2, targeted or self.question, src2, "w2-")
         if not e2:
             self._emit(sid, "wave.stopped", {"reason": "no_questions:empty-wave2"})
@@ -690,7 +1031,7 @@ class _LiveRun:
             result, deps=deps, budgets=self.limits,
             waves_used=1,
             jobs_used=len(self.store.list_jobs(result.session_id)),
-            tool_calls_used=self.tool_calls[0],
+            tool_calls_used=self.budget.used,
             elapsed_s=monotonic() - self.t0,
         )
         gate: str = f"{decision.stop_reason}:{decision.reason_detail}"
@@ -704,8 +1045,14 @@ class _LiveRun:
                 self.store.save_session(sess)
             synth = synthesize_wave1(self.question, self.as_of_str or "unbounded", result)
             if synth is not None:
-                self._store_final(result.session_id, synth.freeze_id, synth.answer, synth.refs)
+                self._store_final(result.session_id, synth.freeze_id, synth.answer, synth.claims)
             self._emit(result.session_id, "wave.stopped", {"reason": "complete:wave1"})
+            try:
+                if self.trace is not None:
+                    _conclusion = synth.answer[:2000] if synth is not None and synth.answer else "complete:wave1"
+                    self.trace.finish(_conclusion, "completed")
+            except Exception:
+                pass
             return {
                 "session_id": result.session_id, "wave_id": result.wave_id,
                 "freeze_id": result.freeze_id, "evidence_ids": list(result.evidence_ids),
@@ -721,8 +1068,14 @@ class _LiveRun:
             sess2 = _session.transition_session(sess2, SessionStatus.SYNTHESIZING)
             self.store.save_session(sess2)
         if synth2 is not None:
-            self._store_final(result.session_id, synth2.freeze_id, synth2.answer, synth2.refs)
+            self._store_final(result.session_id, synth2.freeze_id, synth2.answer, synth2.claims)
         self._emit(result.session_id, "wave.stopped", {"reason": "complete:wave2"})
+        try:
+            if self.trace is not None:
+                _conclusion2 = synth2.answer[:2000] if synth2 is not None and synth2.answer else "complete:wave2"
+                self.trace.finish(_conclusion2, "completed")
+        except Exception:
+            pass
         return {
             "session_id": result.session_id, "wave_id": result.wave_id,
             "freeze_id": result.freeze_id, "evidence_ids": list(result.evidence_ids),
@@ -749,6 +1102,8 @@ def run_live(
     *,
     interrupt_after: str | None = None,
     wave_id: int = 1,
+    provider: str = "fake",
+    model_name: str | None = None,
 ) -> dict[str, object]:
     """Run one live wave-1 and persist every step; resume never duplicates."""
     if interrupt_after not in (None, "source", "freeze", "one-committee"):
@@ -757,13 +1112,14 @@ def run_live(
     limits: DirectorBudgets = budgets if budgets is not None else DirectorBudgets()
     as_of_str: str = as_of.strip() if isinstance(as_of, str) and as_of.strip() else ""
     scoped: list[str] = list(tickers)
-    run = _LiveRun(store, question, objective, as_of, as_of_str, scoped, dispatch, model, limits, wave_id)
+    run = _LiveRun(store, question, objective, as_of, as_of_str, scoped, dispatch, model, limits, wave_id, provider=provider, model_name=model_name)
 
     if interrupt_after == "one-committee":
         sid = run._create_session(question, as_of_str, interrupt_after)
         eids = run._fetch(sid)
         if not eids:
             run._emit(sid, "wave.stopped", {"reason": "no_questions:empty-wave1"})
+            run._store_empty_terminal(sid)
             return {
                 "session_id": sid, "wave_id": wave_id, "freeze_id": "",
                 "evidence_ids": eids, "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
@@ -824,6 +1180,7 @@ def run_live(
             "dossier_id": did_out, "stock": None, "bull": None, "bear": None,
             "disagreement": None, "stop_reason": f"interrupted:{interrupt_after}",
         }
+    run._store_empty_terminal(result.session_id)
     return {
         "session_id": result.session_id, "wave_id": result.wave_id,
         "freeze_id": result.freeze_id, "evidence_ids": list(result.evidence_ids),
@@ -838,6 +1195,9 @@ def resume_live(
     model: Callable[[str], str],
     repo: ResearchRepository | None = None,
     budgets: DirectorBudgets | None = None,
+    *,
+    provider: str = "fake",
+    model_name: str | None = None,
 ) -> dict[str, object]:
     """Continue an interrupted session to a final result without duplicating work.
 
@@ -864,15 +1224,74 @@ def resume_live(
     as_of: str | None = as_of_str or None
     wave: int = sess.current_wave if isinstance(sess.current_wave, int) and sess.current_wave >= 1 else 1
     scoped: list[str] = []
-    for rec_dict in store.list_evidence(session_id):
-        meta = rec_dict.get("metadata")
-        if isinstance(meta, dict):
-            tickers_raw = meta.get("tickers")
-            if isinstance(tickers_raw, str) and tickers_raw.strip():
-                scoped = [t.strip() for t in tickers_raw.split(",") if t.strip()]
-                break
+    try:
+        for job in store.list_jobs(session_id):
+            if job.job_type != JobType.SOURCE_AGENT.value or job.wave_id != wave:
+                continue
+            diag = job.diagnostics or {}
+            raw_tick: object = diag.get("tickers")
+            if isinstance(raw_tick, list) and raw_tick:
+                tickers = [t.strip() for t in raw_tick if isinstance(t, str) and t.strip()]
+                if tickers:
+                    scoped = tickers
+                    break
+    except Exception:
+        pass
+    if not scoped:
+        for rec_dict in store.list_evidence(session_id):
+            meta = rec_dict.get("metadata")
+            if isinstance(meta, dict):
+                tickers_raw = meta.get("tickers")
+                if isinstance(tickers_raw, str) and tickers_raw.strip():
+                    scoped = [t.strip() for t in tickers_raw.split(",") if t.strip()]
+                    break
     run = _LiveRun(store, question, objective, as_of, as_of_str, scoped, dispatch, model,
-                   limits, wave, actor="resume_live")
+                   limits, wave, actor="resume_live", provider=provider, model_name=model_name)
+    try:
+        from pathlib import Path as _Path
+        import time as _time
+        from app.config import get_data_root as _gdr
+        trace_id = sess.budget.get("trace_id")
+        if not isinstance(trace_id, str) or not trace_id:
+            existing = list_traces(session_id)
+            trace_id = existing[0].trace_id if existing else None
+        if isinstance(trace_id, str) and trace_id:
+            try:
+                events = get_trace_events(trace_id)
+                seq = len(events)
+            except Exception:
+                seq = 0
+            try:
+                root = _gdr()
+            except Exception:
+                root = _Path("data")
+            from app.research.evals.traces import TRACE_DB_NAME as _tdb
+            try:
+                db_path = root / _tdb
+            except Exception:
+                db_path = _Path("data") / _tdb
+            run.trace = TraceRecorder(trace_id=trace_id, session_id=session_id, wave_id=wave, db_path=db_path, jsonl_path=root / "traces" / f"{trace_id}.jsonl", _seq=seq, _start_perf=_time.perf_counter(), _start_iso="", _closed=False)
+            run.trace_id = trace_id
+            run._trace_record("trace.resumed", {"trace_id": trace_id, "session_id": session_id, "wave_id": wave})
+        else:
+            import subprocess as _sp
+            try:
+                _sha = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, timeout=2).strip() or "unknown"
+            except Exception:
+                _sha = "unknown"
+            tr = create_trace(session_id=session_id, wave_id=wave, provider=run.provider, model=run.model_name, prompt_version="v1", git_sha=_sha)
+            run.trace, run.trace_id = tr, tr.trace_id
+            run._trace_record("trace.opened", {"trace_id": tr.trace_id, "session_id": session_id, "resume": True})
+    except Exception:
+        pass
+    try:
+        persisted = sess.budget.get("tool_calls_used")
+        if isinstance(persisted, int) and persisted >= 0:
+            run.budget.hydrate(persisted)
+        else:
+            run.budget.hydrate(len(store.list_evidence(session_id)))
+    except Exception:
+        pass
     for rec_dict in store.list_evidence(session_id):
         try:
             ev = evidence_from_dict(rec_dict)
@@ -893,17 +1312,51 @@ def resume_live(
         if isinstance(_did, str) and _did and _did not in run.dossier_ids:
             run.dossier_ids.append(_did)
     eids: list[str] = [e.evidence_id for e in run.ledger.list_session(session_id) if e.wave_id == wave]
+    dossier_id = f"{session_id}:{wave}:sec"
+    all_jobs = store.list_jobs(session_id)
+    src_jobs = [j for j in all_jobs if j.job_type == JobType.SOURCE_AGENT.value and j.wave_id == wave]
+    src_completed = any(j.status == "completed" for j in src_jobs)
+    dossier_exists = dossier_id in set(run.dossier_ids)
+    if src_completed and dossier_exists:
+        pass
+    else:
+        reuse_job = next((j for j in src_jobs if j.status in ("queued", "running")), None)
+        fetch_q = question
+        if reuse_job is not None:
+            if reuse_job.status == "queued":
+                store.save_job(_jobs.start_job(reuse_job))
+                run._emit(session_id, "job.started", {"job_id": reuse_job.job_id})
+            run._trace_record("source.reused", {"job_id": reuse_job.job_id, "wave_id": wave})
+            try:
+                diag_q = (reuse_job.diagnostics or {}).get("question")
+                if isinstance(diag_q, str) and diag_q.strip():
+                    fetch_q = diag_q
+            except Exception:
+                pass
+            src_id = reuse_job.job_id
+        else:
+            if wave == 2:
+                try:
+                    for evt in store.list_events(session_id):
+                        payload = evt.to_dict().get("payload")
+                        if isinstance(payload, dict) and evt.event_type == "wave.started":
+                            tq = payload.get("targeted_question")
+                            if isinstance(tq, str) and tq.strip():
+                                fetch_q = tq
+                                break
+                except Exception:
+                    pass
+            src_id = run._open_source_job(session_id, wave, fetch_q)
+        eids = run._fetch_wave(session_id, wave, fetch_q, src_id, "")
     if not eids:
-        src_new: str = run._open_source_job(session_id, wave)
-        eids = run._fetch_wave(session_id, wave, question, src_new, "")
-        if not eids:
-            run._record_stop(session_id, "no_questions:empty-wave1")
-            return {
-                "session_id": session_id, "wave_id": wave, "freeze_id": "",
-                "evidence_ids": eids, "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
-                "stock": None, "bull": None, "bear": None, "disagreement": None,
-                "stop_reason": "no_questions:empty-wave1",
-            }
+        run._record_stop(session_id, "no_questions:empty-wave1")
+        run._store_empty_terminal(session_id)
+        return {
+            "session_id": session_id, "wave_id": wave, "freeze_id": "",
+            "evidence_ids": eids, "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
+            "stock": None, "bull": None, "bear": None, "disagreement": None,
+            "stop_reason": "no_questions:empty-wave1",
+        }
     fid: str = f"{session_id}:{wave}:freeze"
     try:
         existing_freeze = store.get_freeze(fid)
