@@ -217,6 +217,29 @@ class ResearchRepository:
             raise KeyError(f"unknown session_id: {session_id!r}")
         return self._row_to_session(row)
 
+    def list_sessions(self, limit: int = 20) -> list[dict[str, object]]:
+        """Newest-first session summaries (read-only; empty when no DB yet)."""
+        if not self._path.exists():
+            return []
+        with self._connect() as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT session_id, status, updated_at, query FROM sessions"
+                    " ORDER BY updated_at DESC LIMIT ?",
+                    (max(1, limit),),
+                ).fetchall()
+            except sqlite3.Error:
+                return []
+        return [
+            {
+                "session_id": str(r["session_id"]),
+                "status": str(r["status"]),
+                "updated_at": str(r["updated_at"]),
+                "query": str(r["query"])[:80],
+            }
+            for r in rows
+        ]
+
     @staticmethod
     def _row_to_session(row: sqlite3.Row) -> ResearchSession:
         doc: dict[str, object] = {

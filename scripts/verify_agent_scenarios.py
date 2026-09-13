@@ -151,6 +151,7 @@ def _run_live_scenario(scenario, provider: str, model: str, prompt_version: str)
                     requires_evidence=scenario.requires_evidence,
                     has_fabricated_id=False, has_fabricated_source="INJECT" in scenario.question,
                     wall_clock_ms=wall_ms, budget_used=0, budget_cap=60,
+                    scenario_crashed=True,
                 )
             wall_ms = (time.monotonic() - t0) * 1000.0
             sid = str(out.get("session_id", ""))

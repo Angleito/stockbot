@@ -13,6 +13,10 @@ from app.tools import TOOLS
 
 
 def test_no_trading_tool_schemas_in_registry():
+    # Allowlist: local research-session lifecycle, not a brokerage action.
+    # research_cancel closes a research session (Capability.RESEARCH, no broker
+    # access); no order-cancellation tool exists.
+    non_trading = {"research_cancel"}
     names: list[str] = []
     for tool in TOOLS:
         function = tool.get("function")
@@ -21,11 +25,16 @@ def test_no_trading_tool_schemas_in_registry():
         assert isinstance(name, str)
         names.append(name)
     for name in names:
+        if name in non_trading:
+            continue
         lowered = name.lower()
         assert not is_blocked(lowered), f"trading-like tool in registry: {name}"
         assert lowered not in BLOCKED_TOOLS, f"blocked tool in registry: {name}"
     assert not any(
-        keyword in name for name in names for keyword in BLOCKED_KEYWORDS
+        keyword in name
+        for name in names
+        if name not in non_trading
+        for keyword in BLOCKED_KEYWORDS
     ), "trading keyword leaked into a model-visible tool schema"
 
 

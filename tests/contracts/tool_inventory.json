@@ -49,6 +49,11 @@
   "list_sec_filings",
   "list_tool_domains",
   "query_finra",
+  "research_cancel",
+  "research_read",
+  "research_resume",
+  "research_start",
+  "research_status",
   "run_scan",
   "search_company_patents",
   "search_sec_filings",
@@ -59,5 +64,6 @@
   "thesis_journal",
   "thesis_refine",
   "thesis_show",
+  "thesis_status",
   "thesis_watch"
 ]

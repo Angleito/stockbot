@@ -114,6 +114,7 @@ class EvalInput:
     has_private_leak: bool = False
     has_fabricated_id: bool = False
     has_fabricated_source: bool = False
+    scenario_crashed: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,12 @@ class ScenarioResult:
     passed: bool
     violations: tuple[str, ...]
     metrics: EvalMetrics
+
+
+def _v_execution_failure(inp: EvalInput) -> str | None:
+    if inp.scenario_crashed or inp.failed_count > 0:
+        return "scenario-execution-failed"
+    return None
 
 
 def _v_future_crossing(inp: EvalInput) -> str | None:
@@ -221,6 +228,7 @@ def _v_no_evidence(inp: EvalInput) -> str | None:
 
 
 _CHECKS: tuple[Callable[[EvalInput], str | None], ...] = (
+    _v_execution_failure,
     _v_future_crossing,
     _v_fabricated_id,
     _v_fabricated_source,

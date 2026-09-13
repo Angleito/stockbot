@@ -458,7 +458,8 @@ def test_describe_direct_tool_names_parity():
     assert set(direct) <= {pi_bridge._tool_name(t) for t in tools if isinstance(t, dict)}
     assert "thesis_show" in direct
     assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
-        "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal",
+        "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status",
+        "research_start", "research_resume", "research_status", "research_cancel", "research_read",
     }
 
 

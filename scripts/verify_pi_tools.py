@@ -48,7 +48,9 @@ TRANSIENT_RETRY_CAP = 2
 DEFAULT_CONCURRENCY = 3
 POLL_S = 2
 THESIS_ID_PLACEHOLDER = "thesis-placeholder"
-THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})
+THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status"})
+RESEARCH_SESSION_PLACEHOLDER = "research-session-placeholder"
+RESEARCH_SESSION_TOOLS = frozenset({"research_resume", "research_status", "research_cancel", "research_read"})
 FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
 # Prerequisite edges derive from TOOL_DISCOVERY_REGISTRY (single source with
 # app/tools.py); per-edge description citations enforced by
@@ -357,6 +359,15 @@ def ensure_thesis_fixture(store: Path) -> str:
     return str(out["thesis_id"])
 
 
+def ensure_research_fixture(store: Path) -> str:
+    """Create one verification research session in the batch store; returns its ID."""
+    ctx = RequestContext(principal_id="verify", capabilities=frozenset({Capability.RESEARCH}), data_root=store)
+    out = execute_tool("research_start", {"question": "Verify wiring: NVDA AI demand stays strong."}, "verify", context=ctx)
+    if not isinstance(out, dict) or not out.get("session_id"):
+        raise RuntimeError(f"research fixture setup failed: {str(out)[:300]}")
+    return str(out["session_id"])
+
+
 FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
 FINRA_SETTLEMENT_ENV = "PI_VERIFY_SETTLEMENT_DATE"
 FETCH_TOP_SYMBOLS_SQL = (
@@ -515,6 +526,12 @@ VERIFY_CASES: dict[str, _VerifyCase] = {
     "thesis_refine": {"arguments": {"id": "thesis-placeholder", "clarification": "AI datacenter capex keeps growing."}, "natural_v1": "AI datacenter capex keeps growing. Update thesis thesis-placeholder with that.", "natural_v2": "New info: AI datacenter capex keeps growing. Please update thesis thesis-placeholder."},
     "thesis_watch": {"arguments": {"id": "thesis-placeholder"}, "natural_v1": "What am I watching for thesis thesis-placeholder?", "natural_v2": "What are the watch rules for thesis thesis-placeholder?"},
     "thesis_journal": {"arguments": {"id": "thesis-placeholder", "body": "Operator note: still watching NVDA datacenter demand."}, "natural_v1": "Still watching NVDA datacenter demand. Add that to thesis thesis-placeholder.", "natural_v2": "Please note for thesis thesis-placeholder: still watching NVDA datacenter demand."},
+    "research_start": {"arguments": {"question": "Will NVDA inference growth offset slowing training capex?"}, "natural_v1": "Will NVDA inference growth offset slowing training capex?", "natural_v2": "Start a research session on whether NVDA inference growth will offset slowing training capex."},
+    "research_resume": {"arguments": {"session_id": "research-session-placeholder"}, "natural_v1": "Continue my research session research-session-placeholder.", "natural_v2": "Resume research session research-session-placeholder where it left off."},
+    "research_status": {"arguments": {"session_id": "research-session-placeholder"}, "natural_v1": "What is the state of my research session research-session-placeholder?", "natural_v2": "Show the status of research session research-session-placeholder."},
+    "research_cancel": {"arguments": {"session_id": "research-session-placeholder"}, "natural_v1": "Cancel my research session research-session-placeholder.", "natural_v2": "Stop and cancel research session research-session-placeholder."},
+    "research_read": {"arguments": {"session_id": "research-session-placeholder", "kind": "research", "resource_id": "research-session-placeholder"}, "natural_v1": "Read back my research session research-session-placeholder.", "natural_v2": "Show the stored record for research session research-session-placeholder."},
+    "thesis_status": {"arguments": {"id": "thesis-placeholder", "action": "pause"}, "natural_v1": "Pause monitoring that thesis.", "natural_v2": "Please pause thesis thesis-placeholder monitoring."},
 }
 
 
@@ -1438,6 +1455,11 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
                 for key, value in args.items():
                     if value == THESIS_ID_PLACEHOLDER:
                         args[key] = fixture_id
+            if tool in RESEARCH_SESSION_TOOLS:
+                research_id = ensure_research_fixture(store_dir.resolve())
+                for key, value in args.items():
+                    if value == RESEARCH_SESSION_PLACEHOLDER:
+                        args[key] = research_id
             if prompt_override is not None:
                 prompt = prompt_override
             elif attempt >= 3:

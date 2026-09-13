@@ -1,4 +1,4 @@
-"""Stockbot admin CLI — runs, data refresh, log server, login (no chat; Pi is the harness)."""
+"""Stockbot admin CLI — research state, runs, data refresh, log server, login (no chat; Pi is the harness)."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
 _SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
                 "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis", "google-data",
-                "research", "eval")
+                "research", "trace", "eval")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -675,200 +675,97 @@ def _cmd_google_data(args: argparse.Namespace) -> None:
 
 
 def _cmd_research(args: argparse.Namespace) -> None:
-    """Research sessions: thin dispatch over the KernelCore-owned kernel (no state here)."""
+    """Research sessions: state-only admin over the kernel service (no models here)."""
+    from app.research import service as _service
+
     sub = getattr(args, "research_command", None)
-    if sub == "run":
-        if getattr(args, "live", False):
-            from app.pi_gateway import PiSessionContext, execute_pi_tool
-            from app.research.repository import ResearchRepository as _LiveRepo
-            from app.research.runner import run_live as _run_live
-            _tickers: list[str] = [args.ticker] if getattr(args, "ticker", None) else []
-            _pi = PiSessionContext(session_id="research-live")
-            _as_of: str | None = args.as_of
-            def _dispatch(name: str, tool_args: dict[str, object]) -> dict[str, object]:
-                return execute_pi_tool(name, tool_args, _pi, as_of=_as_of)
-            def _model(prompt: str) -> str:
-                import subprocess as _sp
-                import tempfile as _tf
-                import time as _time
-                # pi answers quickly then lingers nondeterministically on teardown;
-                # a file redirect shows completed output long before exit, while a
-                # pipe yields nothing until then. Poll the file and reap early.
-                try:
-                    tmp = _tf.NamedTemporaryFile(prefix="pi-model-", suffix=".txt",
-                                                 delete=False, mode="w", encoding="utf-8")
-                    tmp_path = tmp.name
-                    tmp.close()
-                except OSError as exc:
-                    raise RuntimeError(f"Pi model temp file failed: {exc}") from exc
-                try:
-                    with open(tmp_path, "w", encoding="utf-8") as _out:
-                        proc = _sp.Popen(["pi", "-p", "--no-session", "--", prompt],
-                                         stdout=_out, stderr=_sp.PIPE, text=True)
-                except FileNotFoundError as exc:
-                    raise RuntimeError("`pi` binary not found (install Pi to run live)") from exc
-                deadline = _time.monotonic() + 300
-                stable = 0
-                last_size = -1
-                rc: int | None = None
-                try:
-                    while True:
-                        rc = proc.poll()
-                        try:
-                            size = __import__("os").path.getsize(tmp_path)
-                        except OSError:
-                            size = 0
-                        if size == last_size and size > 0:
-                            stable += 1
-                        else:
-                            stable = 0
-                        last_size = size
-                        if rc is not None or stable >= 3 or _time.monotonic() >= deadline:
-                            break
-                        _time.sleep(5)
-                finally:
-                    if proc.poll() is None:
-                        proc.kill()
-                try:
-                    with open(tmp_path, encoding="utf-8") as _fh:
-                        text = _fh.read().strip()
-                finally:
-                    try:
-                        __import__("os").unlink(tmp_path)
-                    except OSError:
-                        pass
-                if rc is not None and rc != 0 and not text:
-                    raise RuntimeError(f"Pi exited {rc}")
-                if not text:
-                    raise RuntimeError("Pi timed out")
-                return text
-            from app.research.runner import LiveModelError as _LiveModelError
-            try:
-                _res: dict[str, object] = _run_live(
-                    args.question, args.objective or args.question, args.as_of,
-                    _tickers, _dispatch, _model, _LiveRepo(), None,
-                    interrupt_after=args.interrupt_after)
-            except _LiveModelError as exc:
-                raise SystemExit(f"research --live: {exc.message} (session {exc.session_id})") from exc
-            _ev: object = _res.get("evidence_ids")
-            _n: int = len(_ev) if isinstance(_ev, list) else 0
-            print(f"{_res.get('session_id')} freeze={_res.get('freeze_id')} evidence={_n}"
-                  f" dossier={_res.get('dossier_id')} stop={_res.get('stop_reason')}")
-            print(f"committee: stock={_res.get('stock') is not None}"
-                  f" bull={_res.get('bull') is not None} bear={_res.get('bear') is not None}")
-            if isinstance(_res.get("wave2_freeze_id"), str):
-                _ev2: object = _res.get("wave2_evidence_ids")
-                print(f"wave2: freeze={_res.get('wave2_freeze_id')}"
-                      f" evidence={len(_ev2) if isinstance(_ev2, list) else 0}"
-                      f" dossier={_res.get('wave2_dossier_id')} target={_res.get('wave2_targeted')}")
-            return
-        from app.research import jobs as _jobs
-        from app.research import session as _session
+    if sub == "create":
         from app.research.models import default_policy
-        from app.research.repository import ResearchRepository
         policy = default_policy()
         if args.interrupt_after is not None:
             # ponytail: test hook recorded on the session; the wave runner honors it when it lands.
             policy["interrupt_after"] = args.interrupt_after
-        new_session = _session.create_session(
-            args.question, args.objective or args.question,
-            as_of=args.as_of, policy=policy)
-        updated, job = _jobs.create_job(
-            new_session, [], job_type="source_agent", owner="cli")
-        repo = ResearchRepository()
-        repo.save_session(updated)
-        repo.save_job(job)
-        print(f"{updated.session_id} job={job.job_id} status={updated.status}")
-    elif sub == "inspect":
-        from app.research.repository import ResearchRepository, pending_next_action
-        repo = ResearchRepository()
         try:
-            found = repo.get_session(args.session_id)
-        except KeyError:
-            raise SystemExit(f"research: unknown session {args.session_id}") from None
-        job_list = repo.list_jobs(args.session_id)
-        print(f"{found.session_id} status={found.status} wave={found.current_wave}")
-        print(f"query: {found.query}")
-        print(f"jobs={len(job_list)} evidence={len(found.evidence_ids)}"
-              f" freezes={len(found.freeze_ids)} dossiers={len(found.dossier_ids)}")
-        print(f"pending: {pending_next_action(found, job_list)}")
-    elif sub == "resume":
-        if getattr(args, "live", False):
-            from app.pi_gateway import PiSessionContext, execute_pi_tool
-            from app.research.repository import ResearchRepository as _ResumeRepo
-            from app.research.runner import LiveModelError as _ResumeModelError
-            from app.research.runner import resume_live as _resume_live
-            _rrepo = _ResumeRepo()
-            try:
-                _found = _rrepo.get_session(args.session_id)
-            except KeyError:
-                raise SystemExit(f"research: unknown session {args.session_id}") from None
-            _ras_of: str | None = _found.as_of.isoformat() if _found.as_of is not None else None
-            _rpi = PiSessionContext(session_id="research-live")
-            def _rdispatch(name: str, tool_args: dict[str, object]) -> dict[str, object]:
-                return execute_pi_tool(name, tool_args, _rpi, as_of=_ras_of)
-            def _rmodel(prompt: str) -> str:
-                import subprocess as _sp
-                try:
-                    proc: _sp.CompletedProcess[str] = _sp.run(
-                        ["pi", "-p", "--no-session", "--", prompt],
-                        capture_output=True, text=True, timeout=300)
-                except FileNotFoundError as exc:
-                    raise RuntimeError("`pi` binary not found (install Pi to run live)") from exc
-                except _sp.TimeoutExpired as exc:
-                    raise RuntimeError("Pi timed out") from exc
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Pi exited {proc.returncode}: {proc.stderr.strip()[:500]}")
-                text: str = proc.stdout.strip()
-                if not text:
-                    raise RuntimeError("Pi returned no text")
-                return text
-            try:
-                _rres: dict[str, object] = _resume_live(args.session_id, _rdispatch, _rmodel, _rrepo, None)
-            except KeyError:
-                raise SystemExit(f"research: unknown session {args.session_id}") from None
-            except _ResumeModelError as exc:
-                raise SystemExit(f"research --live: {exc.message} (session {exc.session_id})") from exc
-            _rev: object = _rres.get("evidence_ids")
-            _rn: int = len(_rev) if isinstance(_rev, list) else 0
-            print(f"{_rres.get('session_id')} freeze={_rres.get('freeze_id')} evidence={_rn}"
-                  f" dossier={_rres.get('dossier_id')} stop={_rres.get('stop_reason')}")
-            print(f"committee: stock={_rres.get('stock') is not None}"
-                  f" bull={_rres.get('bull') is not None} bear={_rres.get('bear') is not None}")
-            if isinstance(_rres.get("wave2_freeze_id"), str):
-                _rev2: object = _rres.get("wave2_evidence_ids")
-                print(f"wave2: freeze={_rres.get('wave2_freeze_id')}"
-                      f" evidence={len(_rev2) if isinstance(_rev2, list) else 0}"
-                      f" dossier={_rres.get('wave2_dossier_id')} target={_rres.get('wave2_targeted')}")
-            return
-        # ponytail: idempotent resume (no dup evidence/jobs) lives in ResearchRepository.resume.
-        from app.research.repository import ResearchRepository
-        repo = ResearchRepository()
-        try:
-            state = repo.resume(args.session_id)
-        except KeyError:
-            raise SystemExit(f"research: unknown session {args.session_id}") from None
-        print(f"{state.session.session_id} wave={state.wave} status={state.session.status}")
-        print(f"budgets: {json.dumps(state.budgets, sort_keys=True)}")
-        print(f"open jobs: {', '.join(state.open_job_ids) if state.open_job_ids else '-'}")
-        print(f"pending: {state.pending_next_action}")
-    elif sub == "cancel":
-        from app.research import session as _session
-        from app.research.models import SessionStatus
-        from app.research.repository import ResearchRepository
-        repo = ResearchRepository()
-        try:
-            found = repo.get_session(args.session_id)
-        except KeyError:
-            raise SystemExit(f"research: unknown session {args.session_id}") from None
-        try:
-            out = _session.transition_session(found, SessionStatus.CANCELLED)
+            session_id = _service.create_research(
+                args.question, args.objective or args.question,
+                as_of=args.as_of, policy=policy)
+            state = _service.inspect_research(session_id)
         except ValueError as exc:
             raise SystemExit(f"research: {exc}") from None
-        repo.save_session(out)
-        print(f"{out.session_id} status={out.status}")
+        session = state["session"]
+        assert isinstance(session, dict)
+        jobs = state["jobs"]
+        assert isinstance(jobs, list)
+        first = jobs[0] if jobs else None
+        job_id = first.get("job_id") if isinstance(first, dict) else None
+        print(f"{session_id} job={job_id} status={session.get('status')}")
+    elif sub == "inspect":
+        try:
+            state = _service.inspect_research(args.session_id)
+            resumed = _service.resume_research(args.session_id)
+        except _service.ResearchNotFound:
+            raise SystemExit(f"research: unknown session {args.session_id}") from None
+        session = state["session"]
+        assert isinstance(session, dict)
+        jobs = state["jobs"]
+        assert isinstance(jobs, list)
+        evidence_ids = session.get("evidence_ids")
+        freeze_ids = session.get("freeze_ids")
+        dossier_ids = session.get("dossier_ids")
+        budgets = resumed.get("budgets")
+        open_ids = resumed.get("open_job_ids")
+        assert isinstance(open_ids, list)
+        print(f"{session.get('session_id')} status={session.get('status')} wave={session.get('current_wave')}")
+        print(f"query: {session.get('query')}")
+        print(f"jobs={len(jobs)} evidence={len(evidence_ids) if isinstance(evidence_ids, list) else 0}"
+              f" freezes={len(freeze_ids) if isinstance(freeze_ids, list) else 0}"
+              f" dossiers={len(dossier_ids) if isinstance(dossier_ids, list) else 0}")
+        print(f"pending: {state.get('pending_next_action')}")
+        print(f"budgets: {json.dumps(budgets, sort_keys=True) if isinstance(budgets, dict) else '{}'}")
+        print(f"open jobs: {', '.join(str(i) for i in open_ids) if open_ids else '-'}")
+    elif sub == "list":
+        rows = _service.list_research(limit=args.limit)
+        if not rows:
+            print("No research sessions recorded.")
+            return
+        for row in rows:
+            print(f"{row['session_id']} status={row['status']} {str(row['updated_at'])[:26]} {row['query']}")
+    elif sub == "cancel":
+        try:
+            out = _service.cancel_research(args.session_id)
+        except _service.ResearchNotFound:
+            raise SystemExit(f"research: unknown session {args.session_id}") from None
+        print(f"{out.get('session_id')} status={out.get('status')}")
+    elif sub == "retry":
+        try:
+            job = _service.retry_job(args.job_id)
+        except _service.ResearchNotFound:
+            raise SystemExit(f"research: unknown job {args.job_id}") from None
+        print(f"{job.get('job_id')} status={job.get('status')} session={job.get('session_id')}")
     else:
-        raise SystemExit("research: choose from run, inspect, resume, cancel")
+        raise SystemExit("research: choose from create, inspect, list, cancel, retry")
+
+
+def _cmd_trace(session_id: str) -> None:
+    """Show persisted traces for a research session (read-only)."""
+    from app.research.evals.traces import get_trace_events, list_traces
+
+    headers = list_traces(session_id)
+    if not headers:
+        print(f"no traces for session {session_id}")
+        return
+    for header in headers:
+        print(f"{header.trace_id} wave={header.wave_id} model={header.model} status={header.status}")
+        try:
+            events = get_trace_events(header.trace_id)
+        except Exception as exc:
+            print(f"  events: unavailable ({exc})")
+            continue
+        print(f"  events={len(events)}")
+        for evt in events[:50]:
+            print(f"    {evt.seq} {evt.event_type} {evt.duration_ms}")
+        if len(events) > 50:
+            print(f"    ... {len(events) - 50} more")
 
 
 def _cmd_eval(args: argparse.Namespace) -> None:
@@ -1016,30 +913,27 @@ def _build_parser() -> argparse.ArgumentParser:
                                 help="seconds between ticks (default 900; must be > 0)")
     monitor_parser.add_argument("--known-at", default=None,
                                 help="PIT upper bound ISO timestamp (default: now UTC per tick)")
-    research_parser = subparsers.add_parser("research", help="run/inspect/resume/cancel a research session")
+    research_parser = subparsers.add_parser("research", help="create/inspect/list/cancel/retry a research session (state only)")
     research_sub = research_parser.add_subparsers(dest="research_command")
-    research_run = research_sub.add_parser("run", help="create a session and enqueue its first job")
-    research_run.add_argument("--question", required=True, help="research question")
-    research_run.add_argument("--objective", default=None, help="objective (default: question)")
-    research_run.add_argument("--ticker", default=None, help="primary ticker, e.g. NVDA")
-    research_run.add_argument("--as-of", default=None, help="PIT upper bound ISO timestamp")
-    research_run.add_argument("--interrupt-after", default=None,
+    research_create = research_sub.add_parser("create", help="create a session and enqueue its first job")
+    research_create.add_argument("--question", required=True, help="research question")
+    research_create.add_argument("--objective", default=None, help="objective (default: question)")
+    research_create.add_argument("--as-of", default=None, help="PIT upper bound ISO timestamp")
+    research_create.add_argument("--interrupt-after", default=None,
                               choices=["source", "freeze", "one-committee"],
                               help="test hook recorded on the session so resume can be exercised")
-    research_run.add_argument("--live", action="store_true",
-                              help="run wave-1 live via Pi dispatch/model and persist evidence/freeze/dossier/committee")
     research_inspect = research_sub.add_parser("inspect", help="show a research session")
     research_inspect.add_argument("session_id", help="session id")
-    research_resume = research_sub.add_parser(
-        "resume", help="resume an interrupted session without duplicating evidence/jobs")
-    research_resume.add_argument("session_id", help="session id")
-    research_resume.add_argument("--interrupt-after", default=None,
-                                 choices=["source", "freeze", "one-committee"],
-                                 help="test hook: stop again after one stage")
-    research_resume.add_argument("--live", action="store_true",
-                                 help="continue the session live via Pi dispatch/model to a final result")
+    research_list = research_sub.add_parser("list", help="list recent research sessions")
+    research_list.add_argument("--limit", type=int, default=20, help="max rows (default 20)")
     research_cancel = research_sub.add_parser("cancel", help="cancel a research session")
     research_cancel.add_argument("session_id", help="session id")
+    research_retry = research_sub.add_parser("retry", help="enqueue a replacement for a failed job")
+    research_retry.add_argument("job_id", help="job id")
+
+    trace_parser = subparsers.add_parser("trace", help="show persisted traces for a research session")
+    trace_parser.add_argument("session_id", help="research session id")
+
     eval_common = argparse.ArgumentParser(add_help=False)
     eval_common.add_argument("--scenario", default=None, help="one scenario (default: all)")
     eval_common.add_argument("--provider", default="unknown", help="provider label")
@@ -1115,13 +1009,15 @@ def main() -> None:
         _cmd_google_data(args)
     elif args.command == "research":
         _cmd_research(args)
+    elif args.command == "trace":
+        _cmd_trace(args.session_id)
     elif args.command == "eval":
         _cmd_eval(args)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
             "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
-            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data, research, eval)"
+            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data, research, trace, eval)"
         )
 
 

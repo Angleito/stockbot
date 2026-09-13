@@ -121,11 +121,15 @@ def test_tool_schemas_have_dispatchers() -> None:
 
 def test_no_trading_tool_names() -> None:
     banned = ("order", "place", "submit", "cancel", "replace", "withdraw", "deposit", "transfer", "trade")
+    # Allowlist: local session lifecycle, not a brokerage action. research_cancel
+    # closes a research session (Capability.RESEARCH, no broker access); no
+    # order-cancellation tool exists.
+    non_trading = {"research_cancel"}
     names = [_tool_name(entry) for entry in tools.TOOLS]
     assert len(names) >= 24
     for name in names:
         for token in banned:
-            assert token not in name.lower(), f"{name} contains banned token {token}"
+            assert token not in name.lower() or name in non_trading, f"{name} contains banned token {token}"
 
 
 def test_execution_rechecks_application_capability() -> None:

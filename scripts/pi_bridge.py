@@ -9,11 +9,22 @@ string ``id`` get ``{"error": "missing_arg"}``.
   {"op": "tool_call", "id": str, "run_id": str, "tool_call_id": str,
    "name": str, "arguments": dict, "bridge_queue_ms": float}
     -> {"id": str, "result": {...}}
-  {"op": "abort_run", "id": str, "run_id": str, "error_type": str, "error_message": str}
-    -> {"id": str, "ok": true}
-  {"op": "pi_event", "id": str, "run_id": str, "event": str, ...} -> {"id": str, "ok": true}
-  (recorded into the existing runs DB via RunRecorder; unknown events or a
-  disabled recorder are ignored without breaking research)
+  {"op": "tool.invoke", "id": str, "name": str, "arguments": dict,
+   "session_id": str | null, "tool_call_id": str, "bridge_queue_ms": float}
+    -> {"id": str, "result": {...}} (dumb tool passthrough, no session state)
+  {"op": "research.session.create", "id": str, "question": str,
+   "objective": str | null, "as_of": str | null} -> {"id": str, "result": {"session_id": str}}
+  {"op": "research.job.start", "id": str, "session_id": str, "type": str,
+   "source": str | null, "parent": str | null, "budget": dict | null}
+    -> {"id": str, "result": {job}}
+  {"op": "research.job.complete", "id": str, "job_id": str, "outcome": dict | null}
+    -> {"id": str, "result": {job}}
+  {"op": "research.evidence.add", "id": str, "session_id": str, "job_id": str,
+   "item": dict} -> {"id": str, "result": {evidence record}}
+  {"op": "research.session.inspect", "id": str, "session_id": str}
+    -> {"id": str, "result": {session, jobs, pending_next_action}}
+  {"op": "research.session.cancel", "id": str, "session_id": str}
+    -> {"id": str, "result": {session}}
 
 ``id`` is protocol correlation only. ``tool_call_id`` is Pi's tool-call ID
 used for run tracing (``{run_id}:tc:{tool_call_id}``). ``bridge_queue_ms``
@@ -46,6 +57,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.pi_gateway import PiSessionContext, execute_pi_tool
+from app.research import service as _kernel  # eventual rename target: kernel_rpc.py (name only; transport stays)
 from app.policy import Capability
 from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
 from app.runtime import EventType
@@ -388,6 +400,148 @@ def _abort_run(request: Mapping[str, object]) -> dict[str, object]:
     return {"ok": True, "finalized": finalized}
 
 
+def _op_research_session_create(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.session.create -> service.create_research."""
+    question = request.get("question")
+    objective = request.get("objective")
+    as_of = request.get("as_of")
+    policy = request.get("policy")
+    try:
+        session_id = _kernel.create_research(
+            question if isinstance(question, str) else "",
+            objective if isinstance(objective, str) and objective.strip() else None,
+            as_of=as_of if isinstance(as_of, str) else None,
+            policy=policy if isinstance(policy, dict) else None,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": {"session_id": session_id}}
+
+
+def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.job.start -> service.start_job."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    job_type = request.get("type")
+    source = request.get("source")
+    parent = request.get("parent")
+    budget = request.get("budget")
+    try:
+        job = _kernel.start_job(
+            session_id,
+            job_type if isinstance(job_type, str) and job_type else "source_agent",
+            source if isinstance(source, str) and source else None,
+            parent if isinstance(parent, str) and parent else None,
+            budget if isinstance(budget, dict) else None,
+        )
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": job}
+
+
+def _op_research_job_complete(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.job.complete -> service.complete_job."""
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    outcome = request.get("outcome")
+    try:
+        job = _kernel.complete_job(job_id, outcome if isinstance(outcome, dict) else None)
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": job}
+
+
+def _op_research_evidence_add(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.evidence.add -> service.record_evidence."""
+    session_id = request.get("session_id")
+    job_id = request.get("job_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    item = request.get("item")
+    if not isinstance(item, dict):
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'item' must be a mapping"}
+    try:
+        record = _kernel.record_evidence(session_id, job_id, item)
+    except _kernel.ResearchNotFound as exc:
+        if "unknown job_id" in str(exc):
+            return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": record}
+
+
+def _op_research_session_inspect(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.session.inspect -> service.inspect_research."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    try:
+        state = _kernel.inspect_research(session_id)
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    return {"id": protocol_id, "result": state}
+
+
+def _op_research_session_cancel(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.session.cancel -> service.cancel_research."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    try:
+        session = _kernel.cancel_research(session_id)
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    return {"id": protocol_id, "result": session}
+
+
+def _run_tool_invoke(request: Mapping[str, object]) -> None:
+    """Executor worker: dumb tool passthrough with an ephemeral session context."""
+    protocol_id = request.get("id")
+    name = request.get("name")
+    arguments = request.get("arguments", {})
+    if not isinstance(name, str) or not name:
+        _write({"id": protocol_id, "error": "missing_arg"})
+        return
+    if not isinstance(arguments, dict):
+        _write({"id": protocol_id, "error": "missing_arg"})
+        return
+    tool_call_id = request.get("tool_call_id")
+    data_root = request.get("data_root")
+    raw_as_of = request.get("as_of")
+    as_of = raw_as_of if isinstance(raw_as_of, str) and raw_as_of else None
+    raw_queue_ms = request.get("bridge_queue_ms")
+    try:
+        queue_ms = float(raw_queue_ms if isinstance(raw_queue_ms, (int, float, str)) else 0.0)
+    except (TypeError, ValueError):
+        queue_ms = 0.0
+    raw_sid = request.get("session_id", request.get("run_id"))
+    sid = raw_sid if isinstance(raw_sid, str) and raw_sid else f"bridge:{protocol_id}"
+    try:
+        result = execute_pi_tool(
+            name,
+            arguments,
+            PiSessionContext(session_id=sid),
+            tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
+            protocol_id=protocol_id if isinstance(protocol_id, str) else None,
+            bridge_queue_ms=queue_ms,
+            data_root=data_root if isinstance(data_root, str) and data_root else None,
+            as_of=as_of,
+        )
+        _write({"id": protocol_id, "result": result})
+    except Exception:  # per-request failure never breaks the loop
+        logger.exception("tool.invoke failed")
+        _write({"id": protocol_id, "error": "bridge_failed"})
+
+
 def _handle(line: str) -> dict[str, object] | None:
     """Route one input line. Returns a response dict, or None when the
     response will be written asynchronously by a worker (tool_call)."""
@@ -418,6 +572,21 @@ def _handle(line: str) -> dict[str, object] | None:
         return {"id": protocol_id, **_abort_run(request)}
     if op == "pi_event":
         return {"id": protocol_id, **_pi_event(request)}
+    if op == "tool.invoke":
+        _executor.submit(_run_tool_invoke, dict(request))
+        return None
+    if op == "research.session.create":
+        return _op_research_session_create(request, protocol_id)
+    if op == "research.job.start":
+        return _op_research_job_start(request, protocol_id)
+    if op == "research.job.complete":
+        return _op_research_job_complete(request, protocol_id)
+    if op == "research.evidence.add":
+        return _op_research_evidence_add(request, protocol_id)
+    if op == "research.session.inspect":
+        return _op_research_session_inspect(request, protocol_id)
+    if op == "research.session.cancel":
+        return _op_research_session_cancel(request, protocol_id)
     return {"id": protocol_id, "error": "unknown_op"}
 
 

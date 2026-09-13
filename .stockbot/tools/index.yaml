@@ -78,6 +78,11 @@ domains:
     families:
       - search:
         path: "/patents/search"
+  research:
+    description: "Live research sessions: questions, jobs, evidence, freezes, and dossiers."
+    families:
+      - session:
+        path: "/research/session"
   sec:
     description: "SEC filing discovery, retrieval, and document reading via EDGAR."
     families:
@@ -470,6 +475,66 @@ tools:
     summary: "Company patent search: publications, assignees, counts, and classifications."
     version: 2
     keywords: [assignee, classification, company, count, filed, finding, lately, patent, patented, publication, search]
+  - name: research_cancel
+    domain: research
+    family: session
+    path: "/research/session/research_cancel"
+    intent: cancel_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Cancel a research session; terminal sessions return current state."
+    version: 2
+    keywords: [cancel, current, longer, needed, no, research, return, session, state, stopping, terminal]
+  - name: research_read
+    domain: research
+    family: session
+    path: "/research/session/research_read"
+    intent: read_research_resource
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Read one persisted research resource: evidence, freeze, dossier, job, or session record."
+    version: 2
+    keywords: [dossier, evidence, freeze, job, one, persisted, read, reading, record, research, resource, session, single]
+  - name: research_resume
+    domain: research
+    family: session
+    path: "/research/session/research_resume"
+    intent: resume_research
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Resume a research session: read-only snapshot with wave, budgets, open jobs, and next action."
+    version: 2
+    keywords: [action, budget, entering, existing, job, next, only, open, re, read, research, resume, resuming, session, snapshot, wave]
+  - name: research_start
+    domain: research
+    family: session
+    path: "/research/session/research_start"
+    intent: start_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Start a research session for a question; returns the session ID with its first job and next action."
+    version: 2
+    keywords: [action, first, id, job, new, next, question, research, return, session, start, starting]
+  - name: research_status
+    domain: research
+    family: session
+    path: "/research/session/research_status"
+    intent: inspect_research
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Read a research session with its jobs and pending next action."
+    version: 2
+    keywords: [action, checking, current, inspect, job, next, pending, read, research, session, state, statu]
   - name: find_sec_entities
     domain: sec
     family: entity-discovery
@@ -626,6 +691,18 @@ tools:
     summary: "Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>."
     version: 2
     keywords: [assessment, checking, current, id, pas, read, retrieve, state, statu, thesi, uuid]
+  - name: thesis_status
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_status"
+    intent: change_thesis_status
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "Pause, resume, or close thesis monitoring. Pass the thesis ID as thesis:<uuid>."
+    version: 2
+    keywords: [change, close, closing, deleting, id, monitoring, pas, pause, paused, pausing, resume, resuming, rule, statu, thesi, uuid, without]
   - name: thesis_watch
     domain: thesis
     family: lifecycle

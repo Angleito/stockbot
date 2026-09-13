@@ -701,6 +701,43 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
   refreshStatus(lastCtx);
  });
+
+ // --- operator slash commands: thin delegation into research tools ---
+ // Pi owns the agent loop; these commands only phrase the tool call and let
+ // the agent run it. No state, policy, or synthesis lives here.
+ pi.registerCommand("research", {
+  description: "Start a persisted research session: /research <question> (delegates to research_start)",
+  handler: async (args) => {
+   const question = args.trim();
+   await pi.sendMessage(
+    {
+     customType: "stockbot-research-command",
+     content: question
+      ? `Use the research_start tool with question: ${question}`
+      : "Ask the operator for a research question, then use the research_start tool with it.",
+     display: true,
+    },
+    { triggerTurn: true, deliverAs: "followUp" },
+   );
+  },
+ });
+ pi.registerCommand("research-status", {
+  description: "Show a research session: /research-status <session_id> (delegates to research_status)",
+  handler: async (args) => {
+   const sessionId = args.trim();
+   await pi.sendMessage(
+    {
+     customType: "stockbot-research-status-command",
+     content: sessionId
+      ? `Use the research_status tool with session_id: ${sessionId}`
+      : "Ask the operator for a research session id, then use the research_status tool with it.",
+     display: true,
+    },
+    { triggerTurn: true, deliverAs: "followUp" },
+   );
+  },
+ });
+
  pi.on("agent_start", () => {
   // A queued routing continuation reuses the same run, recorder/session,
   // active tools, and routing state instead of starting a second bridge run.

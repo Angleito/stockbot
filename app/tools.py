@@ -1144,6 +1144,95 @@ TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
+            "name": "thesis_status",
+            "description": "Pauses, resumes, or closes thesis monitoring. Pause suspends monitor ticks without deleting rules; resume re-activates; close ends monitoring permanently. Returns thesis_id, slug, and status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Thesis ID or slug."},
+                    "action": {"type": "string", "enum": ["pause", "resume", "close"], "description": "Status change to apply."},
+                },
+                "required": ["id", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_start",
+            "description": "Starts a research session for a question and returns session_id with its first job, status, and pending next action.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Research question."},
+                    "objective": {"type": "string", "description": "Objective (defaults to the question)."},
+                    "as_of": {"type": "string", "description": "Point-in-time cutoff (ISO-8601); omit for current state."},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_resume",
+            "description": "Resumes a research session: read-only snapshot with session, wave, budgets, open jobs, and pending next action. Nonmutating.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_status",
+            "description": "Reads a research session with its jobs and pending next action. Nonmutating.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_cancel",
+            "description": "Cancels a research session; cancelling a terminal session returns its current state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_read",
+            "description": "Reads one persisted research resource (evidence, freeze, dossier, job, or session) by ID. Nonmutating.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "kind": {"type": "string", "enum": ["evidence", "freeze", "dossier", "job", "research"], "description": "Resource store to read."},
+                    "resource_id": {"type": "string", "description": "Evidence, freeze, dossier, job, or session ID."},
+                },
+                "required": ["session_id", "kind", "resource_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_alternative_signals",
             "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
             "parameters": {
@@ -2087,6 +2176,7 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
     "offerings": "Financing history, offering terms, and dilution math.",
     "ownership": "Beneficial ownership stakes, holder changes, and relationship links.",
     "patents": "Patent records and innovation activity.",
+    "research": "Live research sessions: questions, jobs, evidence, freezes, and dossiers.",
     "thesis": "Thesis tracking, refinement, obligations, and operator notes.",
     "transactions": "Transaction status and mandate evaluation for deals.",
     "valuation": "Valuation multiples and financial-statement analysis.",
@@ -2846,6 +2936,22 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         prerequisites=(),
         direct_activation=False,
     ),
+    "thesis_status": ToolDiscovery(
+        domain="thesis",
+        family="lifecycle",
+        intent="change_thesis_status",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_thesis",
+        time_mode="current",
+        summary="Pause, resume, or close thesis monitoring. Pass the thesis ID as thesis:<uuid>.",
+        choose_when=("Pausing monitoring without deleting rules, resuming a paused thesis, or closing a thesis.",),
+        reject_when=("Not for reading thesis state (thesis_show).", "Not for editing claims or rules (thesis_refine, thesis_watch).",),
+        conflicts_with=(),
+        related_tools=("thesis_show",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
     "thesis_refine": ToolDiscovery(
         domain="thesis",
         family="lifecycle",
@@ -2890,6 +2996,86 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         reject_when=("Not for logging notes (thesis_journal).", "Not for reading thesis status and assessment (thesis_show).",),
         conflicts_with=("thesis_journal", "thesis_show",),
         related_tools=("thesis_show",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_start": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="start_research",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Start a research session for a question; returns the session ID with its first job and next action.",
+        choose_when=("Starting research on a new question.",),
+        reject_when=("Not for checking session state (research_status).", "Not for cancelling a session (research_cancel).",),
+        conflicts_with=("research_status", "research_cancel",),
+        related_tools=("research_status", "research_cancel", "research_resume",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_resume": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="resume_research",
+        output_kind="current_snapshot",
+        source="local",
+        entity_scope="single_session",
+        time_mode="latest_or_as_of",
+        summary="Resume a research session: read-only snapshot with wave, budgets, open jobs, and next action.",
+        choose_when=("Resuming or re-entering an existing research session.",),
+        reject_when=("Not for checking jobs and next action without wave state (research_status).",),
+        conflicts_with=("research_status",),
+        related_tools=("research_status", "research_start",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_status": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="inspect_research",
+        output_kind="current_snapshot",
+        source="local",
+        entity_scope="single_session",
+        time_mode="latest_or_as_of",
+        summary="Read a research session with its jobs and pending next action.",
+        choose_when=("Checking a research session and its current state.",),
+        reject_when=("Not for starting a session (research_start).", "Not for resuming wave and budget state (research_resume).",),
+        conflicts_with=("research_start", "research_resume",),
+        related_tools=("research_start", "research_resume", "research_read", "research_cancel",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_cancel": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="cancel_research",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Cancel a research session; terminal sessions return current state.",
+        choose_when=("Stopping a research session that is no longer needed.",),
+        reject_when=("Not for starting a session (research_start).",),
+        conflicts_with=("research_start",),
+        related_tools=("research_start", "research_status",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
+    "research_read": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="read_research_resource",
+        output_kind="current_snapshot",
+        source="local",
+        entity_scope="single_session",
+        time_mode="latest_or_as_of",
+        summary="Read one persisted research resource: evidence, freeze, dossier, job, or session record.",
+        choose_when=("Reading a single evidence, freeze, dossier, job, or session record.",),
+        reject_when=("Not for session state overviews (research_status).",),
+        conflicts_with=(),
+        related_tools=("research_status",),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3868,6 +4054,12 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "thesis_refine": Capability.RESEARCH,
     "thesis_watch": Capability.RESEARCH,
     "thesis_journal": Capability.RESEARCH,
+    "thesis_status": Capability.RESEARCH,
+    "research_start": Capability.RESEARCH,
+    "research_resume": Capability.RESEARCH,
+    "research_status": Capability.RESEARCH,
+    "research_cancel": Capability.RESEARCH,
+    "research_read": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
     "get_option_chain": Capability.BROKER_MARKET_READ,
     "analyze_option_contract": Capability.BROKER_MARKET_READ,
@@ -3975,8 +4167,8 @@ def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: Reques
     return Thesis.from_dict(dict(snap.thesis), "<as_of>")
 
 
-_PIT_INSTANT_TOOLS = frozenset({"thesis_show"})
-_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal"})
+_PIT_INSTANT_TOOLS = frozenset({"thesis_show", "research_status", "research_resume", "research_read"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel"})
 
 
 def _pit_day(cutoff: str) -> str | None:
@@ -4217,6 +4409,116 @@ def _thesis_journal(arguments: dict[str, object], context: RequestContext) -> di
     dest = repo.append_journal_entry(thesis.thesis_id, entry)
     return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
 
+def _thesis_status(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    repo = _thesis_repo_for(context)
+    thesis_id = arguments.get("id")
+    if not isinstance(thesis_id, str) or not thesis_id.strip():
+        raise ValueError("thesis_status: 'id' must be a non-empty string")
+    action = arguments.get("action")
+    if not isinstance(action, str) or action not in ("pause", "resume", "close"):
+        raise ValueError("thesis_status: 'action' must be one of pause, resume, close")
+    op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis, "close": repo.close_thesis}[action]
+    updated = op(thesis_id.strip(), effective_at=_effective_at(context))
+    return {"thesis_id": updated.thesis_id, "slug": updated.slug, "status": updated.status, "action": action}
+
+
+def _research_repo_for(context: RequestContext):
+    """Research repository rooted at the invocation's data root (never CWD)."""
+    from app.research.repository import ResearchRepository
+
+    return ResearchRepository(data_root=context.data_root)
+
+
+def _research_not_found_error(exc: Exception) -> dict[str, object]:
+    """Named unknown-id error; never raises to the model beyond the envelope."""
+    raw = exc.args[0] if exc.args and isinstance(exc.args[0], str) else str(exc)
+    message = raw or "unknown research id"
+    error_type = "unknown_job" if "job_id" in message else "unknown_session"
+    return {"error": message, "error_type": error_type}
+
+
+def _research_start(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+
+    question = arguments.get("question")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("research_start: 'question' must be a non-empty string")
+    objective = arguments.get("objective")
+    as_of = arguments.get("as_of")
+    repo = _research_repo_for(context)
+    session_id = research_service.create_research(
+        question.strip(),
+        objective.strip() if isinstance(objective, str) and objective.strip() else None,
+        as_of=as_of if isinstance(as_of, str) and as_of else None,
+        repo=repo,
+    )
+    snapshot = research_service.inspect_research(session_id, repo=repo)
+    raw_jobs = snapshot.get("jobs")
+    jobs: list[object] = list(raw_jobs) if isinstance(raw_jobs, list) else []
+    first_raw = jobs[0] if jobs else None
+    first: dict[str, object] = dict(first_raw) if isinstance(first_raw, dict) else {}
+    raw_session = snapshot.get("session")
+    status = raw_session.get("status") if isinstance(raw_session, dict) else None
+    return {
+        "session_id": session_id,
+        "job_id": first.get("job_id"),
+        "status": status,
+        "pending_next_action": snapshot.get("pending_next_action"),
+    }
+
+
+def _research_resume(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    try:
+        return dict(research_service.resume_research(session_id, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
+def _research_status(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    try:
+        return dict(research_service.inspect_research(session_id, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
+def _research_cancel(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    try:
+        return dict(research_service.cancel_research(session_id, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
+def _research_read(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    kind = arguments.get("kind")
+    if not isinstance(kind, str) or kind not in ("evidence", "freeze", "dossier", "job", "research"):
+        return {"error": f"unknown resource kind: {kind!r} (expected evidence|freeze|dossier|job|research)", "error_type": "unknown_resource"}
+    resource_id = str(arguments.get("resource_id"))
+    try:
+        stores = _research_repo_for(context).resource_stores(session_id)
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+    store = stores[kind]
+    if resource_id not in store:
+        if kind == "job":
+            return {"error": f"unknown job_id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_job"}
+        return {"error": f"unknown {kind} id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_resource"}
+    return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
+
 
 _THESIS_HANDLERS: dict[str, ContextHandler] = {
     "thesis_create": _thesis_create,
@@ -4224,13 +4526,22 @@ _THESIS_HANDLERS: dict[str, ContextHandler] = {
     "thesis_refine": _thesis_refine,
     "thesis_watch": _thesis_watch,
     "thesis_journal": _thesis_journal,
+    "thesis_status": _thesis_status,
 }
 
-# Thesis tools are direct local dispatch (no broker) but take
+_RESEARCH_HANDLERS: dict[str, ContextHandler] = {
+    "research_start": _research_start,
+    "research_resume": _research_resume,
+    "research_status": _research_status,
+    "research_cancel": _research_cancel,
+    "research_read": _research_read,
+}
+
+# Thesis/research tools are direct local dispatch (no broker) but take
 # (arguments, context) instead of (arguments, model) for data-root scoping.
 # Merged view for backward compat (tests/scripts import _DIRECT_HANDLERS).
-_DIRECT_HANDLERS: dict[str, object] = {**_MODEL_HANDLERS, **_THESIS_HANDLERS}
-_CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS)
+_DIRECT_HANDLERS: dict[str, object] = {**_MODEL_HANDLERS, **_THESIS_HANDLERS, **_RESEARCH_HANDLERS}
+_CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS) | frozenset(_RESEARCH_HANDLERS)
 
 def execute_tool(
     name: str,
@@ -4262,6 +4573,8 @@ def execute_tool(
             return _invalid_args_error(name, invalid)
         if name in _CONTEXT_CALL_HANDLERS:
             ctx_handler = _THESIS_HANDLERS.get(name)
+            if ctx_handler is None:
+                ctx_handler = _RESEARCH_HANDLERS.get(name)
             if ctx_handler is None:
                 return _unknown_tool_error(name)
             return ctx_handler(arguments, context)

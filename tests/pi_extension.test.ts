@@ -947,6 +947,19 @@ test("stockbot extension registers youtube-analytics command once", async () => 
 	expect(typeof commands["youtube-analytics"].handler).toBe("function");
 });
 
+test("stockbot extension registers research operator commands", async () => {
+	const { commands, pi, sent } = fakePiHost();
+	await stockbotExtension(pi);
+	for (const name of ["research", "research-status"]) expect(typeof commands[name]?.handler).toBe("function");
+	await commands["research"].handler("NVDA inference growth", {});
+	await commands["research-status"].handler("rs:abc", {});
+	expect(sent.length).toBe(2);
+	const first = sent[0]?.message as { content?: unknown };
+	expect(String(first.content)).toContain("research_start");
+	const second = sent[1]?.message as { content?: unknown };
+	expect(String(second.content)).toContain("research_status");
+});
+
 test("every registered bridge tool carries its parameter schema", async () => {
 	// Regression: parameters were once dropped at registration, so the
 	// provider rejected every tool call (tools[4] 400). Fail loudly here.

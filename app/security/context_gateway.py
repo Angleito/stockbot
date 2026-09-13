@@ -122,6 +122,12 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "thesis_refine": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "thesis_watch": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "thesis_journal": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "thesis_status": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_start": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_resume": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_status": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_cancel": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_read": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     # Robinhood market data (account-connected, public observations).
     "get_market_snapshot": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
     "get_option_chain": _envelope("robinhood", SourceType.MCP, Sensitivity.PUBLIC, Integrity.AUTHENTICATED),
