@@ -16,7 +16,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from types import ModuleType
 from typing import Optional, Sequence
@@ -44,7 +44,7 @@ _LEGACY_SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
 
 
 @contextlib.contextmanager
-def _finra_short_interest_lock(parquet_root: Path) -> Iterator[None]:
+def _finra_short_interest_lock(parquet_root: Path) -> Generator[None]:
     """Hold one blocking ``fcntl.flock`` across short_interest parquet mutations."""
     if fcntl is None:  # pragma: no cover
         raise RuntimeError("finra short-interest lock requires fcntl.flock")

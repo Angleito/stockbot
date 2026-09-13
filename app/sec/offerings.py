@@ -328,7 +328,7 @@ def get_offering_history(ticker_or_cik: str | int, *, as_of: str | None = None,
                          terms_forms: tuple[str, ...] | list[str] | frozenset[str] | set[str] | None = None) -> list[Offering]:
     filings = list_sec_filings(ticker_or_cik, forms=list(forms),
                                as_of=as_of, limit=limit)
-    wanted = ({str(f).strip().upper() for f in terms_forms}
+    wanted = ({f.strip().upper() for f in terms_forms}
               if terms_forms is not None else None)
     out: list[Offering] = []
     for filing in filings:

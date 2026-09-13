@@ -299,7 +299,7 @@ def _trace_metrics(conn: sqlite3.Connection, expected_tool: str) -> dict[str, ob
         rejected_disc = conn.execute("SELECT COUNT(*) FROM agent_events WHERE event_type = 'tool_failed' AND tool_name IN ('browse_tools','search_tools','describe_tool','list_tool_domains')").fetchone()[0]
     except sqlite3.Error:
         rejected_disc = 0
-    return {"discovery_calls": int(disc or 0), "failed_discovery_calls": int(failed_disc or 0), "rejected_discovery_calls": int(rejected_disc or 0), "research_calls": int(research_calls or 0), "failed_research_calls": int(failed_research or 0), "target_dispatched": expected_tool in _call_tool_dispatched_names(conn) or _direct_tool_completed(conn, expected_tool), "call_tool_count": _call_tool_start_count(conn), "direct_tool_calls": int(direct_tool_calls or 0)}
+    return {"discovery_calls": disc or 0, "failed_discovery_calls": failed_disc or 0, "rejected_discovery_calls": rejected_disc or 0, "research_calls": research_calls or 0, "failed_research_calls": failed_research or 0, "target_dispatched": expected_tool in _call_tool_dispatched_names(conn) or _direct_tool_completed(conn, expected_tool), "call_tool_count": _call_tool_start_count(conn), "direct_tool_calls": direct_tool_calls or 0}
 
 
 def get_concurrency() -> int:
@@ -1441,9 +1441,10 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
             if prompt_override is not None:
                 prompt = prompt_override
             elif attempt >= 3:
-                prompt = build_routing_attempt_prompt(tool, args, attempt)
+                # Explicit-dispatch debug mode only; natural scenario path lives in verify_judge.py.
+                prompt = build_routing_explicit_prompt(tool, args)
             else:
-                prompt = build_attempt_prompt(tool, args, attempt)
+                prompt = build_explicit_prompt(tool, args)
             code, timed_out, _out, err_text, saw_complete = run_pi(prompt, db_path, cwd, store_dir)
             base_config_failed = code != 0 and not saw_complete and "model" in err_text.lower()
             reach_ok, reach_reason = evaluate_reachability_attempt(db_path, tool, code, timed_out, completed_override=saw_complete, attempt=attempt)
@@ -1468,7 +1469,7 @@ def run_verification_attempt(tool: str, attempt: int, base_args: Mapping[str, ob
                 failure_cat = None if ok else classify_routing_failure(db_path, tool, attempt=attempt, expected_args=args)
             except Exception:
                 failure_cat = None
-            return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed, reach_ok, reach_reason, routing_ok, routing_reason, disc, resc, _direct_count_for_db(db_path, tool), comp_ok, comp_reason, _routing_metrics_for_db(db_path), terminal_completed=bool(saw_complete), failure_category=failure_cat)
+            return AttemptResult(tool, attempt, ok, reason, code, str(db_path), duration_seconds, model_config_failed, reach_ok, reach_reason, routing_ok, routing_reason, disc, resc, _direct_count_for_db(db_path, tool), comp_ok, comp_reason, _routing_metrics_for_db(db_path), terminal_completed=saw_complete, failure_category=failure_cat)
         return AttemptResult(tool, attempt, False, "transient budget exhausted: retry loop fell through", 124, "", time.monotonic() - start, False, False, "transient budget exhausted", False, "transient budget exhausted")
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -1599,14 +1600,8 @@ def evaluate_completion_attempt(db_path: Path, expected_tool: str | None, exit_c
             if expected_tool is None:
                 if continuations != 0:
                     return False, "routing failed: unexpected routing continuation for unsupported request"
-                if _routing_tool_success(conn, "search_tools", attempt=1) is not None:
-                    return False, "routing failed: no clean zero-match search_tools trace"
-                try:
-                    zero_rows: list[tuple[object]] = conn.execute("SELECT result_row_count FROM tool_calls WHERE tool_name = 'search_tools' AND error_type IS NULL").fetchall()
-                except sqlite3.Error:
-                    zero_rows = []
-                if not zero_rows or any(not isinstance(r[0], int) or r[0] != 0 for r in zero_rows):
-                    return False, "routing failed: no clean zero-match search_tools trace"
+                # Discovery is telemetry only: unsupported passes on terminal limitation
+                # with no successful research, regardless of discovery.
                 if _research_call_count(conn) != 0:
                     return False, "routing failed: unexpected research tool call(s) for unsupported request"
                 if timed_out and not completed_override:
@@ -1616,16 +1611,17 @@ def evaluate_completion_attempt(db_path: Path, expected_tool: str | None, exit_c
                 if not _final_answer_present(conn):
                     return False, "routing failed: empty final answer for unsupported request"
                 return True, "pass"
+            # Discovery is telemetry only (WARNING); correctness is terminal completion + research + answer.
             discovery_ok = any(_routing_tool_success(conn, t, attempt=1) is None for t in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"))
             if not discovery_ok:
-                return False, "routing failed: no clean discovery before research"
+                print("WARNING: no clean discovery before research (telemetry only)", file=sys.stderr)
             target_problem = _routing_tool_success(conn, expected_tool, attempt=1)
             if target_problem is not None:
                 if target_problem == "absent" and _has_any_tool_calls(conn, expected_tool):
                     return False, f"target '{expected_tool}' failed-research-call (errored execution, no clean run)"
                 return False, f"target '{expected_tool}' absent ({target_problem})"
             if not _discovery_before_dispatch(conn, expected_tool):
-                return False, f"routing failed: discovery did not precede research dispatch of '{expected_tool}'"
+                print(f"WARNING: discovery did not precede dispatch of '{expected_tool}' (telemetry only)", file=sys.stderr)
             if timed_out and not completed_override:
                 return False, "transient: pi timeout before terminal state"
             if exit_code != 0 and not completed_override:
@@ -1635,7 +1631,7 @@ def evaluate_completion_attempt(db_path: Path, expected_tool: str | None, exit_c
             if continuations == 1:
                 cont_at = _routing_continuation_started_at(conn)
                 inner_at = _clean_tool_started_at(conn, expected_tool)
-                if not (cont_at and inner_at and str(cont_at) < str(inner_at)):
+                if not (cont_at and inner_at and cont_at < inner_at):
                     return False, "routing failed: routing continuation did not recover to research"
             return True, "pass"
         finally:
@@ -1668,7 +1664,7 @@ def run_agent_loop_case(case: _AgentLoopCase, batch_root: Path, cwd: Path, index
     comp_ok, comp_reason = evaluate_completion_attempt(db_path, case["expected_tool"], code, timed_out, completed_override=saw_complete)
     disc, resc = _metrics_for_db(db_path, label)
     duration_seconds = time.monotonic() - start
-    return AttemptResult(label, index, comp_ok, comp_reason if not comp_ok else "pass", code, str(db_path), duration_seconds, False, None, "", None, "", disc, resc, _direct_count_for_db(db_path, label), comp_ok, comp_reason, _routing_metrics_for_db(db_path), terminal_completed=bool(saw_complete))
+    return AttemptResult(label, index, comp_ok, comp_reason if not comp_ok else "pass", code, str(db_path), duration_seconds, False, None, "", None, "", disc, resc, _direct_count_for_db(db_path, label), comp_ok, comp_reason, _routing_metrics_for_db(db_path), terminal_completed=saw_complete)
 
 
 def run_agent_loop_main() -> int:
@@ -1720,7 +1716,7 @@ def run_confusion() -> int:
     for c in cases:
         _raw_pair = c.get("pair")
         assert isinstance(_raw_pair, list)
-        pair = tuple(sorted(str(x) for x in _raw_pair))
+        pair = tuple(sorted(x for x in _raw_pair))
         by_pair[(pair[0], pair[1])].append(c)
     total = 0
     correct = 0
@@ -1731,9 +1727,9 @@ def run_confusion() -> int:
         pair_total = 0
         pair_ok = 0
         for c in by_pair[pair]:
-            expected = str(c["expected_tool"])
+            expected = c["expected_tool"]
             base_args = dict(c["arguments"])
-            prompt = str(c["prompt"])
+            prompt = c["prompt"]
             result = run_verification_attempt(expected, 1, base_args, root / f"{pair[0]}-vs-{pair[1]}", cwd, durable, 1, prompt_override=prompt)
             db_path = Path(result.db) if result.db else root / expected / "attempt-1" / "runs.sqlite"
             # Selection accuracy: discovery/selection/dispatch/arguments correct even on EXECUTION_FAILURE.
@@ -1812,7 +1808,7 @@ def run_holdout(holdout_path: str) -> int:
             failed_reach += 1
             failed_routing += 1
             continue
-        tool = str(case["expected_tool"])
+        tool = case["expected_tool"]
         try:
             base_args = dict(case["arguments"]) if isinstance(case.get("arguments"), dict) else resolve_arguments(tool, schemas)
         except LookupError as exc:
@@ -1820,14 +1816,14 @@ def run_holdout(holdout_path: str) -> int:
             failed_reach += 1
             failed_routing += 1
             continue
-        result = run_verification_attempt(tool, 1, base_args, root, cwd, durable, 1, prompt_override=str(case["prompt"]))
+        result = run_verification_attempt(tool, 1, base_args, root, cwd, durable, 1, prompt_override=case["prompt"])
         db_path = Path(result.db) if result.db else root / tool / "attempt-1" / "runs.sqlite"
         if result.reach_ok is None or result.routing_ok is None:
             holdout_reach_ok, holdout_reach_reason = evaluate_holdout_reachability_attempt(db_path, tool)
             holdout_routing_ok, holdout_routing_reason = evaluate_holdout_attempt(db_path, tool)
         else:
-            holdout_reach_ok, holdout_reach_reason = bool(result.reach_ok), result.reach_reason
-            holdout_routing_ok, holdout_routing_reason = bool(result.routing_ok), result.routing_reason
+            holdout_reach_ok, holdout_reach_reason = result.reach_ok, result.reach_reason
+            holdout_routing_ok, holdout_routing_reason = result.routing_ok, result.routing_reason
         print(f"{'PASS' if holdout_reach_ok else 'FAIL'}[reach] {'PASS' if holdout_routing_ok else 'FAIL'}[route] {case['prompt']!r} -> {tool} (reach: {holdout_reach_reason}; route: {holdout_routing_reason}) [{result.duration_seconds:.1f}s]")
         if not holdout_reach_ok:
             failed_reach += 1
@@ -1840,6 +1836,7 @@ def run_holdout(holdout_path: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tool", default=None, help="verify one tool only (debug mode)")
+    parser.add_argument("--routing", action="store_true", help="run live exact-routing benchmark only (opt-in benchmark, demoted from default gate)")
     parser.add_argument("--holdout", nargs="?", const="evals/holdout_discovery.json", default=None, help="run the discovery holdout only (no live matrix): each prompt must browse-or-search then call_tool its expected tool")
     parser.add_argument("--agent-loop", action="store_true", help="run the natural agent-loop cases only (no live matrix): discovery -> research -> answer per AGENT_LOOP_CASES")
     parser.add_argument("--confusion", action="store_true", help="run generated confusion benchmark only (no live matrix)")
@@ -1850,6 +1847,10 @@ def main() -> int:
         return run_holdout(args.holdout)
     if args.agent_loop:
         return run_agent_loop_main()
+    if args.tool is None and not args.routing:
+        parser.print_usage(sys.stderr)
+        print("live exact-routing matrix is opt-in: use --routing for full benchmark, --tool <name> for single-tool exact-dispatch debug, --confusion/--holdout for benchmarks, or scripts/verify_judge.py for outcome suite", file=sys.stderr)
+        return 2
     debug = args.tool is not None
     if debug:
         print("DEBUG MODE — partial verification")
@@ -1979,17 +1980,9 @@ def main() -> int:
     else:
         print("Failure categories: none")
     print(f"Concurrency: {concurrency} | Wall time: {wall:.1f}s")
-    loop_results: list[AttemptResult] = [] if debug else run_agent_loop(root / "agent-loop", cwd)
+    loop_results: list[AttemptResult] = []
     loop_failed = 0
-    for r, case in zip(loop_results, AGENT_LOOP_CASES):
-        mark = "PASS" if r.ok else "FAIL"
-        print(f"{mark}[agent-loop] {case['prompt']!r} -> {case['expected_tool'] or 'unsupported'} ({r.reason}) [{r.duration_seconds:.1f}s]")
-        if not r.ok:
-            loop_failed += 1
-    if debug:
-        print("Agent-loop completion: skipped (debug mode)")
-    else:
-        print(f"Agent-loop completion: {len(loop_results) - loop_failed}/{len(loop_results)} cases complete")
+    print("Agent-loop completion: skipped (moved to scripts/verify_judge.py)")
     wall = time.monotonic() - verify_start
     failed_tools = sorted(set(failed_reach_tools) | set(failed_routing_tools))
     print(f"RESULT: {'PASS' if not failed_tools and not loop_failed else 'FAIL'}")

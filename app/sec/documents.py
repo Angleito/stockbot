@@ -21,7 +21,7 @@ def _normalize_accession(accession_no: str) -> str:
     surrounding whitespace is stripped and a bare 18-digit run takes the
     canonical 10-2-6 dashes. Anything else passes through to live lookup."""
     text = accession_no.strip() if isinstance(accession_no, str) else accession_no
-    digits = "".join(ch for ch in str(text) if ch.isdigit())
+    digits = "".join(ch for ch in text if ch.isdigit())
     if isinstance(text, str) and "-" not in text and len(digits) == 18 and text.strip().isdigit():
         return f"{digits[:10]}-{digits[10:12]}-{digits[12:]}"
     return text

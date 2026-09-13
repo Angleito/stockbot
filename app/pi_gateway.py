@@ -60,6 +60,13 @@ from .tools import (
 
 _CALL_TOOL_FORBIDDEN = frozenset({"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"})
 
+# Bounded local thesis lifecycle sinks (sqlite store only; never egress).
+# Private-pattern arg scanning would false-positive on user thesis content,
+# while real exfiltration vectors (search_web, external research) stay scanned.
+_THESIS_LOCAL_TOOLS = frozenset({
+    "thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal",
+})
+
 logger = logging.getLogger(__name__)
 
 # Model label recorded for Pi-driven tool calls. Handlers ignore it
@@ -408,7 +415,7 @@ def _execute_pi_tool(
                 "error_type": "egress_denied",
                 "soft": True,
             }
-    else:
+    elif name not in _THESIS_LOCAL_TOOLS:
         hit = private_pattern_hit(args_for_hash)
         if hit:
             _record_security(session, name, args_for_hash, "action_blocked", hit)

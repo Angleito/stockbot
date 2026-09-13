@@ -36,11 +36,11 @@ def _resolve_section(accession_no: str, section: str | None) -> str | None:
     list_sec_documents instead of guessing again. Filing-text headings
     (``risk_factors``, ``Item 1A``) are never documents: the error says so.
     """
-    if section is None or not str(section).strip() or str(section).strip().lower() == "full":
+    if section is None or not section.strip() or section.strip().lower() == "full":
         return None
     from . import documents
 
-    want = str(section).strip()
+    want = section.strip()
     try:
         names = [d.document_name for d in documents.list_sec_documents(accession_no)
                  if d.document_name]

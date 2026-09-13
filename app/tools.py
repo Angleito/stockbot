@@ -3084,7 +3084,7 @@ def _ambiguity_groups(ranked_names: list[str]) -> tuple[bool, list[dict[str, obj
     def _group_key(g: dict[str, object]) -> str:
         cands = g.get("candidates")
         if isinstance(cands, list) and cands and isinstance(cands[0], str):
-            return str(cands[0])
+            return cands[0]
         return ""
     groups.sort(key=_group_key)
     return (len(groups) > 0), groups

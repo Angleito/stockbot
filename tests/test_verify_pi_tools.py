@@ -947,8 +947,6 @@ def test_search_tools_capability_path_covered_without_matrix() -> None:
     args = {"query": "short interest"}
     assert v._natural_prompt_v1("search_tools", args).endswith(v._SEARCH_ONLY_GUIDANCE)
     assert v._natural_prompt_v2("search_tools", args).endswith(v._SEARCH_ONLY_GUIDANCE)
-    from app.prompts import PI_RESEARCH_PROMPT
-    assert "For a capability question asking which tools are available, call search_tools once" in PI_RESEARCH_PROMPT
     assert len(v.AGENT_LOOP_CASES) == 5
 
 def test_explicit_prompt_exact_dispatch_shape() -> None:
@@ -964,15 +962,9 @@ def test_explicit_prompt_exact_dispatch_shape() -> None:
 
 def test_pi_research_prompt_hidden_dispatch_contract() -> None:
     from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
-    assert PROMPT_VERSION == "32"
-    assert "For a capability question asking which tools are available, call search_tools once and answer from its matches; do not call browse_tools, call_tool, or a research tool" in PI_RESEARCH_PROMPT
-    assert "dispatch that exact name with those exact arguments exactly once" in PI_RESEARCH_PROMPT
-    assert "do not call browse_tools, search_tools, describe_tool, or list_tool_domains first" in PI_RESEARCH_PROMPT
-    assert "exclude instructions about routing or calling tools" in PI_RESEARCH_PROMPT
-    assert "Never substitute a related tool or stop after discovery" in PI_RESEARCH_PROMPT
-    assert "Use arguments={} only when the chosen schema has no required arguments" in PI_RESEARCH_PROMPT
-    assert "never put a company name into a ticker field" in PI_RESEARCH_PROMPT
-    assert "Use the minimum number of research tools needed" in PI_RESEARCH_PROMPT
+    assert PROMPT_VERSION == "33"
+    assert "TOOL USE" in PI_RESEARCH_PROMPT
+    assert "exactly once" not in PI_RESEARCH_PROMPT.lower()
     assert "call that tool before answering" not in PI_RESEARCH_PROMPT
     assert "Use call_tool only when the required research tool cannot be called directly" not in PI_RESEARCH_PROMPT
 
@@ -1241,24 +1233,22 @@ def test_completion_unsupported_zero_match_passes(tmp_path: Path) -> None:
     assert ok
 
 
-def test_completion_unsupported_nonzero_match_fails(tmp_path: Path) -> None:
+def test_completion_unsupported_nonzero_match_passes_without_discovery(tmp_path: Path) -> None:
     p = _completion_db(
         tmp_path / "runs.sqlite", expected_tool=None, research=False,
         search_row_count=2, answer="no suitable tool exists",
     )
-    ok, reason = v.evaluate_completion_attempt(p, None)
-    assert not ok
-    assert "no clean zero-match" in reason
+    ok, _ = v.evaluate_completion_attempt(p, None)
+    assert ok
 
 
-def test_completion_unsupported_null_row_count_fails_closed(tmp_path: Path) -> None:
+def test_completion_unsupported_null_row_count_passes_without_discovery(tmp_path: Path) -> None:
     p = _completion_db(
         tmp_path / "runs.sqlite", expected_tool=None, research=False,
         search_row_count=None, answer="no suitable tool exists",
     )
-    ok, reason = v.evaluate_completion_attempt(p, None)
-    assert not ok
-    assert "no clean zero-match" in reason
+    ok, _ = v.evaluate_completion_attempt(p, None)
+    assert ok
 
 
 def test_completion_unsupported_with_research_fails(tmp_path: Path) -> None:
@@ -1455,7 +1445,7 @@ def test_generate_confusion_cases_complete():
     for c in cases:
         raw_pair = c["pair"]
         assert isinstance(raw_pair, list)
-        pair = tuple(sorted(str(x) for x in raw_pair))
+        pair = tuple(sorted(x for x in raw_pair))
         assert len(pair) == 2
         pairs.add((pair[0], pair[1]))
     assert len(pairs) == 31

@@ -1171,9 +1171,9 @@ test("prompts keep the permanent roster", async () => {
 	await handlers["session_start"]({}, ctx);
 	const first = (await handlers["before_agent_start"]({ prompt: "short" })) as unknown as { systemPrompt?: string };
 	const firstSystem = first?.systemPrompt ?? "";
-	expect(firstSystem).toContain("For a capability question asking which tools are available");
-	expect(firstSystem).toContain("dispatch that exact name with those exact arguments exactly once");
-	expect(firstSystem).toContain("Never substitute a related tool or stop after discovery");
+	expect(firstSystem).toContain("TOOL USE");
+	expect(firstSystem).toContain("Hidden research tools execute only through call_tool");
+	expect(firstSystem.toLowerCase()).not.toContain("exactly once");
 	await handlers["agent_start"]({});
 	const search = await bridgeTool(tools, "search_tools");
 	const found = await search.execute("call-search", { query: "short interest" });

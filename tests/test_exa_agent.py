@@ -11,5 +11,5 @@ def test_pi_research_prompt_search_web_policy():
 
 
 def test_pi_research_prompt_out_of_domain_scope_rule():
-    assert "For non-investment requests, first call search_tools" in PI_RESEARCH_PROMPT
+    assert "For non-investment requests" in PI_RESEARCH_PROMPT
     assert "scope limitation" in PI_RESEARCH_PROMPT

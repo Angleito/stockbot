@@ -87,9 +87,9 @@ def _check_bq_limits() -> Optional[dict[str, object]]:
         _cfg2 = None
     if _cfg2 is not None:
         try:
-            per_q = int(_cfg2.get_bq_max_bytes_per_query())
-            per_m = int(_cfg2.get_bq_monthly_bytes_limit())
-            per_d = int(_cfg2.get_bq_daily_bytes_limit())
+            per_q = _cfg2.get_bq_max_bytes_per_query()
+            per_m = _cfg2.get_bq_monthly_bytes_limit()
+            per_d = _cfg2.get_bq_daily_bytes_limit()
         except (TypeError, ValueError):
             return {"status": "error", "source": SOURCE,
                     "error": "invalid BigQuery byte limit", "error_type": "invalid_config"}

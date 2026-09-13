@@ -33,7 +33,7 @@ def _api_enabled() -> bool:
         _cfg = None
     if _cfg is not None:
         try:
-            return bool(_cfg.google_trends_api_enabled())
+            return _cfg.google_trends_api_enabled()
         except Exception:
             return False
     return os.getenv("GOOGLE_TRENDS_API_ENABLED", "").strip().lower() in ("1", "true", "yes")

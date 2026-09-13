@@ -36,9 +36,9 @@ def _schema_args(name: str) -> tuple[list[str], dict[str, dict[str, str]]]:
                 detail: dict[str, str] = {}
                 if isinstance(spec, dict):
                     if isinstance(spec.get("type"), str):
-                        detail["type"] = str(spec["type"])
+                        detail["type"] = spec["type"]
                     if isinstance(spec.get("description"), str):
-                        detail["desc"] = str(spec["description"])
+                        detail["desc"] = spec["description"]
                 typed[str(prop)] = detail
             return required, typed
     raise ValueError(f"tool {name!r} has no canonical schema in TOOLS")
