@@ -53,3 +53,7 @@ htmlcov/
 .omp/
 node_modules/
 local/
+
+# Rust build output
+target/
+operator/target/
