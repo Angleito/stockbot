@@ -134,6 +134,62 @@ def _unavailable_data_response(failed: list[tuple[str, dict[str, object]]]) -> s
     return "\n".join(lines)
 
 
+_SOURCE_REF_ID_KEYS = (
+    "accession_no", "accession_number", "accession", "record_id",
+    "document_name", "filing_id",
+)
+_SOURCE_REF_URL_KEYS = ("url", "source_url", "source", "filing_url", "document_url", "link")
+_SOURCE_REF_DATE_KEYS = (
+    "known_at", "accepted_at", "acceptanceDatetime", "acceptedDate",
+    "filed_at", "filingDate", "filed", "published_at", "publishedAt", "published",
+)
+
+
+def _is_uri_like(value: str) -> bool:
+    text = value.strip()
+    return "://" in text or "/" in text or "." in text
+
+
+def _extract_source_refs(result: object) -> dict[str, object]:
+    """First actual record reference; top-level labels never qualify."""
+    if not isinstance(result, dict):
+        return {}
+    candidates: list[dict[str, object]] = [result]
+    for value in result.values():
+        if isinstance(value, dict):
+            candidates.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    candidates.append(item)
+    all_refs: list[dict[str, str]] = []
+    for item in candidates:
+        ref: dict[str, str] = {}
+        for key in _SOURCE_REF_ID_KEYS:
+            raw_id = item.get(key)
+            if isinstance(raw_id, (str, int)) and str(raw_id).strip():
+                ref["record_id"] = str(raw_id).strip()
+                break
+        for key in _SOURCE_REF_URL_KEYS:
+            raw_url = item.get(key)
+            if isinstance(raw_url, str) and raw_url.strip() and _is_uri_like(raw_url):
+                ref["uri"] = raw_url.strip()
+                break
+        for key in _SOURCE_REF_DATE_KEYS:
+            raw_date = item.get(key)
+            if isinstance(raw_date, str) and raw_date.strip():
+                ref["known_at"] = raw_date.strip()
+                break
+        if ref and ref not in all_refs:
+            all_refs.append(ref)
+    if not all_refs:
+        return {}
+    primary: dict[str, object] = dict(next((r for r in all_refs if "record_id" in r), all_refs[0]))
+    if len(all_refs) > 1:
+        primary["all"] = all_refs
+    return primary
+
+
 def _tool_result_meta(result: object) -> ToolResultMeta:
     """Best-effort telemetry envelope for a tool result: row counts,
     truncation, source name, and freshness."""
@@ -578,6 +634,9 @@ def _execute_pi_tool(
         "status": status,
         "as_of": meta.as_of,
     }
+    source_refs = _extract_source_refs(result)
+    if source_refs:
+        safe_meta["source_refs"] = source_refs
     if name in ("search_tools", "browse_tools") and isinstance(result, dict):
         # Deferred loading: the TS extension activates these schemas additively.
         # Names are already model-visible in content; meta carries them structured.

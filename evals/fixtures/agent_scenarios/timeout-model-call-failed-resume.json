@@ -1,0 +1,29 @@
+{
+  "answer_excerpt": "LiveModelError at scout-1: TimeoutExpired: Command 'pi' timed out after 1 seconds; session rs:144df35c-0109-49d4-ba97-9563ea189944 session=failed(timeout), job job:cc37e5c0-1066-446c-bbca-1121171f081c job=failed(timeout), journal model.failed + wave.stopped, running_jobs=0; resume reports failed with no duplicates.",
+  "as_of": null,
+  "budget_cap": null,
+  "budget_used": null,
+  "evidence_ids": [],
+  "family": "unsupported",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": null,
+  "freeze_before": null,
+  "known_ats": [],
+  "question": "A Pi model call times out mid-wave: what must the harness persist before surfacing the error, and can the session resume without duplicating work?",
+  "scenario_name": "timeout-model-call-failed-resume",
+  "session_id": "rs:144df35c-0109-49d4-ba97-9563ea189944",
+  "tool_calls": [],
+  "validator": {
+    "expected_tools": [],
+    "pit_as_of": null,
+    "requires_evidence": false,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze",
+      "timeout_resume_requires_failed"
+    ]
+  }
+}

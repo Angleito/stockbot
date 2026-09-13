@@ -40,7 +40,8 @@ if TYPE_CHECKING:
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
 _SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
-                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis", "google-data")
+                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis", "google-data",
+                "research", "eval")
 
 
 def _cmd_runs(limit: int) -> None:
@@ -673,6 +674,238 @@ def _cmd_google_data(args: argparse.Namespace) -> None:
     print(json.dumps({"sources": out}, indent=2, default=str))
 
 
+def _cmd_research(args: argparse.Namespace) -> None:
+    """Research sessions: thin dispatch over the KernelCore-owned kernel (no state here)."""
+    sub = getattr(args, "research_command", None)
+    if sub == "run":
+        if getattr(args, "live", False):
+            from app.pi_gateway import PiSessionContext, execute_pi_tool
+            from app.research.repository import ResearchRepository as _LiveRepo
+            from app.research.runner import run_live as _run_live
+            _tickers: list[str] = [args.ticker] if getattr(args, "ticker", None) else []
+            _pi = PiSessionContext(session_id="research-live")
+            _as_of: str | None = args.as_of
+            def _dispatch(name: str, tool_args: dict[str, object]) -> dict[str, object]:
+                return execute_pi_tool(name, tool_args, _pi, as_of=_as_of)
+            def _model(prompt: str) -> str:
+                import subprocess as _sp
+                import tempfile as _tf
+                import time as _time
+                # pi answers quickly then lingers nondeterministically on teardown;
+                # a file redirect shows completed output long before exit, while a
+                # pipe yields nothing until then. Poll the file and reap early.
+                try:
+                    tmp = _tf.NamedTemporaryFile(prefix="pi-model-", suffix=".txt",
+                                                 delete=False, mode="w", encoding="utf-8")
+                    tmp_path = tmp.name
+                    tmp.close()
+                except OSError as exc:
+                    raise RuntimeError(f"Pi model temp file failed: {exc}") from exc
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as _out:
+                        proc = _sp.Popen(["pi", "-p", "--no-session", "--", prompt],
+                                         stdout=_out, stderr=_sp.PIPE, text=True)
+                except FileNotFoundError as exc:
+                    raise RuntimeError("`pi` binary not found (install Pi to run live)") from exc
+                deadline = _time.monotonic() + 300
+                stable = 0
+                last_size = -1
+                rc: int | None = None
+                try:
+                    while True:
+                        rc = proc.poll()
+                        try:
+                            size = __import__("os").path.getsize(tmp_path)
+                        except OSError:
+                            size = 0
+                        if size == last_size and size > 0:
+                            stable += 1
+                        else:
+                            stable = 0
+                        last_size = size
+                        if rc is not None or stable >= 3 or _time.monotonic() >= deadline:
+                            break
+                        _time.sleep(5)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                try:
+                    with open(tmp_path, encoding="utf-8") as _fh:
+                        text = _fh.read().strip()
+                finally:
+                    try:
+                        __import__("os").unlink(tmp_path)
+                    except OSError:
+                        pass
+                if rc is not None and rc != 0 and not text:
+                    raise RuntimeError(f"Pi exited {rc}")
+                if not text:
+                    raise RuntimeError("Pi timed out")
+                return text
+            from app.research.runner import LiveModelError as _LiveModelError
+            try:
+                _res: dict[str, object] = _run_live(
+                    args.question, args.objective or args.question, args.as_of,
+                    _tickers, _dispatch, _model, _LiveRepo(), None,
+                    interrupt_after=args.interrupt_after)
+            except _LiveModelError as exc:
+                raise SystemExit(f"research --live: {exc.message} (session {exc.session_id})") from exc
+            _ev: object = _res.get("evidence_ids")
+            _n: int = len(_ev) if isinstance(_ev, list) else 0
+            print(f"{_res.get('session_id')} freeze={_res.get('freeze_id')} evidence={_n}"
+                  f" dossier={_res.get('dossier_id')} stop={_res.get('stop_reason')}")
+            print(f"committee: stock={_res.get('stock') is not None}"
+                  f" bull={_res.get('bull') is not None} bear={_res.get('bear') is not None}")
+            if isinstance(_res.get("wave2_freeze_id"), str):
+                _ev2: object = _res.get("wave2_evidence_ids")
+                print(f"wave2: freeze={_res.get('wave2_freeze_id')}"
+                      f" evidence={len(_ev2) if isinstance(_ev2, list) else 0}"
+                      f" dossier={_res.get('wave2_dossier_id')} target={_res.get('wave2_targeted')}")
+            return
+        from app.research import jobs as _jobs
+        from app.research import session as _session
+        from app.research.models import default_policy
+        from app.research.repository import ResearchRepository
+        policy = default_policy()
+        if args.interrupt_after is not None:
+            # ponytail: test hook recorded on the session; the wave runner honors it when it lands.
+            policy["interrupt_after"] = args.interrupt_after
+        new_session = _session.create_session(
+            args.question, args.objective or args.question,
+            as_of=args.as_of, policy=policy)
+        updated, job = _jobs.create_job(
+            new_session, [], job_type="source_agent", owner="cli")
+        repo = ResearchRepository()
+        repo.save_session(updated)
+        repo.save_job(job)
+        print(f"{updated.session_id} job={job.job_id} status={updated.status}")
+    elif sub == "inspect":
+        from app.research.repository import ResearchRepository, pending_next_action
+        repo = ResearchRepository()
+        try:
+            found = repo.get_session(args.session_id)
+        except KeyError:
+            raise SystemExit(f"research: unknown session {args.session_id}") from None
+        job_list = repo.list_jobs(args.session_id)
+        print(f"{found.session_id} status={found.status} wave={found.current_wave}")
+        print(f"query: {found.query}")
+        print(f"jobs={len(job_list)} evidence={len(found.evidence_ids)}"
+              f" freezes={len(found.freeze_ids)} dossiers={len(found.dossier_ids)}")
+        print(f"pending: {pending_next_action(found, job_list)}")
+    elif sub == "resume":
+        if getattr(args, "live", False):
+            from app.pi_gateway import PiSessionContext, execute_pi_tool
+            from app.research.repository import ResearchRepository as _ResumeRepo
+            from app.research.runner import LiveModelError as _ResumeModelError
+            from app.research.runner import resume_live as _resume_live
+            _rrepo = _ResumeRepo()
+            try:
+                _found = _rrepo.get_session(args.session_id)
+            except KeyError:
+                raise SystemExit(f"research: unknown session {args.session_id}") from None
+            _ras_of: str | None = _found.as_of.isoformat() if _found.as_of is not None else None
+            _rpi = PiSessionContext(session_id="research-live")
+            def _rdispatch(name: str, tool_args: dict[str, object]) -> dict[str, object]:
+                return execute_pi_tool(name, tool_args, _rpi, as_of=_ras_of)
+            def _rmodel(prompt: str) -> str:
+                import subprocess as _sp
+                try:
+                    proc: _sp.CompletedProcess[str] = _sp.run(
+                        ["pi", "-p", "--no-session", "--", prompt],
+                        capture_output=True, text=True, timeout=300)
+                except FileNotFoundError as exc:
+                    raise RuntimeError("`pi` binary not found (install Pi to run live)") from exc
+                except _sp.TimeoutExpired as exc:
+                    raise RuntimeError("Pi timed out") from exc
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Pi exited {proc.returncode}: {proc.stderr.strip()[:500]}")
+                text: str = proc.stdout.strip()
+                if not text:
+                    raise RuntimeError("Pi returned no text")
+                return text
+            try:
+                _rres: dict[str, object] = _resume_live(args.session_id, _rdispatch, _rmodel, _rrepo, None)
+            except KeyError:
+                raise SystemExit(f"research: unknown session {args.session_id}") from None
+            except _ResumeModelError as exc:
+                raise SystemExit(f"research --live: {exc.message} (session {exc.session_id})") from exc
+            _rev: object = _rres.get("evidence_ids")
+            _rn: int = len(_rev) if isinstance(_rev, list) else 0
+            print(f"{_rres.get('session_id')} freeze={_rres.get('freeze_id')} evidence={_rn}"
+                  f" dossier={_rres.get('dossier_id')} stop={_rres.get('stop_reason')}")
+            print(f"committee: stock={_rres.get('stock') is not None}"
+                  f" bull={_rres.get('bull') is not None} bear={_rres.get('bear') is not None}")
+            if isinstance(_rres.get("wave2_freeze_id"), str):
+                _rev2: object = _rres.get("wave2_evidence_ids")
+                print(f"wave2: freeze={_rres.get('wave2_freeze_id')}"
+                      f" evidence={len(_rev2) if isinstance(_rev2, list) else 0}"
+                      f" dossier={_rres.get('wave2_dossier_id')} target={_rres.get('wave2_targeted')}")
+            return
+        # ponytail: idempotent resume (no dup evidence/jobs) lives in ResearchRepository.resume.
+        from app.research.repository import ResearchRepository
+        repo = ResearchRepository()
+        try:
+            state = repo.resume(args.session_id)
+        except KeyError:
+            raise SystemExit(f"research: unknown session {args.session_id}") from None
+        print(f"{state.session.session_id} wave={state.wave} status={state.session.status}")
+        print(f"budgets: {json.dumps(state.budgets, sort_keys=True)}")
+        print(f"open jobs: {', '.join(state.open_job_ids) if state.open_job_ids else '-'}")
+        print(f"pending: {state.pending_next_action}")
+    elif sub == "cancel":
+        from app.research import session as _session
+        from app.research.models import SessionStatus
+        from app.research.repository import ResearchRepository
+        repo = ResearchRepository()
+        try:
+            found = repo.get_session(args.session_id)
+        except KeyError:
+            raise SystemExit(f"research: unknown session {args.session_id}") from None
+        try:
+            out = _session.transition_session(found, SessionStatus.CANCELLED)
+        except ValueError as exc:
+            raise SystemExit(f"research: {exc}") from None
+        repo.save_session(out)
+        print(f"{out.session_id} status={out.status}")
+    else:
+        raise SystemExit("research: choose from run, inspect, resume, cancel")
+
+
+def _cmd_eval(args: argparse.Namespace) -> None:
+    """Deterministic agent-scenario evals (own store: data/eval_runs.sqlite)."""
+    sub = getattr(args, "eval_command", None)
+    if sub in ("run", "model"):
+        from app.research.evals.evaluators import outcomes_from_fixtures, run_eval_suite
+        names = [args.scenario] if args.scenario else None
+        outcomes = outcomes_from_fixtures(names)
+        summary = run_eval_suite(
+            model=args.model, provider=args.provider,
+            prompt_version=args.prompt_version, outcomes=outcomes)
+        print(f"eval run {summary.eval_run_id}:"
+              f" {summary.passed_count}/{summary.scenario_count} passed (model={summary.model})")
+        if summary.failed_count:
+            raise SystemExit(1)
+    elif sub == "inspect":
+        from app.research.evals.evaluators import get_eval_results, get_eval_run
+        header = get_eval_run(args.eval_run_id)
+        if header is None:
+            raise SystemExit(f"eval: unknown run {args.eval_run_id}")
+        print(f"eval run {header.eval_run_id} model={header.model} provider={header.provider}"
+              f" harness={header.harness_version} prompt={header.prompt_version}"
+              f" git={header.git_sha} scenarios={header.scenario_version} at={header.started_at}")
+        for row in get_eval_results(args.eval_run_id):
+            verdict = "PASS" if row.passed else f"FAIL {','.join(row.violations)}"
+            print(f"  {verdict} {row.scenario_name}")
+    elif sub == "promote":
+        from app.research.evals.regression import promote_to_fixture
+        path = promote_to_fixture(
+            session_id=args.session_id, scenario_name=args.scenario_name,
+            question=args.question, as_of=args.as_of)
+        print(str(path))
+    else:
+        raise SystemExit("eval: choose from run, model, inspect, promote")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stockbot — AI investment research assistant")
     subparsers = parser.add_subparsers(dest="command")
@@ -783,6 +1016,48 @@ def _build_parser() -> argparse.ArgumentParser:
                                 help="seconds between ticks (default 900; must be > 0)")
     monitor_parser.add_argument("--known-at", default=None,
                                 help="PIT upper bound ISO timestamp (default: now UTC per tick)")
+    research_parser = subparsers.add_parser("research", help="run/inspect/resume/cancel a research session")
+    research_sub = research_parser.add_subparsers(dest="research_command")
+    research_run = research_sub.add_parser("run", help="create a session and enqueue its first job")
+    research_run.add_argument("--question", required=True, help="research question")
+    research_run.add_argument("--objective", default=None, help="objective (default: question)")
+    research_run.add_argument("--ticker", default=None, help="primary ticker, e.g. NVDA")
+    research_run.add_argument("--as-of", default=None, help="PIT upper bound ISO timestamp")
+    research_run.add_argument("--interrupt-after", default=None,
+                              choices=["source", "freeze", "one-committee"],
+                              help="test hook recorded on the session so resume can be exercised")
+    research_run.add_argument("--live", action="store_true",
+                              help="run wave-1 live via Pi dispatch/model and persist evidence/freeze/dossier/committee")
+    research_inspect = research_sub.add_parser("inspect", help="show a research session")
+    research_inspect.add_argument("session_id", help="session id")
+    research_resume = research_sub.add_parser(
+        "resume", help="resume an interrupted session without duplicating evidence/jobs")
+    research_resume.add_argument("session_id", help="session id")
+    research_resume.add_argument("--interrupt-after", default=None,
+                                 choices=["source", "freeze", "one-committee"],
+                                 help="test hook: stop again after one stage")
+    research_resume.add_argument("--live", action="store_true",
+                                 help="continue the session live via Pi dispatch/model to a final result")
+    research_cancel = research_sub.add_parser("cancel", help="cancel a research session")
+    research_cancel.add_argument("session_id", help="session id")
+    eval_common = argparse.ArgumentParser(add_help=False)
+    eval_common.add_argument("--scenario", default=None, help="one scenario (default: all)")
+    eval_common.add_argument("--provider", default="unknown", help="provider label")
+    eval_common.add_argument("--prompt-version", default="v1", help="prompt version stamp")
+    eval_parser = subparsers.add_parser("eval", help="deterministic agent-scenario evals")
+    eval_sub = eval_parser.add_subparsers(dest="eval_command")
+    eval_run = eval_sub.add_parser("run", parents=[eval_common], help="run evals")
+    eval_run.add_argument("--model", default="deterministic", help="model label")
+    eval_model = eval_sub.add_parser("model", parents=[eval_common], help="labelled multi-model eval run")
+    eval_model.add_argument("--model", required=True, help="model label, e.g. granite-4.1-8b")
+    eval_inspect = eval_sub.add_parser("inspect", help="show one eval run")
+    eval_inspect.add_argument("eval_run_id", help="eval run id, e.g. eval:abc123")
+    eval_promote = eval_sub.add_parser("promote", help="promote a session to a regression fixture")
+    eval_promote.add_argument("session_id", help="session id")
+    eval_promote.add_argument("--scenario-name", required=True,
+                              help="scenario, e.g. factual-nvda-datacenter-growth")
+    eval_promote.add_argument("--question", default=None, help="override the scenario question")
+    eval_promote.add_argument("--as-of", default=None, help="override the scenario as_of")
     return parser
 
 
@@ -838,11 +1113,15 @@ def main() -> None:
         _cmd_thesis(args)
     elif args.command == "google-data":
         _cmd_google_data(args)
+    elif args.command == "research":
+        _cmd_research(args)
+    elif args.command == "eval":
+        _cmd_eval(args)
     else:
         parser.error(
             "unknown command (choose from runs, inspect, refresh-data, replay-sec-facts, "
             "refresh-obligations, evaluate-mandate, log-server, robinhood-login, "
-            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data)"
+            "backfill-sec, resume-sec-backfill, sec-coverage, thesis, google-data, research, eval)"
         )
 
 
