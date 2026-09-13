@@ -1,0 +1,10 @@
+[package]
+name = "stockbot-operator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent-ui = { path = "../agent-ui" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+herdr-client = { path = "../herdr-client" }

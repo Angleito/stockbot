@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/agent-ui", "crates/agent-ui-ttfx", "crates/herdr-client", "crates/stockbot-operator"]
+resolver = "2"
+
+[workspace.dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
