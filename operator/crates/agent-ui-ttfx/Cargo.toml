@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 ratatui = { workspace = true }
+ttfx = { workspace = true }

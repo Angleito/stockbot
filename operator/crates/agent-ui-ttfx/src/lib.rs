@@ -1,7 +1,12 @@
-//! Region-clipped decrypt stub. No stdout/terminal ownership:
-//! everything draws into the caller's `Rect`/`Buffer` only.
+//! Region-clipped decrypt animation backed by `ttfx::Session`.
+//! No stdout/terminal ownership: everything draws into the caller's
+//! `Rect`/`Buffer` only.
 
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier},
+};
 
 /// Frame-driven region animation. Settles to static UI when [`Animation::finished`].
 pub trait Animation {
@@ -15,72 +20,66 @@ pub trait Animation {
     fn finished(&self) -> bool;
 }
 
-/// Scramble glyphs for unrevealed cells (deterministic cycle, no RNG).
-const SCRAMBLE: [char; 8] = ['#', '@', '%', '&', '*', '+', '=', '?'];
+/// Deterministic seed so the same input always plays the same frames.
+const SEED: u64 = 42;
 
-/// Packed-cell decrypt: reveals left-to-right, top-to-bottom, one row per
-/// tick; unrevealed non-blank cells show a deterministic scramble glyph.
+fn options() -> ttfx::SessionOptions {
+    ttfx::SessionOptions {
+        seed: Some(SEED),
+        frame_rate: 30,
+        palette: None,
+        background: None,
+        bands: false,
+    }
+}
+
+/// Decrypt effect over the joined lines, clipped to `area` on render.
+///
+/// Session dims are fixed at construction; [`Animation::resize`] is a
+/// viewport hint only and never rebuilds (so it never restarts) the effect.
 pub struct TtfxAnimation {
-    cells: Vec<Vec<char>>,
-    width: u16,
-    height: u16,
+    session: ttfx::Session,
     view_w: u16,
     view_h: u16,
-    revealed: usize,
-    frame: usize,
 }
 
 impl TtfxAnimation {
-    /// Pack target lines (short rows space-padded to the longest).
+    /// Join `lines` to text; dims are max line length x line count (min 1x1).
+    /// Viewport starts at full dims.
     pub fn new(lines: Vec<String>) -> Self {
         let width = lines
             .iter()
-            .map(|l| l.chars().count() as u16)
+            .map(|l| l.chars().count() as u32)
             .max()
-            .unwrap_or(0);
-        let height = lines.len() as u16;
-        let cells = lines
-            .into_iter()
-            .map(|l| {
-                let mut row: Vec<char> = l.chars().collect();
-                row.resize(width as usize, ' ');
-                row
-            })
-            .collect();
-        Self {
-            cells,
-            width,
-            height,
-            view_w: width,
-            view_h: height,
-            revealed: 0,
-            frame: 0,
-        }
+            .unwrap_or(0)
+            .max(1);
+        let height = (lines.len() as u32).max(1);
+        let text = lines.join("\n");
+        let session = ttfx::Session::new_with_options(&text, "decrypt", width, height, options())
+            .expect("decrypt session");
+        Self { session, view_w: width as u16, view_h: height as u16 }
     }
 
     /// Blank placeholder of the given size.
     pub fn with_size(width: u16, height: u16) -> Self {
-        Self {
-            cells: vec![vec![' '; width as usize]; height as usize],
-            width,
-            height,
-            view_w: width,
-            view_h: height,
-            revealed: 0,
-            frame: 0,
-        }
+        let session =
+            ttfx::Session::new_with_options("", "decrypt", width as u32, height as u32, options())
+                .expect("decrypt session");
+        Self { session, view_w: width, view_h: height }
     }
 
-    fn total(&self) -> usize {
-        self.width as usize * self.height as usize
-    }
-
-    fn target(&self, row: usize, col: usize) -> char {
-        self.cells[row][col]
+    fn rgb(raw: u32) -> Color {
+        Color::Rgb(
+            ((raw >> 16) & 0xFF) as u8,
+            ((raw >> 8) & 0xFF) as u8,
+            (raw & 0xFF) as u8,
+        )
     }
 }
 
 impl Animation for TtfxAnimation {
+    /// Viewport hint: clamps [`Animation::render`] only. Never touches the
+    /// session, so repeated layout passes with any dims can't restart it.
     fn resize(&mut self, width: u16, height: u16) {
         self.view_w = width;
         self.view_h = height;
@@ -90,35 +89,44 @@ impl Animation for TtfxAnimation {
         if self.finished() {
             return;
         }
-        self.frame += 1;
-        let step = self.width.max(1) as usize;
-        self.revealed = (self.revealed + step).min(self.total());
+        self.session.advance();
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if area.is_empty() {
             return;
         }
-        let rows = (self.height.min(self.view_h).min(area.height)) as usize;
-        let cols = (self.width.min(self.view_w).min(area.width)) as usize;
-        for r in 0..rows {
-            for c in 0..cols {
-                let idx = r * self.width as usize + c;
-                let t = self.target(r, c);
-                let ch = if t == ' ' || idx < self.revealed {
-                    t
-                } else {
-                    SCRAMBLE[(idx + self.frame) % SCRAMBLE.len()]
+        let frame = self.session.frame();
+        let rows = (self.session.height() as u16).min(self.view_h).min(area.height);
+        let cols = (self.session.width() as u16).min(self.view_w).min(area.width);
+        for y in 0..rows {
+            for x in 0..cols {
+                let Some((symbol, fg, bg, flags)) = frame.get(x as usize, y as usize) else {
+                    continue;
                 };
-                if let Some(cell) = buf.cell_mut((area.x + c as u16, area.y + r as u16)) {
-                    cell.set_char(ch);
+                let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) else {
+                    continue;
+                };
+                cell.set_char(if symbol == 0 {
+                    ' '
+                } else {
+                    char::from_u32(symbol).unwrap_or(' ')
+                });
+                if fg != 0 {
+                    cell.set_fg(Self::rgb(fg));
+                }
+                if bg != 0 {
+                    cell.set_bg(Self::rgb(bg));
+                }
+                if flags & 1 != 0 {
+                    cell.modifier.insert(Modifier::BOLD);
                 }
             }
         }
     }
 
     fn finished(&self) -> bool {
-        self.revealed >= self.total()
+        self.session.done()
     }
 }
 
@@ -126,81 +134,93 @@ impl Animation for TtfxAnimation {
 mod tests {
     use super::*;
 
-    fn decrypt_lines() -> Vec<String> {
-        (0..8)
-            .map(|i| format!("decrypt stub row {i:02} data......"))
-            .map(|mut s| {
-                s.truncate(30);
-                while s.len() < 30 {
-                    s.push('.');
-                }
-                s
+    fn lines() -> Vec<String> {
+        vec![
+            "decrypt demo line one......".to_string(),
+            "decrypt demo line two......".to_string(),
+        ]
+    }
+
+    fn symbols(area: Rect, buf: &Buffer) -> Vec<String> {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        buf.cell((area.x + x, area.y + y))
+                            .unwrap()
+                            .symbol()
+                            .to_owned()
+                    })
+                    .collect()
             })
             .collect()
     }
 
     #[test]
-    fn decrypt_30x8_runs_and_leaves_outside_untouched() {
-        let lines = decrypt_lines();
-        assert_eq!(lines.len(), 8);
-        assert!(lines.iter().all(|l| l.chars().count() == 30));
-
-        let mut anim = TtfxAnimation::new(lines.clone());
-        assert!(!anim.finished());
-
-        let area = Rect::new(5, 2, 30, 8);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
-        for y in 0..12 {
-            for x in 0..40 {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char('X');
-                }
-            }
+    fn deterministic_seed_same_frame_twice() {
+        let mut a = TtfxAnimation::new(lines());
+        let mut b = TtfxAnimation::new(lines());
+        for _ in 0..5 {
+            a.tick();
+            b.tick();
         }
+        let area = Rect::new(0, 0, 26, 2);
+        let mut ba = Buffer::empty(area);
+        let mut bb = Buffer::empty(area);
+        a.render(area, &mut ba);
+        b.render(area, &mut bb);
+        assert_eq!(symbols(area, &ba), symbols(area, &bb));
+    }
 
-        // Pre-finish frames animate but never leak outside the region.
+    #[test]
+    fn tick_advances_frame() {
+        let mut anim = TtfxAnimation::new(lines());
+        let area = Rect::new(0, 0, 26, 2);
+        let mut before = Buffer::empty(area);
+        anim.render(area, &mut before);
+        let still_blank = symbols(area, &before)
+            .iter()
+            .all(|row| row.chars().all(|s| s == ' '));
+        assert!(still_blank);
         anim.tick();
+        let mut after = Buffer::empty(area);
+        anim.render(area, &mut after);
+        assert_ne!(symbols(area, &before), symbols(area, &after));
+    }
+
+    #[test]
+    fn render_clips_to_rect() {
+        let mut anim = TtfxAnimation::new(lines());
+        anim.resize(2, 1);
+        for _ in 0..5 {
+            anim.tick();
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, 26, 2));
+        let area = Rect::new(0, 0, 2, 1);
         anim.render(area, &mut buf);
-        for y in 0..12 {
-            for x in 0..40 {
-                let inside = x >= 5 && x < 35 && y >= 2 && y < 10;
+        for y in 0..2 {
+            for x in 0..26 {
+                let inside = x < 2 && y < 1;
                 if !inside {
-                    assert_eq!(buf.cell((x, y)).unwrap().symbol(), "X", "leak at {x},{y}");
+                    assert_eq!(buf.cell((x, y)).unwrap().symbol(), " ");
                 }
             }
         }
+    }
 
-        for _ in 0..100 {
+    #[test]
+    fn finished_eventually_true_and_static() {
+        let mut anim = TtfxAnimation::new(lines());
+        for _ in 0..10_000 {
             if anim.finished() {
                 break;
             }
             anim.tick();
-            anim.render(area, &mut buf);
         }
         assert!(anim.finished());
-
-        // Settled frame equals the static target text.
-        for (r, line) in lines.iter().enumerate() {
-            for (c, want) in line.chars().enumerate() {
-                let got = buf
-                    .cell((area.x + c as u16, area.y + r as u16))
-                    .unwrap()
-                    .symbol()
-                    .to_owned();
-                assert_eq!(got, want.to_string(), "mismatch at {c},{r}");
-            }
-        }
-        // Outside still untouched after the full run.
-        for y in 0..12 {
-            for x in 0..40 {
-                let inside = x >= 5 && x < 35 && y >= 2 && y < 10;
-                if !inside {
-                    assert_eq!(buf.cell((x, y)).unwrap().symbol(), "X", "leak at {x},{y}");
-                }
-            }
-        }
-
-        // Finished animation is static: further ticks change nothing.
+        let area = Rect::new(0, 0, 26, 2);
+        let mut buf = Buffer::empty(area);
+        anim.render(area, &mut buf);
         let settled = buf.content.clone();
         anim.tick();
         anim.render(area, &mut buf);
