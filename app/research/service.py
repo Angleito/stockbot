@@ -22,7 +22,7 @@ from .evidence import (
     evidence_to_dict,
     ingest_evidence,
 )
-from .models import JSONValue, default_policy, utcnow, validate_json_value
+from .models import JSONValue, default_policy, utcnow, validate_json_mapping
 from .repository import ResearchRepository, pending_next_action
 
 if TYPE_CHECKING:
@@ -215,7 +215,9 @@ def start_job(
     tool_budget = details.get("tool_budget")
     child_budget = details.get("child_budget")
     wave_raw: object = details.get("wave_id", wave_id)
-    wave_id_arg: int = wave_raw if isinstance(wave_raw, int) and not isinstance(wave_raw, bool) else wave_id
+    if isinstance(wave_raw, bool) or not isinstance(wave_raw, int):
+        raise ValueError(f"start_job: 'wave_id' must be an int, got {wave_raw!r}")
+    wave_id_arg: int = wave_raw
     model_raw: object = details.get("model")
     model_arg: str | None = model if model is not None else (model_raw if isinstance(model_raw, str) else None)
     updated, job = _jobs.create_job(
@@ -330,8 +332,7 @@ def record_evidence(
     supports: tuple[str, ...] = tuple(s for s in supports_raw if isinstance(s, str)) if isinstance(supports_raw, (list, tuple)) else ()
     contradicts_raw: object = data.get("contradicts", ())
     contradicts: tuple[str, ...] = tuple(s for s in contradicts_raw if isinstance(s, str)) if isinstance(contradicts_raw, (list, tuple)) else ()
-    metadata_raw: object = data.get("metadata", {})
-    metadata: dict[str, JSONValue] = {k: validate_json_value(v, "<evidence>") for k, v in metadata_raw.items()} if isinstance(metadata_raw, dict) and all(isinstance(k, str) for k in metadata_raw) else {}
+    metadata: dict[str, JSONValue] = validate_json_mapping(data.get("metadata", {}), "record_evidence: 'metadata'")
     record = Evidence(
         evidence_id=evidence_id,
         session_id=session_id,

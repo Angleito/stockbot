@@ -964,3 +964,37 @@ def test_queued_scout_blocks_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         _svc.freeze_session(sid, 1, repo=repo)
     assert scout.job_id in str(exc.value)
     assert repo.get_job(scout.job_id).status == "queued"
+
+
+def test_start_job_rejects_malformed_budget_wave_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, _ = _svc_sid(repo)
+    for bad in ("2", 2.0, True, None):
+        with pytest.raises(ValueError, match="wave_id"):
+            _svc.start_job(sid, "source_agent", budget={"wave_id": bad}, repo=repo)
+    ok = _svc.start_job(sid, "source_agent", budget={"wave_id": 1}, repo=repo)
+    assert ok["job_id"]
+
+
+def test_record_evidence_rejects_bad_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    base = _svc_item(f"{sid}:ev:badmeta")
+    bads: list[object] = [{"ok": object()}, {1: "x"}, "not-a-dict", [("k", "v")]]
+    for i, bad in enumerate(bads):
+        item = dict(base)
+        item["evidence_id"] = f"{sid}:ev:bad{i}"
+        item["metadata"] = bad
+        with pytest.raises(ValueError, match="metadata"):
+            _svc.record_evidence(sid, src, item, repo=repo)
+    good = dict(base)
+    good["evidence_id"] = f"{sid}:ev:goodmeta"
+    good["metadata"] = {"source": "sec", "page": 3}
+    out = _svc.record_evidence(sid, src, good, repo=repo)
+    assert out["metadata"] == {"source": "sec", "page": 3}
