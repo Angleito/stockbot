@@ -119,11 +119,11 @@ def stage_for_session(session: object, jobs: object = ()) -> Stage:
     return "SOURCE_RESEARCH"
 
 
-def check_stage_tool(stage: str, tool_name: str) -> None:
+def check_stage_tool(stage: Stage, tool_name: str) -> None:
     """Raise ValueError when tool_name is forbidden in stage. Discovery always passes."""
     if tool_name in DISCOVERY_TOOLS:
         return
-    allowed = STAGE_ALLOW.get(stage)  # type: ignore[call-overload]
+    allowed = STAGE_ALLOW.get(stage)
     if allowed is not None and tool_name in allowed:
         return
     raise ValueError(f"Stage {stage} forbids tool '{tool_name}'")

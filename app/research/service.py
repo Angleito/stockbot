@@ -22,7 +22,7 @@ from .evidence import (
     evidence_to_dict,
     ingest_evidence,
 )
-from .models import JSONValue, default_policy, utcnow
+from .models import JSONValue, default_policy, utcnow, validate_json_value
 from .repository import ResearchRepository, pending_next_action
 
 if TYPE_CHECKING:
@@ -117,17 +117,17 @@ def run_research(
     if existing:
         for job in existing:
             if job.status == "running":
-                return job.to_dict()  # type: ignore[return-value]
+                return job.to_dict()
         for job in existing:
             if job.status == "queued":
                 running = _jobs.start_job(job)
                 store.save_job(running)
-                return running.to_dict()  # type: ignore[return-value]
-        return existing[0].to_dict()  # type: ignore[return-value]
+                return running.to_dict()
+        return existing[0].to_dict()
     updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="service")
     running = _jobs.start_job(job)
     store.save_session_and_job(updated, running)
-    return running.to_dict()  # type: ignore[return-value]
+    return running.to_dict()
 
 
 def resume_research(
@@ -185,13 +185,13 @@ def cancel_research(
     store = _repo(repo)
     found = _require_session(store, session_id)
     if found.status in _session.TERMINAL_STATUSES:
-        return found.to_dict()  # type: ignore[return-value]
+        return found.to_dict()
     try:
         out = _session.transition_session(found, SessionStatus.CANCELLED)
     except ValueError:
-        return found.to_dict()  # type: ignore[return-value]
+        return found.to_dict()
     store.save_session(out)
-    return out.to_dict()  # type: ignore[return-value]
+    return out.to_dict()
 
 
 def start_job(
@@ -214,15 +214,19 @@ def start_job(
     token_budget = details.get("token_budget")
     tool_budget = details.get("tool_budget")
     child_budget = details.get("child_budget")
+    wave_raw: object = details.get("wave_id", wave_id)
+    wave_id_arg: int = wave_raw if isinstance(wave_raw, int) and not isinstance(wave_raw, bool) else wave_id
+    model_raw: object = details.get("model")
+    model_arg: str | None = model if model is not None else (model_raw if isinstance(model_raw, str) else None)
     updated, job = _jobs.create_job(
         found,
         existing,
         job_type=type,
         owner=str(details.get("owner", owner)),
-        wave_id=int(details.get("wave_id", wave_id)),  # type: ignore[arg-type]
+        wave_id=wave_id_arg,
         parent_job_id=parent,
         source_domain=source,
-        model=model if model is not None else details.get("model"),  # type: ignore[arg-type]
+        model=model_arg,
         token_budget=token_budget if isinstance(token_budget, int) else None,
         tool_budget=tool_budget if isinstance(tool_budget, int) else None,
         child_budget=child_budget if isinstance(child_budget, int) else None,
@@ -231,7 +235,7 @@ def start_job(
     store.save_job(job)
     running = _jobs.start_job(job)
     store.save_job(running)
-    return running.to_dict()  # type: ignore[return-value]
+    return running.to_dict()
 
 
 def complete_job(
@@ -244,7 +248,7 @@ def complete_job(
     store = _repo(repo)
     job = _require_job(store, job_id)
     if job.status in _TERMINAL_JOBS:
-        return job.to_dict()  # type: ignore[return-value]
+        return job.to_dict()
     if job.status == "queued":
         job = _jobs.start_job(job)
         store.save_job(job)
@@ -252,9 +256,9 @@ def complete_job(
     try:
         done = _jobs.complete_job(job, result=result)
     except ValueError:
-        return job.to_dict()  # type: ignore[return-value]
+        return job.to_dict()
     store.save_job(done)
-    return done.to_dict()  # type: ignore[return-value]
+    return done.to_dict()
 
 
 def _coerce_dt(value: object) -> datetime | None:
@@ -322,6 +326,12 @@ def record_evidence(
     )
     source_name_raw = data.get("source_name", data.get("source", job.source_domain or "pi"))
     source_name = source_name_raw if isinstance(source_name_raw, str) and source_name_raw.strip() else "pi"
+    supports_raw: object = data.get("supports", ())
+    supports: tuple[str, ...] = tuple(s for s in supports_raw if isinstance(s, str)) if isinstance(supports_raw, (list, tuple)) else ()
+    contradicts_raw: object = data.get("contradicts", ())
+    contradicts: tuple[str, ...] = tuple(s for s in contradicts_raw if isinstance(s, str)) if isinstance(contradicts_raw, (list, tuple)) else ()
+    metadata_raw: object = data.get("metadata", {})
+    metadata: dict[str, JSONValue] = {k: validate_json_value(v, "<evidence>") for k, v in metadata_raw.items()} if isinstance(metadata_raw, dict) and all(isinstance(k, str) for k in metadata_raw) else {}
     record = Evidence(
         evidence_id=evidence_id,
         session_id=session_id,
@@ -342,15 +352,11 @@ def record_evidence(
         effective_at=_coerce_dt(data.get("effective_at")),
         job_id=job_id,
         agent_id=str(data.get("agent_id", "pi")),
-        supports=tuple(s for s in data.get("supports", ()) if isinstance(s, str))  # type: ignore[union-attr]
-        if isinstance(data.get("supports", ()), (list, tuple))
-        else (),
-        contradicts=tuple(s for s in data.get("contradicts", ()) if isinstance(s, str))  # type: ignore[union-attr]
-        if isinstance(data.get("contradicts", ()), (list, tuple))
-        else (),
+        supports=supports,
+        contradicts=contradicts,
         confidence=float(data["confidence"]) if isinstance(data.get("confidence"), (int, float)) else None,
         quality=data.get("quality") if isinstance(data.get("quality"), str) else None,
-        metadata=dict(data.get("metadata", {})) if isinstance(data.get("metadata"), dict) else {},  # type: ignore[arg-type]
+        metadata=metadata,
         superseded_by=data.get("superseded_by") if isinstance(data.get("superseded_by"), str) else None,
     )
     ledger = EvidenceLedger()

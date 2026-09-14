@@ -28,7 +28,7 @@ from app.research.evidence import (
 )
 from app.research.freeze import FreezeIntegrityError, create_freeze, verify_freeze
 from app.research.journal import append_event
-from app.research.models import Job, SessionStatus
+from app.research.models import JSONValue, Job, SessionStatus
 from app.research.repository import ResearchRepository
 from app.research.runner import run_live
 
@@ -903,9 +903,11 @@ def test_concurrent_dispatch_race_admits_one(tmp_path: Path, monkeypatch: pytest
     repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
     sess = repo.get_session(sid)
     policy = dict(sess.policy)
-    section = dict(policy.get("research", {}))  # type: ignore[arg-type]
+    raw: object = policy.get("research", {})
+    assert isinstance(raw, dict)
+    section: dict[str, JSONValue] = dict(raw)
     section["max_tool_calls"] = 1
-    policy["research"] = section  # type: ignore[assignment]
+    policy["research"] = section
     repo.save_session(dataclasses.replace(sess, policy=policy))
     barrier = threading.Barrier(2)
     outcomes: list[object] = [None, None]

@@ -225,15 +225,17 @@ def _run_tool_call(request: Mapping[str, object]) -> None:
         if session is None:
             _write({"id": protocol_id, "error": "unknown_run"})
             return
+        raw_sid: object = request.get("active_research_session_id")
+        raw_jid: object = request.get("active_research_job_id")
         with session._lock:
-            if request.get("active_research_session_id") is not None:
-                session.active_research_session_id = request.get("active_research_session_id")  # type: ignore[assignment]
-                if request.get("active_research_job_id") is not None:
-                    session.active_research_job_id = request.get("active_research_job_id")  # type: ignore[assignment]
+            if raw_sid is not None:
+                session.active_research_session_id = raw_sid if isinstance(raw_sid, str) else None
+                if raw_jid is not None:
+                    session.active_research_job_id = raw_jid if isinstance(raw_jid, str) else None
                 else:
                     session.active_research_job_id = None
-            elif request.get("active_research_job_id") is not None:
-                session.active_research_job_id = request.get("active_research_job_id")  # type: ignore[assignment]
+            elif raw_jid is not None:
+                session.active_research_job_id = raw_jid if isinstance(raw_jid, str) else None
             captured_sid = session.active_research_session_id
             captured_jid = session.active_research_job_id
         token = set_current_recorder(recorder) if recorder is not None else None

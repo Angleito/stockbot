@@ -83,6 +83,12 @@ def _teardown_run(run_id: str) -> None:
         pi_bridge._inflight.pop(run_id, None)
 
 
+def _bridge_result(resp: dict[str, object]) -> dict[str, object]:
+    r = resp.get("result")
+    assert isinstance(r, dict)
+    return r
+
+
 def _tool_payload(run_id: str, tool_call_id: str | None = None) -> dict[str, object]:
     return {
         "id": f"tc-{uuid.uuid4().hex[:8]}",
@@ -533,13 +539,15 @@ def test_research_create_inspect_add_evidence_uses_initial_running_job(
                     "question": "NVDA demand?", "objective": "o", "data_root": root})
     )
     assert created is not None and "result" in created
-    sid = str(created["result"]["session_id"])  # type: ignore[index]
+    sid_val = _bridge_result(created).get("session_id")
+    assert isinstance(sid_val, str)
+    sid = sid_val
     inspected = pi_bridge._handle(
         json.dumps({"id": "r-inspect", "op": "research.session.inspect",
                     "session_id": sid, "data_root": root})
     )
     assert inspected is not None and "result" in inspected
-    jobs = inspected["result"]["jobs"]  # type: ignore[index]
+    jobs = _bridge_result(inspected).get("jobs")
     assert isinstance(jobs, list)
     src = [j for j in jobs if isinstance(j, dict) and j.get("job_type") == "source_agent"]
     assert len(src) == 1
@@ -559,7 +567,8 @@ def test_research_create_inspect_add_evidence_uses_initial_running_job(
                     "session_id": sid, "data_root": root})
     )
     assert reinspected is not None and "result" in reinspected
-    jobs2 = reinspected["result"]["jobs"]  # type: ignore[index]
+    jobs2 = _bridge_result(reinspected).get("jobs")
+    assert isinstance(jobs2, list)
     src2 = [j for j in jobs2 if isinstance(j, dict) and j.get("job_type") == "source_agent"]
     assert len(src2) == 1
 
@@ -704,7 +713,9 @@ def test_call_tool_research_finalize_completes_trio_session(
             "claims": [{"text": "finding", "evidence_ids": [eid]}],
         },
     }, bound, data_root=str(root))
-    assert out.get("meta", {}).get("status") == "completed", out  # type: ignore[union-attr]
+    meta = out.get("meta")
+    assert isinstance(meta, dict)
+    assert meta.get("status") == "completed", out
     fresh = ResearchRepository(data_root=root)
     final = fresh.get_session(sid).final_result
     assert isinstance(final, dict)

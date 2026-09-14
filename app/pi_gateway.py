@@ -429,13 +429,14 @@ def _execute_pi_tool(
     # Attached staged session must exist for every target (fail closed);
     # discovery only skips the stage check, never existence.
     if _store is not None:
-        _sid: str = _resolved_sid  # type: ignore[assignment]
+        assert isinstance(_resolved_sid, str) and _resolved_sid
+        _sid: str = _resolved_sid
         try:
-            _found = _store.get_session(_sid)
+            _found: object | None = _store.get_session(_sid)
         except KeyError:
             if not _sid_from_explicit:
                 return {"error": f"Unknown research session '{_sid}'", "error_type": "invalid_research_context"}
-            _found = None  # type: ignore[assignment]
+            _found = None
         else:
             if name not in DISCOVERY_TOOLS:
                 _st = stage_for_session(_found, _store.list_jobs(_sid))
@@ -474,7 +475,9 @@ def _execute_pi_tool(
             return {"error": f"Active research job is required for tool '{name}'", "error_type": "invalid_research_context"}
         try:
             from app.research import service as _svc
-            _svc.authorize_and_consume_dispatch(_resolved_sid, _resolved_jid, name, repo=_store)  # type: ignore[arg-type]
+            assert isinstance(_resolved_sid, str) and _resolved_sid
+            assert isinstance(_resolved_jid, str) and _resolved_jid
+            _svc.authorize_and_consume_dispatch(_resolved_sid, _resolved_jid, name, repo=_store)
         except ValueError as exc:
             _cmsg = str(exc).lower()
             if "budget" in _cmsg or "exhaust" in _cmsg or "quota" in _cmsg:

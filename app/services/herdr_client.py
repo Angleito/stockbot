@@ -12,6 +12,11 @@ import json
 import os
 import socket
 from collections.abc import Iterator
+from typing import Protocol
+
+class _RecvSocket(Protocol):
+    def recv(self, n: int, /) -> bytes: ...
+
 
 DEFAULT_SOCKET = os.path.expanduser("~/.config/herdr/herdr.sock")
 
@@ -54,7 +59,7 @@ class HerdrClient:
         return sock
 
     @staticmethod
-    def _read_lines(sock: socket.socket) -> Iterator[dict[str, object]]:
+    def _read_lines(sock: _RecvSocket) -> Iterator[dict[str, object]]:
         buf = b""
         while True:
             chunk = sock.recv(65536)
@@ -121,7 +126,7 @@ def demo() -> None:
         def sendall(self, data: bytes) -> None:
             received.append(data)
 
-    messages = list(HerdrClient._read_lines(FakeSock()))  # type: ignore[arg-type]
+    messages = list(HerdrClient._read_lines(FakeSock()))
     assert messages == [{"event": "pane_created"}, {"result": {"type": "ok"}}], messages
     assert received == [], received  # reader never writes
 
