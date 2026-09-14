@@ -22,7 +22,11 @@ export function setResearchBridge(fn: BridgeCall): void {
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
 export type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
 
-// ponytail: in-memory fetch cap; kernel cancel persists the stop so resume sees TERMINAL and stays done.
+// ponytail: Mem is session pointer plus a local fetch backstop; stage still derives
+// from kernel inspect, but the attempt count itself is in-memory. Ceiling: restart or
+// resume resets the count, worst case 3 extra fetch prompts per restart. Terminal
+// persists via kernel research.session.cancel, so resume after cancel sees TERMINAL
+// and returns done. Upgrade path: kernel-persisted attempt count if restarts mid-fetch matter.
 const MAX_FETCH_ATTEMPTS = 3;
 interface Mem {
  sessionId: string;
