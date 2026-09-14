@@ -22,10 +22,11 @@ export function setResearchBridge(fn: BridgeCall): void {
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
 export type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
 
-// ponytail: Mem is just the session pointer; everything else derives from kernel
-// inspect so a restart plus resumeResearch recovers the full driver state.
+// ponytail: in-memory fetch cap; kernel cancel persists the stop so resume sees TERMINAL and stays done.
+const MAX_FETCH_ATTEMPTS = 3;
 interface Mem {
  sessionId: string;
+ fetchAttempts: number;
 }
 const runs = new Map<string, Mem>();
 export function clearResearchRun(runId: string): void {
@@ -218,17 +219,17 @@ function fetchPrompt(sessionId: string, jobId: string, question: string, asOf?: 
  const cutoff = asOf && asOf.length > 0 ? `known_at is required as ISO-8601 on or before the session cutoff ${asOf}; ` : `no session cutoff applies; known_at may be any ISO-8601 or omitted; `;
  return (
   `Research session ${sessionId} created for "${question}". Fetch evidence now: dispatch SEC research with ` +
-  `Call call_tool with name="search_web" (or get_fundamentals / get_short_interest), then record each finding with ` +
+  `Call call_tool with name="search_sec_filings" (or list_sec_filings / get_sec_document), then record each finding with ` +
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ${cutoff}` +
-  `Out-of-order calls fail closed; keep fetching until evidence shows.`
+  `Out-of-order calls fail closed; up to 3 SEC dispatches, then the driver closes the run as no_questions:empty-wave1 when SEC has no coverage.`
  );
 }
 
 function wave2Prompt(sessionId: string, jobId: string, targeted: string, asOf?: string): string {
  return (
   `Wave-2 authorized for research session ${sessionId}${targeted}. Fetch targeted evidence with ` +
-  `Call call_tool with name="search_web", then record each finding with ` +
+  `Call call_tool with name="search_sec_filings" (or get_material_events / get_sec_document), then record each finding with ` +
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ` +
   `known_at is required as ISO-8601 on or before the session cutoff ${asOf || "unbounded"}.`
@@ -332,7 +333,7 @@ export async function startResearch(
  const sessionId = str(created.session_id);
  if (!sessionId) throw new Error("research.session.create failed: missing session_id");
  const { session, jobs, latestFreeze } = await inspect(sessionId, dataRoot, asOf);
- runs.set(runId, { sessionId });
+ runs.set(runId, { sessionId, fetchAttempts: 0 });
  return { sessionId, prompt: fetchPrompt(sessionId, deriveState(session, jobs, latestFreeze).jobId, question, asOf) };
 }
 
@@ -342,7 +343,7 @@ export async function resumeResearch(
  dataRoot?: string,
  asOf?: string,
 ): Promise<{ sessionId: string; prompt: string }> {
- runs.set(runId, { sessionId });
+ runs.set(runId, { sessionId, fetchAttempts: 0 });
  const adv = await advanceOnAgentEnd(runId, "", dataRoot, asOf);
  // Terminal answers reuse the persisted final answer and leave no active run
  // binding (advance deletes it); every other state reuses the advance prompt.
@@ -371,6 +372,16 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  const d = deriveState(session, jobs, latestFreeze);
  const evidence = strs(session.evidence_ids);
  if (evidence.length === 0) {
+  m.fetchAttempts += 1;
+  if (m.fetchAttempts >= MAX_FETCH_ATTEMPTS) {
+   try {
+    await rpc("research.session.cancel", { session_id: sid }, dataRoot, asOf);
+   } catch {
+    // cancel is best-effort; the run still terminates locally.
+   }
+   runs.delete(runId);
+   return { done: true, answer: `Research session ${sid} closed: no SEC evidence after ${MAX_FETCH_ATTEMPTS} fetch attempts (no_questions:empty-wave1).` };
+  }
   return { done: false, prompt: fetchPrompt(sid, d.jobId, str(session.query) || str(session.objective) || sid, asOf) };
  }
  const freezes = strs(session.freeze_ids);
