@@ -22,7 +22,7 @@ from .evidence import (
     evidence_to_dict,
     ingest_evidence,
 )
-from .models import JSONValue, default_policy, utcnow, validate_json_mapping
+from .models import JSONValue, default_policy, utcnow, validate_json_mapping, validate_json_value
 from .repository import ResearchRepository, pending_next_action
 
 if TYPE_CHECKING:
@@ -45,6 +45,12 @@ __all__ = [
     "list_research",
     "record_committee_analysis",
     "record_evidence",
+    "submit_source_result",
+    "create_committee_jobs",
+    "transition_job_completed",
+    "research_events",
+    "heartbeat_job",
+    "job_diagnostics",
     "resume_research",
     "retry_job",
     "run_research",
@@ -54,6 +60,38 @@ __all__ = [
 
 class ResearchNotFound(KeyError):
     """Unknown session/job/evidence id. Subclasses KeyError for existing handlers."""
+
+
+def transition_job_completed(session_id: str, job_id: str, *, repo=None) -> dict[str, object]:
+    """Single authoritative wave/counter transition: job wave + session current_wave together."""
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    found = _require_session(store, session_id)
+    if job.session_id != found.session_id:
+        raise ValueError("transition_job_completed: session/job mismatch")
+    wave = job.wave_id if isinstance(job.wave_id, int) and job.wave_id >= 1 else 1
+    cur = store.get_session(session_id)
+    if wave > cur.current_wave:
+        from dataclasses import replace as _replace
+        store.save_session(_replace(cur, current_wave=wave, updated_at=utcnow()))
+        cur = store.get_session(session_id)
+    return {"session_id": session_id, "job_id": job_id, "current_wave": cur.current_wave, "job_wave": wave}
+
+
+def research_events(session_id: str, job_id: str | None = None, limit: int = 100, cursor: int = 0,
+                    *, repo=None) -> dict[str, object]:
+    """Bounded structured events from the journal (read-only)."""
+    store = _repo(repo)
+    _require_session(store, session_id)
+    limit = max(1, min(200, limit if isinstance(limit, int) else 100))
+    cursor = max(0, cursor if isinstance(cursor, int) else 0)
+    events = store.list_events(session_id)
+    if job_id:
+        events = [e for e in events if isinstance(e.payload, dict) and e.payload.get("job_id") == job_id]
+    page = events[cursor:cursor + limit]
+    return {"session_id": session_id, "job_id": job_id, "cursor": cursor, "limit": limit,
+            "events": [{"ts": e.timestamp.isoformat(), "kind": e.event_type, "job_id": (e.payload.get("job_id") if isinstance(e.payload, dict) else None),
+                        "detail": dict(e.payload)} for e in page]}
 
 
 _TERMINAL_JOBS = frozenset({"completed", "failed", "cancelled", "timed_out"})
@@ -81,6 +119,59 @@ def _require_job(repo: ResearchRepository, job_id: str):
         raise ResearchNotFound(f"unknown job_id: {job_id!r}") from None
 
 
+def _emit(store: ResearchRepository, session_id: str, event_type: str, payload: dict[str, object]) -> None:
+    """Append one journal event (best-effort; never breaks the mutation)."""
+    try:
+        from .journal import append_event, hydrate
+        hydrate(session_id, store.list_events(session_id))
+        store.save_event(append_event(session_id, event_type, "service", "service", dict(payload)))
+    except Exception:
+        pass
+
+
+def _enforce_live_job(store: ResearchRepository, job_id: str):
+    """Fail-closed deadline guard shared by every governed mutation."""
+    from dataclasses import replace as _replace
+    from .models import Failure, normalize_time
+
+    job = _require_job(store, job_id)
+    if job.deadline is not None:
+        deadline = normalize_time(job.deadline)
+        if utcnow() > deadline:
+            timed = _replace(job, status="timed_out", completed_at=utcnow(),
+                             failure=Failure(category="timeout", message="deadline expired"))
+            store.save_job(timed)
+            raise ValueError(f"ERR_JOB_TIMED_OUT: job {job_id!r} deadline expired")
+    if job.status == "timed_out":
+        raise ValueError(f"ERR_JOB_TIMED_OUT: job {job_id!r} timed out")
+    return job
+
+
+def heartbeat_job(job_id: str, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, JSONValue]:
+    """Refresh last_heartbeat_at; read path surfaces staleness + remaining."""
+    from dataclasses import replace as _replace
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    beat = _replace(job, last_heartbeat_at=utcnow())
+    store.save_job(beat)
+    return beat.to_dict()
+
+
+def job_diagnostics(session_id: str, job_id: str, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, JSONValue]:
+    """Non-empty diagnostics: staleness, deadline remaining, evidence count."""
+    from .models import HEARTBEAT_STALE_S
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    now = utcnow()
+    hb = job.last_heartbeat_at or job.started_at or job.created_at
+    staleness = max(0.0, (now - hb).total_seconds()) if hb is not None else 0.0
+    remaining = (job.deadline - now).total_seconds() if job.deadline is not None else None
+    count = sum(1 for r in store.list_evidence(session_id) if r.get("job_id") == job_id)
+    return {"job_id": job_id, "stale": staleness > HEARTBEAT_STALE_S, "staleness_s": staleness,
+            "deadline_remaining_s": remaining, "evidence_count": count,
+            "last_event": job.status}
+
+
 def create_research(
     question: str,
     objective: str | None = None,
@@ -99,9 +190,10 @@ def create_research(
         as_of=as_of,
         policy=policy if policy is not None else default_policy(),
     )
-    updated, job = _jobs.create_job(new_session, [], job_type="source_agent", owner="service")
+    updated, job = _jobs.create_job(new_session, [], job_type="source_agent", owner="pi", source_domain=None)
     running = _jobs.start_job(job)
     store.save_session_and_job(updated, running)
+    _emit(store, updated.session_id, "job.started", {"job_id": running.job_id})
     return updated.session_id
 
 
@@ -124,7 +216,7 @@ def run_research(
                 store.save_job(running)
                 return running.to_dict()
         return existing[0].to_dict()
-    updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="service")
+    updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="pi", source_domain=None)
     running = _jobs.start_job(job)
     store.save_session_and_job(updated, running)
     return running.to_dict()
@@ -260,7 +352,8 @@ def complete_job(
     except ValueError:
         return job.to_dict()
     store.save_job(done)
-    return done.to_dict()
+    transition_job_completed(job.session_id, job.job_id, repo=store)
+    return store.get_job(job.job_id).to_dict()
 
 
 def _coerce_dt(value: object) -> datetime | None:
@@ -287,7 +380,7 @@ def record_evidence(
         raise ValueError("record_evidence: 'item' must be a mapping")
     store = _repo(repo)
     found = _require_session(store, session_id)
-    job = _require_job(store, job_id)
+    job = _enforce_live_job(store, job_id)
     if job.session_id != found.session_id:
         raise ValueError(f"record_evidence: job {job_id!r} belongs to {job.session_id!r}")
     if job.status != "running":
@@ -333,6 +426,29 @@ def record_evidence(
     contradicts_raw: object = data.get("contradicts", ())
     contradicts: tuple[str, ...] = tuple(s for s in contradicts_raw if isinstance(s, str)) if isinstance(contradicts_raw, (list, tuple)) else ()
     metadata: dict[str, JSONValue] = validate_json_mapping(data.get("metadata", {}), "record_evidence: 'metadata'")
+    ev_type = str(data.get("type", "filing_observation"))
+    if ev_type == "search_coverage":
+        for req in ("query", "search_id"):
+            if not isinstance(data.get(req), str) or not data.get(req).strip():
+                raise ValueError(f"record_evidence: search_coverage requires '{req}'")
+    subject = str(data.get("subject", found.query[:120]))
+    if ev_type == "filing_observation" and subject.strip().lower() == "openai":
+        rec_id = data.get("source_record_id")
+        uri = data.get("source_uri")
+        blob = f"{rec_id or ''} {uri or ''}".lower()
+        if "openai" not in blob:
+            raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (OpenAI claim off unrelated filing)")
+    norm = lambda v: str(v or "").strip().lower()
+    if ev_type == "search_coverage":
+        identity_key = "|".join(("sec", norm(data.get("operation", "search")), norm(data.get("search_id")), norm(data.get("query")), norm(subject)))
+    else:
+        identity_key = "|".join(("sec", norm(data.get("operation", "filing")), norm(data.get("source_record_id")), norm(subject), norm(data.get("observation_type", claim[:80]))))
+    prior = store.list_evidence(session_id)
+    for row in prior:
+        if isinstance(row.get("metadata"), dict) and row["metadata"].get("identity_key") == identity_key:
+            return {"evidence_id": row.get("evidence_id"), "accepted": False, "duplicate_of": row.get("evidence_id")}
+    if sum(1 for r in prior if r.get("job_id") == job_id) >= 8:
+        raise ValueError("record_evidence: ERR_EVIDENCE_CAP (max 8 per source job; submit result)")
     record = Evidence(
         evidence_id=evidence_id,
         session_id=session_id,
@@ -357,7 +473,7 @@ def record_evidence(
         contradicts=contradicts,
         confidence=float(data["confidence"]) if isinstance(data.get("confidence"), (int, float)) else None,
         quality=data.get("quality") if isinstance(data.get("quality"), str) else None,
-        metadata=metadata,
+        metadata={**metadata, "identity_key": identity_key, "evidence_type": ev_type},
         superseded_by=data.get("superseded_by") if isinstance(data.get("superseded_by"), str) else None,
     )
     ledger = EvidenceLedger()
@@ -371,6 +487,9 @@ def record_evidence(
     ingest_evidence(ledger, record, as_of=found.as_of)
     stored = evidence_to_dict(record)
     store.save_evidence(stored)
+    _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
+    stored = dict(stored)
+    stored["metadata"] = {k: v for k, v in metadata.items()}
     if record.evidence_id not in found.evidence_ids:
         store.save_session(
             replace(
@@ -380,6 +499,67 @@ def record_evidence(
             )
         )
     return stored
+
+
+def submit_source_result(
+    job_id: str,
+    coverage: dict[str, object] | None = None,
+    evidence_ids: list[str] | None = None,
+    unresolved_questions: list[str] | None = None,
+    create_committee: bool = False,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Complete one running source job with validated coverage; evidence stays mutation-only.
+
+    Validates job open + deadline live, every evidence id exists in this session,
+    then completes the job with a coverage/result payload. Returns
+    {job_status: completed, dossier-ish refs}. Terminal reuse returns current state.
+    """
+    from .dossiers import create_dossier, default_coverage, validate_dossier
+
+    store = _repo(repo)
+    job = _enforce_live_job(store, job_id)
+    found = _require_session(store, job.session_id)
+    cov = dict(coverage or {})
+    useful = cov.get("useful_for_question", "sufficient")
+    if useful not in ("sufficient", "insufficient"):
+        raise ValueError("submit_source_result: coverage useful_for_question must be sufficient|insufficient")
+    ids = list(evidence_ids or [])
+    if not ids and useful != "insufficient":
+        raise ValueError("submit_source_result: ERR_EMPTY_RESULT (no evidence with sufficient coverage)")
+    ledger_ids = {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id)}
+    missing = [e for e in ids if e not in ledger_ids]
+    if missing:
+        raise ValueError(f"submit_source_result: ERR_EVIDENCE_NOT_FOUND {missing[:3]}")
+    dossier_id = f"{job.session_id}:{job.wave_id}:sec"
+    dossier = create_dossier(
+        dossier_id=dossier_id, session_id=job.session_id, wave_id=job.wave_id,
+        subject=found.query[:120], coverage={**default_coverage(), "complete": useful == "sufficient"},
+        findings=[{"text": "source result", "evidence_ids": ids}] if ids else [],
+        open_questions=list(unresolved_questions or []),
+    )
+    validate_dossier(dossier, ledger_ids)
+    from .dossiers.sec import dossier_to_dict
+    try:
+        store.save_dossier(dossier_to_dict(dossier))
+    except ValueError:
+        pass
+    cur = store.get_session(job.session_id)
+    if dossier_id not in cur.dossier_ids:
+        store.save_session(replace(cur, dossier_ids=[*cur.dossier_ids, dossier_id], updated_at=utcnow()))
+    done = _jobs.complete_job(job, result={"coverage": cov, "evidence_ids": ids})
+    store.save_job(done)
+    _emit(store, job.session_id, "job.completed", {"job_id": job.job_id})
+    transition_job_completed(job.session_id, job.job_id, repo=store)
+    out: dict[str, JSONValue] = {"job_status": done.status, "job_id": done.job_id, "dossier_id": dossier_id,
+            "evidence_ids": validate_json_value(ids, "<submit>")}
+    if create_committee and cov.get("useful_for_question", "sufficient") == "sufficient":
+        trio = create_committee_jobs(job.session_id, job.wave_id, repo=store)
+        out["pending_next_action"] = trio["pending_next_action"]  # type: ignore[assignment]
+        out["committee_jobs"] = validate_json_value(trio["jobs"], "<submit>")
+    return out
+
 
 def list_research(
     limit: int = 20,
@@ -538,7 +718,51 @@ def freeze_session(
     if fid not in out.freeze_ids:
         out = replace(out, freeze_ids=[*out.freeze_ids, fid], updated_at=utcnow())
     store.save_session(out)
-    return _freeze.freeze_to_dict(frozen)
+    _emit(store, session_id, "freeze.created", {"freeze_id": fid, "wave_id": wave_id})
+    # Coverage gate: all-insufficient dossiers block committee; caller routes next source or FINALIZE_INSUFFICIENT.
+    dossiers = store.list_dossiers(session_id)
+    if dossiers:
+        completes = [d.get("coverage", {}) for d in dossiers if isinstance(d.get("coverage"), dict)]
+        if completes and all(c.get("complete") is False for c in completes):
+            out_dict = _freeze.freeze_to_dict(frozen)
+            out_dict["coverage_gate"] = "insufficient"
+            out_dict["pending_next_action"] = {"verb": "FINALIZE_INSUFFICIENT",
+                "reason": "no sufficient source coverage; broad question not answered from SEC no-coverage"}
+            return out_dict
+    # Committee creation stays caller-driven: freeze returns the verb + roles and
+    # reuses pre-existing committee job ids when present, never auto-creating.
+    # ponytail: opt-in atomic creation lives in submit_source_result(create_committee=True) only.
+    jobs = store.list_jobs(session_id)
+    existing = [j.job_id for j in jobs if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot")]
+    out_dict = _freeze.freeze_to_dict(frozen)
+    out_dict["pending_next_action"] = {"verb": "EXECUTE_COMMITTEE",
+        "jobs": existing or ["stockbot", "bullbot", "bearbot"], "wave_id": wave_id, "freeze_id": fid}
+    return out_dict
+
+
+def create_committee_jobs(session_id: str, wave_id: int = 1, *, repo=None) -> dict[str, object]:
+    """Opt-in atomic trio creation: 3 distinct pi-owned committee jobs, ids returned together."""
+    store = _repo(repo)
+    found = _require_session(store, session_id)
+    jobs = store.list_jobs(session_id)
+    by_role: dict[str, str] = {}
+    for j in jobs:
+        if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot"):
+            by_role.setdefault(j.job_type, j.job_id)
+    created: list[str] = []
+    cur = store.get_session(session_id)
+    for role in ("stockbot", "bullbot", "bearbot"):
+        if role in by_role:
+            created.append(by_role[role])
+            continue
+        cur, job = _jobs.create_job(cur, store.list_jobs(session_id), job_type=role, owner="pi", wave_id=wave_id)
+        store.save_session(cur)
+        started = _jobs.start_job(job)
+        store.save_job(started)
+        created.append(started.job_id)
+        _emit(store, session_id, "committee.created", {"job_id": started.job_id, "role": role})
+    return {"session_id": session_id, "wave_id": wave_id, "jobs": created,
+            "pending_next_action": {"verb": "EXECUTE_COMMITTEE", "jobs": created, "wave_id": wave_id}}
 
 
 def record_committee_analysis(
@@ -611,6 +835,7 @@ def record_committee_analysis(
         runs.append(fresh)
     cur = replace(cur, committee_runs=runs, updated_at=utcnow())
     store.save_session(cur)
+    _emit(store, session_id, "committee.created", {"job_id": job_id, "role": role, "freeze_id": fid})
     return done.to_dict()
 
 

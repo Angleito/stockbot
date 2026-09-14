@@ -624,6 +624,58 @@ def _op_research_session_finalize(request: Mapping[str, object], protocol_id: st
     return {"id": protocol_id, "result": final}
 
 
+def _op_research_source_submit(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.source.submit -> service.submit_source_result."""
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        create_flag = request.get("create_committee") is True
+        out = _kernel.submit_source_result(
+            job_id, dict(request.get("coverage") or {}),
+            list(request.get("evidence_ids") or []), list(request.get("unresolved_questions") or []),
+            create_flag, repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": out}
+
+
+def _op_research_job_heartbeat(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.job.heartbeat -> service.heartbeat_job."""
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        out = _kernel.heartbeat_job(job_id, repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": out}
+
+
+def _op_research_events(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.events -> service.research_events."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    raw_job = request.get("job_id")
+    raw_limit = request.get("limit", 100)
+    raw_cursor = request.get("cursor", 0)
+    try:
+        out = _kernel.research_events(session_id, raw_job if isinstance(raw_job, str) else None,
+            raw_limit if isinstance(raw_limit, int) else 100, raw_cursor if isinstance(raw_cursor, int) else 0,
+            repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    return {"id": protocol_id, "result": out}
+
+
 def _run_tool_invoke(request: Mapping[str, object]) -> None:
     """Executor worker: dumb tool passthrough with an ephemeral session context."""
     protocol_id = request.get("id")
@@ -714,6 +766,12 @@ def _handle(line: str) -> dict[str, object] | None:
         return _op_research_wave2_decide(request, protocol_id)
     if op == "research.session.finalize":
         return _op_research_session_finalize(request, protocol_id)
+    if op == "research.source.submit":
+        return _op_research_source_submit(request, protocol_id)
+    if op == "research.job.heartbeat":
+        return _op_research_job_heartbeat(request, protocol_id)
+    if op == "research.events":
+        return _op_research_events(request, protocol_id)
     return {"id": protocol_id, "error": "unknown_op"}
 
 

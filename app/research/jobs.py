@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .models import (
     FAILURE_CATEGORY_VALUES,
@@ -19,6 +19,7 @@ from .models import (
     JobStatus,
     JobType,
     ResearchSession,
+    SOURCE_RUNTIME_BUDGET_S,
     new_job_id,
     utcnow,
     validate_json_mapping,
@@ -169,7 +170,7 @@ def create_job(
         source_domain=source_domain,
         status=JobStatus.QUEUED.value,
         created_at=utcnow(),
-        deadline=parsed_deadline,
+        deadline=parsed_deadline if parsed_deadline is not None else (utcnow() + timedelta(seconds=SOURCE_RUNTIME_BUDGET_S)) if jtype == JobType.SOURCE_AGENT.value else None,
         model=model,
         token_budget=token_budget,
         tool_budget=tool_budget if tool_budget is not None else default_tool_budget(policy, jtype),
@@ -185,7 +186,7 @@ def start_job(job: Job) -> Job:
     """Mark a queued job running; raises ValueError otherwise."""
     if job.status != JobStatus.QUEUED.value:
         raise ValueError(f"<job>: cannot start job in status {job.status!r}")
-    out = replace(job, status=JobStatus.RUNNING.value, started_at=utcnow())
+    out = replace(job, status=JobStatus.RUNNING.value, started_at=utcnow(), last_heartbeat_at=utcnow())
     out.validate("<job>")
     return out
 

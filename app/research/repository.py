@@ -23,6 +23,7 @@ from .models import (
     Job,
     JournalEvent,
     ResearchSession,
+    SOURCE_RUNTIME_BUDGET_S,
     utcnow,
     validate_json_mapping,
     validate_json_value,
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   parent_job_id TEXT, job_type TEXT NOT NULL, owner TEXT NOT NULL,
   source_domain TEXT, status TEXT NOT NULL,
   created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, deadline TEXT,
+  last_heartbeat_at TEXT,
   model TEXT, token_budget INTEGER, tool_budget INTEGER, child_budget INTEGER NOT NULL,
   result TEXT, diagnostics TEXT NOT NULL, failure TEXT);
 CREATE TABLE IF NOT EXISTS journal (
@@ -129,26 +131,38 @@ def _job_id(job: Job) -> str:
     return job.job_id
 
 
-def pending_next_action(session: ResearchSession, jobs: list[Job]) -> str:
-    """Deterministic next step from status + open jobs (read-only)."""
+def pending_next_action(session: ResearchSession, jobs: list[Job]) -> JSONValue:
+    """Deterministic next step from status + open jobs (read-only).
+
+    Returns an EXECUTE_* verb naming the runnable owned job; bare `wait` only
+    when no runnable work exists. Dict shape survives JSON round-trips.
+    """
     mine = sorted((j for j in jobs if j.session_id == session.session_id), key=_job_id)
-    running = [j.job_id for j in mine if j.status == "running"]
-    queued = [j.job_id for j in mine if j.status == "queued"]
+    running = [j for j in mine if j.status == "running"]
+    queued = [j for j in mine if j.status == "queued"]
     if session.status in ("completed", "failed", "cancelled"):
-        return f"none: session {session.status}"
+        return {"verb": "NONE", "reason": f"session {session.status}"}
     if running:
-        return f"wait: {len(running)} running job(s): {', '.join(running)}"
+        first = running[0]
+        return {"verb": "EXECUTE_JOB", "job_id": first.job_id, "job_type": first.job_type,
+                "source_domain": first.source_domain or "sec",
+                "deadline": first.deadline.isoformat() if first.deadline is not None else None,
+                "budget_s": SOURCE_RUNTIME_BUDGET_S}
     if queued:
-        return f"dispatch: {len(queued)} queued job(s): {', '.join(queued)}"
+        first = queued[0]
+        return {"verb": "EXECUTE_JOB", "job_id": first.job_id, "job_type": first.job_type,
+                "source_domain": first.source_domain or "sec",
+                "deadline": first.deadline.isoformat() if first.deadline is not None else None,
+                "budget_s": SOURCE_RUNTIME_BUDGET_S}
     return {
-        "created": "plan",
-        "planning": "plan",
-        "researching": f"dispatch wave {session.current_wave + 1} research",
-        "freezing": "freeze evidence",
-        "analyzing": "analyze frozen evidence",
-        "targeted_research": "dispatch targeted research",
-        "synthesizing": "synthesize",
-    }.get(session.status, f"none: unknown status {session.status!r}")
+        "created": {"verb": "PLAN"},
+        "planning": {"verb": "PLAN"},
+        "researching": {"verb": "WAIT", "reason": "no runnable jobs"},
+        "freezing": {"verb": "FREEZE"},
+        "analyzing": {"verb": "ANALYZE"},
+        "targeted_research": {"verb": "EXECUTE_JOB", "reason": "dispatch targeted research"},
+        "synthesizing": {"verb": "SYNTHESIZE"},
+    }.get(session.status, {"verb": "NONE", "reason": f"unknown status {session.status!r}"})
 
 
 _SESSION_SQL = (
@@ -160,9 +174,9 @@ _SESSION_SQL = (
 )
 _JOB_SQL = (
     "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
-    " source_domain, status, created_at, started_at, completed_at, deadline, model,"
+    " source_domain, status, created_at, started_at, completed_at, deadline, last_heartbeat_at, model,"
     " token_budget, tool_budget, child_budget, result, diagnostics, failure)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -199,6 +213,7 @@ def _job_params(job: Job) -> tuple[object, ...]:
         job.started_at.isoformat() if job.started_at is not None else None,
         job.completed_at.isoformat() if job.completed_at is not None else None,
         job.deadline.isoformat() if job.deadline is not None else None,
+        job.last_heartbeat_at.isoformat() if job.last_heartbeat_at is not None else None,
         job.model, job.token_budget, job.tool_budget, job.child_budget,
         json.dumps(doc["result"], sort_keys=True) if job.result is not None else None,
         json.dumps(doc["diagnostics"], sort_keys=True),
@@ -212,7 +227,7 @@ class ResumeState:
     session: ResearchSession
     wave: int
     budgets: dict[str, JSONValue] = field(default_factory=dict)
-    pending_next_action: str = ""
+    pending_next_action: JSONValue = ""
     open_job_ids: list[str] = field(default_factory=list)
 
 
@@ -237,6 +252,10 @@ class ResearchRepository:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
             except sqlite3.Error:
                 pass
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN last_heartbeat_at TEXT")
+        except sqlite3.Error:
+            pass
         return conn
 
     # -- sessions ------------------------------------------------------
@@ -409,6 +428,7 @@ class ResearchRepository:
             "parent_job_id": row["parent_job_id"], "job_type": row["job_type"], "owner": row["owner"],
             "source_domain": row["source_domain"], "status": row["status"], "created_at": row["created_at"],
             "started_at": row["started_at"], "completed_at": row["completed_at"], "deadline": row["deadline"],
+            "last_heartbeat_at": row["last_heartbeat_at"] if "last_heartbeat_at" in row.keys() else None,
             "model": row["model"], "token_budget": row["token_budget"], "tool_budget": row["tool_budget"],
             "child_budget": row["child_budget"],
         }

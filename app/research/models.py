@@ -129,6 +129,11 @@ class FailureCategory(StrEnum):
     COMMITTEE_DEADLOCK = "committee_deadlock"
     SYNTHESIS_FAILED = "synthesis_failed"
 
+# Control-plane bounds: single authority for source runtime, heartbeat staleness,
+# and per-source evidence cap. One constant each; delete duplicates elsewhere.
+SOURCE_RUNTIME_BUDGET_S = 600
+HEARTBEAT_STALE_S = 120
+MAX_SOURCE_EVIDENCE_N = 8
 # ponytail: single nested defaults dict; per-job overrides only via explicit
 # create_job kwargs. Add sections when a new job type needs children/tools.
 DEFAULT_BUDGETS: dict[str, JSONValue] = {
@@ -419,6 +424,7 @@ class Job:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     deadline: datetime | None = None
+    last_heartbeat_at: datetime | None = None
     model: str | None = None
     token_budget: int | None = None
     tool_budget: int | None = None
@@ -463,6 +469,7 @@ class Job:
             "started_at": self.started_at.isoformat() if self.started_at is not None else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at is not None else None,
             "deadline": self.deadline.isoformat() if self.deadline is not None else None,
+            "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at is not None else None,
             "model": self.model,
             "token_budget": self.token_budget,
             "tool_budget": self.tool_budget,
@@ -504,6 +511,7 @@ class Job:
             started_at=_coerce_time(d.get("started_at"), "started_at", where),
             completed_at=_coerce_time(d.get("completed_at"), "completed_at", where),
             deadline=_coerce_time(d.get("deadline"), "deadline", where),
+            last_heartbeat_at=_coerce_time(d.get("last_heartbeat_at"), "last_heartbeat_at", where),
             model=_opt_str(d.get("model"), "model", where),
             token_budget=_opt_int(d.get("token_budget"), "token_budget", where),
             tool_budget=_opt_int(d.get("tool_budget"), "tool_budget", where),
