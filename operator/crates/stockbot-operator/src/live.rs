@@ -169,17 +169,33 @@ mod tests {
 
     #[test]
     fn feed_pump_is_visible_without_refresh() {
-        let mut app = App::new(WorldState::new());
+        let mut app = App::new();
+        // New shell starts in Chat mode with no world; pump into an empty
+        // research world so the feed builds it, as before.
+        app.current_mut().research = Some(crate::workspace::ResearchState {
+            world: WorldState::new(),
+            tick: 0,
+            title: "TEST RESEARCH".to_owned(),
+            query: "test".to_owned(),
+            cursor: 0,
+        });
         let mut feed = LiveFeed::from_fake();
         // First event (AgentSpawned) is visible immediately after one pump.
         assert!(feed.pump_one(&mut app));
-        assert!(app.world().agents.contains_key(&AgentId::new("agent-sec")));
+        assert!(app
+            .current()
+            .research
+            .as_ref()
+            .unwrap()
+            .world
+            .agents
+            .contains_key(&AgentId::new("agent-sec")));
         let mut pumped = 1;
         while feed.pump_one(&mut app) {
             pumped += 1;
         }
         assert_eq!(pumped, fake_stockbot_sequence().len());
-        assert_eq!(app.world().workers.len(), 3);
+        assert_eq!(app.current().research.as_ref().unwrap().world.workers.len(), 3);
         assert!(!feed.pump_one(&mut app));
     }
 

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 agent-ui = { path = "../agent-ui" }
+agent-ui-ttfx = { path = "../agent-ui-ttfx" }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 herdr-client = { path = "../herdr-client" }

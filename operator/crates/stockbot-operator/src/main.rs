@@ -1,14 +1,22 @@
 mod adapter;
 mod app;
 mod live;
+mod ui_market;
+mod ui_research;
+mod ui_shell;
+mod workspace;
 
-use agent_ui::{AgentEvent, Selected, View, WorldState, ids::AgentId};
-use agent_ui::views::{agent, worker, world};
-use crate::app::App;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use agent_ui_ttfx::Animation;
+
+use crate::app::{App, Focus, research_split};
+use crate::ui_market::{TransientTitle, status_pulse_glyph};
+use crate::ui_research::render_research;
+use crate::ui_shell::{render_chat, render_sidebar, root_split};
+use crate::workspace::WorkspaceMode;
+use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     widgets::Paragraph,
 };
 
@@ -28,28 +36,23 @@ fn main() -> std::io::Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
-    // Live world: starts empty, fills from the typed runtime feed without
-    // manual refresh (adapt -> apply per tick, no text parsing).
-    let mut app = App::new(WorldState::new());
-    // Keep the SEC highlight for keyboard drill-down once the feed lands it.
-    app.apply(AgentEvent::SelectionChanged(Some(Selected::Agent(
-        AgentId::new("agent-sec"),
-    ))));
-    let mut feed = live::LiveFeed::from_fake();
+    let mut app = App::new();
     loop {
-        // One live event per tick; every tick redraws so updates land now.
-        feed.pump_one(&mut app);
+        // One deterministic pump per 50ms frame; every tick redraws.
+        app.tick();
         terminal.draw(|frame: &mut Frame| render(frame, &app))?;
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    code => app.on_key(code),
-                },
+                Event::Key(key) => {
+                    if app.on_key(key.code, key.modifiers) {
+                        break;
+                    }
+                }
                 Event::Mouse(mouse) => {
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        mouse_click(&mut app, mouse.column, mouse.row);
+                        if let Ok((cols, rows)) = crossterm::terminal::size() {
+                            app.clicked(mouse.column, mouse.row, cols, rows);
+                        }
                     }
                 }
                 _ => {}
@@ -58,71 +61,75 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
     }
     Ok(())
 }
-/// Left-click dispatch: hit-test the current view's area and funnel through
-/// the same `clicked_*` intent API as the widgets wave. Unknown/empty clicks
-/// are ignored; other buttons never reach here. Keyboard is untouched.
-fn mouse_click(app: &mut App, column: u16, row: u16) {
-    let Ok((cols, rows)) = crossterm::terminal::size() else {
-        return;
-    };
-    // Same shell split as `render`: header 1, view fill, footer 1.
-    let view_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(Rect::new(0, 0, cols, rows))[1];
-    match app.view().clone() {
-        View::World => {
-            let hit = world::agent_at(view_area, app.world(), column, row);
-            if let Some(id) = hit {
-                app.clicked_agent(&id);
-            }
-        }
-        View::Agent(id) => {
-            let hit = agent::worker_at(view_area, app.world(), &id, column, row);
-            if let Some(wid) = hit {
-                app.clicked_worker(&wid);
-            }
-        }
-        View::Worker(id) => {
-            if worker::raw_logs_hit(view_area, column, row) {
-                app.clicked_raw_logs(&id);
-            }
-        }
-        View::Logs(_) => {}
-    }
-}
 
 fn render(frame: &mut Frame, app: &App) {
-    let world = app.world();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-    let header = Paragraph::new(format!(
-        "stockbot-operator -- {:?} (agents: {}, workers: {})",
-        app.view(),
-        world.agents.len(),
-        world.workers.len()
-    ));
-    match app.view() {
-        View::World => world::render_world(frame, chunks[1], world),
-        View::Agent(id) => agent::render(frame, chunks[1], world, &id),
-        View::Worker(id) => worker::render(frame, chunks[1], world, &id),
-        View::Logs(id) => {
-            let lines = live::raw_logs(world, &id);
-            frame.render_widget(Paragraph::new(lines.join("\n")), chunks[1]);
+    // Splash owns the whole screen until done or skipped.
+    if !app.startup.done() {
+        app.startup.render(frame, frame.area());
+        return;
+    }
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
+    let (header_area, body, footer_area) = (chunks[0], chunks[1], chunks[2]);
+    let (sidebar_area, workspace_area) = root_split(body);
+
+    let ws = app.current();
+    let mode = ws.mode();
+    let titles: Vec<(String, bool, bool)> = app
+        .workspaces()
+        .iter()
+        .map(|w| (w.title.clone(), w.research.is_some(), false))
+        .collect();
+    render_sidebar(frame, sidebar_area, &titles, app.selected(), app.sidebar_scroll);
+
+    match mode {
+        WorkspaceMode::Chat => {
+            render_chat(frame, workspace_area, &ws.chat);
+        }
+        WorkspaceMode::Research => {
+            let (top, bottom) = research_split(workspace_area);
+            if let Some(research) = ws.research.as_ref() {
+                render_research(frame, top, research, &ws.view);
+            }
+            render_chat(frame, bottom, &ws.chat);
+            // Transient decrypt title over the TOP region's first line.
+            if app.research_age < 15 && top.height > 0 && top.width > 0 {
+                let overlay = Rect::new(top.x, top.y, top.width, 1);
+                let mut title = TransientTitle::new("RESEARCH STARTING");
+                title.resize(overlay.width.max(1), overlay.height.max(1));
+                for _ in 0..app.research_age {
+                    title.tick();
+                }
+                title.render(overlay, frame.buffer_mut());
+            }
         }
     }
-    let footer =
-        Paragraph::new("Enter drill-in - Esc back - Up/Down select - click select/open - q quit");
-    frame.render_widget(header, chunks[0]);
-    frame.render_widget(footer, chunks[2]);
+
+    let tick = ws
+        .research
+        .as_ref()
+        .map(|r| r.tick as usize)
+        .unwrap_or(app.research_age as usize);
+    let header = Paragraph::new(format!(
+        "{} {} -- {:?}/{:?}",
+        status_pulse_glyph(tick),
+        ws.title,
+        mode,
+        app.focus,
+    ));
+    frame.render_widget(header, header_area);
+    let footer = Paragraph::new(match app.focus {
+        Focus::Sidebar => "Up/Down select workspace - + new - Tab pane - Enter chat - q quit",
+        Focus::Research => {
+            "Enter drill-in - Esc back - Up/Down select - Tab pane - / chat - q quit"
+        }
+        Focus::Chat => {
+            "type message - Enter send (/research ...) - Tab pane - Esc sidebar - q quit"
+        }
+    });
+    frame.render_widget(footer, footer_area);
 }

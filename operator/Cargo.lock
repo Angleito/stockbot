@@ -667,6 +667,7 @@ name = "stockbot-operator"
 version = "0.1.0"
 dependencies = [
  "agent-ui",
+ "agent-ui-ttfx",
  "crossterm",
  "herdr-client",
  "ratatui",
