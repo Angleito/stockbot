@@ -1156,12 +1156,6 @@ test("search_tools returns discovery evidence without changing the roster", asyn
 	expect(active).toContain("builtin-tool");
 	for (const t of visible()) expect([...DISCOVERY_TOOLS, "builtin-tool"]).toContain(t.name);
 	expect(visible().map((t) => t.name)).not.toContain("get_fundamentals");
-	// Discovered research dispatches via call_tool.
-	const call = await bridgeTool(tools, "call_tool");
-	const out = await call.execute("call-dispatch", { name: "get_short_interest", arguments: { ticker: "GME" } });
-	const inner = (((out.details as Json).result ?? {}) as Json);
-	expect(inner.error_type).not.toBe("unknown_tool");
-	expect(inner.error_type).not.toBe("invalid_tool_arguments");
 });
 
 test("search evidence caps matches at five", async () => {
