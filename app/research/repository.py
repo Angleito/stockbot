@@ -151,6 +151,60 @@ def pending_next_action(session: ResearchSession, jobs: list[Job]) -> str:
     }.get(session.status, f"none: unknown status {session.status!r}")
 
 
+_SESSION_SQL = (
+    "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
+    " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
+    " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
+    " final_result, failure)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_JOB_SQL = (
+    "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
+    " source_domain, status, created_at, started_at, completed_at, deadline, model,"
+    " token_budget, tool_budget, child_budget, result, diagnostics, failure)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def _session_params(session: ResearchSession) -> tuple[object, ...]:
+    """Positional params for _SESSION_SQL (caller validates first)."""
+    policy = json.dumps(validate_json_mapping(session.policy, "<session>"), sort_keys=True)
+    budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
+    doc = session.to_dict()
+    return (
+        session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
+        session.query, session.objective,
+        session.as_of.isoformat() if session.as_of is not None else None,
+        session.status, session.current_wave, policy, budget,
+        json.dumps(doc["job_ids"], sort_keys=True),
+        json.dumps(doc["evidence_ids"], sort_keys=True),
+        json.dumps(doc["freeze_ids"], sort_keys=True),
+        json.dumps(doc["dossier_ids"], sort_keys=True),
+        json.dumps(doc["committee_runs"], sort_keys=True),
+        json.dumps(doc["unresolved_questions"], sort_keys=True),
+        session.targeted_question, session.targeted_domain,
+        json.dumps(doc["final_result"], sort_keys=True)
+        if session.final_result is not None else None,
+        json.dumps(doc["failure"], sort_keys=True)
+        if session.failure is not None else None,
+    )
+
+
+def _job_params(job: Job) -> tuple[object, ...]:
+    """Positional params for _JOB_SQL (caller validates first)."""
+    doc = job.to_dict()
+    return (
+        job.job_id, job.session_id, job.wave_id, job.parent_job_id, job.job_type, job.owner,
+        job.source_domain, job.status, job.created_at.isoformat(),
+        job.started_at.isoformat() if job.started_at is not None else None,
+        job.completed_at.isoformat() if job.completed_at is not None else None,
+        job.deadline.isoformat() if job.deadline is not None else None,
+        job.model, job.token_budget, job.tool_budget, job.child_budget,
+        json.dumps(doc["result"], sort_keys=True) if job.result is not None else None,
+        json.dumps(doc["diagnostics"], sort_keys=True),
+        json.dumps(doc["failure"], sort_keys=True) if job.failure is not None else None,
+    )
+
 @dataclass(frozen=True)
 class ResumeState:
     """Resume snapshot: session + wave + budgets + next action. No writes performed."""
@@ -190,33 +244,8 @@ class ResearchRepository:
     def save_session(self, session: ResearchSession) -> None:
         """Upsert one session row."""
         session.validate("<research.sqlite>")
-        policy = json.dumps(validate_json_mapping(session.policy, "<session>"), sort_keys=True)
-        budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
-                " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
-                " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
-                " final_result, failure)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
-                    session.query, session.objective,
-                    session.as_of.isoformat() if session.as_of is not None else None,
-                    session.status, session.current_wave, policy, budget,
-                    json.dumps(session.to_dict()["job_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["evidence_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["freeze_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["dossier_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["committee_runs"], sort_keys=True),
-                    json.dumps(session.to_dict()["unresolved_questions"], sort_keys=True),
-                    session.targeted_question, session.targeted_domain,
-                    json.dumps(session.to_dict()["final_result"], sort_keys=True)
-                    if session.final_result is not None else None,
-                    json.dumps(session.to_dict()["failure"], sort_keys=True)
-                    if session.failure is not None else None,
-                ),
-            )
+            conn.execute(_SESSION_SQL, _session_params(session))
 
     def get_session(self, session_id: str) -> ResearchSession:
         """Load one session; raises KeyError when absent."""
@@ -276,72 +305,86 @@ class ResearchRepository:
         """Upsert one job row."""
         job.validate("<research.sqlite>")
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
-                " source_domain, status, created_at, started_at, completed_at, deadline, model,"
-                " token_budget, tool_budget, child_budget, result, diagnostics, failure)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    job.job_id, job.session_id, job.wave_id, job.parent_job_id, job.job_type, job.owner,
-                    job.source_domain, job.status, job.created_at.isoformat(),
-                    job.started_at.isoformat() if job.started_at is not None else None,
-                    job.completed_at.isoformat() if job.completed_at is not None else None,
-                    job.deadline.isoformat() if job.deadline is not None else None,
-                    job.model, job.token_budget, job.tool_budget, job.child_budget,
-                    json.dumps(job.to_dict()["result"], sort_keys=True) if job.result is not None else None,
-                    json.dumps(job.to_dict()["diagnostics"], sort_keys=True),
-                    json.dumps(job.to_dict()["failure"], sort_keys=True) if job.failure is not None else None,
-                ),
-            )
+            conn.execute(_JOB_SQL, _job_params(job))
 
     def save_session_and_job(self, session: ResearchSession, job: Job) -> None:
         """Upsert one session + one job in a single SQLite transaction."""
         session.validate("<research.sqlite>")
         job.validate("<research.sqlite>")
-        policy = json.dumps(validate_json_mapping(session.policy, "<session>"), sort_keys=True)
-        budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
         with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
-                " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
-                " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
-                " final_result, failure)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
-                    session.query, session.objective,
-                    session.as_of.isoformat() if session.as_of is not None else None,
-                    session.status, session.current_wave, policy, budget,
-                    json.dumps(session.to_dict()["job_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["evidence_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["freeze_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["dossier_ids"], sort_keys=True),
-                    json.dumps(session.to_dict()["committee_runs"], sort_keys=True),
-                    json.dumps(session.to_dict()["unresolved_questions"], sort_keys=True),
-                    session.targeted_question, session.targeted_domain,
-                    json.dumps(session.to_dict()["final_result"], sort_keys=True)
-                    if session.final_result is not None else None,
-                    json.dumps(session.to_dict()["failure"], sort_keys=True)
-                    if session.failure is not None else None,
-                ),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
-                " source_domain, status, created_at, started_at, completed_at, deadline, model,"
-                " token_budget, tool_budget, child_budget, result, diagnostics, failure)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    job.job_id, job.session_id, job.wave_id, job.parent_job_id, job.job_type, job.owner,
-                    job.source_domain, job.status, job.created_at.isoformat(),
-                    job.started_at.isoformat() if job.started_at is not None else None,
-                    job.completed_at.isoformat() if job.completed_at is not None else None,
-                    job.deadline.isoformat() if job.deadline is not None else None,
-                    job.model, job.token_budget, job.tool_budget, job.child_budget,
-                    json.dumps(job.to_dict()["result"], sort_keys=True) if job.result is not None else None,
-                    json.dumps(job.to_dict()["diagnostics"], sort_keys=True),
-                    json.dumps(job.to_dict()["failure"], sort_keys=True) if job.failure is not None else None,
-                ),
-            )
+            conn.execute(_SESSION_SQL, _session_params(session))
+            conn.execute(_JOB_SQL, _job_params(job))
+
+    def consume_dispatch_budget(self, session_id: str, job_id: str) -> tuple[ResearchSession, Job]:
+        """Atomically consume one job + global dispatch slot under BEGIN IMMEDIATE."""
+        from dataclasses import replace
+
+        from .models import Failure, normalize_time
+
+        conn = self._connect()
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                srow = conn.execute(
+                    "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if srow is None:
+                    raise KeyError(f"unknown session_id: {session_id!r}")
+                jrow = conn.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                if jrow is None:
+                    raise KeyError(f"unknown job_id: {job_id!r}")
+                session = self._row_to_session(srow)
+                job = self._row_to_job(jrow)
+                if job.session_id != session.session_id:
+                    raise ValueError(f"dispatch: job {job_id!r} belongs to {job.session_id!r}")
+                if job.status != "running":
+                    raise ValueError(f"dispatch: job {job_id!r} status is {job.status!r} (running required)")
+                if job.deadline is not None:
+                    deadline = normalize_time(job.deadline)
+                    if utcnow() > deadline:
+                        timed = replace(
+                            job, status="timed_out", completed_at=utcnow(),
+                            failure=Failure(category="timeout", message=f"deadline {job.deadline.isoformat()} expired"),
+                        )
+                        timed.validate("<research.sqlite>")
+                        conn.execute(_JOB_SQL, _job_params(timed))
+                        conn.commit()
+                        raise ValueError(f"dispatch: job {job_id!r} deadline expired")
+                if job.tool_budget is not None and job.tool_budget <= 0:
+                    raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
+                try:
+                    from .director import DirectorBudgets
+
+                    default_max = DirectorBudgets().max_tool_calls
+                except Exception:
+                    default_max = 60
+                raw_section: object = session.policy.get("research", {})
+                section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
+                raw_max: object = section.get("max_tool_calls", default_max)
+                max_calls = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else default_max
+                raw_used: object = session.budget.get("tool_calls_used", 0)
+                used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
+                if used >= max_calls:
+                    raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
+                spent = replace(job, tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None)
+                billed = replace(session, budget={**session.budget, "tool_calls_used": used + 1}, updated_at=utcnow())
+                billed.validate("<research.sqlite>")
+                spent.validate("<research.sqlite>")
+                conn.execute(_SESSION_SQL, _session_params(billed))
+                conn.execute(_JOB_SQL, _job_params(spent))
+                conn.commit()
+                return billed, spent
+            except Exception:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+        finally:
+            conn.close()
 
     def get_job(self, job_id: str) -> Job:
         """Load one job; raises KeyError when absent."""

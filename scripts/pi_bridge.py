@@ -179,6 +179,14 @@ def _validate_tool_call(request: Mapping[str, object]) -> dict[str, object] | No
     run_id = request.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"error": "missing_arg"}
+    raw_sid = request.get("active_research_session_id")
+    if raw_sid is not None and (not isinstance(raw_sid, str) or not raw_sid):
+        return {"error": "invalid_research_context"}
+    raw_jid = request.get("active_research_job_id")
+    if raw_jid is not None and (not isinstance(raw_jid, str) or not raw_jid):
+        return {"error": "invalid_research_context"}
+    if raw_sid is None and raw_jid is not None:
+        return {"error": "invalid_research_context"}
     with _state_lock:
         known = run_id in _sessions
     if not known:
@@ -217,6 +225,17 @@ def _run_tool_call(request: Mapping[str, object]) -> None:
         if session is None:
             _write({"id": protocol_id, "error": "unknown_run"})
             return
+        with session._lock:
+            if request.get("active_research_session_id") is not None:
+                session.active_research_session_id = request.get("active_research_session_id")  # type: ignore[assignment]
+                if request.get("active_research_job_id") is not None:
+                    session.active_research_job_id = request.get("active_research_job_id")  # type: ignore[assignment]
+                else:
+                    session.active_research_job_id = None
+            elif request.get("active_research_job_id") is not None:
+                session.active_research_job_id = request.get("active_research_job_id")  # type: ignore[assignment]
+            captured_sid = session.active_research_session_id
+            captured_jid = session.active_research_job_id
         token = set_current_recorder(recorder) if recorder is not None else None
         try:
             result = execute_pi_tool(
@@ -228,6 +247,8 @@ def _run_tool_call(request: Mapping[str, object]) -> None:
                 bridge_queue_ms=queue_ms,
                 data_root=data_root if isinstance(data_root, str) and data_root else None,
                 as_of=as_of,
+                active_research_session_id=captured_sid,
+                active_research_job_id=captured_jid,
             )
         finally:
             if token is not None:
@@ -677,8 +698,8 @@ def _handle(line: str) -> dict[str, object] | None:
         return _op_research_session_create(request, protocol_id)
     if op == "research.job.start":
         return _op_research_job_start(request, protocol_id)
-    if op == "research.job.complete":
-        return _op_research_job_complete(request, protocol_id)
+    if op == "research.evidence.add":
+        return _op_research_evidence_add(request, protocol_id)
     if op == "research.session.inspect":
         return _op_research_session_inspect(request, protocol_id)
     if op == "research.session.resume":

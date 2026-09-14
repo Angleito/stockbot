@@ -100,8 +100,8 @@ def create_research(
         policy=policy if policy is not None else default_policy(),
     )
     updated, job = _jobs.create_job(new_session, [], job_type="source_agent", owner="service")
-    store.save_session(updated)
-    store.save_job(job)
+    running = _jobs.start_job(job)
+    store.save_session_and_job(updated, running)
     return updated.session_id
 
 
@@ -116,13 +116,18 @@ def run_research(
     existing = store.list_jobs(session_id)
     if existing:
         for job in existing:
-            if job.status in ("queued", "running"):
+            if job.status == "running":
                 return job.to_dict()  # type: ignore[return-value]
+        for job in existing:
+            if job.status == "queued":
+                running = _jobs.start_job(job)
+                store.save_job(running)
+                return running.to_dict()  # type: ignore[return-value]
         return existing[0].to_dict()  # type: ignore[return-value]
     updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="service")
-    store.save_session(updated)
-    store.save_job(job)
-    return job.to_dict()  # type: ignore[return-value]
+    running = _jobs.start_job(job)
+    store.save_session_and_job(updated, running)
+    return running.to_dict()  # type: ignore[return-value]
 
 
 def resume_research(
@@ -154,10 +159,18 @@ def inspect_research(
     store = _repo(repo)
     found = _require_session(store, session_id)
     job_list = store.list_jobs(session_id)
+    latest_freeze: dict[str, JSONValue] | None = None
+    if found.freeze_ids:
+        fid = found.freeze_ids[-1]
+        try:
+            latest_freeze = store.get_freeze(fid)
+        except KeyError:
+            raise ValueError(f"inspect: unknown freeze_id: {fid!r}") from None
     return {
         "session": found.to_dict(),
         "jobs": [j.to_dict() for j in job_list],
         "pending_next_action": pending_next_action(found, job_list),
+        "latest_freeze": latest_freeze,
     }
 
 
@@ -758,7 +771,6 @@ def authorize_and_consume_dispatch(
     repo: ResearchRepository | Path | str | None = None,
 ) -> dict[str, object]:
     """Authorize one tool dispatch, then atomically consume job + global budget slots."""
-    from .models import Failure, normalize_time
     from .stage import check_stage_tool, stage_for_session
 
     store = _repo(repo)
@@ -766,15 +778,6 @@ def authorize_and_consume_dispatch(
     job = _require_job(store, job_id)
     if job.session_id != found.session_id:
         raise ValueError(f"dispatch: job {job_id!r} belongs to {job.session_id!r}")
-    if job.status != "running":
-        raise ValueError(f"dispatch: job {job_id!r} status is {job.status!r} (running required)")
-    if job.deadline is not None:
-        deadline = normalize_time(job.deadline)
-        if utcnow() > deadline:
-            timed = replace(job, status="timed_out", completed_at=utcnow(),
-                            failure=Failure(category="timeout", message=f"deadline {job.deadline.isoformat()} expired"))
-            store.save_job(timed)
-            raise ValueError(f"dispatch: job {job_id!r} deadline expired")
     jobs = store.list_jobs(session_id)
     check_stage_tool(stage_for_session(found, jobs), tool_name)
     if job.source_domain is not None and not tool_name.startswith("research"):
@@ -783,20 +786,11 @@ def authorize_and_consume_dispatch(
 
             if not is_sec_tool(tool_name):
                 raise ValueError(f"dispatch: tool {tool_name!r} outside SEC domain for job {job_id!r}")
-    if job.tool_budget is not None and job.tool_budget <= 0:
-        raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
-    from .director import DirectorBudgets
-
-    raw_section: object = found.policy.get("research", {})
-    section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
-    raw_max: object = section.get("max_tool_calls", DirectorBudgets().max_tool_calls)
-    max_calls = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else DirectorBudgets().max_tool_calls
-    raw_used: object = found.budget.get("tool_calls_used", 0)
-    used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
-    if used >= max_calls:
-        raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
-    spent = replace(job, tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None)
-    billed = replace(found, budget={**found.budget, "tool_calls_used": used + 1}, updated_at=utcnow())
-    store.save_session_and_job(billed, spent)
+    try:
+        billed, spent = store.consume_dispatch_budget(session_id, job_id)
+    except KeyError as exc:
+        raise ResearchNotFound(exc.args[0] if exc.args else str(exc)) from None
+    raw_used: object = billed.budget.get("tool_calls_used", 0)
+    used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) else 0
     return {"session_id": session_id, "job_id": job_id, "tool_name": tool_name,
-            "tool_budget": spent.tool_budget, "tool_calls_used": used + 1}
+            "tool_budget": spent.tool_budget, "tool_calls_used": used}

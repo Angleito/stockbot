@@ -511,6 +511,18 @@ tools:
     summary: "Cancel a research session; terminal sessions return current state."
     version: 2
     keywords: [cancel, current, longer, needed, no, research, return, session, state, stopping, terminal]
+  - name: research_finalize
+    domain: research
+    family: session
+    path: "/research/session/research_finalize"
+    intent: finalize_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Persist the trio-joined synthesis and complete a research session with frozen-evidence claims."
+    version: 2
+    keywords: [claim, complete, evidence, finalize, finalizing, frozen, grounded, joined, persist, research, session, synthesi, trio]
   - name: research_read
     domain: research
     family: session

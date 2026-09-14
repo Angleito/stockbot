@@ -1266,6 +1266,33 @@ TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
+            "name": "research_finalize",
+            "description": "Persists the trio-joined synthesis and completes a research session; every claim must cite frozen evidence IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "answer": {"type": "string", "minLength": 1, "description": "Final synthesis prose."},
+                    "claims": {
+                        "type": "array", "minItems": 1,
+                        "description": "Grounded findings; each claim needs non-empty text and non-empty evidence IDs from the freeze.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "minLength": 1, "description": "Finding text."},
+                                "evidence_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Frozen evidence IDs grounding this claim."},
+                            },
+                            "required": ["text", "evidence_ids"],
+                        },
+                    },
+                },
+                "required": ["session_id", "answer", "claims"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_alternative_signals",
             "description": "Reads locally collected Google public-data discovery candidates (top/rising lists) with persistence/diffusion features only when exactly one PIT-valid v2 feature scope matches; otherwise features are null with available_feature_scopes listed. Candidates only, never materiality or investment claims.",
             "parameters": {
@@ -3144,6 +3171,22 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         prerequisites=(),
         direct_activation=False,
     ),
+    "research_finalize": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="finalize_research",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Persist the trio-joined synthesis and complete a research session with frozen-evidence claims.",
+        choose_when=("Finalizing a trio-complete research session with grounded claims.",),
+        reject_when=("Not for session state overviews (research_status).",),
+        conflicts_with=(),
+        related_tools=("research_status",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
 }
 
 
@@ -4127,6 +4170,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "research_read": Capability.RESEARCH,
     "research_add_evidence": Capability.RESEARCH,
     "research_add_analysis": Capability.RESEARCH,
+    "research_finalize": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
     "get_option_chain": Capability.BROKER_MARKET_READ,
     "analyze_option_contract": Capability.BROKER_MARKET_READ,
@@ -4235,7 +4279,7 @@ def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: Reques
 
 
 _PIT_INSTANT_TOOLS = frozenset({"thesis_show", "research_status", "research_resume", "research_read"})
-_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_add_analysis"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_add_analysis", "research_finalize"})
 
 
 def _pit_day(cutoff: str) -> str | None:
@@ -4620,6 +4664,30 @@ def _research_add_analysis(arguments: dict[str, object], context: RequestContext
         return _research_not_found_error(e)
 
 
+def _research_finalize(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    answer = arguments["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("research_finalize: 'answer' must be a non-empty string")
+    claims = arguments["claims"]
+    if not isinstance(claims, list) or not claims:
+        raise ValueError("research_finalize: 'claims' must be a non-empty list")
+    for _c in claims:
+        _t: object = _c.get("text", "") if isinstance(_c, dict) else ""
+        _e: object = _c.get("evidence_ids", []) if isinstance(_c, dict) else []
+        if not isinstance(_t, str) or not _t.strip():
+            raise ValueError("research_finalize: each claim 'text' must be a non-empty string")
+        if not isinstance(_e, list) or not _e or any(not isinstance(_i, str) or not _i.strip() for _i in _e):
+            raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
+    try:
+        return dict(research_service.finalize_session(session_id, answer, claims, repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
 _THESIS_HANDLERS: dict[str, ContextHandler] = {
     "thesis_create": _thesis_create,
     "thesis_show": _thesis_show,
@@ -4637,6 +4705,7 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
     "research_read": _research_read,
     "research_add_evidence": _research_add_evidence,
     "research_add_analysis": _research_add_analysis,
+    "research_finalize": _research_finalize,
 }
 
 # Thesis/research tools are direct local dispatch (no broker) but take

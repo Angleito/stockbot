@@ -10,7 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
 import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -26,6 +26,7 @@ export function toolCallRequest(
  bridgeQueueMs = 0,
  dataRoot?: string,
  asOf?: string,
+ researchContext?: { sessionId: string; jobId?: string },
 ): Json {
  const req: Json = {
   id,
@@ -38,6 +39,8 @@ export function toolCallRequest(
  };
  if (dataRoot) req.data_root = dataRoot;
  if (asOf) req.as_of = asOf;
+ if (researchContext?.sessionId) req.active_research_session_id = researchContext.sessionId;
+ if (researchContext?.jobId) req.active_research_job_id = researchContext.jobId;
  return req;
 }
 
@@ -473,7 +476,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       routing.assistedSearchCalls++;
      }
     }
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId), researchContextForRun(runId)));
     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
     const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
     const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");

@@ -1,40 +1,65 @@
 """Stage-gated capabilities: derive research stage, enforce per-stage tool sets.
 
-Kernel-authoritative gate (TS mirrors for UX only). Stdlib only.
+Kernel-authoritative gate (TS mirrors for UX only). Canonical tool names only.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-try:
-    from app.pi_gateway import RESEARCH_TOOL_NAMES as _RESEARCH_TOOLS
-except Exception:  # pragma: no cover - gateway import fallback
-    _RESEARCH_TOOLS = frozenset()
-try:
-    from app.research.agents.source_agent import SEC_TOOLS as _SEC_TOOLS
-except Exception:  # pragma: no cover - agent import fallback
-    _SEC_TOOLS = frozenset()
+from app.policy import Capability
+from app.tools import tools_for_capabilities
 
 Stage = Literal["SOURCE_RESEARCH", "COMMITTEE", "FINAL"]
 
-_DISCOVERY: frozenset[str] = frozenset({
+
+def _schema_name(tool: dict[str, object]) -> str | None:
+    """OpenAI schema function name (TOOLS entries are untyped app-side JSON)."""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
+# Canonical agent-visible set: single source of truth stays in app/tools.py.
+RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
+    name
+    for tool in tools_for_capabilities(frozenset({Capability.RESEARCH}))
+    for name in [_schema_name(tool)]
+    if name is not None
+)
+
+DISCOVERY_TOOLS: frozenset[str] = frozenset({
     "browse_tools", "search_tools", "describe_tool", "list_tool_domains", "call_tool",
 })
 
+CONTROL_TOOLS: frozenset[str] = frozenset({
+    "research_start", "research_resume", "research_status", "research_cancel",
+    "research_read", "research_add_evidence", "research_add_analysis",
+    "research_finalize",
+})
+
+_THESIS_TOOLS: frozenset[str] = frozenset({
+    "thesis_create", "thesis_show", "thesis_refine", "thesis_watch",
+    "thesis_journal", "thesis_status",
+})
+
+# Data dispatches: everything research-capable except discovery, thesis
+# actions, and local research controls.
+DISPATCH_TOOLS: frozenset[str] = frozenset(
+    RESEARCH_TOOL_NAMES - DISCOVERY_TOOLS - CONTROL_TOOLS - _THESIS_TOOLS
+)
+
 STAGE_ALLOW: dict[Stage, frozenset[str]] = {
-    "SOURCE_RESEARCH": frozenset({
-        "search_web", "get_fundamentals", "get_short_interest",
-        "research_add_evidence",
-        "research.session.inspect", "research.session.resume",
-        "research.job.start", "research.job.complete", "research.freeze.create",
-    } | set(_RESEARCH_TOOLS) | set(_SEC_TOOLS)),
-    "COMMITTEE": frozenset({
-        "research.session.inspect", "research.session.resume",
-        "research.job.start", "research_add_analysis",
+    "SOURCE_RESEARCH": DISCOVERY_TOOLS | DISPATCH_TOOLS | frozenset({
+        "research_resume", "research_status", "research_add_evidence",
     }),
-    "FINAL": frozenset({
-        "research.session.inspect", "research.session.resume", "research.session.finalize",
+    "COMMITTEE": DISCOVERY_TOOLS | frozenset({
+        "research_resume", "research_status", "research_add_analysis",
+    }),
+    "FINAL": DISCOVERY_TOOLS | frozenset({
+        "research_resume", "research_status", "research_finalize",
     }),
 }
 
@@ -96,7 +121,7 @@ def stage_for_session(session: object, jobs: object = ()) -> Stage:
 
 def check_stage_tool(stage: str, tool_name: str) -> None:
     """Raise ValueError when tool_name is forbidden in stage. Discovery always passes."""
-    if tool_name in _DISCOVERY:
+    if tool_name in DISCOVERY_TOOLS:
         return
     allowed = STAGE_ALLOW.get(stage)  # type: ignore[call-overload]
     if allowed is not None and tool_name in allowed:
@@ -104,4 +129,4 @@ def check_stage_tool(stage: str, tool_name: str) -> None:
     raise ValueError(f"Stage {stage} forbids tool '{tool_name}'")
 
 
-__all__ = ["STAGE_ALLOW", "Stage", "check_stage_tool", "stage_for_session"]
+__all__ = ["STAGE_ALLOW", "Stage", "check_stage_tool", "stage_for_session", "RESEARCH_TOOL_NAMES", "DISCOVERY_TOOLS", "CONTROL_TOOLS", "DISPATCH_TOOLS"]

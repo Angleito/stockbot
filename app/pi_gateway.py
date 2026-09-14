@@ -57,6 +57,7 @@ from .tools import (
     tool_is_permitted,
     tools_for_capabilities,
 )
+from app.research.stage import DISCOVERY_TOOLS, DISPATCH_TOOLS, RESEARCH_TOOL_NAMES, check_stage_tool, stage_for_session
 
 _CALL_TOOL_FORBIDDEN = frozenset({"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"})
 
@@ -72,24 +73,6 @@ logger = logging.getLogger(__name__)
 # Model label recorded for Pi-driven tool calls. Handlers ignore it
 # (no nested completions remain on the Pi path); it exists for provenance.
 PI_MODEL = "pi"
-
-# Single source of truth stays in app/tools.py; this is just the RESEARCH
-# projection of the canonical registry.
-def _schema_name(tool: dict[str, object]) -> str | None:
-    """OpenAI schema function name (TOOLS entries are untyped app-side JSON)."""
-    function = tool.get("function")
-    if isinstance(function, dict):
-        name = function.get("name")
-        return name if isinstance(name, str) else None
-    return None
-
-
-RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
-    name
-    for tool in tools_for_capabilities(frozenset({Capability.RESEARCH}))
-    for name in [_schema_name(tool)]
-    if name is not None
-)
 
 _UNAVAILABLE_HEADER = (
     "The requested data is unavailable: one or more tool calls failed or "
@@ -224,6 +207,7 @@ class PiSessionContext:
 
     session_id: str
     active_research_session_id: str | None = None
+    active_research_job_id: str | None = None
     authorization: SessionAuthorization = field(default_factory=SessionAuthorization)
     security_state: SessionSecurityState = field(default_factory=SessionSecurityState)
     run_security: RunSecurityContext = field(init=False)
@@ -309,7 +293,6 @@ def _override_context(data_root: str | Path | None = None, as_of: str | None = N
         return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
     return _with_root(root)
 
-
 def execute_pi_tool(
     name: str,
     arguments: dict[str, object],
@@ -320,6 +303,8 @@ def execute_pi_tool(
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
     as_of: str | None = None,
+    active_research_session_id: str | None = None,
+    active_research_job_id: str | None = None,
 ) -> dict[str, object]:
     """Run one Pi-requested tool through all gates. Never raises."""
     try:
@@ -332,6 +317,8 @@ def execute_pi_tool(
             bridge_queue_ms=bridge_queue_ms,
             data_root=data_root,
             as_of=as_of,
+            active_research_session_id=active_research_session_id,
+            active_research_job_id=active_research_job_id,
         )
     except Exception as exc:  # never break the bridge loop
         logger.exception("Pi tool gateway failed for '%s'", name)
@@ -348,6 +335,8 @@ def _execute_pi_tool(
     bridge_queue_ms: float = 0.0,
     data_root: str | Path | None = None,
     as_of: str | None = None,
+    active_research_session_id: str | None = None,
+    active_research_job_id: str | None = None,
 ) -> dict[str, object]:
     # Generic dispatch: call_tool validates then tail-calls the inner tool once.
     # The outer wrapper consumes no budget slot and writes no recorder row.
@@ -371,7 +360,7 @@ def _execute_pi_tool(
             return _invalid_args_error("call_tool", f"Tool '{inner_name}' cannot be called via call_tool; call browse_tools to find the exact canonical name, then call_tool with a research tool name")
         if not any(_tool_function(t).get("name") == inner_name for t in TOOLS):
             return _unknown_tool_error(inner_name)
-        return _execute_pi_tool(inner_name, raw_inner_args, session, tool_call_id=tool_call_id, protocol_id=protocol_id, bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of)
+        return _execute_pi_tool(inner_name, raw_inner_args, session, tool_call_id=tool_call_id, protocol_id=protocol_id, bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of, active_research_session_id=active_research_session_id, active_research_job_id=active_research_job_id)
     # Single-dispatch company-name support, schema-driven: any tool whose
     # schema declares company_name alongside a ticker/entity identifier
     # fills the missing identifier before validation. Cards keep the
@@ -407,33 +396,53 @@ def _execute_pi_tool(
         _args_json(arguments) if isinstance(arguments, dict) else json.dumps(str(arguments))
     )
 
-    # Stage gate: research sessions derive capability sets from persisted
-    # session+jobs; violations return before any budget is consumed.
-    # Discovery tools always pass (not enforced here).
-    if name not in ("browse_tools", "search_tools", "describe_tool", "list_tool_domains"):
-        _raw_sid: object = arguments.get("session_id") if isinstance(arguments, dict) else None
-        if not isinstance(_raw_sid, str) or not _raw_sid:
-            _raw_sid = getattr(session, "active_research_session_id", None)
-        if isinstance(_raw_sid, str) and _raw_sid:
-            _sid: str = _raw_sid
-            try:
-                from app.research import stage as _stage
-            except ImportError:
-                _stage = None  # type: ignore[assignment]
-            if _stage is not None:
-                from app.research.repository import ResearchRepository as _RR
+    # Staged context: immutable request-local IDs. Explicit canonical
+    # arguments win, then the captured bridge pair, then session fields.
+    # Resolved IDs never enter arguments/recorder/schema/handlers.
+    _explicit_sid: str | None = None
+    _explicit_jid: str | None = None
+    if isinstance(arguments, dict):
+        _raw_explicit_sid = arguments.get("session_id")
+        if isinstance(_raw_explicit_sid, str) and _raw_explicit_sid:
+            _explicit_sid = _raw_explicit_sid
+        _raw_explicit_jid = arguments.get("job_id")
+        if isinstance(_raw_explicit_jid, str) and _raw_explicit_jid:
+            _explicit_jid = _raw_explicit_jid
+    _cap_sid = active_research_session_id if isinstance(active_research_session_id, str) and active_research_session_id else None
+    _cap_jid = active_research_job_id if isinstance(active_research_job_id, str) and active_research_job_id else None
+    with session._lock:
+        _ctx_sid = session.active_research_session_id
+        _ctx_jid = session.active_research_job_id
+    if not isinstance(_ctx_sid, str) or not _ctx_sid:
+        _ctx_sid = None
+    if not isinstance(_ctx_jid, str) or not _ctx_jid:
+        _ctx_jid = None
+    _resolved_sid = _explicit_sid or _cap_sid or _ctx_sid
+    _resolved_jid = _explicit_jid or _cap_jid or _ctx_jid
+    _sid_from_explicit = _explicit_sid is not None
+    # One shared research store rooted at the effective request data root.
+    # Never pass the data-root directory to service _repo (it treats a path as a DB file).
+    _store = None
+    if isinstance(_resolved_sid, str) and _resolved_sid:
+        from app.research.repository import ResearchRepository as _RR
+        _store = _RR(data_root=_override_context(data_root, as_of).data_root)
+    # Attached staged session must exist for every target (fail closed);
+    # discovery only skips the stage check, never existence.
+    if _store is not None:
+        _sid: str = _resolved_sid  # type: ignore[assignment]
+        try:
+            _found = _store.get_session(_sid)
+        except KeyError:
+            if not _sid_from_explicit:
+                return {"error": f"Unknown research session '{_sid}'", "error_type": "invalid_research_context"}
+            _found = None  # type: ignore[assignment]
+        else:
+            if name not in DISCOVERY_TOOLS:
+                _st = stage_for_session(_found, _store.list_jobs(_sid))
                 try:
-                    _root = Path(data_root) if isinstance(data_root, str) and data_root else (data_root if isinstance(data_root, Path) else None)
-                    _store = _RR(data_root=_root)
-                    _found = _store.get_session(_sid)
-                except KeyError:
-                    pass
-                else:
-                    _st = _stage.stage_for_session(_found, _store.list_jobs(_sid))
-                    try:
-                        _stage.check_stage_tool(_st, name)
-                    except ValueError as exc:
-                        return {"error": str(exc)}
+                    check_stage_tool(_st, name)
+                except ValueError as exc:
+                    return {"error": str(exc)}
     # Gate 1: RESEARCH-only permit filter; unlisted tools are denied.
     if name not in RESEARCH_TOOL_NAMES or not tool_is_permitted(name, LOCAL_CONTEXT):
         _record_security(
@@ -454,28 +463,26 @@ def _execute_pi_tool(
             "error_type": "invalid_tool_arguments",
         }
 
-    # Gate 8 (reserve): research calls carrying session_id+job_id consume one
-    # job slot atomically via the kernel; everything else keeps the legacy
-    # session-budget reserve below. The outer call_tool wrapper returns before
-    # this point, so only the inner call consumes.
+    # Gate 8 (reserve): attached staged data dispatches consume one persisted
+    # slot via the kernel; bookkeeping (discovery/evidence/reads/finalize)
+    # never touches persisted counters and keeps the per-Pi-run budget below.
+    # The outer call_tool wrapper returns before this point, so only the
+    # inner call consumes.
     _dispatch_consumed = False
-    _raw_csid: object = arguments.get("session_id") if isinstance(arguments, dict) else None
-    _raw_jid: object = arguments.get("job_id") if isinstance(arguments, dict) else None
-    if isinstance(_raw_csid, str) and _raw_csid and isinstance(_raw_jid, str) and _raw_jid:
+    if name in DISPATCH_TOOLS and _store is not None:
+        if not isinstance(_resolved_jid, str) or not _resolved_jid:
+            return {"error": f"Active research job is required for tool '{name}'", "error_type": "invalid_research_context"}
         try:
             from app.research import service as _svc
-            _consume = getattr(_svc, "authorize_and_consume_dispatch", None)
-        except ImportError:
-            _consume = None
-        if _consume is not None:
-            try:
-                _consume(_raw_csid, _raw_jid, name, repo=data_root)
-            except ValueError as exc:
-                _cmsg = str(exc).lower()
-                if "budget" in _cmsg or "exhaust" in _cmsg or "quota" in _cmsg:
-                    return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
-                return {"error": str(exc)}
-            _dispatch_consumed = True
+            _svc.authorize_and_consume_dispatch(_resolved_sid, _resolved_jid, name, repo=_store)  # type: ignore[arg-type]
+        except ValueError as exc:
+            _cmsg = str(exc).lower()
+            if "budget" in _cmsg or "exhaust" in _cmsg or "quota" in _cmsg:
+                return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+            return {"error": str(exc)}
+        except KeyError as exc:
+            return {"error": str(exc), "error_type": "invalid_research_context"}
+        _dispatch_consumed = True
     # one budget slot per call before any external work.
     # search_web draws from its dedicated pool, not the generic tool pool.
     # Session lock held only for the reserve; the handler below runs unlocked.

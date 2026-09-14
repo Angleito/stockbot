@@ -460,7 +460,7 @@ def test_describe_direct_tool_names_parity():
     assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
         "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status",
         "research_start", "research_resume", "research_status", "research_cancel", "research_read",
-        "research_add_evidence", "research_add_analysis",
+        "research_add_evidence", "research_add_analysis", "research_finalize",
     }
 
 
@@ -522,3 +522,199 @@ def test_routing_metrics_persists():
         assert metadata["final_answer_after_evidence"] is True
     finally:
         _teardown_run(run_id)
+
+def test_research_create_inspect_add_evidence_uses_initial_running_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+    root = str(tmp_path / "bridge-data")
+    created = pi_bridge._handle(
+        json.dumps({"id": "r-create", "op": "research.session.create",
+                    "question": "NVDA demand?", "objective": "o", "data_root": root})
+    )
+    assert created is not None and "result" in created
+    sid = str(created["result"]["session_id"])  # type: ignore[index]
+    inspected = pi_bridge._handle(
+        json.dumps({"id": "r-inspect", "op": "research.session.inspect",
+                    "session_id": sid, "data_root": root})
+    )
+    assert inspected is not None and "result" in inspected
+    jobs = inspected["result"]["jobs"]  # type: ignore[index]
+    assert isinstance(jobs, list)
+    src = [j for j in jobs if isinstance(j, dict) and j.get("job_type") == "source_agent"]
+    assert len(src) == 1
+    assert src[0].get("status") == "running"
+    jid = str(src[0].get("job_id"))
+    added = pi_bridge._handle(
+        json.dumps({"id": "r-add", "op": "research.evidence.add", "session_id": sid,
+                    "job_id": jid, "data_root": root,
+                    "item": {"content": "c-ev-1", "claim_text": "c", "subject": "NVDA",
+                             "source_name": "SEC", "source_uri": "https://sec.gov/x",
+                             "source_record_id": "r",
+                             "known_at": "2025-06-29T00:00:00+00:00"}})
+    )
+    assert added is not None and "result" in added, added
+    reinspected = pi_bridge._handle(
+        json.dumps({"id": "r-reinspect", "op": "research.session.inspect",
+                    "session_id": sid, "data_root": root})
+    )
+    assert reinspected is not None and "result" in reinspected
+    jobs2 = reinspected["result"]["jobs"]  # type: ignore[index]
+    src2 = [j for j in jobs2 if isinstance(j, dict) and j.get("job_type") == "source_agent"]
+    assert len(src2) == 1
+
+
+def test_staged_context_no_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Barrier-interleaved staged calls keep their own job pair; args canonical."""
+    run_id = _run_id("staged")
+    _start_session(run_id)
+    responses = _capture_writes(monkeypatch)
+    barrier = threading.Barrier(2)
+    seen: dict[str, tuple[object, object, dict[str, object]]] = {}
+    seen_lock = threading.Lock()
+
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: object
+    ) -> dict[str, str]:
+        barrier.wait(timeout=30)
+        snapshot = dict(arguments)
+        with seen_lock:
+            tool_id = kwargs.get("tool_call_id")
+            assert isinstance(tool_id, str)
+            seen[tool_id] = (kwargs.get("active_research_session_id"), kwargs.get("active_research_job_id"), snapshot)
+        return {"content": "ok"}
+
+    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    try:
+        p1 = _tool_payload(run_id, "call-1")
+        p1["active_research_session_id"] = "sess-A"
+        p1["active_research_job_id"] = "job-A"
+        p2 = _tool_payload(run_id, "call-2")
+        p2["active_research_session_id"] = "sess-A"
+        p2["active_research_job_id"] = "job-B"
+        assert pi_bridge._handle(json.dumps(p1)) is None
+        assert pi_bridge._handle(json.dumps(p2)) is None
+        _wait_run(run_id)
+        assert seen["call-1"][:2] == ("sess-A", "job-A")
+        assert seen["call-2"][:2] == ("sess-A", "job-B")
+        for _, (_, _, args) in seen.items():
+            assert args == {"query": "overlap"}
+            assert "active_research_session_id" not in args
+            assert "active_research_job_id" not in args
+        assert len(responses) == 2
+    finally:
+        _teardown_run(run_id)
+
+
+def test_staged_context_validation() -> None:
+    run_id = _run_id("staged-validate")
+    _start_session(run_id)
+    try:
+        base = _tool_payload(run_id, "call-v")
+        bad_job_only = dict(base)
+        bad_job_only["active_research_job_id"] = "job-X"
+        assert pi_bridge._validate_tool_call(bad_job_only) == {"error": "invalid_research_context"}
+        bad_empty = dict(base)
+        bad_empty["active_research_session_id"] = ""
+        assert pi_bridge._validate_tool_call(bad_empty) == {"error": "invalid_research_context"}
+        good = dict(base)
+        good["active_research_session_id"] = "sess-A"
+        good["active_research_job_id"] = "job-A"
+        assert pi_bridge._validate_tool_call(good) is None
+    finally:
+        _teardown_run(run_id)
+
+def test_tool_call_dispatch_consumes_data_root_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gateway bills <data_root>/research.sqlite; the directory is never opened as SQLite."""
+    import dataclasses
+    import json
+    import app.pi_gateway as _gw
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+    root = tmp_path / "bridge-data"
+    repo = ResearchRepository(data_root=root)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jid = repo.list_jobs(sid)[0].job_id
+    repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
+    calls: list[str] = []
+    def _fake_execute(name: str, arguments: dict[str, object], model: str, context: object = None) -> dict[str, object]:
+        calls.append(name)
+        return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
+    monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
+    run_id = _run_id("dataroot")
+    _start_session(run_id)
+    responses = _capture_writes(monkeypatch)
+    try:
+        payload = {
+            "id": "tc-data-1",
+            "op": "tool_call",
+            "run_id": run_id,
+            "tool_call_id": "call-data-1",
+            "name": "search_web",
+            "arguments": {"query": "NVDA demand"},
+            "data_root": str(root),
+            "active_research_session_id": sid,
+            "active_research_job_id": jid,
+        }
+        assert pi_bridge._handle(json.dumps(payload)) is None
+        _wait_run(run_id)
+        assert len(responses) == 1
+        assert calls == ["search_web"]
+        assert (root / "research.sqlite").exists()
+        fresh = ResearchRepository(data_root=root)
+        assert fresh.get_job(jid).tool_budget == 0
+        assert fresh.get_session(sid).budget.get("tool_calls_used") == 1
+    finally:
+        _teardown_run(run_id)
+
+
+def test_call_tool_research_finalize_completes_trio_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical research_finalize via call_tool completes a trio-complete session."""
+    import app.pi_gateway as _gw
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+    root = tmp_path / "finalize-data"
+    repo = ResearchRepository(data_root=root)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    src = repo.list_jobs(sid)[0].job_id
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, {
+        "evidence_id": eid, "wave_id": 1, "content": "c-" + eid, "claim_text": "c",
+        "subject": "NVDA", "source_name": "SEC", "source_uri": "https://sec.gov/x",
+        "source_record_id": "r", "known_at": "2025-06-29T00:00:00+00:00",
+    }, repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    fid = str(_svc.freeze_session(sid, 1, repo=repo)["freeze_id"])
+    for role in ("stockbot", "bullbot", "bearbot"):
+        jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
+        _svc.record_committee_analysis(sid, jid, role, {
+            "claims": [{"text": "finding", "evidence_ids": [eid]}], "follow_ups": [],
+        }, repo=repo)
+    assert not [j for j in repo.list_jobs(sid) if j.status in ("queued", "running")]
+    bound = PiSessionContext(session_id="pi-finalize", active_research_session_id=sid)
+    out = _gw.execute_pi_tool("call_tool", {
+        "name": "research_finalize",
+        "arguments": {
+            "session_id": sid,
+            "answer": "NVDA demand is supported by the filed evidence.",
+            "claims": [{"text": "finding", "evidence_ids": [eid]}],
+        },
+    }, bound, data_root=str(root))
+    assert out.get("meta", {}).get("status") == "completed", out  # type: ignore[union-attr]
+    fresh = ResearchRepository(data_root=root)
+    final = fresh.get_session(sid).final_result
+    assert isinstance(final, dict)
+    assert final.get("freeze_id") == fid
+    raw_frozen = fresh.get_freeze(fid).get("evidence_ids", [])
+    assert isinstance(raw_frozen, list)
+    frozen = set(raw_frozen)
+    claims = final.get("claims", [])
+    assert isinstance(claims, list) and claims
+    for claim in claims:
+        assert isinstance(claim, dict)
+        refs = claim.get("evidence_ids", [])
+        assert isinstance(refs, list) and set(refs) <= frozen

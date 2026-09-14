@@ -36,7 +36,8 @@ export function sessionIdForRun(runId: string): string | undefined {
 }
 // Last inspect snapshot per session, for the UX-only stage gate in stockbot.ts
 // (kernel remains authoritative). Fail open when nothing was seen yet.
-const lastSeen = new Map<string, { session: Json; jobs: Json[] }>();
+export interface InspectSnapshot { session: Json; jobs: Json[]; latestFreeze: Json | null }
+const lastSeen = new Map<string, InspectSnapshot>();
 
 const ROLES = ["stockbot", "bullbot", "bearbot"] as const;
 const TERMINAL: Record<string, true> = { completed: true, failed: true, cancelled: true };
@@ -46,6 +47,19 @@ const strs = (v: unknown): string[] =>
  Array.isArray(v) ? v.filter((e): e is string => typeof e === "string") : [];
 const objs = (v: unknown): Json[] =>
  Array.isArray(v) ? v.filter((e): e is Json => !!e && typeof e === "object") : [];
+// Authoritative staged context: Mem stays {sessionId}; the active job derives
+// from the latest inspect cache as the running source_agent for the active
+// wave max(current_wave, freeze_ids.length + 1, 1).
+export function researchContextForRun(runId: string): { sessionId: string; jobId?: string } | undefined {
+ const sid = runs.get(runId)?.sessionId;
+ if (!sid) return undefined;
+ const seen = lastSeen.get(sid);
+ if (!seen) return { sessionId: sid };
+ const cw = typeof seen.session.current_wave === "number" && Number.isInteger(seen.session.current_wave) ? (seen.session.current_wave as number) : 0;
+ const wave = Math.max(cw, strs(seen.session.freeze_ids).length + 1, 1);
+ const jid = str(seen.jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === wave && j.status === "running")?.job_id);
+ return jid ? { sessionId: sid, jobId: jid } : { sessionId: sid };
+}
 
 async function rpc(op: string, args: Json, dataRoot?: string, asOf?: string): Promise<Json> {
  const req: Json = { op, ...args };
@@ -68,6 +82,10 @@ function trioState(session: Json, jobs: Json[]): TrioState {
  const recordedSet = new Set(recorded);
  const byId = new Map(jobs.map((j) => [str(j.job_id), j]));
  const isRole = (t: unknown): boolean => (ROLES as readonly string[]).includes(str(t));
+ const runWave = objs(session.committee_runs).find((e) => e.freeze_id === fid)?.wave_id;
+ let wave = 1;
+ if (typeof runWave === "number" && Number.isInteger(runWave)) wave = runWave;
+ else if (typeof session.current_wave === "number" && Number.isInteger(session.current_wave)) wave = session.current_wave;
  const recordedRoles = new Set<string>();
  for (const id of recorded) {
   const j = byId.get(id);
@@ -76,14 +94,10 @@ function trioState(session: Json, jobs: Json[]): TrioState {
   if (isRole(t)) recordedRoles.add(t);
  }
  const eligible = jobs
-  .filter((j) => j.status === "running" && isRole(j.job_type) && !recordedSet.has(str(j.job_id)))
+  .filter((j) => j.status === "running" && isRole(j.job_type) && !recordedSet.has(str(j.job_id)) && j.wave_id === wave)
   .sort((a, b) => (str(a.job_id) < str(b.job_id) ? -1 : 1));
  const covered = new Set<string>(recordedRoles);
  for (const j of eligible) covered.add(str(j.job_type));
- const runWave = objs(session.committee_runs).find((e) => e.freeze_id === fid)?.wave_id;
- let wave = 1;
- if (typeof runWave === "number" && Number.isInteger(runWave)) wave = runWave;
- else if (typeof session.current_wave === "number" && Number.isInteger(session.current_wave)) wave = session.current_wave;
  return { fid, wave, have: recordedRoles.size, done: recordedRoles.size === 3, eligible, covered };
 }
 
@@ -102,10 +116,11 @@ function journalTypes(session: Json): Set<string> {
  return out;
 }
 
-export function deriveState(session: Json, jobs: Json[]): {
+export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): {
  stage: Stage; jobId: string; decided: boolean; authorized: boolean;
  baseline: number; wave2Frozen: boolean; targeted: string;
- wave2JobId: string; trio: TrioState;
+ wave2JobId: string; freezeEvidenceIds: string[]; unfrozenEvidenceIds: string[];
+ trio: TrioState;
 } {
  const sid = str(session.session_id);
  const status = str(session.status);
@@ -125,7 +140,17 @@ export function deriveState(session: Json, jobs: Json[]): {
   journal.has("wave.authorized") || journal.has("wave.stopped") ||
   status === "targeted_research" || status === "synthesizing" ||
   status === "completed" || currentWave === 2 || targeted.length > 0;
- const wave2Frozen = freezes.includes(`${sid}:2:freeze`);
+ // ponytail: wave-2 frozen derives from the freeze record's wave_id, never the
+ // freeze-id shape, so non-synthesized ids still resume to finalize. Absent
+ // record (older stubs) falls back to the synthesized id check.
+ const freezeWaveId = latestFreeze && typeof latestFreeze.wave_id === "number" && Number.isInteger(latestFreeze.wave_id) ? latestFreeze.wave_id : null;
+ const wave2Frozen = freezeWaveId !== null && freezeWaveId !== undefined ? freezeWaveId >= 2 : freezes.includes(`${sid}:2:freeze`);
+ // Committee/final prompts use the freeze's evidence ids, never the session's
+ // broader mutable list; the difference only decides whether the active wave
+ // gathered anything past the latest freeze.
+ const freezeEvidenceIds = latestFreeze ? strs(latestFreeze.evidence_ids) : evidence;
+ const frozenSet = new Set(freezeEvidenceIds);
+ const unfrozenEvidenceIds = latestFreeze ? evidence.filter((id) => !frozenSet.has(id)) : [];
  const src1 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 1);
  const src2 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 2);
  const jobId = str(src1?.job_id ?? jobs[0]?.job_id);
@@ -145,37 +170,40 @@ export function deriveState(session: Json, jobs: Json[]): {
   stage = "COMMITTEE";
  }
  if (status === "synthesizing" || status === "completed") stage = "FINAL";
- return { stage, jobId, decided, authorized, baseline, wave2Frozen, targeted, wave2JobId, trio };
+ return { stage, jobId, decided, authorized, baseline, wave2Frozen, targeted, wave2JobId, freezeEvidenceIds, unfrozenEvidenceIds, trio };
 }
 
-// UX-only mirror of the kernel stage gate (kernel stays authoritative): narrow
-// deny lists over Pi-visible tools, same reason string, fail open otherwise.
+// UX-only mirror of the kernel stage gate (kernel stays authoritative):
+// positive canonical control allowlists plus discovery, same reason string,
+// fail open otherwise. COMMITTEE/FINAL therefore block every unlisted data tool.
 const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_tools: true, describe_tool: true, list_tool_domains: true, call_tool: true };
+const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_add_evidence: true };
+const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_add_analysis: true };
+const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_finalize: true };
+// Local controls, thesis actions, and dotted bridge ops are never staged data
+// dispatches; SOURCE blocks them while unlisted data tools pass.
+const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_cancel: true, research_read: true, research_add_evidence: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
 export function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_DISCOVERY[toolName]) return undefined;
- const denied =
-  stage === "SOURCE_RESEARCH"
-   ? toolName === "research_add_analysis" || toolName === "research.session.finalize" || toolName === "research_finalize"
-   : stage === "COMMITTEE"
-    ? toolName === "search_web" || toolName === "get_fundamentals" || toolName === "get_short_interest" ||
-    toolName === "research_add_evidence" || toolName === "research.session.finalize" || toolName === "research_finalize"
-    : toolName === "search_web" || toolName === "get_fundamentals" || toolName === "get_short_interest" ||
-    toolName === "research_add_evidence" || toolName === "research_add_analysis";
- return denied ? `Stage ${stage} forbids tool '${toolName}'` : undefined;
+ if (stage === "COMMITTEE") return STAGE_GATE_COMMITTEE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
+ if (stage === "FINAL") return STAGE_GATE_FINAL_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
+ if (STAGE_GATE_SOURCE_EXTRA[toolName]) return undefined;
+ return STAGE_GATE_NON_DISPATCH[toolName] ? `Stage ${stage} forbids tool '${toolName}'` : undefined;
 }
 export function blockReasonForRun(runId: string, toolName: string): string | undefined {
  const sid = runs.get(runId)?.sessionId;
  if (!sid) return undefined;
  const seen = lastSeen.get(sid);
  if (!seen) return undefined;
- return stageBlockReason(deriveState(seen.session, seen.jobs).stage, toolName);
+ return stageBlockReason(deriveState(seen.session, seen.jobs, seen.latestFreeze).stage, toolName);
 }
 
-async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<{ session: Json; jobs: Json[] }> {
+async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<InspectSnapshot> {
  const res = await rpc("research.session.inspect", { session_id: sessionId }, dataRoot, asOf);
  if (!res.session || typeof res.session !== "object")
   throw new Error("research.session.inspect failed: missing session");
- const out = { session: res.session as Json, jobs: objs(res.jobs) };
+ const lf = res.latest_freeze;
+ const out: InspectSnapshot = { session: res.session as Json, jobs: objs(res.jobs), latestFreeze: lf && typeof lf === "object" ? (lf as Json) : null };
  lastSeen.set(sessionId, out);
  return out;
 }
@@ -223,19 +251,20 @@ function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowe
 function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string, note = ""): string {
  return (
   `${note}Evidence frozen as ${freezeId}. Finalize now: ` +
-  `Call call_tool with name="research.session.finalize" and arguments={"session_id": "${sessionId}", "answer": "<final synthesis prose>", ` +
+  `Call call_tool with name="research_finalize" and arguments={"session_id": "${sessionId}", "answer": "<final synthesis prose>", ` +
   `"claims": [{"text": "<finding>", "evidence_ids": ["<allowed evidence id>"]}]}. ` +
   `Every claim ref must use these frozen evidence ids: ${allowedIds}. Empty claims are rejected (claims_required); unknown ids fail closed naming them.`
  );
 }
 
-// Best-effort: complete the wave's running source jobs so the kernel
+// Best-effort: complete the wave's queued and running source jobs so the kernel
 // terminal-before-freeze guard passes. Failures (already terminal, stub without
 // the op) are ignored; freeze.create stays fail-closed below.
 async function freezeWave(sessionId: string, wave: number, jobs: Json[], dataRoot?: string, asOf?: string): Promise<void> {
  for (const j of jobs) {
   const t = str(j.job_type);
-  if ((t === "source_agent" || t === "scout") && j.wave_id === wave && str(j.status) === "running") {
+  const s = str(j.status);
+  if ((t === "source_agent" || t === "scout") && j.wave_id === wave && (s === "running" || s === "queued")) {
    try {
     await rpc("research.job.complete", { job_id: str(j.job_id), outcome: { status: "done" } }, dataRoot, asOf);
    } catch {
@@ -247,30 +276,30 @@ async function freezeWave(sessionId: string, wave: number, jobs: Json[], dataRoo
 }
 
 async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string): Promise<Advance> {
- let session: Json;
- let jobs: Json[];
+ let snapshot: InspectSnapshot;
  try {
-  ({ session, jobs } = await inspect(sessionId, dataRoot, asOf));
+  snapshot = await inspect(sessionId, dataRoot, asOf);
  } catch {
   return { done: false, prompt: `Freeze sent for research session ${sessionId}; author the trio with Call call_tool with name="research_add_analysis" and arguments={"session_id": "${sessionId}", "job_id": "<running committee job>", "role": "<stockbot|bullbot|bearbot>", ${ANALYSIS_SHAPE}}. Every claim ref must use frozen evidence ids; unknown ids fail closed naming them.` };
  }
- const fresh = trioState(session, jobs);
- if (fresh.done) {
-  return { done: false, prompt: finalizePrompt(sessionId, fresh.fid, strs(session.evidence_ids).join(", "), `Trio complete for research session ${sessionId}. `) };
+ const d = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
+ const allowed = d.freezeEvidenceIds.join(", ");
+ if (d.trio.done) {
+  return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `Trio complete for research session ${sessionId}. `) };
  }
- const seeded = fresh.eligible.slice(0, 3);
+ const seeded = d.trio.eligible.slice(0, 3);
  if (seeded.length === 0) {
-  const role = ROLES.find((r) => !fresh.covered.has(r)) ?? "stockbot";
+  const role = ROLES.find((r) => !d.trio.covered.has(r)) ?? "stockbot";
   try {
    const started = await rpc("research.job.start", { session_id: sessionId, type: role, wave_id: wave }, dataRoot, asOf);
    const nid = str(started.job_id);
    if (!nid) throw new Error("research.job.start failed: missing job_id");
-   return { done: false, prompt: trioPrompt(sessionId, fresh.fid, [{ job_id: nid, job_type: role, wave_id: wave }], strs(session.evidence_ids).join(", ")) };
+   return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, [{ job_id: nid, job_type: role, wave_id: wave }], allowed) };
   } catch (err) {
    return { done: false, prompt: `Committee job (${role}) for research session ${sessionId} failed (${err instanceof Error ? err.message : String(err)}). Keep authoring analyses with Call call_tool with name="research_add_analysis".` };
   }
  }
- return { done: false, prompt: trioPrompt(sessionId, fresh.fid, seeded, strs(session.evidence_ids).join(", ")) };
+ return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, seeded, allowed) };
 }
 
 export async function startResearch(
@@ -282,9 +311,9 @@ export async function startResearch(
  const created = await rpc("research.session.create", { question }, dataRoot, asOf);
  const sessionId = str(created.session_id);
  if (!sessionId) throw new Error("research.session.create failed: missing session_id");
- const { session, jobs } = await inspect(sessionId, dataRoot, asOf);
+ const { session, jobs, latestFreeze } = await inspect(sessionId, dataRoot, asOf);
  runs.set(runId, { sessionId });
- return { sessionId, prompt: fetchPrompt(sessionId, deriveState(session, jobs).jobId, question, asOf) };
+ return { sessionId, prompt: fetchPrompt(sessionId, deriveState(session, jobs, latestFreeze).jobId, question, asOf) };
 }
 
 export async function resumeResearch(
@@ -294,53 +323,37 @@ export async function resumeResearch(
  asOf?: string,
 ): Promise<{ sessionId: string; prompt: string }> {
  runs.set(runId, { sessionId });
- const { session, jobs } = await inspect(sessionId, dataRoot, asOf);
- const d = deriveState(session, jobs);
- const final = session.final_result;
- if ((final && typeof final === "object") || TERMINAL[str(session.status)]) {
-  const fr = (final && typeof final === "object" ? final : {}) as Json;
-  const tail = str(fr.answer) ? `: ${str(fr.answer)}` : ".";
-  return { sessionId, prompt: `Resumed research session ${sessionId} is ${str(session.status)}${tail}` };
- }
- const evidence = strs(session.evidence_ids);
- if (evidence.length === 0)
-  return { sessionId, prompt: fetchPrompt(sessionId, d.jobId, str(session.query) || str(session.objective) || sessionId, asOf) };
- if (!d.trio.done) {
-  const eligible = d.trio.eligible.slice(0, 3);
-  if (eligible.length > 0)
-   return { sessionId, prompt: trioPrompt(sessionId, d.trio.fid, eligible, evidence.join(", ")) };
-  const missing = ROLES.filter((r) => !d.trio.covered.has(r));
-  return { sessionId, prompt: `Resumed research session ${sessionId}: evidence frozen as ${d.trio.fid}; author the missing trio roles (${missing.join(", ") || "none"}) with Call call_tool with name="research_add_analysis" and arguments={"session_id": "${sessionId}", "job_id": "<running committee job>", "role": "<stockbot|bullbot|bearbot>", ${ANALYSIS_SHAPE}}. Every claim ref must use these frozen evidence ids: ${evidence.join(", ")}.` };
- }
- if (d.authorized && !d.wave2Frozen)
-  return { sessionId, prompt: wave2Prompt(sessionId, d.wave2JobId || d.jobId, d.targeted, asOf) };
- return { sessionId, prompt: finalizePrompt(sessionId, d.trio.fid, evidence.join(", "), `Resumed research session ${sessionId} (wave-2 ${d.authorized ? "authorized" : "declined"}). `) };
+ const adv = await advanceOnAgentEnd(runId, "", dataRoot, asOf);
+ // Terminal answers reuse the persisted final answer and leave no active run
+ // binding (advance deletes it); every other state reuses the advance prompt.
+ if (!adv) return { sessionId, prompt: `Resumed research session ${sessionId} is complete.` };
+ if (adv.done) return { sessionId, prompt: `Resumed research session ${sessionId} is complete${adv.answer ? `: ${adv.answer}` : "."}` };
+ return { sessionId, prompt: adv.prompt };
 }
 
 export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: string, asOf?: string): Promise<Advance> {
  const m = runs.get(runId);
  if (!m) return null;
  const sid = m.sessionId;
- let session: Json;
- let jobs: Json[];
+ let snapshot: InspectSnapshot;
  try {
-  ({ session, jobs } = await inspect(sid, dataRoot, asOf));
+  snapshot = await inspect(sid, dataRoot, asOf);
  } catch (err) {
   return { done: false, prompt: `Research session ${sid} unreadable (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
  }
+ const { session, jobs, latestFreeze } = snapshot;
  const final = session.final_result;
  if ((final && typeof final === "object") || TERMINAL[str(session.status)]) {
   runs.delete(runId);
   const fr = (final && typeof final === "object" ? final : {}) as Json;
   return { done: true, answer: str(fr.answer) || answer };
  }
+ const d = deriveState(session, jobs, latestFreeze);
  const evidence = strs(session.evidence_ids);
  if (evidence.length === 0) {
-  const d0 = deriveState(session, jobs);
-  return { done: false, prompt: fetchPrompt(sid, d0.jobId, str(session.query) || str(session.objective) || sid, asOf) };
+  return { done: false, prompt: fetchPrompt(sid, d.jobId, str(session.query) || str(session.objective) || sid, asOf) };
  }
  const freezes = strs(session.freeze_ids);
- const d = deriveState(session, jobs);
  if (freezes.length === 0) {
   try {
    await freezeWave(sid, 1, jobs, dataRoot, asOf);
@@ -350,9 +363,11 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   return seedTrio(sid, 1, dataRoot, asOf);
  }
  if (!d.trio.done) {
-  const missing = ROLES.find((r) => !d.trio.covered.has(r));
-  if (!missing) return { done: false, prompt: trioPrompt(sid, d.trio.fid, d.trio.eligible.slice(0, 3), strs(session.evidence_ids).join(", ")) };
-  const role = missing;
+  // Reuse running committee work on this exact freeze; start only the next
+  // missing role when nothing is running, one transition per advance.
+  if (d.trio.eligible.length > 0)
+   return { done: false, prompt: trioPrompt(sid, d.trio.fid, d.trio.eligible.slice(0, 3), d.freezeEvidenceIds.join(", ")) };
+  const role = ROLES.find((r) => !d.trio.covered.has(r)) ?? "stockbot";
   let nid = "";
   try {
    const started = await rpc("research.job.start", { session_id: sid, type: role, wave_id: d.trio.wave }, dataRoot, asOf);
@@ -361,7 +376,7 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   } catch (err) {
    return { done: false, prompt: `Committee job (${role}) for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Keep authoring analyses with Call call_tool with name="research_add_analysis".` };
   }
-  return { done: false, prompt: trioPrompt(sid, d.trio.fid, [...d.trio.eligible, { job_id: nid, job_type: role, wave_id: d.trio.wave }].slice(0, 3), strs(session.evidence_ids).join(", ")) };
+  return { done: false, prompt: trioPrompt(sid, d.trio.fid, [{ job_id: nid, job_type: role, wave_id: d.trio.wave }], d.freezeEvidenceIds.join(", ")) };
  }
  let authorized = d.authorized;
  let targeted = d.targeted;
@@ -382,10 +397,21 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
     const started = await rpc("research.job.start", { session_id: sid, type: "source_agent", wave_id: 2 }, dataRoot, asOf);
     const nid = str(started.job_id);
     if (!nid) throw new Error("research.job.start failed: missing job_id");
+    try {
+     await inspect(sid, dataRoot, asOf);
+    } catch {
+     // inspect refresh is best-effort; the explicit nid still drives the prompt
+    }
     return { done: false, prompt: wave2Prompt(sid, nid, targeted, asOf) };
    } catch (err) {
     return { done: false, prompt: `Wave-2 source job for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
    }
+  }
+  // Wave-2 source work is underway: without evidence past the latest freeze the
+  // driver keeps fetching; the wave-2 freeze fires only once new evidence lands.
+  if (d.unfrozenEvidenceIds.length === 0) {
+   const runningW2 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 2 && str(j.status) === "running");
+   return { done: false, prompt: wave2Prompt(sid, str(runningW2?.job_id) || d.wave2JobId, targeted, asOf) };
   }
   try {
    await freezeWave(sid, 2, jobs, dataRoot, asOf);
@@ -394,5 +420,5 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   }
   return seedTrio(sid, 2, dataRoot, asOf);
  }
- return { done: false, prompt: finalizePrompt(sid, d.trio.fid, strs(session.evidence_ids).join(", "), authorized ? `Wave-2 complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `) };
+ return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Wave-2 complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `) };
 }

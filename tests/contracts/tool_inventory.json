@@ -52,6 +52,7 @@
   "research_add_analysis",
   "research_add_evidence",
   "research_cancel",
+  "research_finalize",
   "research_read",
   "research_resume",
   "research_start",

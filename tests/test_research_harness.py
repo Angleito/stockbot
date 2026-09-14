@@ -750,7 +750,6 @@ def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, st
     from app.research import service as _svc
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     jobs = repo.list_jobs(sid)
-    repo.save_job(_jobs.start_job(jobs[0]))
     return sid, jobs[0].job_id
 
 def _svc_item(eid: str, wave: int = 1) -> dict[str, object]:
@@ -867,14 +866,68 @@ def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
-    from app.research import service as _svc
+    import app.pi_gateway as _gw
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
-    jid = str(_svc.start_job(sid, "source_agent", budget={"tool_budget": 1}, repo=repo, wave_id=1)["job_id"])
+    sid, jid = _svc_sid(repo)
+    repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
     ctx = PiSessionContext(session_id="t-budget")
-    first = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx)
-    assert "error" not in first
-    second = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:2")}, ctx)
-    assert second.get("error_type") == "budget_exhausted"
+    ctx.active_research_session_id = sid
+    ctx.active_research_job_id = jid
+    calls: list[tuple[str, dict[str, object]]] = []
+    def _fake_execute(name: str, arguments: dict[str, object], model: str, context: object = None) -> dict[str, object]:
+        calls.append((name, dict(arguments)))
+        return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
+    monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
+    first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    assert "error" not in first, first
+    second = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    assert second.get("error_type") == "budget_exhausted", second
+    assert len(calls) == 1
+    assert calls[0][0] == "search_web" and calls[0][1] == {"query": "NVDA demand"}
+    assert repo.get_job(jid).tool_budget == 0
     assert repo.get_session(sid).budget.get("tool_calls_used") == 1
+    kept = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx)
+    assert "error" not in kept, kept
+    assert repo.get_job(jid).tool_budget == 0
+    assert repo.get_session(sid).budget.get("tool_calls_used") == 1
+
+def test_concurrent_dispatch_race_admits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, jid = _svc_sid(repo)
+    repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
+    sess = repo.get_session(sid)
+    policy = dict(sess.policy)
+    section = dict(policy.get("research", {}))  # type: ignore[arg-type]
+    section["max_tool_calls"] = 1
+    policy["research"] = section  # type: ignore[assignment]
+    repo.save_session(dataclasses.replace(sess, policy=policy))
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = [None, None]
+
+    def _worker(idx: int) -> None:
+        try:
+            barrier.wait(timeout=10)
+            outcomes[idx] = _svc.authorize_and_consume_dispatch(sid, jid, "search_web", repo=repo)
+        except Exception as exc:  # noqa: BLE001 — race outcome is the assertion
+            outcomes[idx] = exc
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in (0, 1)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert all(thread.is_alive() is False for thread in threads)
+    successes = [o for o in outcomes if isinstance(o, dict)]
+    failures = [o for o in outcomes if isinstance(o, Exception)]
+    assert len(successes) == 1, outcomes
+    assert len(failures) == 1, outcomes
+    assert "budget exhausted" in str(failures[0]).lower(), outcomes
+    assert repo.get_session(sid).budget.get("tool_calls_used") == 1
+    assert repo.get_job(jid).tool_budget == 0
+    assert [j.job_id for j in repo.list_jobs(sid)] == [jid]
