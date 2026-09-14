@@ -1390,7 +1390,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	let spawnN = 0;
 	let finalized = false;
 	let decided = false;
-	let srcStatus = "queued";
+	let srcStatus = "running";
 	let bridgeFn: (req: Json) => Promise<Json> = async () => ({ error: "unset" });
 	setResearchBridge((bridgeFn = async (req: Json) => {
 		ops.push(String(req.op));
@@ -1458,7 +1458,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_add_evidence");
 	expect(transitions()).toEqual(["research.session.create"]);
-	// Evidence arrives: the queued source job completes, wave 1 freezes, then
+	// Evidence arrives: the running source job completes, wave 1 freezes, then
 	// the driver seeds the first committee job on the freeze.
 	evidence = [EV1];
 	adv = await advanceOnAgentEnd(runId, "");
@@ -1856,6 +1856,113 @@ test("research director restart: E2 trio complete on a non-synthesized freeze id
 	expect(resumed.prompt).toContain("research_finalize");
 	expect(resumed.prompt).not.toContain("research.session.finalize");
 	expectFreezeIds(resumed.prompt, FC, [E1, E2], [F1]);
+});
+
+test("research director restart: queued scout is never auto-completed at freeze", async () => {
+	const SID = "rs:resume-queued-scout";
+	const E1 = `${SID}:ev:1`;
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, { status: "researching", evidence_ids: [E1], current_wave: 1 }),
+		jobs: [
+			{ job_id: "job:src", job_type: "source_agent", wave_id: 1, status: "running" },
+			{ job_id: "job:scout-q", job_type: "scout", wave_id: 1, status: "queued" },
+		],
+		freezes: {},
+	};
+	setResearchBridge(resumeBridge(state, ops));
+	const resumed = await resumeResearch(SID, "run-resume-queued-scout");
+	const completes = ops.filter((o) => o.op === "research.job.complete");
+	expect(completes.length).toBe(1);
+	expect(completes[0].job_id).toBe("job:src");
+	expect(completes.map((o) => o.job_id)).not.toContain("job:scout-q");
+	expect(state.jobs.find((j) => j.job_id === "job:scout-q")?.status).toBe("queued");
+	expect(resumed.prompt).toContain("research_add_analysis");
+});
+
+test("research director restart: fresh context reloads freeze and evidence before trio analysis", async () => {
+	const SID = "rs:resume-reload";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const E2 = `${SID}:ev:2`;
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1, E2], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
+		jobs: [],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1, E2] } },
+	};
+	const base = resumeBridge(state, ops);
+	const bridgeWithRead = async (req: Json) => {
+		const op = String(req.op);
+		if (op === "research.read" || op === "research_read") {
+			const kind = String((req as Json).kind);
+			const rid = String((req as Json).resource_id ?? (req as Json).job_id ?? "");
+			if (kind === "freeze") {
+				const fr = state.freezes[rid];
+				if (!fr) return { error: "unknown_resource" };
+				return { result: { session_id: SID, kind, resource_id: rid, record: fr } };
+			}
+			if (kind === "evidence") {
+				const ids = Array.isArray(state.session.evidence_ids) ? (state.session.evidence_ids as unknown[]) : [];
+				if (!ids.includes(rid)) return { error: "unknown_resource" };
+				return { result: { session_id: SID, kind, resource_id: rid, record: { evidence_id: rid } } };
+			}
+			if (kind === "job") {
+				const job = state.jobs.find((j) => j.job_id === rid);
+				if (!job) return { error: "unknown_job" };
+				return { result: { session_id: SID, kind, resource_id: rid, record: job } };
+			}
+			return { error: "unknown_resource" };
+		}
+		return base(req);
+	};
+	setResearchBridge(bridgeWithRead);
+	const trio = await resumeResearch(SID, "run-resume-reload-trio");
+	expect(trio.prompt).toContain("research_read");
+	expect(trio.prompt).toContain('"kind": "freeze"');
+	expect(trio.prompt).toContain(F1);
+	expect(trio.prompt).toContain(E1);
+	expect(trio.prompt).toContain(E2);
+	expect(trio.prompt).toContain("research_add_analysis");
+	expect(trio.prompt).not.toContain("search_web");
+	expect(trio.prompt).not.toContain("research_add_evidence");
+	const freezeRead = await bridgeWithRead({ op: "research.read", session_id: SID, kind: "freeze", resource_id: F1 });
+	expect((freezeRead.result as Json).resource_id).toBe(F1);
+	const evRead = await bridgeWithRead({ op: "research.read", session_id: SID, kind: "evidence", resource_id: E1 });
+	expect((evRead.result as Json).resource_id).toBe(E1);
+	const analysis = { claims: [{ text: "finding", evidence_ids: [E1] }], follow_ups: [] };
+	const frozen = ((state.freezes[F1] as Json).evidence_ids as unknown as string[]);
+	for (const claim of analysis.claims) {
+		for (const id of claim.evidence_ids) expect(frozen).toContain(id);
+	}
+	state.session = {
+		...state.session,
+		committee_runs: [{ freeze_id: F1, wave_id: 1, jobs: ["job:s1", "job:u1", "job:b1"] }],
+	};
+	state.jobs.push(
+		{ job_id: "job:s1", job_type: "stockbot", wave_id: 1, status: "completed" },
+		{ job_id: "job:u1", job_type: "bullbot", wave_id: 1, status: "completed" },
+		{ job_id: "job:b1", job_type: "bearbot", wave_id: 1, status: "completed" },
+	);
+	const fin = await resumeResearch(SID, "run-resume-reload-fin");
+	expect(fin.prompt).toContain("research_finalize");
+	expect(fin.prompt).toContain("research_read");
+	expect(fin.prompt).toContain('"kind": "freeze"');
+	expect(fin.prompt).toContain(F1);
+	expect(fin.prompt).toContain('"kind": "job"');
+	expect(fin.prompt).toContain("job:s1");
+	expect(fin.prompt).toContain("job:u1");
+	expect(fin.prompt).toContain("job:b1");
+	expect(fin.prompt).not.toContain("search_web");
+	expect(fin.prompt).not.toContain("research_add_evidence");
+	for (const jid of ["job:s1", "job:u1", "job:b1"]) {
+		const jr = await bridgeWithRead({ op: "research.read", session_id: SID, kind: "job", resource_id: jid });
+		expect((jr.result as Json).resource_id).toBe(jid);
+	}
+	const finalClaims = [{ text: "synthesis", evidence_ids: [E1, E2] }];
+	for (const claim of finalClaims) {
+		for (const id of claim.evidence_ids) expect(frozen).toContain(id);
+	}
 });
 
 test("bridge close kills child, settles inflight, fails fast", async () => {

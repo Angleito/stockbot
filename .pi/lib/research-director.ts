@@ -177,12 +177,12 @@ export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | n
 // positive canonical control allowlists plus discovery, same reason string,
 // fail open otherwise. COMMITTEE/FINAL therefore block every unlisted data tool.
 const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_tools: true, describe_tool: true, list_tool_domains: true, call_tool: true };
-const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_add_evidence: true };
-const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_add_analysis: true };
-const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_finalize: true };
+const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_evidence: true };
+const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_analysis: true };
+const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_finalize: true };
 // Local controls, thesis actions, and dotted bridge ops are never staged data
 // dispatches; SOURCE blocks them while unlisted data tools pass.
-const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_cancel: true, research_read: true, research_add_evidence: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
+const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_add_evidence: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
 export function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_DISCOVERY[toolName]) return undefined;
  if (stage === "COMMITTEE") return STAGE_GATE_COMMITTEE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
@@ -235,6 +235,10 @@ function wave2Prompt(sessionId: string, jobId: string, targeted: string, asOf?: 
  );
 }
 
+function trioJobIdsForFreeze(session: Json, fid: string): string[] {
+ return strs(objs(session.committee_runs).find((e) => e.freeze_id === fid)?.jobs);
+}
+
 function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowedIds: string): string {
  const calls = mapping
   .map(
@@ -243,28 +247,44 @@ function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowe
   )
   .join(" ");
  return (
+  `Fresh context? Reload first: Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "freeze", "resource_id": "${freezeId}"}, ` +
+  `then Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "evidence", "resource_id": "<id>"} for each id you will cite. ` +
+  `Committee may READ frozen state; it must NOT fetch new evidence. Then ` +
   `Evidence frozen as ${freezeId}. Author the trio now, one call per role (${calls}). ` +
   `Every claim ref must use these frozen evidence ids: ${allowedIds}. Unknown ids fail closed naming them; follow_ups is an optional list of questions ending with "?".`
  );
 }
 
-function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string, note = ""): string {
+function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string, note = "", trioJobIds: string[] = []): string {
+ const freezeRead =
+  `Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "freeze", "resource_id": "${freezeId}"}`;
+ const jobReads = trioJobIds
+  .map(
+   (jid) =>
+    `Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "job", "resource_id": "${jid}"}`,
+  )
+  .join(", ");
+ const reload =
+  jobReads.length > 0
+   ? `Fresh context? Reload first: ${freezeRead}, ${jobReads} for persisted committee outputs, and kind "evidence" reads as needed. Then `
+   : `Fresh context? Reload first: ${freezeRead}, and kind "evidence" reads as needed. Then `;
  return (
-  `${note}Evidence frozen as ${freezeId}. Finalize now: ` +
+  `${reload}${note}Evidence frozen as ${freezeId}. Finalize now: ` +
   `Call call_tool with name="research_finalize" and arguments={"session_id": "${sessionId}", "answer": "<final synthesis prose>", ` +
   `"claims": [{"text": "<finding>", "evidence_ids": ["<allowed evidence id>"]}]}. ` +
   `Every claim ref must use these frozen evidence ids: ${allowedIds}. Empty claims are rejected (claims_required); unknown ids fail closed naming them.`
  );
 }
 
-// Best-effort: complete the wave's queued and running source jobs so the kernel
-// terminal-before-freeze guard passes. Failures (already terminal, stub without
-// the op) are ignored; freeze.create stays fail-closed below.
+// Best-effort: complete the wave's running source jobs so the kernel
+// terminal-before-freeze guard passes; queued work never ran, is left untouched,
+// and the kernel freeze_session open-jobs guard exposes it. Failures (already
+// terminal, stub without the op) are ignored; freeze.create stays fail-closed below.
 async function freezeWave(sessionId: string, wave: number, jobs: Json[], dataRoot?: string, asOf?: string): Promise<void> {
  for (const j of jobs) {
   const t = str(j.job_type);
   const s = str(j.status);
-  if ((t === "source_agent" || t === "scout") && j.wave_id === wave && (s === "running" || s === "queued")) {
+  if ((t === "source_agent" || t === "scout") && j.wave_id === wave && (s === "running")) {
    try {
     await rpc("research.job.complete", { job_id: str(j.job_id), outcome: { status: "done" } }, dataRoot, asOf);
    } catch {
@@ -285,7 +305,7 @@ async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf
  const d = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
  const allowed = d.freezeEvidenceIds.join(", ");
  if (d.trio.done) {
-  return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `Trio complete for research session ${sessionId}. `) };
+  return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `Trio complete for research session ${sessionId}. `, trioJobIdsForFreeze(snapshot.session, d.trio.fid)) };
  }
  const seeded = d.trio.eligible.slice(0, 3);
  if (seeded.length === 0) {
@@ -420,5 +440,5 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   }
   return seedTrio(sid, 2, dataRoot, asOf);
  }
- return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Wave-2 complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `) };
+ return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Wave-2 complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `, trioJobIdsForFreeze(session, d.trio.fid)) };
 }

@@ -931,3 +931,34 @@ def test_concurrent_dispatch_race_admits_one(tmp_path: Path, monkeypatch: pytest
     assert repo.get_session(sid).budget.get("tool_calls_used") == 1
     assert repo.get_job(jid).tool_budget == 0
     assert [j.job_id for j in repo.list_jobs(sid)] == [jid]
+
+
+def test_stage_allows_common_read_controls() -> None:
+    from app.research.stage import check_stage_tool
+
+    for stage in ("SOURCE_RESEARCH", "COMMITTEE", "FINAL"):
+        check_stage_tool(stage, "research_read")
+        check_stage_tool(stage, "research_cancel")
+    for stage in ("COMMITTEE", "FINAL"):
+        with pytest.raises(ValueError, match="forbids"):
+            check_stage_tool(stage, "research_add_evidence")
+        with pytest.raises(ValueError, match="forbids"):
+            check_stage_tool(stage, "search_web")
+
+
+def test_queued_scout_blocks_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _svc_sid(repo)
+    _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:1"), repo=repo)
+    found = repo.get_session(sid)
+    existing = repo.list_jobs(sid)
+    updated, scout = _jobs.create_job(found, existing, job_type="scout", owner="service", wave_id=1)
+    repo.save_session(updated)
+    repo.save_job(scout)
+    with pytest.raises(ValueError, match="still open") as exc:
+        _svc.freeze_session(sid, 1, repo=repo)
+    assert scout.job_id in str(exc.value)
+    assert repo.get_job(scout.job_id).status == "queued"
