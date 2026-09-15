@@ -15,7 +15,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 from ..config import get_data_root
 
@@ -61,9 +61,9 @@ def archive(
     payload: bytes,
     *,
     url: str,
-    retrieved_at: Optional[str] = None,
-    metadata: Optional[dict[str, object]] = None,
-    root: Optional[Path] = None,
+    retrieved_at: str | None = None,
+    metadata: dict[str, object] | None = None,
+    root: Path | None = None,
 ) -> ArchiveRecord:
     """Store one immutable payload and its manifest.
 
@@ -129,9 +129,9 @@ def find(
     kind: str,
     key: str,
     *,
-    sha256: Optional[str] = None,
-    root: Optional[Path] = None,
-) -> Optional[ArchiveRecord]:
+    sha256: str | None = None,
+    root: Path | None = None,
+) -> ArchiveRecord | None:
     """Return the archived record for a (source, kind, key), optionally
     narrowed by content hash, or None."""
     root = Path(root) if root else get_data_root() / "raw"
@@ -152,7 +152,7 @@ def iter_archive(
     kind: str,
     key: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> Iterable[ArchiveRecord]:
     """All archived payload revisions for one source key, oldest first."""
     root = Path(root) if root else get_data_root() / "raw"
@@ -171,7 +171,7 @@ def has_payload(
     key: str,
     sha256: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> bool:
     """True when a payload with this content hash is already archived."""
     return find(source, kind, key, sha256=sha256, root=root) is not None

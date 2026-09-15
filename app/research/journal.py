@@ -35,6 +35,45 @@ def next_sequence(session_id: str) -> int:
         return (max((e.sequence for e in events), default=0)) + 1
 
 
+def _check_journal_ids(session_id: str, event_type: str, actor_type: str, actor_id: str) -> None:
+    if not session_id:
+        raise ValueError("<journal>: 'session_id' must be a non-empty string")
+    if not event_type:
+        raise ValueError("<journal>: 'event_type' must be a non-empty string")
+    if not actor_type:
+        raise ValueError("<journal>: 'actor_type' must be a non-empty string")
+    if not actor_id:
+        raise ValueError("<journal>: 'actor_id' must be a non-empty string")
+
+
+def _build_journal_event(
+    session_id: str,
+    event_type: str,
+    actor_type: str,
+    actor_id: str,
+    payload: Mapping[str, object] | None,
+    previous_state: str | None,
+    new_state: str | None,
+    event_id: str | None,
+    timestamp: datetime | None,
+    sequence: int,
+) -> JournalEvent:
+    event = JournalEvent(
+        event_id=event_id or new_event_id(),
+        session_id=session_id,
+        sequence=sequence,
+        event_type=event_type,
+        timestamp=timestamp or utcnow(),
+        actor_type=actor_type,
+        actor_id=actor_id,
+        payload=validate_json_mapping(payload or {}, "<journal>: 'payload'"),
+        previous_state=previous_state,
+        new_state=new_state,
+    )
+    event.validate("<journal>")
+    return event
+
+
 def append_event(
     session_id: str,
     event_type: str,
@@ -48,30 +87,13 @@ def append_event(
     timestamp: datetime | None = None,
 ) -> JournalEvent:
     """Build, validate, append, and return one event. Never mutates history."""
-    if not session_id:
-        raise ValueError("<journal>: 'session_id' must be a non-empty string")
-    if not event_type:
-        raise ValueError("<journal>: 'event_type' must be a non-empty string")
-    if not actor_type:
-        raise ValueError("<journal>: 'actor_type' must be a non-empty string")
-    if not actor_id:
-        raise ValueError("<journal>: 'actor_id' must be a non-empty string")
+    _check_journal_ids(session_id, event_type, actor_type, actor_id)
     with _LOCK:
         events = _LOG.setdefault(session_id, [])
         sequence = (max((e.sequence for e in events), default=0)) + 1
-        event = JournalEvent(
-            event_id=event_id or new_event_id(),
-            session_id=session_id,
-            sequence=sequence,
-            event_type=event_type,
-            timestamp=timestamp or utcnow(),
-            actor_type=actor_type,
-            actor_id=actor_id,
-            payload=validate_json_mapping(payload or {}, "<journal>: 'payload'"),
-            previous_state=previous_state,
-            new_state=new_state,
+        event = _build_journal_event(
+            session_id, event_type, actor_type, actor_id, payload, previous_state, new_state, event_id, timestamp, sequence
         )
-        event.validate("<journal>")
         if any(e.event_id == event.event_id for e in events):
             raise ValueError(f"<journal>: duplicate event_id {event.event_id!r}")
         events.append(event)

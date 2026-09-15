@@ -1,45 +1,61 @@
 """Tool implementations + OpenAI-format JSON schemas for Pi."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import analyst_client
-from . import edgar_client
-from . import exa_client
-from . import finra_client
-from . import obligations
-from . import valuation
-from .config import broker_enabled, get_data_root, get_robinhood_mcp_url
-from .policy import Capability, RequestContext
+from . import (
+    analyst_client,
+    edgar_client,
+    exa_client,
+    finra_client,
+    obligations,
+    sec,
+    valuation,
+)
 from .analytics import screens
 from .analytics.options import analyze_option, compare_options
 from .analytics.portfolio import largest_positions, portfolio_concentration
-from .robinhood import RobinhoodClient
-from .robinhood import capabilities
+from .config import broker_enabled, get_data_root, get_robinhood_mcp_url
+from .domain.market.entities import EntityRelationship
+from .domain.portfolio.models import PortfolioSnapshot, Position
+from .policy import Capability, RequestContext
+from .robinhood import RobinhoodClient, capabilities
 from .robinhood.auth import DEFAULT_TOKEN_PATH, OAuthConfig, has_valid_tokens
 from .robinhood.client import RobinhoodAuthRequired
 from .robinhood.options import OptionQuote, normalize_option_quote
 from .robinhood.portfolio import RobinhoodPortfolioProvider
-from .services import risk as risk_service
-from .domain.market.entities import EntityRelationship
-from .domain.portfolio.models import Position
-from .services.portfolio_research import PortfolioResearchPosition, SEC_CONCEPTS, enrich_portfolio_research
-from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 from .sec.models import SECSearchResult
+from .services import risk as risk_service
 from .services import sec_facts
-from . import sec
+from .services.portfolio_research import (
+    SEC_CONCEPTS,
+    PortfolioResearchPosition,
+    enrich_portfolio_research,
+)
+from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
 from .storage import duckdb
 
 if TYPE_CHECKING:
+    from .domain.risk.breaches import RiskBreach
+    from .domain.risk.evaluation import EvaluationIssue, RiskEvaluation
+    from .sec.models import Filing
     from .thesis.intake import IntakeProposal
-    from .thesis.models import Thesis
+    from .thesis.models import (
+        JSONValue,
+        Thesis,
+        ThesisQuestion,
+        ThesisStateSnapshot,
+        WatchRule,
+    )
     from .thesis.repository import ThesisRepository
 
 logger = logging.getLogger(__name__)
@@ -1249,6 +1265,24 @@ TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
+            "name": "research_submit_source_result",
+            "description": "Complete one running source job with validated coverage; evidence stays mutation-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "job_id": {"type": "string", "description": "Running source job ID to complete."},
+                    "coverage": {"type": "object", "description": "Coverage with useful_for_question sufficient|insufficient (required)."},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Evidence IDs grounding a sufficient result (empty only with insufficient)."},
+                    "unresolved_questions": {"type": "array", "items": {"type": "string"}, "description": "Open questions left by the source run."},
+                },
+                "required": ["session_id", "job_id", "coverage", "evidence_ids", "unresolved_questions"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "research_add_analysis",
             "description": "Records one committee analysis (stockbot, bullbot, or bearbot) on a running job; claim refs are validated against the frozen evidence.",
             "parameters": {
@@ -1416,6 +1450,29 @@ def authorize_robinhood_browser() -> bool:
         return False
 
 
+def _norm_row(row: dict[str, object]) -> dict[str, object]:
+    """One provider row with string keys (provider JSON is untyped)."""
+    return {str(k): v for k, v in row.items()}
+
+def _parse_text_block(text: str) -> object:
+    try:
+        parsed: object = json.loads(text)
+        return parsed
+    except (TypeError, ValueError):
+        return {"text": text}
+
+
+def _payload_from_content(value: dict[str, object]) -> object:
+    """MCP content-blocks payload: first text block wins, else the raw dict."""
+    content = value.get("content")
+    if isinstance(content, list):
+        for block in content:
+            text = block.get("text") if isinstance(block, dict) else None
+            if text:
+                return _parse_text_block(text)
+    return value
+
+
 def _provider_payload(value: object) -> object:
     """Unwrap MCP envelope (genuinely dynamic provider JSON)."""
     if isinstance(value, dict):
@@ -1423,39 +1480,56 @@ def _provider_payload(value: object) -> object:
         if structured is not None:
             payload: object = structured
             return payload
-        content = value.get("content")
-        if isinstance(content, list):
-            for block in content:
-                text = block.get("text") if isinstance(block, dict) else None
-                if text:
-                    try:
-                        parsed: object = json.loads(text)
-                        return parsed
-                    except (TypeError, ValueError):
-                        return {"text": text}
-        return value
+        assert isinstance(value, dict)
+        return _payload_from_content(value)
     return value
 
 
-def _rows(payload: object, *keys: str) -> list[dict[str, object]]:
-    unwrapped = _provider_payload(payload)
+def _direct_rows(unwrapped: object) -> list[dict[str, object]] | None:
+    """Payload that is already rows (or never rows): list, non-dict, else None."""
     if isinstance(unwrapped, list):
-        return [{str(k): v for k, v in row.items()} for row in unwrapped if isinstance(row, dict)]
-    if not isinstance(unwrapped, dict):
-        return []
+        return [_norm_row(row) for row in unwrapped if isinstance(row, dict)]
+    return [] if not isinstance(unwrapped, dict) else None
+
+
+def _keyed_rows(unwrapped: dict[str, object], keys: tuple[str, ...]) -> list[dict[str, object]] | None:
+    """First caller-keyed list hit, else None."""
     for key in keys:
         value = unwrapped.get(key)
         if isinstance(value, list):
-            return [{str(k): v for k, v in row.items()} for row in value if isinstance(row, dict)]
+            return [_norm_row(row) for row in value if isinstance(row, dict)]
+    return None
+
+
+def _default_hit(value: object, keys: tuple[str, ...]) -> list[dict[str, object]] | None:
+    """One conventional-key hit: list rows, or non-empty nested rows, else None."""
+    if isinstance(value, list):
+        return [_norm_row(row) for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        nested = _rows(value, *keys)
+        if nested:
+            return nested
+    return None
+
+
+def _default_rows(unwrapped: dict[str, object], keys: tuple[str, ...]) -> list[dict[str, object]]:
+    """Conventional data/results/items/records keys (one nested level), else the dict itself."""
     for key in ("data", "results", "items", "records"):
-        value = unwrapped.get(key)
-        if isinstance(value, list):
-            return [{str(k): v for k, v in row.items()} for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            nested = _rows(value, *keys)
-            if nested:
-                return nested
-    return [{str(k): v for k, v in unwrapped.items()}]
+        hit = _default_hit(unwrapped.get(key), keys)
+        if hit is not None:
+            return hit
+    return [_norm_row(unwrapped)]
+
+def _rows(payload: object, *keys: str) -> list[dict[str, object]]:
+    unwrapped = _provider_payload(payload)
+    direct = _direct_rows(unwrapped)
+    if direct is not None:
+        return direct
+    assert isinstance(unwrapped, dict)
+    hit = _keyed_rows(unwrapped, keys)
+    if hit is not None:
+        return hit
+    return _default_rows(unwrapped, keys)
 
 
 def _first(value: object, *keys: str) -> object:
@@ -1496,46 +1570,52 @@ def get_market_snapshot(ticker: str) -> dict[str, object]:
 _PORTFOLIO_TOP_POSITIONS = 15
 _PORTFOLIO_TOP_LARGEST = 5
 
-def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict[str, object]:
-    """Deterministic mandate evaluation over the latest persisted snapshot."""
-    path = mandate_path or Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
-    try:
-        evaluation = risk_service.evaluate_latest_mandate(path, data_root=data_root)
-    except FileNotFoundError as exc:
-        return {"error": str(exc)}
-    except ValueError as exc:
-        return {"error": str(exc)}
+def _breach_row(breach: RiskBreach) -> dict[str, object]:
+    """One mandate breach with Decimal-safe string rendering."""
+    return {
+        "metric": breach.metric,
+        "target": breach.target,
+        "severity": breach.severity,
+        "actual": str(breach.actual) if breach.actual is not None else None,
+        "limit": str(breach.limit) if breach.limit is not None else None,
+        "excess": str(breach.excess) if breach.excess is not None else None,
+        "note": breach.note,
+        "unit": breach.unit,
+    }
+
+
+def _mandate_issue_row(issue: EvaluationIssue) -> dict[str, object]:
+    """One mandate issue with stable key order."""
+    return {
+        "code": issue.code,
+        "metric": issue.metric,
+        "target": issue.target,
+        "position_id": issue.position_id,
+        "ticker": issue.ticker,
+    }
+
+
+def _mandate_evaluation(evaluation: RiskEvaluation) -> dict[str, object]:
+    """Evaluation dataclass -> model packet (snapshot ids, breaches, issues)."""
     return {
         "result_type": "mandate_evaluation",
         "snapshot_id": evaluation.snapshot_id,
         "snapshot_created_at": evaluation.created_at.isoformat(),
         "snapshot_created_at_local": evaluation.created_at.astimezone().isoformat(),
-        "breaches": [
-            {
-                "metric": breach.metric,
-                "target": breach.target,
-                "severity": breach.severity,
-                "actual": str(breach.actual) if breach.actual is not None else None,
-                "limit": str(breach.limit) if breach.limit is not None else None,
-                "excess": str(breach.excess) if breach.excess is not None else None,
-                "note": breach.note,
-                "unit": breach.unit,
-            }
-            for breach in evaluation.breaches
-        ],
+        "breaches": [_breach_row(breach) for breach in evaluation.breaches],
         "sector_exposures": {sector: str(weight) for sector, weight in evaluation.sector_exposures.items()},
-        "issues": [
-            {
-                "code": issue.code,
-                "metric": issue.metric,
-                "target": issue.target,
-                "position_id": issue.position_id,
-                "ticker": issue.ticker,
-            }
-            for issue in evaluation.issues
-        ],
+        "issues": [_mandate_issue_row(issue) for issue in evaluation.issues],
         "source": "mandate",
     }
+
+def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict[str, object]:
+    """Deterministic mandate evaluation over the latest persisted snapshot."""
+    path = mandate_path or Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
+    try:
+        evaluation = risk_service.evaluate_latest_mandate(path, data_root=data_root)
+    except (FileNotFoundError, ValueError) as exc:
+        return {"error": str(exc)}
+    return _mandate_evaluation(evaluation)
 
 
 def _str_or_none(value: object) -> str | None:
@@ -1548,9 +1628,7 @@ def _optional_int(value: object) -> int | None:
         return None
     if isinstance(value, bool):
         return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
+    if isinstance(value, (int, float)):
         return int(value)
     if isinstance(value, str):
         return int(value.strip())
@@ -1640,20 +1718,60 @@ def _get_portfolio_snapshot(arguments: dict[str, object], model: str) -> dict[st
         snapshot = sync_robinhood_portfolio(provider, data_root=None)
     else:
         snapshot = read_latest_snapshot(data_root=None) or sync_robinhood_portfolio(provider, data_root=None)
-    research = {
+    research = _snapshot_research(snapshot)
+    positions_by_id = _snapshot_positions_by_id(snapshot)
+    position_rows = _snapshot_position_rows(snapshot, positions_by_id, research)
+    omitted_count = max(0, len(snapshot.positions) - len(position_rows))
+    return _snapshot_envelope(snapshot, position_rows, omitted_count, research)
+
+
+def _snapshot_research(snapshot: PortfolioSnapshot) -> dict[str, PortfolioResearchPosition]:
+    """Research items keyed by position id."""
+    return {
         item.position.position_id: item
         for item in enrich_portfolio_research(snapshot)
     }
-    positions_by_id = {position.position_id: position for position in snapshot.positions}
+
+
+def _snapshot_positions_by_id(snapshot: PortfolioSnapshot) -> dict[str, Position]:
+    """Positions keyed by position id."""
+    return {position.position_id: position for position in snapshot.positions}
+
+
+def _snapshot_position_rows(
+    snapshot: PortfolioSnapshot,
+    positions_by_id: dict[str, Position],
+    research: dict[str, PortfolioResearchPosition],
+) -> list[dict[str, object]]:
+    """Top-N position rows in rank order."""
     ranked = largest_positions(
         [(position.position_id, position.market_value) for position in snapshot.positions],
         limit=_PORTFOLIO_TOP_POSITIONS,
     )
-    position_rows = [
+    return [
         _position_research_row(positions_by_id[position_id], research.get(position_id))
         for position_id, _ in ranked
     ]
-    omitted_count = max(0, len(snapshot.positions) - len(position_rows))
+
+
+def _snapshot_largest(snapshot: PortfolioSnapshot) -> list[dict[str, object]]:
+    """Largest positions by ticker for the envelope."""
+    return [
+        {"ticker": ticker, "market_value": _str_or_none(value)}
+        for ticker, value in largest_positions(
+            [(position.ticker, position.market_value) for position in snapshot.positions],
+            limit=_PORTFOLIO_TOP_LARGEST,
+        )
+    ]
+
+
+def _snapshot_envelope(
+    snapshot: PortfolioSnapshot,
+    position_rows: list[dict[str, object]],
+    omitted_count: int,
+    research: dict[str, PortfolioResearchPosition],
+) -> dict[str, object]:
+    """Result envelope for a loaded snapshot."""
     return {
         "result_type": "portfolio_snapshot",
         # Persistent snapshot/account identifiers stay local. Tool results are
@@ -1679,13 +1797,7 @@ def _get_portfolio_snapshot(arguments: dict[str, object], model: str) -> dict[st
         ),
         "positions": position_rows,
         "omitted_count": omitted_count,
-        "largest_positions": [
-            {"ticker": ticker, "market_value": _str_or_none(value)}
-            for ticker, value in largest_positions(
-                [(position.ticker, position.market_value) for position in snapshot.positions],
-                limit=_PORTFOLIO_TOP_LARGEST,
-            )
-        ],
+        "largest_positions": _snapshot_largest(snapshot),
         "unresolved": [
             position.ticker
             for position in snapshot.positions
@@ -1769,13 +1881,22 @@ def _run_scan(arguments: dict[str, object], model: str) -> dict[str, object]:
     }
 
 
-def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> list[OptionQuote]:
-    client = _robinhood_client()
+def _call_broker_tool(client: RobinhoodClient, name: str, arguments: dict[str, object]) -> object:
+    """Broker tool call without static MCP typing."""
+    return client.call_tool(name, arguments)
+
+
+def _chain_id_for(client: RobinhoodClient, ticker: str) -> object:
+    """First chain id for the ticker, else None (provider JSON is untyped)."""
     chain = _provider_payload(
-        client.call_tool("get_option_chains", {"underlying_symbol": ticker})
+        _call_broker_tool(client, "get_option_chains", {"underlying_symbol": ticker})
     )
     chain_rows = _rows(chain, "chains", "option_chains")
-    chain_id = _first(chain_rows[0], "chain_id", "chainId", "id") if chain_rows else None
+    return _first(chain_rows[0], "chain_id", "chainId", "id") if chain_rows else None
+
+
+def _instrument_args(ticker: str, option_type: str, chain_id: object, filters: dict[str, object]) -> dict[str, object]:
+    """Provider instrument query: chain scoping plus optional expiry/state."""
     instrument_args: dict[str, object] = {"chain_symbol": ticker, "type": option_type}
     if chain_id:
         instrument_args["chain_id"] = chain_id
@@ -1783,42 +1904,71 @@ def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> lis
         instrument_args["expiration_dates"] = filters["expiration_date"]
     if filters.get("state") is not None:
         instrument_args["state"] = filters["state"]
-    instruments = _rows(
-        client.call_tool("get_option_instruments", instrument_args),
-        "instruments",
-        "option_instruments",
-    )
-    instruments = [
+    return instrument_args
+
+
+def _of_option_type(instruments: list[dict[str, object]], option_type: str) -> list[dict[str, object]]:
+    """Keep only rows of the requested put/call type (provider echoes both)."""
+    return [
         row for row in instruments
         if str(_first(row, "type", "option_type", "optionType") or option_type).lower() in {option_type, option_type[0]}
     ]
-    today = date.today()
-    filtered_instruments: list[dict[str, object]] = []
-    for row in instruments:
-        expiration = str(_first(row, "expiration", "expiration_date", "expirationDate") or "")[:10]
-        try:
-            dte = (date.fromisoformat(expiration) - today).days
-        except ValueError:
-            dte = None
-        strike = _first(row, "strike", "strike_price", "strikePrice")
-        try:
-            strike_value = Decimal(str(strike))
-        except (ValueError, TypeError):
-            strike_value = None
-        if filters.get("min_dte") is not None and (dte is None or dte < int(str(filters["min_dte"]))):
-            continue
-        if filters.get("max_dte") is not None and (dte is None or dte > int(str(filters["max_dte"]))):
-            continue
-        if filters.get("strike_min") is not None and (strike_value is None or strike_value < Decimal(str(filters["strike_min"]))):
-            continue
-        if filters.get("strike_max") is not None and (strike_value is None or strike_value > Decimal(str(filters["strike_max"]))):
-            continue
-        filtered_instruments.append(row)
-    instruments = filtered_instruments
+
+
+def _row_dte(row: dict[str, object], today: date) -> int | None:
+    """Days to expiry for one instrument row, None when unparseable."""
+    expiration = str(_first(row, "expiration", "expiration_date", "expirationDate") or "")[:10]
+    try:
+        return (date.fromisoformat(expiration) - today).days
+    except ValueError:
+        return None
+
+
+def _row_strike_value(row: dict[str, object]) -> Decimal | None:
+    """Strike for one instrument row, None when missing/non-numeric."""
+    strike = _first(row, "strike", "strike_price", "strikePrice")
+    try:
+        return Decimal(str(strike))
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+
+
+def _dte_in_range(dte: int | None, filters: dict[str, object]) -> bool:
+    """min_dte/max_dte window; unparseable expiry never passes a bound."""
+    min_dte = filters.get("min_dte")
+    if min_dte is not None and (dte is None or dte < int(str(min_dte))):
+        return False
+    max_dte = filters.get("max_dte")
+    if max_dte is not None and (dte is None or dte > int(str(max_dte))):
+        return False
+    return True
+
+
+def _strike_in_range(strike_value: Decimal | None, filters: dict[str, object]) -> bool:
+    """strike_min/strike_max window; missing strike never passes a bound."""
+    strike_min = filters.get("strike_min")
+    if strike_min is not None and (strike_value is None or strike_value < Decimal(str(strike_min))):
+        return False
+    strike_max = filters.get("strike_max")
+    if strike_max is not None and (strike_value is None or strike_value > Decimal(str(strike_max))):
+        return False
+    return True
+
+
+def _filter_instruments(instruments: list[dict[str, object]], filters: dict[str, object], today: date) -> list[dict[str, object]]:
+    """DTE/strike window over instrument rows."""
+    return [
+        row for row in instruments
+        if _dte_in_range(_row_dte(row, today), filters) and _strike_in_range(_row_strike_value(row), filters)
+    ]
+
+
+def _quotes_by_id(client: RobinhoodClient, instruments: list[dict[str, object]]) -> dict[str, object]:
+    """Quote rows keyed by instrument id (empty when no instruments)."""
     ids = [_first(row, "id", "instrument_id", "contract_id") for row in instruments]
     ids = [str(value) for value in ids if value]
     quotes = _rows(
-        client.call_tool("get_option_quotes", {"instrument_ids": ids}),
+        _call_broker_tool(client, "get_option_quotes", {"instrument_ids": ids}),
         "quotes",
         "option_quotes",
         "results",
@@ -1829,6 +1979,11 @@ def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> lis
         quote_id = _first(quote, "id", "instrument_id", "contract_id")
         if quote_id:
             quotes_by_id[str(quote_id)] = quote
+    return quotes_by_id
+
+
+def _merge_quotes(instruments: list[dict[str, object]], quotes_by_id: dict[str, object], ticker: str) -> list[OptionQuote]:
+    """Instrument + quote merge normalized to OptionQuotes (un-normalizable rows dropped)."""
     normalized: list[OptionQuote] = []
     for instrument in instruments:
         instrument_id = str(_first(instrument, "id", "instrument_id", "contract_id") or "")
@@ -1844,6 +1999,36 @@ def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> lis
             continue
     return normalized
 
+def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> list[OptionQuote]:
+    client = _robinhood_client()
+    chain_id = _chain_id_for(client, ticker)
+    instruments = _rows(
+        client.call_tool("get_option_instruments", _instrument_args(ticker, option_type, chain_id, filters)),
+        "instruments",
+        "option_instruments",
+    )
+    instruments = _filter_instruments(_of_option_type(instruments, option_type), filters, date.today())
+    return _merge_quotes(instruments, _quotes_by_id(client, instruments), ticker)
+
+
+def _filter_quotes(quotes: list[OptionQuote], min_dte: object, max_dte: object, strike_min: object, strike_max: object) -> list[OptionQuote]:
+    """DTE/strike window over normalized quotes (loader already applied the same window pre-quote)."""
+    today = date.today()
+    return [
+        quote for quote in quotes
+        if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
+        and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
+        and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
+        and (strike_max is None or quote.strike <= Decimal(str(strike_max)))
+    ]
+
+
+def _no_quotes_error(ticker: str, option_type: str) -> dict[str, object]:
+    """Empty-filter envelope shared by chain/compare (ticker already uppercased)."""
+    return {
+        "error": f"No Robinhood {option_type} contracts matched the requested filters for {ticker}",
+        "source": "robinhood_mcp",
+    }
 
 def get_option_chain(ticker: str, option_type: str, min_dte: object = None, max_dte: object = None, strike_min: object = None, strike_max: object = None, limit: object = 20) -> dict[str, object]:
     ticker = ticker.strip().upper()
@@ -1856,19 +2041,9 @@ def get_option_chain(ticker: str, option_type: str, min_dte: object = None, max_
         strike_min=strike_min,
         strike_max=strike_max,
     )
-    today = date.today()
-    filtered = [
-        quote for quote in quotes
-        if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
-        and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
-        and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
-        and (strike_max is None or quote.strike <= Decimal(str(strike_max)))
-    ]
+    filtered = _filter_quotes(quotes, min_dte, max_dte, strike_min, strike_max)
     if not filtered:
-        return {
-            "error": f"No Robinhood {option_type} contracts matched the requested filters for {ticker}",
-            "source": "robinhood_mcp",
-        }
+        return _no_quotes_error(ticker, option_type)
     bounded = max(1, min(int(str(limit or 20)), 30))
     return {
         "result_type": "option_chain",
@@ -1894,19 +2069,9 @@ def compare_robinhood_options(ticker: str, option_type: str, target_price: objec
     quotes = _load_option_quotes(
         ticker.strip().upper(), option_type.lower(), min_dte=min_dte, max_dte=max_dte, strike_min=strike_min, strike_max=strike_max
     )
-    today = date.today()
-    filtered = [
-        quote for quote in quotes
-        if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
-        and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
-        and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
-        and (strike_max is None or quote.strike <= Decimal(str(strike_max)))
-    ]
+    filtered = _filter_quotes(quotes, min_dte, max_dte, strike_min, strike_max)
     if not filtered:
-        return {
-            "error": f"No Robinhood {option_type} contracts matched the requested filters for {ticker}",
-            "source": "robinhood_mcp",
-        }
+        return _no_quotes_error(ticker.strip().upper(), option_type.lower())
     return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=(str(target_price) if target_price is not None else None), limit=int(str(limit or 20)))}
 
 
@@ -1972,6 +2137,29 @@ def plan_public_search_queries(
     return [{"query": f"{name} recent announcements"} for name in targets[:3]]
 
 
+def _other_end(rel: EntityRelationship, primary_entity_id: str) -> str | None:
+    """The far end of one relationship touching the primary, else None."""
+    try:
+        if rel.from_entity_id == primary_entity_id:
+            return rel.to_entity_id
+        if rel.to_entity_id == primary_entity_id:
+            return rel.from_entity_id
+    except AttributeError:
+        return None
+    return None
+
+
+def _related_names(primary_entity_id: str, relationships: Sequence[EntityRelationship], names_by_entity: dict[str, str] | None) -> list[str]:
+    """Names one hop from the primary via EntityRelationships."""
+    if not isinstance(names_by_entity, dict):
+        return []
+    others: list[str] = []
+    for rel in relationships or ():
+        other = _other_end(rel, primary_entity_id)
+        if other:
+            others.append(other)
+    return [names_by_entity[other] for other in others if other in names_by_entity]
+
 def suggest_public_search_queries(
     primary_entity_id: str | None,
     primary_name: str | None,
@@ -1980,19 +2168,7 @@ def suggest_public_search_queries(
     names_by_entity: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Warehouse-aware wrapper: single-hop EntityRelationships."""
-    related: list[str] = []
-    if primary_entity_id:
-        for rel in relationships or ():
-            other: str | None = None
-            try:
-                if rel.from_entity_id == primary_entity_id:
-                    other = rel.to_entity_id
-                elif rel.to_entity_id == primary_entity_id:
-                    other = rel.from_entity_id
-            except AttributeError:
-                continue
-            if other and isinstance(names_by_entity, dict) and other in names_by_entity:
-                related.append(names_by_entity[other])
+    related = _related_names(primary_entity_id, relationships, names_by_entity) if primary_entity_id else []
     return plan_public_search_queries(primary_name, primary_ticker, related)
 
 
@@ -2027,67 +2203,143 @@ def _arg_int(args: dict[str, object], key: str, default: int) -> int:
     return int(raw) if isinstance(raw, (int, str)) else default
 
 
+def _signals_capped(rows: object, limit: int) -> bool:
+    """Continuation flag: row count reaches the requested limit."""
+    count = len(rows) if isinstance(rows, list) else 0
+    try:
+        return count >= max(1, limit)
+    except (TypeError, ValueError):
+        return False
+
+
+def _query_signals_result(args: dict[str, object], rows: object, limit: int) -> dict[str, object]:
+    """Local-signal ok packet with continuation capped at the requested limit."""
+    capped = _signals_capped(rows, limit)
+    assert isinstance(rows, list)
+    return {"status": "ok", "source": "google", "signals": rows,
+            "count": len(rows),
+            "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"),
+                         "as_of": _arg_str(args, "as_of")},
+            "warnings": [], "continuation": capped}
+
+
 def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, object]:
     """Local collected candidates only; disabled without credentials, never raises."""
     try:
         from .google_data import signals as _signals
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("google", exc)
     try:
         limit = _arg_int(args, "limit", 20)
-        rows = _signals.query_signals(
-            query=_arg_str(args, "query"), geo=_arg_str(args, "geo"), as_of=_arg_str(args, "as_of"),
-            limit=limit, data_root=get_data_root(),
+        return _query_signals_result(
+            args,
+            _signals.query_signals(
+                query=_arg_str(args, "query"), geo=_arg_str(args, "geo"), as_of=_arg_str(args, "as_of"),
+                limit=limit, data_root=get_data_root(),
+            ),
+            limit,
         )
-        try:
-            capped = len(rows) >= max(1, limit)
-        except (TypeError, ValueError):
-            capped = False
-        return {"status": "ok", "source": "google", "signals": rows,
-                "count": len(rows),
-                "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"),
-                             "as_of": _arg_str(args, "as_of")},
-                "warnings": [], "continuation": capped}
     except Exception as exc:
         logger.exception("find_alternative_signals failed")
         return {"error": f"Tool 'find_alternative_signals' failed: {exc}", "soft": True, "source": "google"}
 
 
+def _trend_geos(args: dict[str, object]) -> list[str]:
+    """Geos for the trends collector: explicit list wins, else geo, else US."""
+    geo = _arg_str(args, "geo")
+    raw_geos = args.get("geos")
+    str_geos: list[str] = [g for g in raw_geos if isinstance(g, str)] if isinstance(raw_geos, list) else []
+    return str_geos or ([geo] if geo else ["US"])
+
+
+def _trend_window(args: dict[str, object]) -> tuple[str | None, str | None]:
+    """Date window for trends: explicit dates win, else the trailing 7 days."""
+    start_date = _arg_str(args, "start_date")
+    end_date = _arg_str(args, "end_date")
+    if start_date is None and end_date is None:
+        _today = datetime.now(timezone.utc).date()
+        return (_today - timedelta(days=6)).isoformat(), _today.isoformat()
+    return start_date, end_date
+
 def _get_trend_evidence(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import trends as _trends
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("trends", exc)
     try:
-        geo = _arg_str(args, "geo")
-        raw_geos = args.get("geos")
-        str_geos: list[str] = [g for g in raw_geos if isinstance(g, str)] if isinstance(raw_geos, list) else []
-        geos = str_geos or ([geo] if geo else ["US"])
-        start_date = _arg_str(args, "start_date")
-        end_date = _arg_str(args, "end_date")
-        if start_date is None and end_date is None:
-            _today = datetime.now(timezone.utc).date()
-            end_date = _today.isoformat()
-            start_date = (_today - timedelta(days=6)).isoformat()
-        result = _google_soft(_trends.collect_trends(
+        start_date, end_date = _trend_window(args)
+        return _google_soft(_trends.collect_trends(
             start_date=start_date, end_date=end_date,
-            geos=list(geos), limit=_arg_int(args, "limit", 100),
+            geos=_trend_geos(args), limit=_arg_int(args, "limit", 100),
             data_root=get_data_root(),
             week_start=_arg_str(args, "week_start"), week_end=_arg_str(args, "week_end"),
             term=_arg_str(args, "term"),
         ))
-        return result
-
-
     except Exception as exc:
         logger.exception("get_trend_evidence failed")
         return {"error": f"Tool 'get_trend_evidence' failed: {exc}", "soft": True, "source": "trends"}
 
 
+def _investigate_term(args: dict[str, object]) -> str:
+    """Search term for the candidate: schema string, else stringified."""
+    term_raw = args.get("term", "")
+    return term_raw if isinstance(term_raw, str) else str(term_raw or "")
+
+
+def _collect_investigate_signals(term: str, geo: str, per_source: int, evidence: dict[str, object], gaps: list[str]) -> None:
+    """Local signals evidence; failures become gaps, never raises."""
+    try:
+        from .google_data import signals as _signals
+        evidence["signals"] = _signals.query_signals(
+            query=term, geo=geo, limit=per_source, data_root=get_data_root())
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        gaps.append(f"signals unavailable: {exc}")
+
+
+def _classify_investigate_entity(ent: object, term: str, confirmed: list[object], unresolved: list[object]) -> None:
+    """One SEC candidate -> confirmed (verified + CIK) or unresolved."""
+    cik = getattr(ent, "cik", None)
+    entry = {"name": getattr(ent, "name", None) or term,
+             "cik": cik,
+             "verification_status": getattr(ent, "verification_status", None)}
+    if getattr(ent, "verification_status", None) == "verified" and cik:
+        confirmed.append(entry)
+    else:
+        unresolved.append(entry)
+
+
+def _resolve_investigate_ticker(term: str, confirmed: list[object], unresolved: list[object]) -> None:
+    """Ticker-alias corroboration; unresolved ticker only when nothing else confirmed anything."""
+    from datetime import datetime, timezone
+
+    from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
+    from .storage.duckdb import ticker_alias_candidates as _alias_cands
+    as_of = datetime.now(timezone.utc)
+    resolution = _resolve_alias(term.upper(),
+                                _alias_cands(term.upper(), as_of, get_data_root()),
+                                as_of=as_of)
+    if resolution.resolved:
+        confirmed.append(
+            {"ticker": term.upper(), "entity_id": resolution.entity_id,
+             "security_id": resolution.security_id, "via": "ticker_alias"})
+    elif not confirmed and not unresolved:
+        unresolved.append({"ticker": term.upper(), "reason": "unresolved"})
+
+
+def _collect_investigate_entities(term: str, confirmed: list[object], unresolved: list[object], gaps: list[str]) -> None:
+    """SEC + ticker-alias corroboration; failures become gaps, never raises."""
+    try:
+        from .sec.discovery.service import find_sec_entities as _find_sec
+        sec = _find_sec(query=term, max_results=5, data_root=get_data_root())
+        for ent in list(getattr(sec, "entities", None) or []):
+            _classify_investigate_entity(ent, term, confirmed, unresolved)
+        _resolve_investigate_ticker(term, confirmed, unresolved)
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        gaps.append(f"entity resolution unavailable: {exc}")
+
 def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str) -> dict[str, object]:
     """Evidence + gaps for one term; corroboration capped, causality never claimed."""
-    term_raw = args.get("term", "")
-    term = term_raw if isinstance(term_raw, str) else str(term_raw or "")
+    term = _investigate_term(args)
     geo = _arg_str(args, "geo") or "US"
     per_source = min(max(_arg_int(args, "limit", 5), 1), 25)
     evidence: dict[str, object] = {}
@@ -2097,39 +2349,8 @@ def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str)
     result: dict[str, object] = {"term": term, "geo": geo, "source": "google",
                      "status": "ok", "evidence": evidence,
                      "entities": {"confirmed": confirmed, "unresolved": unresolved}, "gaps": gaps}
-    try:
-        from .google_data import signals as _signals
-        evidence["signals"] = _signals.query_signals(
-            query=term, geo=geo, limit=per_source, data_root=get_data_root())
-    except Exception as exc:
-        gaps.append(f"signals unavailable: {exc}")
-    try:
-        from datetime import datetime, timezone
-        from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
-        from .sec.discovery.service import find_sec_entities as _find_sec
-        from .storage.duckdb import ticker_alias_candidates as _alias_cands
-        sec = _find_sec(query=term, max_results=5, data_root=get_data_root())
-        for ent in list(getattr(sec, "entities", None) or []):
-            cik = getattr(ent, "cik", None)
-            entry = {"name": getattr(ent, "name", None) or term,
-                     "cik": cik,
-                     "verification_status": getattr(ent, "verification_status", None)}
-            if getattr(ent, "verification_status", None) == "verified" and cik:
-                confirmed.append(entry)
-            else:
-                unresolved.append(entry)
-        as_of = datetime.now(timezone.utc)
-        resolution = _resolve_alias(term.upper(),
-                                    _alias_cands(term.upper(), as_of, get_data_root()),
-                                    as_of=as_of)
-        if resolution.resolved:
-            confirmed.append(
-                {"ticker": term.upper(), "entity_id": resolution.entity_id,
-                 "security_id": resolution.security_id, "via": "ticker_alias"})
-        elif not confirmed and not unresolved:
-            unresolved.append({"ticker": term.upper(), "reason": "unresolved"})
-    except Exception as exc:
-        gaps.append(f"entity resolution unavailable: {exc}")
+    _collect_investigate_signals(term, geo, per_source, evidence, gaps)
+    _collect_investigate_entities(term, confirmed, unresolved, gaps)
     # ponytail: no YouTube imports/calls/data here — evidence table has no expiry, so API content must not enter tool results
     gaps.append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
     if len(gaps) >= 3 and not evidence:
@@ -2140,7 +2361,7 @@ def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str)
 def _get_macro_context(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import datacommons as _dc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("datacommons", exc)
     try:
         return _google_soft(_dc.get_macro_context(
@@ -2153,46 +2374,52 @@ def _get_macro_context(args: dict[str, object], model: str) -> dict[str, object]
         return {"error": f"Tool 'get_macro_context' failed: {exc}", "soft": True, "source": "datacommons"}
 
 
+def _patent_company_id(args: dict[str, object]) -> str:
+    """Validated company_id for the patents collector (non-empty string)."""
+    company_id = args["company_id"]
+    if not isinstance(company_id, str) or not company_id:
+        raise TypeError(f"company_id must be a non-empty string, got {type(company_id).__name__}")
+    return company_id
+
+
+def _patent_assignees(args: dict[str, object]) -> list[str] | None:
+    """Optional assignee filter: strings only, else None."""
+    assignees_raw = args.get("assignees")
+    return [a for a in assignees_raw if isinstance(a, str)] if isinstance(assignees_raw, list) else None
+
 def _search_company_patents(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import patents as _patents
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("patents", exc)
     try:
-        company_id = args["company_id"]
-        if not isinstance(company_id, str) or not company_id:
-            raise TypeError(f"company_id must be a non-empty string, got {type(company_id).__name__}")
-        assignees_raw = args.get("assignees")
-        assignees = [a for a in assignees_raw if isinstance(a, str)] if isinstance(assignees_raw, list) else None
         return _google_soft(_patents.search_company_patents(
-            company_id, start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
-            limit=_arg_int(args, "limit", 20), assignees=assignees,
+            _patent_company_id(args), start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
+            limit=_arg_int(args, "limit", 20), assignees=_patent_assignees(args),
         ))
     except Exception as exc:
         logger.exception("search_company_patents failed")
         return {"error": f"Tool 'search_company_patents' failed: {exc}", "soft": True, "source": "patents"}
 
 
+def _wrap_one(record: object) -> object:
+    """One SEC list item: to_dict when available, else a plain copy."""
+    if hasattr(record, "to_dict"):
+        to_dict = getattr(record, "to_dict")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+        if callable(to_dict):
+            return to_dict()
+        return record
+    if isinstance(record, dict):
+        return dict(record)
+    if isinstance(record, (list, tuple)):
+        return list(record)
+    return record
+
+
 def _wrap_list(identifier: object, records: object, key: str) -> dict[str, object]:
     """SEC list results: identifier echo, count, to_dict records, source."""
-    if not isinstance(records, (list, tuple)):
-        rec_list: list[object] = []
-    else:
-        rec_list = list(records)
-    items: list[object] = []
-    for r in rec_list:
-        if hasattr(r, "to_dict"):
-            to_dict = getattr(r, "to_dict")
-            if callable(to_dict):
-                items.append(to_dict())
-            else:
-                items.append(r)
-        elif isinstance(r, dict):
-            items.append(dict(r))
-        elif isinstance(r, (list, tuple)):
-            items.append(list(r))
-        else:
-            items.append(r)
+    rec_list: list[object] = list(records) if isinstance(records, (list, tuple)) else []
+    items = [_wrap_one(r) for r in rec_list]
     return {"subject": identifier, "count": len(items), key: items, "source": "SEC EDGAR"}
 
 
@@ -3155,6 +3382,22 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         prerequisites=(),
         direct_activation=False,
     ),
+    "research_submit_source_result": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="submit_source_result",
+        output_kind="governed_action",
+        source="local",
+        entity_scope="single_session",
+        time_mode="current",
+        summary="Complete one running source job with validated coverage; evidence stays mutation-only.",
+        choose_when=("Completing a source investigation with validated coverage.",),
+        reject_when=("Not for session state overviews (research_status).",),
+        conflicts_with=(),
+        related_tools=("research_status",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
     "research_add_analysis": ToolDiscovery(
         domain="research",
         family="session",
@@ -3197,57 +3440,103 @@ _SLUG_KEBAB_RE = __import__("re").compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
 _SLUG_SNAKE_RE = __import__("re").compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
 
+def _check_discovery_domain(name: str, meta: ToolDiscovery, known_domains: set[str]) -> None:
+    """Registry entry lives in a known domain."""
+    if meta.domain not in known_domains:
+        raise AssertionError(f"tool discovery {name!r} has unknown domain {meta.domain!r}")
+
+
+def _check_discovery_slugs(name: str, meta: ToolDiscovery) -> None:
+    """Domain/family/source are kebab slugs; intent/output/scope/mode are snake."""
+    for field_name in ("domain", "family", "source"):
+        value = getattr(meta, field_name)
+        if not value or not _SLUG_KEBAB_RE.match(value):
+            raise AssertionError(f"tool discovery {name!r} has non-slug {field_name} {value!r}")
+    for field_name in ("intent", "output_kind", "entity_scope", "time_mode"):
+        value = getattr(meta, field_name)
+        if not value or not _SLUG_SNAKE_RE.match(value):
+            raise AssertionError(f"tool discovery {name!r} has non-snake {field_name} {value!r}")
+
+
+def _check_discovery_texts(name: str, meta: ToolDiscovery) -> None:
+    """Summary plus every bullet bounded and non-empty; both bullets required."""
+    if not meta.summary or len(meta.summary) > _DISCOVERY_TEXT_LIMIT:
+        raise AssertionError(f"tool discovery {name!r} has empty/overlong summary")
+    if not meta.choose_when or not meta.reject_when:
+        raise AssertionError(f"tool discovery {name!r} needs >=1 choose_when and >=1 reject_when")
+    for bullet in (*meta.choose_when, *meta.reject_when, *meta.related_tools, *meta.prerequisites, *meta.conflicts_with):
+        if not bullet or len(bullet) > _DISCOVERY_TEXT_LIMIT:
+            raise AssertionError(f"tool discovery {name!r} has empty/overlong bullet {bullet!r}")
+
+
+def _check_discovery_refs(name: str, meta: ToolDiscovery) -> None:
+    """Related/prerequisite tools exist in the registry."""
+    for ref in (*meta.related_tools, *meta.prerequisites):
+        if ref not in TOOL_DISCOVERY_REGISTRY:
+            raise AssertionError(f"tool discovery {name!r} references unknown tool {ref!r}")
+
+
+def _check_discovery_peer(name: str, meta: ToolDiscovery, peer: str) -> None:
+    """One conflict edge: known peer, reciprocated, and named in reject_when."""
+    if peer not in TOOL_DISCOVERY_REGISTRY:
+        raise AssertionError(f"tool discovery {name!r} conflicts with unknown tool {peer!r}")
+    if name not in TOOL_DISCOVERY_REGISTRY[peer].conflicts_with:
+        raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but {peer!r} does not reciprocate {name!r}")
+    if peer not in " ".join(meta.reject_when):
+        raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but never names {peer!r} in reject_when")
+
+
+def _check_discovery_conflicts(name: str, meta: ToolDiscovery) -> None:
+    """No self/duplicate conflicts; every edge reciprocated and named."""
+    if name in meta.conflicts_with:
+        raise AssertionError(f"tool discovery {name!r} self-conflicts with {name!r}")
+    if len(set(meta.conflicts_with)) != len(meta.conflicts_with):
+        raise AssertionError(f"tool discovery {name!r} has duplicate conflicts_with entry")
+    for peer in meta.conflicts_with:
+        _check_discovery_peer(name, meta, peer)
+
+
+def _check_discovery_entry(name: str, meta: ToolDiscovery, known_domains: set[str]) -> None:
+    """All per-entry gates for one registry row."""
+    _check_discovery_domain(name, meta, known_domains)
+    _check_discovery_slugs(name, meta)
+    _check_discovery_texts(name, meta)
+    _check_discovery_refs(name, meta)
+    _check_discovery_conflicts(name, meta)
+
+
+def _uncovered_research_tools(raw_caps: dict[object, object]) -> list[str]:
+    """RESEARCH-capability tools missing from the discovery registry."""
+    return sorted(
+        str(tool)
+        for tool, cap in raw_caps.items()
+        if cap is Capability.RESEARCH and str(tool) not in {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"} and str(tool) not in TOOL_DISCOVERY_REGISTRY
+    )
+
+
+def _check_discovery_activation(raw_caps: dict[object, object]) -> None:
+    """Direct-activatable rows are RESEARCH-capability tools."""
+    for name, meta in TOOL_DISCOVERY_REGISTRY.items():
+        if meta.direct_activation and raw_caps.get(name) is not Capability.RESEARCH:
+            raise AssertionError(f"tool discovery {name!r} is direct-activatable but not Capability.RESEARCH")
+
+
+def _check_discovery_capabilities() -> None:
+    """Registry covers every RESEARCH tool; activation matches capability."""
+    raw_caps = globals().get("TOOL_CAPABILITIES")
+    if not isinstance(raw_caps, dict):
+        return
+    uncovered = _uncovered_research_tools(raw_caps)
+    if uncovered:
+        raise AssertionError(f"tool discovery registry missing RESEARCH tools: {uncovered}")
+    _check_discovery_activation(raw_caps)
+
 def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
     """Fail loudly on registry drift; returns the registry for verify scripts."""
     known_domains = set(DOMAIN_DESCRIPTIONS)
     for name in sorted(TOOL_DISCOVERY_REGISTRY):
-        meta = TOOL_DISCOVERY_REGISTRY[name]
-        if meta.domain not in known_domains:
-            raise AssertionError(f"tool discovery {name!r} has unknown domain {meta.domain!r}")
-        for field_name in ("domain", "family", "source"):
-            value = getattr(meta, field_name)
-            if not value or not _SLUG_KEBAB_RE.match(value):
-                raise AssertionError(f"tool discovery {name!r} has non-slug {field_name} {value!r}")
-        for field_name in ("intent", "output_kind", "entity_scope", "time_mode"):
-            value = getattr(meta, field_name)
-            if not value or not _SLUG_SNAKE_RE.match(value):
-                raise AssertionError(f"tool discovery {name!r} has non-snake {field_name} {value!r}")
-        if not meta.summary or len(meta.summary) > _DISCOVERY_TEXT_LIMIT:
-            raise AssertionError(f"tool discovery {name!r} has empty/overlong summary")
-        if not meta.choose_when or not meta.reject_when:
-            raise AssertionError(f"tool discovery {name!r} needs >=1 choose_when and >=1 reject_when")
-        bullets = (*meta.choose_when, *meta.reject_when, *meta.related_tools, *meta.prerequisites, *meta.conflicts_with)
-        for bullet in bullets:
-            if not bullet or len(bullet) > _DISCOVERY_TEXT_LIMIT:
-                raise AssertionError(f"tool discovery {name!r} has empty/overlong bullet {bullet!r}")
-        for ref in (*meta.related_tools, *meta.prerequisites):
-            if ref not in TOOL_DISCOVERY_REGISTRY:
-                raise AssertionError(f"tool discovery {name!r} references unknown tool {ref!r}")
-        if name in meta.conflicts_with:
-            raise AssertionError(f"tool discovery {name!r} self-conflicts with {name!r}")
-        if len(set(meta.conflicts_with)) != len(meta.conflicts_with):
-            raise AssertionError(f"tool discovery {name!r} has duplicate conflicts_with entry")
-        for peer in meta.conflicts_with:
-            if peer not in TOOL_DISCOVERY_REGISTRY:
-                raise AssertionError(f"tool discovery {name!r} conflicts with unknown tool {peer!r}")
-            peer_meta = TOOL_DISCOVERY_REGISTRY[peer]
-            if name not in peer_meta.conflicts_with:
-                raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but {peer!r} does not reciprocate {name!r}")
-            blob = " ".join(meta.reject_when)
-            if peer not in blob:
-                raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but never names {peer!r} in reject_when")
-    raw_caps = globals().get("TOOL_CAPABILITIES")
-    if isinstance(raw_caps, dict):
-        uncovered = sorted(
-            str(tool)
-            for tool, cap in raw_caps.items()
-            if cap is Capability.RESEARCH and str(tool) not in {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"} and str(tool) not in TOOL_DISCOVERY_REGISTRY
-        )
-        if uncovered:
-            raise AssertionError(f"tool discovery registry missing RESEARCH tools: {uncovered}")
-        for name, meta in TOOL_DISCOVERY_REGISTRY.items():
-            if meta.direct_activation and raw_caps.get(name) is not Capability.RESEARCH:
-                raise AssertionError(f"tool discovery {name!r} is direct-activatable but not Capability.RESEARCH")
+        _check_discovery_entry(name, TOOL_DISCOVERY_REGISTRY[name], known_domains)
+    _check_discovery_capabilities()
     return TOOL_DISCOVERY_REGISTRY
 
 
@@ -3332,59 +3621,174 @@ def _discovery_keywords(value: str) -> set[str]:
     return {t for t in _normalize_discovery_text(value) if len(t) > 1 and t not in _DISCOVERY_STOPWORDS}
 
 
+def _find_root(parent: dict[str, str], name: str) -> str:
+    """Union-find root with path halving over the ranked-name forest."""
+    while parent[name] != name:
+        parent[name] = parent[parent[name]]
+        name = parent[name]
+    return name
+
+
+def _union_names(parent: dict[str, str], first: str, second: str) -> None:
+    """Union two ranked names by root (no-op when already joined)."""
+    first_root, second_root = _find_root(parent, first), _find_root(parent, second)
+    if first_root != second_root:
+        parent[second_root] = first_root
+
+
+def _conflict_components(ranked_names: list[str]) -> list[list[str]]:
+    """Connected components of conflicts_with among the ranked names."""
+    parent: dict[str, str] = {n: n for n in ranked_names}
+    present = set(ranked_names)
+    for name in ranked_names:
+        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
+            if peer in present:
+                _union_names(parent, name, peer)
+    comps: dict[str, list[str]] = {}
+    for name in ranked_names:
+        comps.setdefault(_find_root(parent, name), []).append(name)
+    return list(comps.values())
+
+
+def _is_ambiguity_group(component: list[str]) -> bool:
+    """A real ambiguity group: 2+ names with at least one internal conflict edge."""
+    if len(component) < 2:
+        return False
+    return any(
+        any(peer in component for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with)
+        for name in component
+    )
+
+
+def _choose_bit(name: str) -> str:
+    """One candidate's distinguishing bit: name plus its primary choose_when."""
+    return f"{name} \u2014 {TOOL_DISCOVERY_REGISTRY[name].choose_when[0]}" if TOOL_DISCOVERY_REGISTRY[name].choose_when else name
+
+
+def _ambiguity_card(component: list[str], index: dict[str, int]) -> dict[str, object]:
+    """Ranked-order candidates, domain/family paths, and the distinguishing question."""
+    def _order_key(n: str) -> int:
+        return index[n]
+    ordered = sorted(component, key=_order_key)
+    paths = sorted({f"{TOOL_DISCOVERY_REGISTRY[n].domain}/{TOOL_DISCOVERY_REGISTRY[n].family}" for n in ordered})
+    bits = [_choose_bit(n) for n in ordered]
+    return {
+        "candidates": ordered,
+        "paths": paths,
+        "distinguishing_question": "Which outcome do you need: " + "; ".join(bits) + "?",
+    }
+
+
+def _group_sort_key(group: dict[str, object]) -> str:
+    """First candidate name (groups are non-empty by construction)."""
+    cands = group.get("candidates")
+    if isinstance(cands, list) and cands and isinstance(cands[0], str):
+        return cands[0]
+    return ""
+
+
 def _ambiguity_groups(ranked_names: list[str]) -> tuple[bool, list[dict[str, object]]]:
     """Connected components of conflicts_with among returned matches."""
     if len(ranked_names) < 2:
         return False, []
     index = {name: i for i, name in enumerate(ranked_names)}
-    parent: dict[str, str] = {n: n for n in ranked_names}
-    def _find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def _union(a: str, b: str) -> None:
-        ra, rb = _find(a), _find(b)
-        if ra != rb:
-            parent[rb] = ra
-    present = set(ranked_names)
-    for name in ranked_names:
-        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
-            if peer in present:
-                _union(name, peer)
-    comps: dict[str, list[str]] = {}
-    for name in ranked_names:
-        comps.setdefault(_find(name), []).append(name)
-    groups: list[dict[str, object]] = []
-    for comp in comps.values():
-        if len(comp) < 2:
-            continue
-        # Only a real ambiguity group when at least one conflict edge is internal.
-        if not any(
-            any(peer in comp for peer in TOOL_DISCOVERY_REGISTRY[n].conflicts_with)
-            for n in comp
-        ):
-            continue
-        def _order_key(n: str) -> int:
-            return index[n]
-        ordered = sorted(comp, key=_order_key)
-        paths = sorted({f"{TOOL_DISCOVERY_REGISTRY[n].domain}/{TOOL_DISCOVERY_REGISTRY[n].family}" for n in ordered})
-        bits = [f"{n} \u2014 {TOOL_DISCOVERY_REGISTRY[n].choose_when[0]}" if TOOL_DISCOVERY_REGISTRY[n].choose_when else n for n in ordered]
-        groups.append({
-            "candidates": ordered,
-            "paths": paths,
-            "distinguishing_question": "Which outcome do you need: " + "; ".join(bits) + "?",
-        })
-    def _group_key(g: dict[str, object]) -> str:
-        cands = g.get("candidates")
-        if isinstance(cands, list) and cands and isinstance(cands[0], str):
-            return cands[0]
-        return ""
-    groups.sort(key=_group_key)
+    groups = [_ambiguity_card(comp, index) for comp in _conflict_components(ranked_names) if _is_ambiguity_group(comp)]
+    groups.sort(key=_group_sort_key)
     return (len(groups) > 0), groups
 
 
 _SEARCH_EMPTY_HINT = "No matches. Retry with the full user question as the query (never a ticker or one word); omit domain unless certain of it."
+
+def _search_params(args: dict[str, object]) -> tuple[str, str | None]:
+    """Normalized query plus validated domain filter (unknown domains ignored)."""
+    query = str(args.get("query") or "")
+    domain = str(args.get("domain") or "").strip().lower() or None
+    if domain is not None and domain not in DOMAIN_DESCRIPTIONS:
+        domain = None
+    return query, domain
+
+
+def _empty_search_result() -> dict[str, object]:
+    """Zero-match envelope with the retry hint."""
+    return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
+
+
+def _tool_name_bonus(name: str, query_norm: str) -> int:
+    """Exact tool-name match bonus (10)."""
+    if query_norm and query_norm == " ".join(_normalize_discovery_text(name.replace("_", " "))):
+        return 10
+    return 0
+
+
+def _tool_phrase_bonus(meta: ToolDiscovery, query_norm: str) -> int:
+    """Exact phrase in summary/choose_when bonus (5, once)."""
+    for text in (meta.summary, *meta.choose_when):
+        phrase = " ".join(_normalize_discovery_text(text))
+        if query_norm and phrase and (query_norm in phrase or phrase in query_norm):
+            return 5
+    return 0
+
+
+def _tool_domain_bonus(meta: ToolDiscovery, query_tokens: set[str]) -> int:
+    """Domain-name overlap bonus (1)."""
+    if query_tokens and set(_normalize_discovery_text(meta.domain)) <= query_tokens:
+        return 1
+    return 0
+
+
+def _tool_field_tokens(name: str, meta: ToolDiscovery) -> set[str]:
+    """Scorable token set: name/domain/family/intent/output/summary/choose_when."""
+    return _discovery_keywords(
+        " ".join((
+            name.replace("_", " "), meta.domain, meta.family.replace("-", " "),
+            meta.intent.replace("_", " "), meta.output_kind.replace("_", " "),
+            meta.summary, " ".join(meta.choose_when),
+        ))
+    )
+
+
+def _score_one_tool(name: str, meta: ToolDiscovery, query_norm: str, query_tokens: set[str]) -> int:
+    """Lexical score for one registry row (name + phrase + overlap + domain)."""
+    score = _tool_name_bonus(name, query_norm) + _tool_phrase_bonus(meta, query_norm)
+    score += len(query_tokens & _tool_field_tokens(name, meta))
+    return score + _tool_domain_bonus(meta, query_tokens)
+
+
+def _rank_scored(scored: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Relative-noise gate (within 4 of best) plus deterministic score/name order."""
+    if scored:
+        best = max(score for score, _ in scored)
+        scored = [(score, name) for score, name in scored if score >= best - 4]
+    def _rank_key(hit: tuple[int, str]) -> tuple[int, str]:
+        return (-hit[0], hit[1])
+    scored.sort(key=_rank_key)
+    return scored
+
+
+def _score_registry(query_norm: str, query_tokens: set[str], domain: str | None) -> list[tuple[int, str]]:
+    """Score every in-domain row, then gate and rank."""
+    scored: list[tuple[int, str]] = []
+    for name, meta in TOOL_DISCOVERY_REGISTRY.items():
+        if domain and meta.domain != domain:
+            continue
+        score = _score_one_tool(name, meta, query_norm, query_tokens)
+        if score > 0:
+            scored.append((score, name))
+    # Relative noise gate: keep hits within 4 points of the best; wide-open
+    # queries with no strong match keep everything.
+    return _rank_scored(scored)
+
+
+def _expand_conflicts(ranked_names: list[str], domain: str | None) -> list[str]:
+    """Top primaries plus their direct conflicts (same domain), bounded to 5."""
+    expanded = list(ranked_names)
+    for name in ranked_names:
+        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
+            if peer not in expanded:
+                if domain and TOOL_DISCOVERY_REGISTRY[peer].domain != domain:
+                    continue
+                expanded.append(peer)
+    return expanded[:5]
 
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Generic lexical ranking over TOOL_DISCOVERY_REGISTRY fields only.
@@ -3399,61 +3803,15 @@ def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     the best score. Returns compact routing cards only: up to 3 lexical primaries plus direct conflicts, bounded to 5, ambiguity over the expanded set.
     """
     del model
-    query = str(args.get("query") or "")
-    domain = str(args.get("domain") or "").strip().lower() or None
-    if domain is not None and domain not in DOMAIN_DESCRIPTIONS:
-        domain = None
+    query, domain = _search_params(args)
     if not query.strip():
-        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
-    query_norm = " ".join(_normalize_discovery_text(query))
-    query_tokens = _discovery_keywords(query)
-    scored: list[tuple[int, str]] = []
-    for name, meta in TOOL_DISCOVERY_REGISTRY.items():
-        if domain and meta.domain != domain:
-            continue
-        score = 0
-        if query_norm and query_norm == " ".join(_normalize_discovery_text(name.replace("_", " "))):
-            score += 10
-        for text in (meta.summary, *meta.choose_when):
-            phrase = " ".join(_normalize_discovery_text(text))
-            if query_norm and phrase and (query_norm in phrase or phrase in query_norm):
-                score += 5
-                break
-        field_tokens = _discovery_keywords(
-            " ".join((
-                name.replace("_", " "), meta.domain, meta.family.replace("-", " "),
-                meta.intent.replace("_", " "), meta.output_kind.replace("_", " "),
-                meta.summary, " ".join(meta.choose_when),
-            ))
-        )
-        score += len(query_tokens & field_tokens)
-        if query_tokens and set(_normalize_discovery_text(meta.domain)) <= query_tokens:
-            score += 1
-        if score > 0:
-            scored.append((score, name))
-    # Relative noise gate: keep hits within 4 points of the best; wide-open
-    # queries with no strong match keep everything.
-    if scored:
-        best = max(score for score, _ in scored)
-        scored = [(score, name) for score, name in scored if score >= best - 4]
-    def _rank_key(hit: tuple[int, str]) -> tuple[int, str]:
-        return (-hit[0], hit[1])
-    scored.sort(key=_rank_key)
-    top = scored[:3]
-    ranked_names = [name for _, name in top]
-    expanded = list(ranked_names)
-    for name in ranked_names:
-        for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with:
-            if peer not in expanded:
-                peer_meta = TOOL_DISCOVERY_REGISTRY[peer]
-                if domain and peer_meta.domain != domain:
-                    continue
-                expanded.append(peer)
-    expanded = expanded[:5]
+        return _empty_search_result()
+    scored = _score_registry(" ".join(_normalize_discovery_text(query)), _discovery_keywords(query), domain)
+    expanded = _expand_conflicts([name for _, name in scored[:3]], domain)
     ranked = [_routing_card(name) for name in expanded]
     ambiguous, groups = _ambiguity_groups(expanded)
     if not ranked:
-        return {"matches": [], "count": 0, "ambiguous": False, "ambiguity_groups": [], "hint": _SEARCH_EMPTY_HINT}
+        return _empty_search_result()
     return {"matches": ranked, "count": len(ranked), "ambiguous": ambiguous, "ambiguity_groups": groups}
 
 
@@ -3469,25 +3827,18 @@ def _list_tool_domains(args: dict[str, object], model: str) -> dict[str, object]
     }
 
 
+def _schema_arg_lists(name: str) -> tuple[list[str], list[str]]:
+    """Required/optional argument names for one tool from its canonical schema."""
+    params, required, optional = _canonical_tool_schema(name)
+    del params
+    return required, optional
+
 def _describe_one(name: str) -> dict[str, object]:
     """Full metadata for one named tool from the registry plus its canonical schema."""
     meta = TOOL_DISCOVERY_REGISTRY.get(name)
     if meta is None:
         return {"error": "unknown_tool", "name": name}
-    required: list[str] = []
-    optional: list[str] = []
-    for tool in TOOLS:
-        fn = _tool_function(tool)
-        if fn.get("name") != name:
-            continue
-        raw_params = fn.get("parameters")
-        params: dict[str, object] = {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
-        raw_required = params.get("required")
-        required = [str(k) for k in raw_required] if isinstance(raw_required, list) else []
-        raw_props = params.get("properties")
-        props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
-        optional = sorted(key for key in props if key not in required)
-        break
+    required, optional = _schema_arg_lists(name)
     return {
         "name": name,
         "domain": meta.domain,
@@ -3508,6 +3859,16 @@ def _describe_one(name: str) -> dict[str, object]:
     }
 
 
+def _parse_describe_names(name: str) -> list[object] | None:
+    """Agents serialize the names array into the name string; coerce instead of failing."""
+    # ponytail: coerce instead of failing their describe-then-call flow.
+    try:
+        parsed = json.loads(name)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, list) and parsed else None
+
+
 def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
     """Full metadata for one named tool, or several tools in order with `names`."""
     del model
@@ -3516,13 +3877,8 @@ def _describe_tool(args: dict[str, object], model: str) -> dict[str, object]:
         return {"tools": [_describe_one(str(name)) for name in raw]}
     name = args.get("name") or ""
     if isinstance(name, str) and name.strip().startswith("["):
-        # ponytail: agents serialize the names array into the name string;
-        # coerce instead of failing their describe-then-call flow.
-        try:
-            parsed = json.loads(name)
-        except (json.JSONDecodeError, TypeError):
-            parsed = None
-        if isinstance(parsed, list) and parsed:
+        parsed = _parse_describe_names(name)
+        if parsed is not None:
             return {"tools": [_describe_one(str(item)) for item in parsed]}
     return _describe_one(str(name))
 
@@ -3533,99 +3889,165 @@ def _browse_key(nm: str) -> tuple[str, str, str]:
     return (meta.domain, meta.family, nm)
 
 
-def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
-    """Hierarchical catalog: root domains, domain families, family tools + contrast, or one tool."""
-    del model
+def _browse_selection(args: dict[str, object]) -> tuple[str | None, str | None, str | None]:
+    """Normalized (name, domain, family) browse coordinates, each None when blank."""
     raw_name = args.get("name")
     name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
     raw_domain = args.get("domain")
     domain = raw_domain.strip().lower() if isinstance(raw_domain, str) and raw_domain.strip() else None
     raw_family = args.get("family")
     family = raw_family.strip().lower() if isinstance(raw_family, str) and raw_family.strip() else None
+    return name, domain, family
+
+
+def _browse_named(name: str) -> dict[str, object]:
+    """One tool by exact name (name-authoritative over guessed coordinates)."""
+    # Name-authoritative: the 1B model copies the whole routing card into
+    # browse (name plus a guessed domain/family). The exact name uniquely
+    # identifies the tool, so resolve it instead of rejecting.
+    if TOOL_DISCOVERY_REGISTRY.get(name) is None:
+        return {"error": "unknown_tool", "name": name}
+    info = _describe_one(name)
+    params, _, _ = _canonical_tool_schema(name)
+    return {**info, "parameters": params}
+
+
+def _browse_family_names(domain: str, family: str) -> list[str]:
+    """Catalog-sorted tool names for one domain/family path."""
+    return sorted(
+        (n for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain and m.family == family),
+        key=_browse_key,
+    )
+
+
+def _browse_family_card(name: str) -> dict[str, object]:
+    """Compact card for one family member (summary/intent/output only)."""
+    meta = TOOL_DISCOVERY_REGISTRY[name]
+    return {
+        "name": name,
+        "domain": meta.domain,
+        "family": meta.family,
+        "summary": meta.summary,
+        "intent": meta.intent,
+        "output_kind": meta.output_kind,
+    }
+
+
+def _browse_contrast_row(name: str) -> dict[str, object]:
+    """One contrast row: primary use plus what it must not be used for."""
+    meta = TOOL_DISCOVERY_REGISTRY[name]
+    return {
+        "tool": name,
+        "use_it_for": meta.choose_when[0] if meta.choose_when else "",
+        "do_not_use_it_for": " ".join(meta.reject_when),
+    }
+
+
+def _browse_family(domain: str, family: str) -> dict[str, object]:
+    """Family path: member cards plus the choose/reject contrast table."""
+    names = _browse_family_names(domain, family)
+    if not names:
+        return {"error": "unknown_family", "domain": domain, "families": sorted({m.family for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain})}
+    tools = [_browse_family_card(n) for n in names]
+    return {
+        "path": f"/{domain}/{family}",
+        "domain": domain,
+        "family": family,
+        "tools": tools,
+        "count": len(tools),
+        "contrast_table": [_browse_contrast_row(n) for n in names],
+    }
+
+
+def _browse_domain(domain: str) -> dict[str, object]:
+    """Domain path: families with tool counts."""
+    fams: dict[str, list[str]] = {}
+    for n, m in TOOL_DISCOVERY_REGISTRY.items():
+        if m.domain == domain:
+            fams.setdefault(m.family, []).append(n)
+    families = [{"name": f, "path": f"/{domain}/{f}", "tool_count": len(v)} for f, v in sorted(fams.items())]
+    return {"path": f"/{domain}", "domain": domain, "families": families}
+
+
+def _browse_root() -> dict[str, object]:
+    """Catalog root: domains only."""
+    domains = [{"name": d, "path": f"/{d}", "description": DOMAIN_DESCRIPTIONS[d]} for d in sorted(DOMAIN_DESCRIPTIONS)]
+    return {"path": "/", "domains": domains}
+
+def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
+    """Hierarchical catalog: root domains, domain families, family tools + contrast, or one tool."""
+    del model
+    name, domain, family = _browse_selection(args)
     if name:
-        # Name-authoritative: the 1B model copies the whole routing card into
-        # browse (name plus a guessed domain/family). The exact name uniquely
-        # identifies the tool, so resolve it instead of rejecting.
-        meta = TOOL_DISCOVERY_REGISTRY.get(name)
-        if meta is None:
-            return {"error": "unknown_tool", "name": name}
-        info = _describe_one(name)
-        params, _, _ = _canonical_tool_schema(name)
-        return {**info, "parameters": params}
+        return _browse_named(name)
     if family and not domain:
         return {"error": "family_requires_domain", "hint": "call browse_tools with domain and family"}
     if domain and domain not in DOMAIN_DESCRIPTIONS:
         return {"error": "unknown_domain", "domains": sorted(DOMAIN_DESCRIPTIONS)}
     if domain and family:
-        names = sorted(
-            (n for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain and m.family == family),
-            key=_browse_key,
-        )
-        if not names:
-            return {"error": "unknown_family", "domain": domain, "families": sorted({m.family for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain})}
-        tools = [
-            {
-                "name": n,
-                "domain": TOOL_DISCOVERY_REGISTRY[n].domain,
-                "family": TOOL_DISCOVERY_REGISTRY[n].family,
-                "summary": TOOL_DISCOVERY_REGISTRY[n].summary,
-                "intent": TOOL_DISCOVERY_REGISTRY[n].intent,
-                "output_kind": TOOL_DISCOVERY_REGISTRY[n].output_kind,
-            }
-            for n in names
-        ]
-        contrast = [
-            {
-                "tool": n,
-                "use_it_for": TOOL_DISCOVERY_REGISTRY[n].choose_when[0] if TOOL_DISCOVERY_REGISTRY[n].choose_when else "",
-                "do_not_use_it_for": " ".join(TOOL_DISCOVERY_REGISTRY[n].reject_when),
-            }
-            for n in names
-        ]
-        return {
-            "path": f"/{domain}/{family}",
-            "domain": domain,
-            "family": family,
-            "tools": tools,
-            "count": len(tools),
-            "contrast_table": contrast,
-        }
+        return _browse_family(domain, family)
     if domain:
-        fams: dict[str, list[str]] = {}
-        for n, m in TOOL_DISCOVERY_REGISTRY.items():
-            if m.domain == domain:
-                fams.setdefault(m.family, []).append(n)
-        families = [{"name": f, "path": f"/{domain}/{f}", "tool_count": len(v)} for f, v in sorted(fams.items())]
-        return {"path": f"/{domain}", "domain": domain, "families": families}
-    domains = [{"name": d, "path": f"/{d}", "description": DOMAIN_DESCRIPTIONS[d]} for d in sorted(DOMAIN_DESCRIPTIONS)]
-    return {"path": "/", "domains": domains}
+        return _browse_domain(domain)
+    return _browse_root()
 
 
+
+def _envelope_dict(raw: object) -> dict[str, object]:
+    """String-keyed dict from envelope JSON, else empty."""
+    return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _envelope_attempts(raw: object) -> list[dict[str, object]]:
+    """Attempt dicts from envelope JSON, else empty."""
+    return [{str(k): v for k, v in a.items()} for a in raw if isinstance(a, dict)] if isinstance(raw, (list, tuple)) else []
+
+
+def _mention_hit(hit: dict[str, object]) -> dict[str, object]:
+    """One text hit as a mention-role packet (unresolved subject)."""
+    base: dict[str, object] = {str(k): v for k, v in hit.items()}
+    base["match_role"] = "mention"
+    base["subject_cik"] = None
+    base["subject_name"] = None
+    return base
+
+
+def _mention_hits(raw: object) -> list[dict[str, object]]:
+    """Text hits as mention packets."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [_mention_hit(hit) for hit in raw if isinstance(hit, dict)]
+
+
+def _envelope_pit_basis(attempts: list[dict[str, object]]) -> str | None:
+    """Most common attempt pit_basis, else None."""
+    bases: list[object] = [a.get("pit_basis") for a in attempts if a.get("pit_basis") is not None]
+    return max(set(str(b) for b in bases), key=_bases_count_key(bases)) if bases else None
+def _envelope_counts(data: dict[str, object], cov: dict[str, object]) -> dict[str, object]:
+    """Reported/retrieved/pages plus entity/filing/document sizes."""
+    def _len_of(key: str) -> int:
+        value = data.get(key)
+        return len(value) if isinstance(value, (list, tuple)) else 0
+    return {
+        "results_reported": cov.get("results_reported", 0),
+        "results_retrieved": cov.get("results_retrieved", 0),
+        "pages": cov.get("pages", 0),
+        "entities": _len_of("entities"),
+        "filings": _len_of("filings"),
+        "documents": _len_of("documents"),
+    }
+
+
+def _envelope_backfill(cov: dict[str, object]) -> list[object]:
+    """Pending backfill jobs, else empty."""
+    return list(cov["pending_backfill_jobs"]) if isinstance(cov.get("pending_backfill_jobs"), (list, tuple)) else []
 
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:
     """SECSearchResult -> model packet: roles, ledger, PIT, jobs, evidence."""
     data = result.to_dict()
-    raw_cov = data.get("coverage")
-    cov: dict[str, object] = {str(k): v for k, v in raw_cov.items()} if isinstance(raw_cov, dict) else {}
-    raw_attempts = data.get("attempts")
-    attempts: list[dict[str, object]] = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, (list, tuple)) else []
-    raw_hits = data.get("text_hits")
-    hits: list[dict[str, object]] = []
-    if isinstance(raw_hits, (list, tuple)):
-        for hit in raw_hits:
-            if isinstance(hit, dict):
-                base: dict[str, object] = {str(k): v for k, v in hit.items()}
-                base["match_role"] = "mention"
-                base["subject_cik"] = None
-                base["subject_name"] = None
-                hits.append(base)
-    bases: list[object] = []
-    for a in attempts:
-        raw_basis = a.get("pit_basis")
-        if raw_basis is not None:
-            bases.append(raw_basis)
-    raw_req = data.get("request")
-    request: dict[str, object] = {str(k): v for k, v in raw_req.items()} if isinstance(raw_req, dict) else {}
+    cov = _envelope_dict(data.get("coverage"))
+    attempts = _envelope_attempts(data.get("attempts"))
+    hits = _mention_hits(data.get("text_hits"))
+    request = _envelope_dict(data.get("request"))
     return {
         "subject": request.get("query") or request.get("company_name"),
         "query": request.get("query"),
@@ -3638,18 +4060,11 @@ def _search_envelope(result: SECSearchResult) -> dict[str, object]:
         "hits": hits,
         "coverage": cov,
         "attempts": attempts,
-        "counts": {
-            "results_reported": cov.get("results_reported", 0),
-            "results_retrieved": cov.get("results_retrieved", 0),
-            "pages": cov.get("pages", 0),
-            "entities": len(data["entities"]) if isinstance(data.get("entities"), (list, tuple)) else 0,
-            "filings": len(data["filings"]) if isinstance(data.get("filings"), (list, tuple)) else 0,
-            "documents": len(data["documents"]) if isinstance(data.get("documents"), (list, tuple)) else 0,
-        },
-        "pit_basis": max(set(str(b) for b in bases), key=_bases_count_key(bases)) if bases else None,
+        "counts": _envelope_counts(data, cov),
+        "pit_basis": _envelope_pit_basis(attempts),
         "warnings": data.get("warnings"),
         "errors": data.get("errors"),
-        "backfill_jobs": list(cov["pending_backfill_jobs"]) if isinstance(cov.get("pending_backfill_jobs"), (list, tuple)) else [],
+        "backfill_jobs": _envelope_backfill(cov),
         "evidence_packet_ids": data.get("evidence_packet_ids"),
         "source": "SEC EDGAR",
     }
@@ -3706,89 +4121,123 @@ def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
         sec.SECDiscoveryService(data_root=get_data_root()).search(request))
 
 
+def _doc_offset(raw: object) -> int:
+    """Lenient offset coercion (bool/float/str all narrow to int, None is 0)."""
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if raw is None:
+        return 0
+    if isinstance(raw, str):
+        return int(raw.strip()) if raw.strip() else 0
+    return int(str(raw))
+
+
+def _doc_max_chars(raw: object) -> int | None:
+    """Lenient max_chars coercion (None/blank keep the 12k model bound)."""
+    if raw is None:
+        return 12_000
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        return int(raw.strip()) if raw.strip() else 12_000
+    return int(str(raw))
+
 def _get_sec_document(args: dict[str, object], model: str) -> dict[str, object]:
     """Archive-first document read; model callers always get a bounded window."""
     del model
-    raw_offset = args.get("offset", 0)
-    if isinstance(raw_offset, bool):
-        offset = int(raw_offset)
-    elif isinstance(raw_offset, int):
-        offset = raw_offset
-    elif isinstance(raw_offset, float):
-        offset = int(raw_offset)
-    elif isinstance(raw_offset, str):
-        offset = int(raw_offset.strip()) if raw_offset.strip() else 0
-    elif raw_offset is None:
-        offset = 0
-    else:
-        offset = int(str(raw_offset))
-    raw_max = args.get("max_chars", 12_000)
-    if raw_max is None:
-        max_chars: int | None = 12_000
-    elif isinstance(raw_max, bool):
-        max_chars = int(raw_max)
-    elif isinstance(raw_max, int):
-        max_chars = raw_max
-    elif isinstance(raw_max, float):
-        max_chars = int(raw_max)
-    elif isinstance(raw_max, str):
-        max_chars = int(raw_max.strip()) if raw_max.strip() else 12_000
-    else:
-        max_chars = int(str(raw_max))
     try:
         return sec.get_sec_document(
             str(args["accession_no"]), _str_or_none(args.get("document_name")),
             as_of=_str_or_none(args.get("as_of")),
-            offset=offset,
-            max_chars=max_chars,
+            offset=_doc_offset(args.get("offset", 0)),
+            max_chars=_doc_max_chars(args.get("max_chars", 12_000)),
             data_root=get_data_root(),
         )
     except (KeyError, ValueError) as exc:
         return {"error": str(exc), "error_type": "invalid_tool_arguments"}
 
 
+_REL_PARTIAL_STATUSES = ("partial", "source_limited", "complete_within_source_limits", "retrying")
+
+
+def _rel_types(raw: object) -> Sequence[str] | None:
+    """relationship_types coercion: string, list/tuple of strings, else None."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(x) for x in raw)
+    return None
+
+
+def _as_result_list(result: dict[str, object], key: str) -> list[object]:
+    """List field from the relationships result, else empty."""
+    raw = result.get(key)
+    return list(raw) if isinstance(raw, (list, tuple)) else []
+
+
+def _rel_attempts(result: dict[str, object]) -> tuple[list[object], list[dict[str, object]]]:
+    """Errors plus attempt dicts from the relationships result."""
+    errors = _as_result_list(result, "errors")
+    raw_attempts = result.get("attempts")
+    attempts = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, list) else []
+    return errors, attempts
+
+
+def _rel_attempt_flags(attempts: list[dict[str, object]]) -> tuple[bool, bool]:
+    """(has_partial, has_failed) over attempt statuses."""
+    has_partial = any(a.get("status") in _REL_PARTIAL_STATUSES for a in attempts)
+    return has_partial, any(a.get("status") == "failed" for a in attempts)
+
+
+def _rel_coverage_status(result: dict[str, object], errors: list[object], attempts: list[dict[str, object]], found: int) -> str:
+    """failed when errors/failures explain zero hits, partial on any caveat, else complete."""
+    has_partial, has_failed = _rel_attempt_flags(attempts)
+    if (errors and not found) or (has_failed and not found):
+        return "failed"
+    if errors or result.get("warnings") or has_partial or has_failed:
+        return "partial"
+    return "complete"
+
+
+def _rel_ciks(result: dict[str, object]) -> list[object]:
+    """CIK list from the relationships result, else empty."""
+    return list(result["ciks"]) if isinstance(result.get("ciks"), (list, tuple)) else []
+
+
+def _rel_request(args: dict[str, object]) -> dict[str, object]:
+    """Echo of the relationship request coordinates."""
+    return {"entity": args.get("entity"),
+            "relationship_types": args.get("relationship_types"),
+            "as_of": args.get("as_of")}
+
 def _sec_relationships_result(args: dict[str, object]) -> dict[str, object]:
-    raw_rt = args.get("relationship_types")
-    if raw_rt is None:
-        rel_types: Sequence[str] | None = None
-    elif isinstance(raw_rt, str):
-        rel_types = (raw_rt,)
-    elif isinstance(raw_rt, (list, tuple)):
-        rel_types = tuple(str(x) for x in raw_rt)
-    else:
-        rel_types = None
     result = sec.search_sec_relationships(
-        str(args["entity"]), relationship_types=rel_types,
+        str(args["entity"]), relationship_types=_rel_types(args.get("relationship_types")),
         as_of=_str_or_none(args.get("as_of")), limit=int(str(args.get("limit", 50) or 50)),
         exhaustive=bool(args.get("exhaustive", True)),
     )
-    raw_typed = result.get("typed")
-    typed_list: list[object] = list(raw_typed) if isinstance(raw_typed, (list, tuple)) else list[object]()
-    raw_rels = result.get("relationships")
-    rels_list: list[object] = list(raw_rels) if isinstance(raw_rels, (list, tuple)) else list[object]()
-    raw_ment = result.get("mentions")
-    ment_list: list[object] = list(raw_ment) if isinstance(raw_ment, (list, tuple)) else list[object]()
+    typed_list = _as_result_list(result, "typed")
+    rels_list = _as_result_list(result, "relationships")
+    ment_list = _as_result_list(result, "mentions")
     found = len(typed_list) + len(rels_list) + len(ment_list)
-    raw_errors = result.get("errors")
-    errors: list[object] = list(raw_errors) if isinstance(raw_errors, (list, tuple)) else []
-    raw_attempts = result.get("attempts")
-    attempts: list[dict[str, object]] = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, list) else []
-    has_partial = any(a.get("status") in ("partial", "source_limited", "complete_within_source_limits", "retrying") for a in attempts)
-    has_failed = any(a.get("status") == "failed" for a in attempts)
+    errors, attempts = _rel_attempts(result)
     return {
         "subject": args.get("entity"),
         "entity": result.get("entity"),
-        "ciks": list(result["ciks"]) if isinstance(result.get("ciks"), (list, tuple)) else [],
-        "request": {"entity": args.get("entity"),
-                    "relationship_types": args.get("relationship_types"),
-                    "as_of": args.get("as_of")},
+        "ciks": _rel_ciks(result),
+        "request": _rel_request(args),
         "count": found,
         "groups": result.get("groups"),
         "parties": result.get("typed"),
         "relationships": result.get("relationships"),
         "mentions": result.get("mentions"),
-        "coverage": {"status": "failed" if (errors and not found) or (has_failed and not found) else (
-            "partial" if errors or result.get("warnings") or has_partial or has_failed else "complete")},
+        "coverage": {"status": _rel_coverage_status(result, errors, attempts, found)},
         "attempts": result.get("attempts"),
         "counts": {"typed": len(typed_list),
                    "workflow": len(rels_list),
@@ -3823,6 +4272,48 @@ def _list_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
         ),
         "filings",
     )
+def _filing_forms(raw: object) -> str | list[str] | tuple[str, ...] | None:
+    """forms union coercion shared by list/diff filings (string, tuple, else None)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(x) for x in raw)
+    return None
+
+
+def _recent_filings(ticker: str, args: dict[str, object]) -> object:
+    """Up to 10 recent filings for ticker self-resolution; errors stay a dict."""
+    try:
+        return sec.list_sec_filings(ticker, forms=_filing_forms(args.get("forms")), as_of=_str_or_none(args.get("as_of")), limit=10)
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return {"error": str(exc)}
+
+
+def _filing_accession(filing: object) -> str:
+    """Accession number narrowed; raises on unexpected shapes."""
+    accession = getattr(filing, "accession_no", None)
+    if isinstance(accession, str) and accession:
+        return accession
+    raise TypeError(f"filing must carry accession_no, got {type(filing).__name__}")
+
+
+def _pick_filing_pair(filings: list[Filing]) -> tuple[Filing, Filing]:
+    """Latest plus the newest same-form predecessor (else the second filing)."""
+    latest = filings[0]
+    same = [f for f in filings[1:] if f.form == latest.form]
+    return (latest, same[0]) if same else (filings[0], filings[1])
+
+
+def _diff_resolved_pair(ticker: str, filings: list[Filing], section: str | None) -> dict[str, object]:
+    """Diff the picked pair, tagged with the resolving ticker."""
+    current, previous = _pick_filing_pair(filings)
+    out = sec.diff_filings(_filing_accession(current), _filing_accession(previous), section=section)
+    if isinstance(out, dict) and "error" not in out:
+        out = {**out, "ticker": ticker.strip().upper(), "resolved_via": "list_sec_filings-internal"}
+    return out
+
 def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     """Accession pair direct, or ticker self-resolution via sec.list_sec_filings."""
     del model
@@ -3834,62 +4325,73 @@ def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     ticker = _str_or_none(args.get("ticker"))
     if not ticker:
         return _invalid_args_error("diff_sec_filings", "Provide ticker or current_accession+previous_accession for tool 'diff_sec_filings'")
-    raw_forms = args.get("forms")
-    if raw_forms is None:
-        forms: str | list[str] | tuple[str, ...] | None = None
-    elif isinstance(raw_forms, str):
-        forms = raw_forms
-    elif isinstance(raw_forms, (list, tuple)):
-        forms = tuple(str(x) for x in raw_forms)
-    else:
-        forms = None
-    try:
-        filings = sec.list_sec_filings(ticker, forms=forms, as_of=_str_or_none(args.get("as_of")), limit=10)
-    except Exception as exc:
-        return {"error": str(exc)}
+    filings = _recent_filings(ticker, args)
+    if isinstance(filings, dict):
+        return filings
+    assert isinstance(filings, list)
     if len(filings) < 2:
         return {"error": f"No pair of filings found for {ticker}: {len(filings)} match"}
-    latest = filings[0]
-    same = [f for f in filings[1:] if f.form == latest.form]
-    current, previous = (latest, same[0]) if same else (filings[0], filings[1])
-    out = sec.diff_filings(current.accession_no, previous.accession_no, section=section)
-    if isinstance(out, dict) and "error" not in out:
-        out = {**out, "ticker": ticker.strip().upper(), "resolved_via": "list_sec_filings-internal"}
-    return out
+    return _diff_resolved_pair(ticker, filings, section)
 
 
-def _resolve_company_to_ticker(name: str) -> str | None:
-    """Company name to ticker: exact warehouse match, then EDGAR company index top hit."""
+def _warehouse_ticker(name: str) -> str | None:
+    """Exact warehouse name->ticker match, else None (never raises)."""
     try:
         from app.services.evidence_resolution import warehouse_name_to_ticker
         mapped = warehouse_name_to_ticker(name)
         if mapped and mapped.strip():
             return mapped.strip().upper()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
+    return None
+
+
+def _edgar_ticker(name: str) -> str | None:
+    """EDGAR company-index top hit tickers[0], else None (never raises)."""
     try:
         from app.sec.client import find_sec_company
         for cand in find_sec_company(name, limit=3):
             ticks = cand.get("tickers") if isinstance(cand, dict) else None
             if isinstance(ticks, list) and ticks and isinstance(ticks[0], str) and ticks[0].strip():
                 return ticks[0].strip().upper()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
     return None
 
+def _resolve_company_to_ticker(name: str) -> str | None:
+    """Company name to ticker: exact warehouse match, then EDGAR company index top hit."""
+    return _warehouse_ticker(name) or _edgar_ticker(name)
+
+
+def _upper_arg(args: dict[str, object], key: str) -> str | None:
+    """Uppercase ticker/entity arg, None when blank/non-string."""
+    raw = args.get(key)
+    return raw.strip().upper() if isinstance(raw, str) and raw.strip() else None
+
+
+def _remap_mixed_case(args: dict[str, object], key: str, value: str) -> str:
+    """Mixed-case values may be company names: remap when the warehouse disagrees."""
+    raw = args.get(key)
+    if isinstance(raw, str) and raw != raw.upper():
+        resolved = _resolve_company_to_ticker(raw)
+        if resolved is not None and resolved != value:
+            return resolved
+    return value
+
+
+def _company_arg(args: dict[str, object]) -> str | None:
+    """company_name arg stripped, None when blank/non-string."""
+    raw = args.get("company_name")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 def _get_obligations(args: dict[str, object], model: str) -> dict[str, object]:
     """Ticker or company name; the server maps names to tickers for single dispatch."""
     del model
-    raw_ticker = args.get("ticker")
-    ticker = raw_ticker.strip().upper() if isinstance(raw_ticker, str) and raw_ticker.strip() else None
-    if ticker is not None and isinstance(raw_ticker, str) and raw_ticker != raw_ticker.upper():
-        resolved = _resolve_company_to_ticker(raw_ticker)
-        if resolved is not None and resolved != ticker:
-            ticker = resolved
+    ticker = _upper_arg(args, "ticker")
+    if ticker is not None:
+        ticker = _remap_mixed_case(args, "ticker", ticker)
     if ticker is None:
-        raw_name = args.get("company_name")
-        name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+        name = _company_arg(args)
         if name is None:
             return _invalid_args_error("get_obligations", "Provide a ticker (e.g. AAPL) or company_name (e.g. Apple) for tool 'get_obligations'")
         resolved = _resolve_company_to_ticker(name)
@@ -3899,16 +4401,10 @@ def _get_obligations(args: dict[str, object], model: str) -> dict[str, object]:
     return obligations.get_obligations(ticker)
 def _ticker_or_company_name(args: dict[str, object], tool: str, key: str = "ticker") -> tuple[str | None, dict[str, object] | None]:
     """Ticker/entity value or company_name; maps names to tickers for single dispatch."""
-    raw = args.get(key)
-    value = raw.strip().upper() if isinstance(raw, str) and raw.strip() else None
+    value = _upper_arg(args, key)
     if value is not None:
-        if isinstance(raw, str) and raw != raw.upper():
-            resolved = _resolve_company_to_ticker(raw)
-            if resolved is not None and resolved != value:
-                return resolved, None
-        return value, None
-    raw_name = args.get("company_name")
-    name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+        return _remap_mixed_case(args, key, value), None
+    name = _company_arg(args)
     if name is None:
         return None, _invalid_args_error(tool, f"Provide an entity/ticker (e.g. AAPL) or company_name (e.g. Apple) for tool '{tool}'; never call with neither")
     resolved = _resolve_company_to_ticker(name)
@@ -4169,6 +4665,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "research_cancel": Capability.RESEARCH,
     "research_read": Capability.RESEARCH,
     "research_add_evidence": Capability.RESEARCH,
+    "research_submit_source_result": Capability.RESEARCH,
     "research_add_analysis": Capability.RESEARCH,
     "research_finalize": Capability.RESEARCH,
     "get_market_snapshot": Capability.BROKER_MARKET_READ,
@@ -4201,6 +4698,27 @@ def tool_is_permitted(name: str, context: RequestContext) -> bool:
     return capability is not None and capability in context.capabilities
 
 
+def _tool_schema(name: str) -> dict[str, object]:
+    """Canonical schema function dict for one tool, else empty."""
+    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
+    return _tool_function(tool) if tool is not None else {}
+
+
+def _schema_dict(raw: object) -> dict[str, object]:
+    """String-keyed dict from schema JSON, else empty."""
+    return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _required_keys(params: dict[str, object]) -> list[str]:
+    """Required argument names from a parameters dict."""
+    raw_required = params.get("required")
+    return [str(k) for k in raw_required] if isinstance(raw_required, list) else []
+
+
+def _tool_properties(name: str) -> dict[str, object]:
+    """Property dict for one tool's parameters, else empty."""
+    return _schema_dict(_tool_schema(name).get("parameters"))
+
 def _validate_tool_arguments(name: str, arguments: object) -> str | None:
     """Schema-level argument check: object-ness plus required keys. Returns
     an error message, or None when the arguments are acceptable. Type
@@ -4208,12 +4726,7 @@ def _validate_tool_arguments(name: str, arguments: object) -> str | None:
     (int(...), ...) remain the source of truth for value shapes."""
     if not isinstance(arguments, dict):
         return f"Tool arguments must be a JSON object for tool '{name}'"
-    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
-    fn_dict: dict[str, object] = _tool_function(tool) if tool is not None else {}
-    raw_params = fn_dict.get("parameters")
-    params_dict: dict[str, object] = {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
-    raw_required = params_dict.get("required")
-    required_keys: list[str] = [str(k) for k in raw_required] if isinstance(raw_required, list) else []
+    required_keys = _required_keys(_schema_dict(_tool_schema(name).get("parameters")))
     missing = [key for key in required_keys if key not in arguments]
     if missing:
         return f"Missing required argument(s) for tool '{name}': {', '.join(missing)}"
@@ -4222,16 +4735,10 @@ def _validate_tool_arguments(name: str, arguments: object) -> str | None:
 
 def _canonical_tool_schema(name: str) -> tuple[dict[str, object], list[str], list[str]]:
     """Canonical parameters object plus required/optional lists via _tool_function."""
-    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
-    fn = _tool_function(tool) if tool is not None else {}
-    raw_params = fn.get("parameters")
-    params: dict[str, object] = {str(k): v for k, v in raw_params.items()} if isinstance(raw_params, dict) else {}
-    raw_required = params.get("required")
-    required: list[str] = [str(k) for k in raw_required] if isinstance(raw_required, list) else []
-    raw_props = params.get("properties")
-    props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
-    optional = sorted(key for key in props if key not in required)
-    return params, required, optional
+    params = _schema_dict(_tool_schema(name).get("parameters"))
+    required = _required_keys(params)
+    props = _schema_dict(params.get("properties"))
+    return params, required, sorted(key for key in props if key not in required)
 
 
 def _invalid_args_error(name: str, message: str) -> dict[str, object]:
@@ -4279,11 +4786,12 @@ def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: Reques
 
 
 _PIT_INSTANT_TOOLS = frozenset({"thesis_show", "research_status", "research_resume", "research_read"})
-_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_add_analysis", "research_finalize"})
+_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_submit_source_result", "research_add_analysis", "research_finalize"})
 
 
 def _pit_day(cutoff: str) -> str | None:
     from datetime import timezone  # local: keep module import surface minimal
+
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
     dt = _as_dt(cutoff)
@@ -4291,6 +4799,30 @@ def _pit_day(cutoff: str) -> str | None:
         return None
     return dt.astimezone(timezone.utc).date().isoformat()
 
+def _tool_has_as_of(name: str) -> bool:
+    """Whether the tool's canonical schema accepts an as_of coordinate."""
+    props = _schema_dict(_tool_schema(name).get("parameters")).get("properties")
+    return isinstance(props, dict) and "as_of" in _schema_dict(props)
+
+
+def _default_pit_value(name: str, args: dict[str, object], cutoff: str) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Blank as_of defaults: instant tools take the cutoff, others the cutoff day."""
+    if name in _PIT_INSTANT_TOOLS:
+        return {**args, "as_of": cutoff}, None
+    day = _pit_day(cutoff)
+    if day is None:
+        return args, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+    return {**args, "as_of": day}, None
+
+
+def _reject_future_as_of(name: str, args: dict[str, object], supplied: str, cutoff: str) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Reject a model as_of beyond the run cutoff (parseable ISO comparison)."""
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
+    if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
+        return args, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+    return args, None
 
 def _apply_pit_cutoff(name: str, arguments: object, context: RequestContext) -> tuple[dict[str, object], dict[str, object] | None]:
     """Default `as_of` to the run cutoff; reject a model value beyond it."""
@@ -4298,32 +4830,14 @@ def _apply_pit_cutoff(name: str, arguments: object, context: RequestContext) -> 
     if not isinstance(arguments, dict):
         return {}, {"error": f"Tool arguments must be a JSON object for tool '{name}'", "error_type": "invalid_tool_arguments"}
     args: dict[str, object] = arguments
-    if not cutoff:
-        return args, None
-    tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
-    fn = _tool_function(tool) if tool is not None else {}
-    raw_parameters = fn.get("parameters")
-    parameters: dict[str, object] = {str(k): v for k, v in raw_parameters.items()} if isinstance(raw_parameters, dict) else {}
-    raw_props = parameters.get("properties")
-    props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
-    if "as_of" not in props:
+    if not cutoff or not _tool_has_as_of(name):
         return args, None
     supplied = args.get("as_of")
     if supplied is None or (isinstance(supplied, str) and not supplied):
-        if name in _PIT_INSTANT_TOOLS:
-            return {**args, "as_of": cutoff}, None
-        day = _pit_day(cutoff)
-        if day is None:
-            return args, {"error": f"tool '{name}': bad run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
-        return {**args, "as_of": day}, None
+        return _default_pit_value(name, args, cutoff)
     if not isinstance(supplied, str):
         return args, None  # handler validation owns the message
-    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-
-    supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
-    if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
-        return args, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
-    return args, None
+    return _reject_future_as_of(name, args, supplied, cutoff)
 
 
 def _thesis_proposal(arguments: dict[str, object], user_thesis: str, path: str) -> IntakeProposal:
@@ -4347,60 +4861,146 @@ def _thesis_create(arguments: dict[str, object], context: RequestContext) -> dic
     return thesis_intake.create_thesis_from_proposal(
         _thesis_repo_for(context), proposal, effective_at=_effective_at(context))
 
-def _thesis_show(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    repo = _thesis_repo_for(context)
-    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
-    tid = thesis.thesis_id
+def _reject_future_show_as_of(model_as_of: str, cutoff: str) -> None:
+    """Reject a model as_of beyond the run cutoff (parseable ISO comparison)."""
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    model_dt, cutoff_dt = _as_dt(model_as_of), _as_dt(cutoff)
+    if model_dt is not None and cutoff_dt is not None and model_dt > cutoff_dt:
+        raise ValueError(f"thesis_show: as_of {model_as_of!r} is beyond the run cutoff {cutoff!r}")
+
+
+def _show_as_of(arguments: dict[str, object], context: RequestContext) -> str | None:
+    """Resolved as_of for show: model value wins, else the run cutoff; rejects future values."""
     model_as_of = arguments.get("as_of")
     cutoff = _effective_at(context)
     if isinstance(model_as_of, str) and model_as_of and cutoff:
-        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+        _reject_future_show_as_of(model_as_of, cutoff)
+    resolved = model_as_of if isinstance(model_as_of, str) and model_as_of else cutoff
+    return resolved if isinstance(resolved, str) and resolved else None
 
-        model_dt, cutoff_dt = _as_dt(model_as_of), _as_dt(cutoff)
-        if model_dt is not None and cutoff_dt is not None and model_dt > cutoff_dt:
-            raise ValueError(f"thesis_show: as_of {model_as_of!r} is beyond the run cutoff {cutoff!r}")
-    as_of = model_as_of if isinstance(model_as_of, str) and model_as_of else cutoff
-    if isinstance(as_of, str) and as_of:
-        snap = repo.load_state_as_of(tid, as_of)
-        t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
-        _rules = watch.get("rules", [])
-        rules = [r for r in (_rules if isinstance(_rules, list) else ()) if isinstance(r, dict)]
-        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
-        _qq = questions.get("questions", [])
-        return {
-            "thesis_id": tid,
-            "slug": t.get("slug"),
-            "status": t.get("status"),
-            "user_thesis": t.get("user_thesis"),
-            "scope": t.get("scope"),
-            "claims": list(_claims) if isinstance((_claims := t.get("claims", [])), list) else [],
-            "expressions": list(_exprs) if isinstance((_exprs := t.get("expressions", [])), list) else [],
-            "assessment": state.get("assessment"),
-            "rules": rules,
-            "setup_needed": not live,
-            "open_questions": [q for q in (_qq if isinstance(_qq, list) else ()) if isinstance(q, dict) and q.get("status") == "open"],
-        }
-    rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
-    live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+
+def _as_snapshot_list(raw: object) -> list[object]:
+    """Snapshot list field (claims/expressions), else empty."""
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _snapshot_rule_dicts(raw: object) -> list[dict[str, object]]:
+    """Watch-rule dicts narrowed from a snapshot field."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, object]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            out.append({str(k): v for k, v in item.items()})
+    return out
+
+
+def _snapshot_rules(watch: dict[str, object] | dict[str, JSONValue]) -> list[dict[str, object]]:
+    """Validated watch rules from a state snapshot."""
+    return _snapshot_rule_dicts(watch.get("rules", []))
+
+
+def _live_rules(rules: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Enabled + supported watch rules."""
+    return [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
+
+
+def _open_snapshot_questions(questions: dict[str, object] | dict[str, JSONValue]) -> list[dict[str, object]]:
+    """Open questions from a state snapshot."""
+    return [q for q in _snapshot_rule_dicts(questions.get("questions", [])) if q.get("status") == "open"]
+
+
+def _load_snapshot(repo: ThesisRepository, tid: str, as_of: str) -> ThesisStateSnapshot:
+    """State snapshot without static repo typing gaps."""
+    return repo.load_state_as_of(tid, as_of)
+
+
+def _watch_rule_dicts(rules: list[WatchRule]) -> list[dict[str, object]]:
+    """Watch rules serialized for the model packet."""
+    out: list[dict[str, object]] = []
+    for rule in rules:
+        rendered = rule.to_dict()
+        out.append({str(k): v for k, v in rendered.items()})
+    return out
+
+
+def _open_question_dicts(questions: list[ThesisQuestion]) -> list[dict[str, object]]:
+    """Open questions serialized for the model packet."""
+    out: list[dict[str, object]] = []
+    for question in questions:
+        if question.status == "open":
+            rendered = question.to_dict()
+            out.append({str(k): v for k, v in rendered.items()})
+    return out
+
+
+def _show_snapshot(repo: ThesisRepository, tid: str, as_of: str) -> dict[str, object]:
+    """Show packet from a point-in-time snapshot."""
+    snap = _load_snapshot(repo, tid, as_of)
+    t, state, watch, questions = snap.thesis, snap.state, snap.watch, snap.questions
+    rules = _snapshot_rules(watch)
+    return {
+        "thesis_id": tid,
+        "slug": t.get("slug"),
+        "status": t.get("status"),
+        "user_thesis": t.get("user_thesis"),
+        "scope": t.get("scope"),
+        "claims": _as_snapshot_list(t.get("claims", [])),
+        "expressions": _as_snapshot_list(t.get("expressions", [])),
+        "assessment": state.get("assessment"),
+        "rules": rules,
+        "setup_needed": not _live_rules(rules),
+        "open_questions": _open_snapshot_questions(questions),
+    }
+
+
+def _thesis_claim_dicts(thesis: Thesis) -> list[dict[str, object]]:
+    """Thesis claims serialized for the model packet."""
+    out: list[dict[str, object]] = []
+    for claim in thesis.claims:
+        rendered = claim.to_dict()
+        out.append({str(k): v for k, v in rendered.items()})
+    return out
+
+
+def _thesis_expression_dicts(thesis: Thesis) -> list[dict[str, object]]:
+    """Thesis expressions serialized for the model packet."""
+    out: list[dict[str, object]] = []
+    for expression in thesis.expressions:
+        rendered = expression.to_dict()
+        out.append({str(k): v for k, v in rendered.items()})
+    return out
+
+
+def _show_live(repo: ThesisRepository, thesis: Thesis, tid: str) -> dict[str, object]:
+    """Show packet from live thesis state."""
+    rules = _watch_rule_dicts(repo.load_watch_rules(tid))
     return {
         "thesis_id": tid,
         "slug": thesis.slug,
         "status": thesis.status,
         "user_thesis": thesis.user_thesis,
         "scope": thesis.scope,
-        "claims": [c.to_dict() for c in thesis.claims],
-        "expressions": [e.to_dict() for e in thesis.expressions],
+        "claims": _thesis_claim_dicts(thesis),
+        "expressions": _thesis_expression_dicts(thesis),
         "assessment": repo.load_state(tid).assessment,
         "rules": rules,
-        "setup_needed": not live,
-        "open_questions": [q.to_dict() for q in repo.load_questions(tid) if q.status == "open"],
+        "setup_needed": not _live_rules(rules),
+        "open_questions": _open_question_dicts(repo.load_questions(tid)),
     }
 
-
-def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    from app.thesis import intake as thesis_intake
-
+def _thesis_show(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     repo = _thesis_repo_for(context)
+    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
+    tid = thesis.thesis_id
+    as_of = _show_as_of(arguments, context)
+    if as_of is not None:
+        return _show_snapshot(repo, tid, as_of)
+    return _show_live(repo, thesis, tid)
+
+
+def _refine_inputs(repo: ThesisRepository, arguments: dict[str, object], context: RequestContext) -> tuple[Thesis, str]:
     thesis_id = arguments.get("id")
     if not isinstance(thesis_id, str) or not thesis_id.strip():
         raise ValueError("thesis_refine: 'id' must be a non-empty string")
@@ -4408,128 +5008,226 @@ def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dic
     clarification = arguments.get("clarification")
     if not isinstance(clarification, str) or not clarification.strip():
         raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
-    proposal = _thesis_proposal(
-        arguments, f"{thesis.user_thesis}\n{clarification.strip()}", "<thesis_refine>")
-    plan = thesis_intake.plan_refinement(thesis, proposal)
+    return thesis, clarification.strip()
+
+def _refine_noop_result(thesis: Thesis) -> dict[str, object]:
+    return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
+def _refine_is_noop(plan: dict[str, object], thesis: Thesis) -> bool:
     merged = plan["merged"]
     merged_thesis = merged.get("user_thesis") if isinstance(merged, dict) else None
-    if (not plan["added_claims"] and not plan["added_expressions"]
-            and merged_thesis == thesis.user_thesis):
-        return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
+    return (not plan["added_claims"] and not plan["added_expressions"]
+            and merged_thesis == thesis.user_thesis)
+
+def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.thesis import intake as thesis_intake
+
+    repo = _thesis_repo_for(context)
+    thesis, clarification = _refine_inputs(repo, arguments, context)
+    proposal = _thesis_proposal(
+        arguments, f"{thesis.user_thesis}\n{clarification}", "<thesis_refine>")
+    plan = thesis_intake.plan_refinement(thesis, proposal)
+    if _refine_is_noop(plan, thesis):
+        return _refine_noop_result(thesis)
     out = thesis_intake.apply_refinement(
         repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
     return {"applied": True, **out}
 
 
-def _thesis_watch(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    from app.thesis.models import new_rule_id
-    from app.thesis.monitor import SUPPORTED_HANDLERS
+def _watch_list(repo: ThesisRepository, tid: str, context: RequestContext) -> dict[str, object]:
+    """Current watch rules: point-in-time snapshot under a cutoff, else live."""
+    cutoff = _effective_at(context)
+    if cutoff:
+        snap = _load_snapshot(repo, tid, cutoff)
+        rules = _snapshot_rules(snap.watch)
+        return {"thesis_id": tid, "rules": rules, "setup_needed": not _live_rules(rules)}
+    live_rules = _watch_rule_dicts(repo.load_watch_rules(tid))
+    return {"thesis_id": tid, "rules": live_rules, "setup_needed": not _live_rules(live_rules)}
 
-    repo = _thesis_repo_for(context)
-    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
-    tid = thesis.thesis_id
-    if arguments.get("rule_type") is None:
-        cutoff = _effective_at(context)
-        if cutoff:
-            snap = repo.load_state_as_of(tid, cutoff)
-            _wrules = snap.watch.get("rules", [])
-            rules = [r for r in (_wrules if isinstance(_wrules, list) else ()) if isinstance(r, dict)]
-            live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
-            return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
-        rules = [r.to_dict() for r in repo.load_watch_rules(tid)]
-        live = [r for r in rules if r.get("enabled") and r.get("support_status") == "supported"]
-        return {"thesis_id": tid, "rules": rules, "setup_needed": not live}
+
+def _handler_names(handlers: Mapping[str, object]) -> list[str]:
+    """Supported rule_type names narrowed from the handlers mapping."""
+    return sorted(handlers)
+
+
+def _checked_rule_type(arguments: dict[str, object], handlers: Mapping[str, object]) -> str:
+    """Validated watch rule_type (non-empty, supported)."""
     rule_type = arguments["rule_type"]
     if not isinstance(rule_type, str) or not rule_type.strip():
         raise ValueError("thesis_watch: 'rule_type' must be a non-empty string")
-    if rule_type not in SUPPORTED_HANDLERS:
-        raise ValueError(f"thesis_watch: unsupported rule_type {rule_type!r}; supported: {sorted(SUPPORTED_HANDLERS)}")
+    if not isinstance(handlers, dict) or rule_type not in handlers:
+        raise ValueError(f"thesis_watch: unsupported rule_type {rule_type!r}; supported: {_handler_names(handlers)}")
+    checked: str = rule_type
+    return checked
+
+
+def _checked_id_list(arguments: dict[str, object], key: str) -> list[str]:
+    """Validated claim/expression id list (list of strings, defaults empty)."""
+    vals = arguments.get(key, [])
+    if not isinstance(vals, list) or not all(isinstance(v, str) for v in vals):
+        raise ValueError(f"thesis_watch: '{key}' must be a list of IDs")
+    raw = arguments.get(key, [])
+    return list(raw) if isinstance(raw, (list, tuple)) else []
+
+
+def _apply_watch_rule(repo: ThesisRepository, tid: str, rule: dict[str, object], context: RequestContext) -> None:
+    """Append one watch rule without static repo typing gaps."""
+    repo.apply_research_result(tid, {"watch_add": [rule]}, "", effective_at=_effective_at(context))
+
+
+def _watch_add(repo: ThesisRepository, thesis: Thesis, arguments: dict[str, object], context: RequestContext, handlers: Mapping[str, object]) -> dict[str, object]:
+    """Validate and append one watch rule to an active thesis."""
+    from app.thesis.models import new_rule_id
+
+    tid = thesis.thesis_id
+    rule_type = _checked_rule_type(arguments, handlers)
     if thesis.status != "active":
         raise ValueError(f"thesis {tid!r} is {thesis.status}; refusing watch change")
-    for key in ("claim_ids", "expression_ids"):
-        vals = arguments.get(key, [])
-        if not isinstance(vals, list) or not all(isinstance(v, str) for v in vals):
-            raise ValueError(f"thesis_watch: '{key}' must be a list of IDs")
-    raw_claims = arguments.get("claim_ids", [])
-    claim_ids = list(raw_claims) if isinstance(raw_claims, (list, tuple)) else []
-    raw_exprs = arguments.get("expression_ids", [])
-    expression_ids = list(raw_exprs) if isinstance(raw_exprs, (list, tuple)) else []
     rule: dict[str, object] = {
         "rule_id": new_rule_id(),
         "rule_type": rule_type,
         "enabled": True,
         "support_status": "supported",
         "support_reason": "",
-        "claim_ids": claim_ids,
-        "expression_ids": expression_ids,
+        "claim_ids": _checked_id_list(arguments, "claim_ids"),
+        "expression_ids": _checked_id_list(arguments, "expression_ids"),
     }
-    repo.apply_research_result(
-        tid, {"watch_add": [rule]}, "", effective_at=_effective_at(context))
+    _apply_watch_rule(repo, tid, rule, context)
     return {"thesis_id": tid, "added": rule}
 
+def _thesis_watch(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.thesis.monitor import SUPPORTED_HANDLERS
+
+    repo = _thesis_repo_for(context)
+    thesis = _thesis_for_context(repo, str(arguments["id"]), context)
+    if arguments.get("rule_type") is None:
+        return _watch_list(repo, thesis.thesis_id, context)
+    return _watch_add(repo, thesis, arguments, context, SUPPORTED_HANDLERS)
+
+
+def _checked_journal_body(arguments: dict[str, object]) -> str:
+    """Validated journal body (non-empty, stripped)."""
+    body = arguments["body"]
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("thesis_journal: 'body' must be a non-empty string")
+    return body.strip()
+
+
+def _checked_journal_title(arguments: dict[str, object]) -> str:
+    """Validated journal title (string, defaults to Operator note)."""
+    title = arguments.get("title", "Operator note")
+    if title is not None and not isinstance(title, str):
+        raise ValueError("thesis_journal: 'title' must be a string")
+    return title or "Operator note"
+
+
+def _trigger_ids(repo: ThesisRepository, thesis_id: str) -> list[str]:
+    """Trigger ids narrowed for the membership check."""
+    return [trigger.trigger_id for trigger in repo.load_triggers(thesis_id)]
+
+
+def _checked_trigger(repo: ThesisRepository, thesis_id: str, trigger_id: str) -> str:
+    """Trigger belongs to the thesis, else raise."""
+    if not isinstance(trigger_id, str) or not trigger_id:
+        raise ValueError("thesis_journal: 'trigger_id' must be a non-empty string")
+    if trigger_id not in _trigger_ids(repo, thesis_id):
+        raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis_id!r}")
+    return trigger_id
+
+
+def _checked_run_id(arguments: dict[str, object], run_id: str) -> str:
+    """run_id requires trigger_id and a non-empty string."""
+    if arguments.get("trigger_id") is None:
+        raise ValueError("thesis_journal: 'run_id' requires 'trigger_id'")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("thesis_journal: 'run_id' must be a non-empty string")
+    return run_id
+
+
+def _checked_known_at(known_at: object) -> str:
+    """Parseable ISO-8601 known_at, else raise."""
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+        raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
+    return known_at
+
+
+def _trigger_known_at(known_at: object, cutoff: str, entry: dict[str, object]) -> None:
+    """Trigger-linked known_at under a cutoff: required and equal to the cutoff."""
+    from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
+    if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
+        raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
+    known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
+    if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
+        raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
+    entry["known_at"] = known_at
+
+
+def _attach_journal_trigger(repo: ThesisRepository, thesis_id: str, arguments: dict[str, object], entry: dict[str, object]) -> str | None:
+    """Trigger/run linkage: trigger_id validated, run_id attached when present."""
+    trigger_id = arguments.get("trigger_id")
+    if trigger_id is None:
+        return None
+    assert isinstance(trigger_id, str)
+    entry["trigger_id"] = _checked_trigger(repo, thesis_id, trigger_id)
+    run_id = arguments.get("run_id")
+    if run_id is not None:
+        assert isinstance(run_id, str)
+        entry["run_id"] = _checked_run_id(arguments, run_id)
+    trigger = entry["trigger_id"]
+    if isinstance(trigger, str):
+        return trigger
+    raise TypeError(f"trigger_id must be a string, got {type(trigger).__name__}")
+
+
+def _attach_journal_known_at(trigger_id: str | None, arguments: dict[str, object], context: RequestContext, entry: dict[str, object]) -> None:
+    """known_at: cutoff-equal for trigger-linked entries under PIT, else plain parseable."""
+    known_at = arguments.get("known_at")
+    if trigger_id is not None:
+        cutoff = _effective_at(context)
+        if cutoff:
+            _trigger_known_at(known_at, cutoff, entry)
+        elif known_at is not None:
+            entry["known_at"] = _checked_known_at(known_at)
+    elif known_at is not None:
+        entry["known_at"] = _checked_known_at(known_at)
 
 def _thesis_journal(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     repo = _thesis_repo_for(context)
     thesis = _thesis_for_context(repo, str(arguments["id"]), context)
     if thesis.status != "active":
         raise ValueError(f"thesis {thesis.thesis_id!r} is {thesis.status}; refusing journal append")
-    body = arguments["body"]
-    if not isinstance(body, str) or not body.strip():
-        raise ValueError("thesis_journal: 'body' must be a non-empty string")
-    title = arguments.get("title", "Operator note")
-    if title is not None and not isinstance(title, str):
-        raise ValueError("thesis_journal: 'title' must be a string")
     entry: dict[str, object] = {
-        "title": title or "Operator note",
-        "body": body.strip(),
+        "title": _checked_journal_title(arguments),
+        "body": _checked_journal_body(arguments),
     }
-    trigger_id = arguments.get("trigger_id")
-    if trigger_id is not None:
-        if not isinstance(trigger_id, str) or not trigger_id:
-            raise ValueError("thesis_journal: 'trigger_id' must be a non-empty string")
-        if not any(t.trigger_id == trigger_id for t in repo.load_triggers(thesis.thesis_id)):
-            raise ValueError(f"thesis_journal: trigger {trigger_id!r} does not belong to thesis {thesis.thesis_id!r}")
-        entry["trigger_id"] = trigger_id
-    run_id = arguments.get("run_id")
-    if run_id is not None:
-        if trigger_id is None:
-            raise ValueError("thesis_journal: 'run_id' requires 'trigger_id'")
-        if not isinstance(run_id, str) or not run_id:
-            raise ValueError("thesis_journal: 'run_id' must be a non-empty string")
-        entry["run_id"] = run_id
-    known_at = arguments.get("known_at")
-    if trigger_id is not None:
-        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-        cutoff = _effective_at(context)
-        if cutoff:
-            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
-                raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
-            known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
-            if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
-                raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
-            entry["known_at"] = known_at
-        elif known_at is not None:
-            if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
-                raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
-            entry["known_at"] = known_at
-    elif known_at is not None:
-        from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
-        if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
-            raise ValueError("thesis_journal: 'known_at' must be a parseable ISO-8601 string")
-        entry["known_at"] = known_at
+    trigger_id = _attach_journal_trigger(repo, thesis.thesis_id, arguments, entry)
+    _attach_journal_known_at(trigger_id, arguments, context, entry)
     dest = repo.append_journal_entry(thesis.thesis_id, entry)
     return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
 
-def _thesis_status(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    repo = _thesis_repo_for(context)
+def _checked_status_id(arguments: dict[str, object]) -> str:
+    """Validated thesis id for status transitions (non-empty, stripped)."""
     thesis_id = arguments.get("id")
     if not isinstance(thesis_id, str) or not thesis_id.strip():
         raise ValueError("thesis_status: 'id' must be a non-empty string")
+    return thesis_id.strip()
+
+
+def _checked_status_action(arguments: dict[str, object]) -> str:
+    """Validated status action (pause/resume/close)."""
     action = arguments.get("action")
     if not isinstance(action, str) or action not in ("pause", "resume", "close"):
         raise ValueError("thesis_status: 'action' must be one of pause, resume, close")
+    return action
+
+def _thesis_status(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    repo = _thesis_repo_for(context)
+    thesis_id = _checked_status_id(arguments)
+    action = _checked_status_action(arguments)
     op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis, "close": repo.close_thesis}[action]
-    updated = op(thesis_id.strip(), effective_at=_effective_at(context))
+    updated = op(thesis_id, effective_at=_effective_at(context))
     return {"thesis_id": updated.thesis_id, "slug": updated.slug, "status": updated.status, "action": action}
 
 
@@ -4548,22 +5246,40 @@ def _research_not_found_error(exc: Exception) -> dict[str, object]:
     return {"error": message, "error_type": error_type}
 
 
-def _research_start(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    from app.research import service as research_service
-
+def _start_question(arguments: dict[str, object]) -> str:
+    """Validated research question (non-empty, stripped)."""
     question = arguments.get("question")
     if not isinstance(question, str) or not question.strip():
         raise ValueError("research_start: 'question' must be a non-empty string")
+    return question.strip()
+
+
+def _start_objective(arguments: dict[str, object]) -> str | None:
+    """Optional research objective (non-blank string, else None)."""
     objective = arguments.get("objective")
+    return objective.strip() if isinstance(objective, str) and objective.strip() else None
+
+
+def _start_as_of(arguments: dict[str, object]) -> str | None:
+    """Optional as_of coordinate (non-blank string, else None)."""
     as_of = arguments.get("as_of")
-    repo = _research_repo_for(context)
-    session_id = research_service.create_research(
-        question.strip(),
-        objective.strip() if isinstance(objective, str) and objective.strip() else None,
-        as_of=as_of if isinstance(as_of, str) and as_of else None,
-        repo=repo,
-    )
-    snapshot = research_service.inspect_research(session_id, repo=repo)
+    return as_of if isinstance(as_of, str) and as_of else None
+
+
+def _inspect_research_snapshot(research_service: object, session_id: str, repo: object) -> dict[str, object]:
+    """inspect_research without static service typing."""
+    inspect = getattr(research_service, "inspect_research", None)
+    if not callable(inspect):
+        raise TypeError(f"research service must expose inspect_research, got {type(research_service).__name__}")
+    snapshot = inspect(session_id, repo=repo)
+    if not isinstance(snapshot, dict):
+        raise TypeError(f"inspect_research must return a dict, got {type(snapshot).__name__}")
+    return {str(k): v for k, v in snapshot.items()}
+
+
+def _started_packet(research_service: object, repo: object, session_id: str) -> dict[str, object]:
+    """Start packet: session id, first job id, status, and next action."""
+    snapshot = _inspect_research_snapshot(research_service, session_id, repo)
     raw_jobs = snapshot.get("jobs")
     jobs: list[object] = list(raw_jobs) if isinstance(raw_jobs, list) else []
     first_raw = jobs[0] if jobs else None
@@ -4576,6 +5292,18 @@ def _research_start(arguments: dict[str, object], context: RequestContext) -> di
         "status": status,
         "pending_next_action": snapshot.get("pending_next_action"),
     }
+
+def _research_start(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+
+    repo = _research_repo_for(context)
+    session_id = research_service.create_research(
+        _start_question(arguments),
+        _start_objective(arguments),
+        as_of=_start_as_of(arguments),
+        repo=repo,
+    )
+    return _started_packet(research_service, repo, session_id)
 
 
 def _research_resume(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
@@ -4611,23 +5339,38 @@ def _research_cancel(arguments: dict[str, object], context: RequestContext) -> d
         return _research_not_found_error(e)
 
 
+_RESEARCH_KINDS = ("evidence", "freeze", "dossier", "job", "research")
+
+
+def _checked_resource_kind(arguments: dict[str, object]) -> str:
+    """Validated research resource kind, else an unknown_resource error is raised by the caller."""
+    kind = arguments.get("kind")
+    if not isinstance(kind, str) or kind not in _RESEARCH_KINDS:
+        raise ValueError(f"unknown resource kind: {kind!r} (expected evidence|freeze|dossier|job|research)")
+    return kind
+
+
+def _unknown_resource_error(kind: str, resource_id: str, session_id: str) -> dict[str, object]:
+    """Unknown id within a known store: jobs get unknown_job, others unknown_resource."""
+    if kind == "job":
+        return {"error": f"unknown job_id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_job"}
+    return {"error": f"unknown {kind} id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_resource"}
+
 def _research_read(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research.service import ResearchNotFound
 
     session_id = str(arguments["session_id"])
-    kind = arguments.get("kind")
-    if not isinstance(kind, str) or kind not in ("evidence", "freeze", "dossier", "job", "research"):
-        return {"error": f"unknown resource kind: {kind!r} (expected evidence|freeze|dossier|job|research)", "error_type": "unknown_resource"}
+    try:
+        kind = _checked_resource_kind(arguments)
+    except ValueError as exc:
+        return {"error": str(exc), "error_type": "unknown_resource"}
     resource_id = str(arguments.get("resource_id"))
     try:
-        stores = _research_repo_for(context).resource_stores(session_id)
+        store = _research_repo_for(context).resource_stores(session_id)[kind]
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
-    store = stores[kind]
     if resource_id not in store:
-        if kind == "job":
-            return {"error": f"unknown job_id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_job"}
-        return {"error": f"unknown {kind} id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_resource"}
+        return _unknown_resource_error(kind, resource_id, session_id)
     return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
 
 
@@ -4639,12 +5382,70 @@ def _research_add_evidence(arguments: dict[str, object], context: RequestContext
     job_id = str(arguments["job_id"])
     item = arguments["item"]
     if not isinstance(item, dict):
-        raise ValueError(f"research_add_evidence: 'item' must be an object, got {type(item).__name__}")
+        raise ValueError(f"research_add_evidence: 'item' must be an object, got {type(item).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     try:
         return dict(research_service.record_evidence(session_id, job_id, item, repo=_research_repo_for(context)))
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
 
+
+def _submit_coverage(arguments: dict[str, object]) -> dict[str, object]:
+    """Validated coverage mapping for submit_source_result."""
+    coverage = arguments["coverage"]
+    if not isinstance(coverage, dict):
+        raise ValueError(f"research_submit_source_result: 'coverage' must be an object, got {type(coverage).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return coverage
+
+
+def _submit_str_list(arguments: dict[str, object], key: str) -> list[str]:
+    """Validated string list for submit_source_result (evidence_ids/unresolved)."""
+    values = arguments[key]
+    if not isinstance(values, list) or any(not isinstance(e, str) for e in values):
+        raise ValueError(f"research_submit_source_result: '{key}' must be a list of strings")
+    return values
+
+
+def _submit_job_known(state: dict[str, object], job_id: str) -> bool:
+    """Whether the session snapshot contains the job."""
+    raw_jobs = state.get("jobs")
+    jobs: list[object] = list(raw_jobs) if isinstance(raw_jobs, list) else []
+    return any(isinstance(j, dict) and j.get("job_id") == job_id for j in jobs)
+
+def _research_submit_source_result(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    from app.research import service as research_service
+    from app.research.service import ResearchNotFound
+
+    session_id = str(arguments["session_id"])
+    job_id = str(arguments["job_id"])
+    coverage = _submit_coverage(arguments)
+    evidence_ids = _submit_str_list(arguments, "evidence_ids")
+    unresolved = _submit_str_list(arguments, "unresolved_questions")
+    try:
+        state = research_service.inspect_research(session_id, repo=_research_repo_for(context))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+    if not _submit_job_known(state, job_id):
+        return {"error": f"unknown job_id: {job_id!r} in session {session_id!r}", "error_type": "unknown_job"}
+    try:
+        return dict(research_service.submit_source_result(job_id, dict(coverage), list(evidence_ids), list(unresolved), repo=_research_repo_for(context)))
+    except (ResearchNotFound, KeyError) as e:
+        return _research_not_found_error(e)
+
+
+def _analysis_role(arguments: dict[str, object]) -> str:
+    """Validated committee role (stockbot/bullbot/bearbot)."""
+    role = str(arguments["role"])
+    if role not in ("stockbot", "bullbot", "bearbot"):
+        raise ValueError(f"research_add_analysis: role must be stockbot|bullbot|bearbot, got {role!r}")
+    return role
+
+
+def _analysis_payload(arguments: dict[str, object]) -> dict[str, object]:
+    """Validated committee analysis mapping."""
+    analysis = arguments["analysis"]
+    if not isinstance(analysis, dict):
+        raise ValueError(f"research_add_analysis: 'analysis' must be an object, got {type(analysis).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return analysis
 
 def _research_add_analysis(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
@@ -4652,38 +5453,58 @@ def _research_add_analysis(arguments: dict[str, object], context: RequestContext
 
     session_id = str(arguments["session_id"])
     job_id = str(arguments["job_id"])
-    role = str(arguments["role"])
-    if role not in ("stockbot", "bullbot", "bearbot"):
-        raise ValueError(f"research_add_analysis: role must be stockbot|bullbot|bearbot, got {role!r}")
-    analysis = arguments["analysis"]
-    if not isinstance(analysis, dict):
-        raise ValueError(f"research_add_analysis: 'analysis' must be an object, got {type(analysis).__name__}")
+    role = _analysis_role(arguments)
+    analysis = _analysis_payload(arguments)
     try:
         return dict(research_service.record_committee_analysis(session_id, job_id, role, analysis, repo=_research_repo_for(context)))
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
 
 
+def _finalize_answer(arguments: dict[str, object]) -> str:
+    """Validated finalize answer (non-empty string)."""
+    answer = arguments["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("research_finalize: 'answer' must be a non-empty string")
+    return answer
+
+
+def _finalize_claim_ids(evidence_ids: object) -> list[str]:
+    """Validated claim evidence id list (non-empty strings)."""
+    if not isinstance(evidence_ids, list) or not evidence_ids:
+        raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
+    for item in evidence_ids:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
+    return evidence_ids
+
+
+def _finalize_claim_text(claim: object) -> None:
+    """One claim has a non-empty text."""
+    text = claim.get("text", "") if isinstance(claim, dict) else ""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("research_finalize: each claim 'text' must be a non-empty string")
+
+
+def _finalize_claims(arguments: dict[str, object]) -> list[object]:
+    """Validated finalize claims (non-empty list of grounded claims)."""
+    claims = arguments["claims"]
+    if not isinstance(claims, list) or not claims:
+        raise ValueError("research_finalize: 'claims' must be a non-empty list")
+    for claim in claims:
+        _finalize_claim_text(claim)
+        _finalize_claim_ids(claim.get("evidence_ids", []) if isinstance(claim, dict) else [])
+    return claims
+
 def _research_finalize(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
     from app.research.service import ResearchNotFound
 
     session_id = str(arguments["session_id"])
-    answer = arguments["answer"]
-    if not isinstance(answer, str) or not answer.strip():
-        raise ValueError("research_finalize: 'answer' must be a non-empty string")
-    claims = arguments["claims"]
-    if not isinstance(claims, list) or not claims:
-        raise ValueError("research_finalize: 'claims' must be a non-empty list")
-    for _c in claims:
-        _t: object = _c.get("text", "") if isinstance(_c, dict) else ""
-        _e: object = _c.get("evidence_ids", []) if isinstance(_c, dict) else []
-        if not isinstance(_t, str) or not _t.strip():
-            raise ValueError("research_finalize: each claim 'text' must be a non-empty string")
-        if not isinstance(_e, list) or not _e or any(not isinstance(_i, str) or not _i.strip() for _i in _e):
-            raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
     try:
-        return dict(research_service.finalize_session(session_id, answer, claims, repo=_research_repo_for(context)))
+        return dict(research_service.finalize_session(session_id, _finalize_answer(arguments), _finalize_claims(arguments), repo=_research_repo_for(context)))
+    except ValueError as e:
+        return {"error": str(e)}
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
 
@@ -4704,6 +5525,7 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
     "research_cancel": _research_cancel,
     "research_read": _research_read,
     "research_add_evidence": _research_add_evidence,
+    "research_submit_source_result": _research_submit_source_result,
     "research_add_analysis": _research_add_analysis,
     "research_finalize": _research_finalize,
 }
@@ -4713,6 +5535,73 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
 # Merged view for backward compat (tests/scripts import _DIRECT_HANDLERS).
 _DIRECT_HANDLERS: dict[str, object] = {**_MODEL_HANDLERS, **_THESIS_HANDLERS, **_RESEARCH_HANDLERS}
 _CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS) | frozenset(_RESEARCH_HANDLERS)
+
+def _permission_error(name: str, context: RequestContext) -> dict[str, object] | None:
+    """Not-permitted envelope, else None."""
+    if not tool_is_permitted(name, context):
+        return {"error": f"Tool is not permitted: {name}"}
+    return None
+
+
+def _pit_unsafe_error(name: str, context: RequestContext) -> dict[str, object] | None:
+    """Historical runs reject tools without an as_of coordinate (governed mutators exempt)."""
+    if _effective_at(context) and name not in _PIT_GOVERNED_MUTATORS and not _tool_has_as_of(name):
+        return {"error": f"Tool '{name}' is not point-in-time safe under this historical run.", "error_type": "pit_unsafe_tool", "soft": True}
+    return None
+
+
+def _lookup_context_handler(name: str) -> ContextHandler | None:
+    """Thesis/research handler for context-dispatched tools, else None."""
+    return _THESIS_HANDLERS.get(name) or _RESEARCH_HANDLERS.get(name)
+
+
+def _lookup_model_handler(name: str) -> ModelHandler | None:
+    """Model handler across the model/FINRA/Robinhood maps, else None."""
+    return (
+        _MODEL_HANDLERS.get(name)
+        or _FINRA_HANDLERS.get(name)
+        or _ROBINHOOD_HANDLERS.get(name)
+    )
+
+
+def _with_pit_flag(name: str, result: dict[str, object], context: RequestContext) -> dict[str, object]:
+    """Mark non-as_of results pit_safe=False under a historical run (governed mutators exempt)."""
+    if _effective_at(context) and isinstance(result, dict):
+        if not _tool_has_as_of(name) and name not in _PIT_GOVERNED_MUTATORS:
+            result.setdefault("pit_safe", False)
+    return result
+
+
+def _dispatch_tool(name: str, arguments: dict[str, object], model: str, context: RequestContext) -> dict[str, object]:
+    """Validated dispatch: context handlers, then model handlers, else unknown-tool."""
+    if name in _CONTEXT_CALL_HANDLERS:
+        ctx_handler = _lookup_context_handler(name)
+        if ctx_handler is None:
+            return _unknown_tool_error(name)
+        return ctx_handler(arguments, context)
+    model_handler = _lookup_model_handler(name)
+    if model_handler is None:
+        return _unknown_tool_error(name)
+    return _with_pit_flag(name, model_handler(arguments, model), context)
+
+
+def _robinhood_failure(name: str) -> dict[str, object]:
+    """Robinhood provider failure without request identifiers (never logged/sent)."""
+    # Provider errors can echo request arguments. Do not log
+    # exception details (no account identifiers in logs) or place
+    # them in a tool message that is subsequently sent to the LLM.
+    logger.warning("Robinhood tool '%s' failed; provider details withheld", name)
+    return {"error": f"Robinhood tool '{name}' failed; provider details withheld."}
+
+
+def _auth_required() -> dict[str, object]:
+    """Robinhood OAuth soft failure (setup step, not an error)."""
+    return {
+        "error": "Robinhood data unavailable (not authorized). Run `cli.py robinhood-login` to authorize.",
+        "error_type": "auth_required",
+        "soft": True,
+        "source": "robinhood_mcp",
+    }
 
 def execute_tool(
     name: str,
@@ -4725,65 +5614,27 @@ def execute_tool(
     never raises — errors are returned as {"error": ...} so the model can
     report them honestly (guardrail behavior)."""
     try:
-        if not tool_is_permitted(name, context):
-            return {"error": f"Tool is not permitted: {name}"}
+        denied = _permission_error(name, context)
+        if denied is not None:
+            return denied
         arguments, pit_error = _apply_pit_cutoff(name, arguments, context)
         if pit_error is not None:
             return pit_error
-        if _effective_at(context) and name not in _PIT_GOVERNED_MUTATORS:
-            _pit_tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
-            _pit_fn = _tool_function(_pit_tool) if _pit_tool is not None else {}
-            _pit_raw_params = _pit_fn.get("parameters")
-            _pit_params: dict[str, object] = {str(k): v for k, v in _pit_raw_params.items()} if isinstance(_pit_raw_params, dict) else {}
-            _pit_raw_props = _pit_params.get("properties")
-            _pit_props: dict[str, object] = {str(k): v for k, v in _pit_raw_props.items()} if isinstance(_pit_raw_props, dict) else {}
-            if "as_of" not in _pit_props:
-                return {"error": f"Tool '{name}' is not point-in-time safe under this historical run.", "error_type": "pit_unsafe_tool", "soft": True}
+        unsafe = _pit_unsafe_error(name, context)
+        if unsafe is not None:
+            return unsafe
         invalid = _validate_tool_arguments(name, arguments)
         if invalid is not None:
             return _invalid_args_error(name, invalid)
-        if name in _CONTEXT_CALL_HANDLERS:
-            ctx_handler = _THESIS_HANDLERS.get(name)
-            if ctx_handler is None:
-                ctx_handler = _RESEARCH_HANDLERS.get(name)
-            if ctx_handler is None:
-                return _unknown_tool_error(name)
-            return ctx_handler(arguments, context)
-        model_handler = (
-            _MODEL_HANDLERS.get(name)
-            or _FINRA_HANDLERS.get(name)
-            or _ROBINHOOD_HANDLERS.get(name)
-        )
-        if model_handler is None:
-            return _unknown_tool_error(name)
-        result = model_handler(arguments, model)
-        if _effective_at(context) and isinstance(result, dict):
-            tool = next((t for t in TOOLS if _tool_function(t).get("name") == name), None)
-            fn = _tool_function(tool) if tool is not None else {}
-            raw_parameters = fn.get("parameters")
-            parameters: dict[str, object] = {str(k): v for k, v in raw_parameters.items()} if isinstance(raw_parameters, dict) else {}
-            raw_props = parameters.get("properties")
-            props: dict[str, object] = {str(k): v for k, v in raw_props.items()} if isinstance(raw_props, dict) else {}
-            if "as_of" not in props and name not in _PIT_GOVERNED_MUTATORS:
-                result.setdefault("pit_safe", False)
-        return result
+        return _dispatch_tool(name, arguments, model, context)
     except KeyError as e:
         return {"error": f"Missing required argument {e} for tool '{name}'"}
     except RobinhoodAuthRequired:
         logger.info("Robinhood tool '%s' not authorized; soft failure", name)
-        return {
-            "error": "Robinhood data unavailable (not authorized). Run `cli.py robinhood-login` to authorize.",
-            "error_type": "auth_required",
-            "soft": True,
-            "source": "robinhood_mcp",
-        }
+        return _auth_required()
     except Exception as e:
         if name in _ROBINHOOD_HANDLERS:
-            # Provider errors can echo request arguments. Do not log
-            # exception details (no account identifiers in logs) or place
-            # them in a tool message that is subsequently sent to the LLM.
-            logger.warning("Robinhood tool '%s' failed; provider details withheld", name)
-            return {"error": f"Robinhood tool '{name}' failed; provider details withheld."}
+            return _robinhood_failure(name)
         logger.exception("Tool '%s' failed", name)
         return {"error": f"Tool '{name}' failed: {e}"}
 

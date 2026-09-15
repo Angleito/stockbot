@@ -47,6 +47,37 @@ def load_proxy_text(accession_no: str) -> str:
     return documents.get_sec_filing_text(accession_no)
 
 
+def _proxy_event_type(form: str) -> str:
+    if form in CONTESTED_FORMS:
+        return "proxy_contest"
+    if form in ("DEFM14A", "PREM14A"):
+        return "merger_vote"
+    if form == "PX14A6G":
+        return "shareholder_proposal"
+    if form in ("PRE 14C", "DEF 14C"):
+        return "information_statement"
+    return "annual_meeting"
+
+
+def _structured_subject_of(obj: object) -> str | None:
+    # Subject only from structured/explicit evidence, never a filer copy.
+    try:
+        for attr in ("subject_name", "subjectName", "registrant_name",
+                     "company"):
+            value = getattr(obj, attr, None)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    return None
+
+
+def _proxy_subject(subject_name: str | None, obj: object | None) -> str | None:
+    if subject_name is not None:
+        return subject_name.strip()
+    return _structured_subject_of(obj) if obj is not None else None
+
+
 def normalize_proxy(
     accession_no: str,
     form: str,
@@ -64,29 +95,7 @@ def normalize_proxy(
     known_at: str | None = None,
     source_url: str | None = None,
 ) -> GovernanceEvent:
-    if form in CONTESTED_FORMS:
-        event_type = "proxy_contest"
-    elif form in ("DEFM14A", "PREM14A"):
-        event_type = "merger_vote"
-    elif form == "PX14A6G":
-        event_type = "shareholder_proposal"
-    elif form in ("PRE 14C", "DEF 14C"):
-        event_type = "information_statement"
-    else:
-        event_type = "annual_meeting"
-    # Subject only from structured/explicit evidence, never a filer copy.
-    structured_subject = None
-    if obj is not None:
-        try:
-            for attr in ("subject_name", "subjectName", "registrant_name",
-                         "company"):
-                value = getattr(obj, attr, None)
-                if value is not None and str(value).strip():
-                    structured_subject = str(value).strip()
-                    break
-        except Exception:
-            structured_subject = None
-    method = ("structured-header" if obj is not None else "form-identity")
+    event_type = _proxy_event_type(form)
     return GovernanceEvent(
         event_id=f"{accession_no}:gov",
         issuer=issuer,
@@ -100,12 +109,11 @@ def normalize_proxy(
         filer_name=filer_name.strip() if filer_name is not None else None,
         subject_cik=str(subject_cik).strip()
         if subject_cik is not None else None,
-        subject_name=(subject_name.strip()
-                      if subject_name is not None else structured_subject),
+        subject_name=_proxy_subject(subject_name, obj),
         document_name=document_name,
         known_at=known_at or filed_at,
         source_url=source_url,
-        extraction_method=method,
+        extraction_method=("structured-header" if obj is not None else "form-identity"),
     )
 
 
@@ -148,28 +156,17 @@ def _num(raw: str) -> int | None:
         return None
 
 
-def extract_votes(
-    text: str | None,
-    *,
-    issuer: str,
-    accession_no: str,
-    meeting_date: str | None = None,
-    document_name: str | None = None,
-) -> list[ShareholderVote]:
-    if not text:
-        return []
-    body = text
-    for_match = _VOTES_FOR.search(body)
-    against_match = _VOTES_AGAINST.search(body)
-    if not for_match and not against_match:
-        return []
-    abstain_match = _ABSTAIN.search(body)
-    outcome_match = _OUTCOME.search(body)
-    first = min(m.start() for m in (for_match, against_match)
-                if m is not None)
-    last = max(m.end() for m in (for_match, against_match, abstain_match,
-                                  outcome_match) if m is not None)
-    return [ShareholderVote(
+def _vote_span(matches: tuple[re.Match[str] | None, ...]) -> tuple[int, int]:
+    present = [m for m in matches if m is not None]
+    return (min(m.start() for m in present), max(m.end() for m in present))
+
+
+def _vote_record(*, issuer: str, accession_no: str, meeting_date: str | None,
+                 for_match: re.Match[str] | None, against_match: re.Match[str] | None,
+                 abstain_match: re.Match[str] | None, outcome_match: re.Match[str] | None,
+                 document_name: str | None) -> ShareholderVote:
+    first, last = _vote_span((for_match, against_match, abstain_match, outcome_match))
+    return ShareholderVote(
         issuer=issuer,
         accession_no=accession_no,
         meeting_date=meeting_date,
@@ -180,7 +177,27 @@ def extract_votes(
         outcome=outcome_match.group(1).lower() if outcome_match else None,
         source_span=f"{first}:{last}",
         document_name=document_name,
-    )]
+    )
+
+def extract_votes(
+    text: str | None,
+    *,
+    issuer: str,
+    accession_no: str,
+    meeting_date: str | None = None,
+    document_name: str | None = None,
+) -> list[ShareholderVote]:
+    if not text:
+        return []
+    for_match = _VOTES_FOR.search(text)
+    against_match = _VOTES_AGAINST.search(text)
+    if not for_match and not against_match:
+        return []
+    return [_vote_record(
+        issuer=issuer, accession_no=accession_no, meeting_date=meeting_date,
+        for_match=for_match, against_match=against_match,
+        abstain_match=_ABSTAIN.search(text), outcome_match=_OUTCOME.search(text),
+        document_name=document_name)]
 
 
 def get_governance_events(
@@ -200,7 +217,7 @@ def get_governance_events(
         issuer = getattr(filing, "filer_name", None) or str(ticker_or_cik)
         try:
             text = load_proxy_text(accession)
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             text = None
         out.append(normalize_proxy(
             accession, form, issuer=issuer, filed_at=filed_at, text=text,

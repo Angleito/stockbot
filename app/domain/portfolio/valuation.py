@@ -9,7 +9,7 @@ from ..market.quotes import Quote
 from ..market.securities import SecurityResolution
 from .models import BrokeragePositionInput, Position
 
-ZERO = Decimal("0")
+ZERO = Decimal(0)
 
 
 def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:

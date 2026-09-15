@@ -18,7 +18,7 @@ def fact_lineage(row: Mapping[str, object]) -> dict[str, object]:
     """
     try:
         items: dict[str, object] = dict(row) if isinstance(row, dict) else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         items = {}
     return {key: items.get(key) for key in _KEYS}
 
@@ -35,7 +35,7 @@ def period_lineage(
     for row in rows or []:
         try:
             end = row.get("period_end")
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             continue
         if not isinstance(end, str) or not end:
             continue

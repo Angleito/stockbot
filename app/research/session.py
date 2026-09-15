@@ -66,6 +66,19 @@ def can_transition(current: str, new_status: str) -> bool:
     return new_status in TRANSITIONS.get(current, frozenset())
 
 
+def _parse_session_as_of(as_of: datetime | str | None) -> datetime | None:
+    if isinstance(as_of, datetime):
+        return normalize_time(as_of)
+    if isinstance(as_of, str) and as_of.strip():
+        try:
+            return normalize_time(datetime.fromisoformat(as_of.strip()))
+        except ValueError:
+            raise ValueError(f"<session>: 'as_of' must be ISO-8601, got {as_of!r}") from None
+    if as_of is not None:
+        raise ValueError(f"<session>: 'as_of' must be ISO-8601, datetime, or null, got {as_of!r}")
+    return None
+
+
 def create_session(
     query: str,
     objective: str,
@@ -80,16 +93,6 @@ def create_session(
         raise ValueError("<session>: 'query' must be a non-empty string")
     if not objective:
         raise ValueError("<session>: 'objective' must be a non-empty string")
-    parsed_as_of: datetime | None = None
-    if isinstance(as_of, datetime):
-        parsed_as_of = normalize_time(as_of)
-    elif isinstance(as_of, str) and as_of.strip():
-        try:
-            parsed_as_of = normalize_time(datetime.fromisoformat(as_of.strip()))
-        except ValueError:
-            raise ValueError(f"<session>: 'as_of' must be ISO-8601, got {as_of!r}") from None
-    elif as_of is not None:
-        raise ValueError(f"<session>: 'as_of' must be ISO-8601, datetime, or null, got {as_of!r}")
     now = utcnow()
     session = ResearchSession(
         session_id=session_id or new_session_id(),
@@ -97,7 +100,7 @@ def create_session(
         updated_at=now,
         query=query,
         objective=objective,
-        as_of=parsed_as_of,
+        as_of=_parse_session_as_of(as_of),
         status=C,
         policy=validate_json_mapping(policy, "<session>: 'policy'") if policy is not None else default_policy(),
         budget=validate_json_mapping(budget, "<session>: 'budget'") if budget is not None else default_budget(),

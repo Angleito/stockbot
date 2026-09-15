@@ -33,6 +33,38 @@ class ToolClient(Protocol):
         ...
 
 
+def _structured_data(payload: Mapping[str, object]) -> object | None:
+    structured: object = payload.get("structured_content") or payload.get("structuredContent")
+    if not isinstance(structured, dict):
+        return None
+    inner: object = structured.get("data")
+    return inner if isinstance(inner, dict) else None
+
+
+def _parsed_content_block(block: object) -> tuple[bool, object]:
+    text: object = block.get("text") if isinstance(block, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return False, None
+    try:
+        parsed: object = json.loads(text)
+    except (TypeError, ValueError):
+        return False, None
+    if not isinstance(parsed, dict):
+        return False, None
+    return True, parsed.get("data", parsed)
+
+
+def _content_data(payload: Mapping[str, object]) -> tuple[bool, object]:
+    content: object = payload.get("content")
+    if not isinstance(content, list):
+        return False, None
+    for block in content:
+        found, value = _parsed_content_block(block)
+        if found:
+            return True, value
+    return False, None
+
+
 def _provider_data(payload: object) -> object:
     """Unwrap the MCP response envelope to the tool's ``data`` object.
 
@@ -40,28 +72,28 @@ def _provider_data(payload: object) -> object:
     ``content`` block; a bare ``{"data": ...}`` and envelope-less payloads
     (used by tests) are unwrapped/passed through unchanged.
     """
-    if isinstance(payload, dict):
-        structured: object = payload.get("structured_content") or payload.get("structuredContent")
-        if isinstance(structured, dict):
-            inner: object = structured.get("data")
-            if isinstance(inner, dict):
-                return inner
-        content: object = payload.get("content")
-        if isinstance(content, list):
-            for block in content:
-                text: object = block.get("text") if isinstance(block, dict) else None
-                if isinstance(text, str) and text.strip():
-                    try:
-                        parsed: object = json.loads(text)
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(parsed, dict):
-                        fallback: object = parsed.get("data", parsed)
-                        return fallback
-        bare: object = payload.get("data")
-        if isinstance(bare, dict):
-            return bare
+    if not isinstance(payload, dict):
+        return payload
+    structured = _structured_data(payload)
+    if structured is not None:
+        return structured
+    found, value = _content_data(payload)
+    if found:
+        return value
+    bare: object = payload.get("data")
+    if isinstance(bare, dict):
+        return bare
     return payload
+
+
+def _dict_rows(payload: Mapping[str, object], keys: tuple[str, ...]) -> list[dict[str, object]] | None:
+    for key in keys:
+        value: object = payload.get(key)
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+        if isinstance(value, dict):
+            return [value]
+    return None
 
 
 def _rows(payload: object, *keys: str, wrap: bool = True) -> list[dict[str, object]] | None:
@@ -76,13 +108,18 @@ def _rows(payload: object, *keys: str, wrap: bool = True) -> list[dict[str, obje
         return [row for row in payload if isinstance(row, dict)]
     if not isinstance(payload, dict):
         return None
-    for key in keys:
-        value: object = payload.get(key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            return [value]
+    found = _dict_rows(payload, keys)
+    if found is not None:
+        return found
     return [payload] if wrap else None
+
+
+def _row_of_quote(value: object) -> list[dict[str, object]] | None:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return None
 
 
 def _quote_rows(payload: object) -> list[dict[str, object]]:
@@ -92,11 +129,9 @@ def _quote_rows(payload: object) -> list[dict[str, object]]:
     if not isinstance(payload, dict):
         return []
     for key in _QUOTE_LIST_KEYS:
-        value: object = payload.get(key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            return [value]
+        rows = _row_of_quote(payload.get(key))
+        if rows is not None:
+            return rows
     return [payload]
 
 
@@ -162,7 +197,7 @@ class RobinhoodPortfolioProvider:
         """The scanner filter-type catalog (no parameters)."""
         data = _provider_data(self._client.call_tool("get_scanner_filter_specs", {}))
         if not isinstance(data, dict):
-            raise ValueError("Unexpected get_scanner_filter_specs payload shape: expected an object")
+            raise ValueError("Unexpected get_scanner_filter_specs payload shape: expected an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return data
 
     def get_scans(self) -> list[dict[str, object]]:
@@ -179,7 +214,7 @@ class RobinhoodPortfolioProvider:
         """Execute a saved scanner; returns live market results."""
         data = _provider_data(self._client.call_tool("run_scan", {"scan_id": scan_id}))
         if not isinstance(data, dict):
-            raise ValueError("Unexpected run_scan payload shape: expected an object")
+            raise ValueError("Unexpected run_scan payload shape: expected an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return data
 
     def get_equity_quotes(self, tickers: Sequence[str]) -> dict[str, MarketSnapshot]:

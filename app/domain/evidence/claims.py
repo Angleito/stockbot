@@ -7,7 +7,13 @@ import re
 
 from app.security.context import Integrity
 
-from .models import ClaimType, EvidenceClaim, ResolutionStatus, SourceTier, coerce_claim_type
+from .models import (
+    ClaimType,
+    EvidenceClaim,
+    ResolutionStatus,
+    SourceTier,
+    coerce_claim_type,
+)
 
 
 def _claim_type_value(claim_type: ClaimType | str) -> str:

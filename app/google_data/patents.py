@@ -9,11 +9,11 @@ publications and families explicitly, never unique inventions or signals.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
-import re
-from datetime import datetime, timedelta, timezone
 
 from ._guards import as_int, result_rows
 from ._lazy_config import google_data_enabled
@@ -38,21 +38,31 @@ def _data_enabled() -> bool:
     return google_data_enabled()
 
 
-def _submit(template: str, params: dict[str, object], executor: _Executor | None,
-            data_root: Path | None) -> dict[str, object]:
-    if executor is None:
-        try:
-            from . import bigquery_client as _bq
-        except ImportError:
-            return {"error": "bigquery client unavailable",
-                    "error_type": "source_unavailable", "source": "bigquery"}
-        try:
-            return _bq.submit_template(template, params, data_root=data_root)
-        except Exception as exc:
-            if type(exc).__name__ == "LedgerCorrupt":
-                raise
-            return {"status": "error", "source": SOURCE,
-                    "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
+def _submit_failure(exc: Exception) -> dict[str, object]:
+    """Fixed-shape executor failure; LedgerCorrupt is never wrapped here."""
+    return {"status": "error", "source": SOURCE,
+            "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
+
+
+def _submit_via_client(template: str, params: dict[str, object],
+                       data_root: Path | None) -> dict[str, object]:
+    """Submit through the real BigQuery client; import failure stays fixed-shape."""
+    try:
+        from . import bigquery_client as _bq
+    except ImportError:
+        return {"error": "bigquery client unavailable",
+                "error_type": "source_unavailable", "source": "bigquery"}
+    try:
+        return _bq.submit_template(template, params, data_root=data_root)
+    except Exception as exc:
+        if type(exc).__name__ == "LedgerCorrupt":
+            raise
+        return _submit_failure(exc)
+
+
+def _direct_submit(template: str, params: dict[str, object],
+                   executor: _Executor) -> dict[str, object]:
+    """Submit through a caller-provided callable or test-double client."""
     try:
         if callable(executor):
             return executor(template, params)
@@ -60,8 +70,14 @@ def _submit(template: str, params: dict[str, object], executor: _Executor | None
     except Exception as exc:
         if type(exc).__name__ == "LedgerCorrupt":
             raise
-        return {"status": "error", "source": SOURCE,
-                "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
+        return _submit_failure(exc)
+
+
+def _submit(template: str, params: dict[str, object], executor: _Executor | None,
+            data_root: Path | None) -> dict[str, object]:
+    if executor is None:
+        return _submit_via_client(template, params, data_root)
+    return _direct_submit(template, params, executor)
 
 
 _UNAVAILABLE = frozenset({"billing_enabled", "billing_unknown", "cost_limit_exceeded",
@@ -79,6 +95,17 @@ def _wrap_error(result: dict[str, object]) -> dict[str, object]:
     return out
 
 
+def _date_error(label: str, value: str | None) -> dict[str, object] | None:
+    """Invalid-params error for one YYYY-MM-DD value, else None."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _DATE_RE.match(value):
+        return {"status": "error", "source": SOURCE,
+                "error": f"invalid {label}: {value!r} (YYYY-MM-DD)",
+                "error_type": "invalid_params"}
+    return None
+
+
 def _check_dates(
     start_date: str | None, end_date: str | None
 ) -> tuple[dict[str, object] | None, str | None, str | None]:
@@ -90,12 +117,9 @@ def _check_dates(
                  "error": "start_date and end_date must both be set or both omitted (YYYY-MM-DD)",
                  "error_type": "invalid_params"}, None, None)
     for label, value in (("start_date", start_date), ("end_date", end_date)):
-        if value is None:
-            continue
-        if not isinstance(value, str) or not _DATE_RE.match(value):
-            return ({"status": "error", "source": SOURCE,
-                     "error": f"invalid {label}: {value!r} (YYYY-MM-DD)",
-                     "error_type": "invalid_params"}, None, None)
+        err = _date_error(label, value)
+        if err is not None:
+            return err, None, None
     if start_date and end_date and start_date > end_date:
         return ({"status": "error", "source": SOURCE,
                  "error": "start_date after end_date", "error_type": "invalid_params"},
@@ -109,6 +133,205 @@ def _clean_list(values: list[str] | str | None) -> list[str]:
     return [v.strip() for v in (values or []) if v and v.strip()]
 
 
+def _company_error(
+    company_id: str, assignees: list[str] | None, aliases: list[str] | None
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Invalid-params error plus cleaned assignee aliases, else (None, aliases)."""
+    if not company_id or not company_id.strip():
+        return ({"status": "error", "source": SOURCE,
+                 "error": "company_id is required", "error_type": "invalid_params"}, [])
+    cleaned = _clean_list(assignees) + _clean_list(aliases)
+    if not cleaned:
+        return ({"status": "unavailable", "source": SOURCE,
+                 "reason": "documented assignee aliases required; never inferred",
+                 "error": "assignees required", "error_type": "source_unavailable"}, [])
+    return None, cleaned
+
+
+def _config_project() -> str | None:
+    """BigQuery project from app config, or None when unavailable."""
+    try:
+        from .. import config as _cfg
+    except ImportError:
+        return None
+    try:
+        return _cfg.get_google_cloud_project()
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+
+
+def _project_name() -> str | None:
+    """Configured BigQuery project or None; config first, env fallback."""
+    return _config_project() or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+
+
+def _disabled_error() -> dict[str, object]:
+    """Fixed-shape error when google data is off or no project is set."""
+    return {"status": "disabled", "source": SOURCE,
+            "reason": "google data disabled or no BigQuery project"}
+
+
+def _project_error() -> dict[str, object] | None:
+    """Disabled error when data is off or no project, else None."""
+    if not _data_enabled():
+        return _disabled_error()
+    if not _project_name():
+        return _disabled_error()
+    return None
+
+
+def _clamp_limit(limit: int, cap: int) -> tuple[dict[str, object] | None, int]:
+    """Clamped limit or (invalid-params error, cap)."""
+    try:
+        return None, max(1, min(limit, cap))
+    except (TypeError, ValueError):
+        return ({"status": "error", "source": SOURCE,
+                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}, cap)
+
+
+def _trailing_window(
+    start_date: str | None, end_date: str | None
+) -> tuple[str | None, str | None]:
+    """Dateless pair becomes the bounded trailing 5-year window."""
+    if start_date is None and end_date is None:
+        today = datetime.now(timezone.utc).date()
+        start = (today - timedelta(days=1825)).isoformat()
+        return start, today.isoformat()
+    return start_date, end_date
+
+
+def _patent_params(assignees: list[str], countries: list[str], limit: int,
+                   start_date: str | None, end_date: str | None) -> dict[str, object]:
+    """Executor params with YYYYMMDD bounds only when dated."""
+    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
+                                 "limit": limit, "collector_version": "1", "sql_version": "1"}
+    if start_date is not None:
+        params["start_yyyymmdd"] = int(start_date.replace("-", ""))
+    if end_date is not None:
+        params["end_yyyymmdd"] = int(end_date.replace("-", ""))
+    return params
+
+
+def _publication_row(row: object) -> dict[str, object] | None:
+    """One normalized publication dict; non-dict rows become None."""
+    if not isinstance(row, dict):
+        return None
+    return {
+        "publication_id": row.get("publication_id") or row.get("id"),
+        "publication_date": str(row.get("publication_date") or row.get("date") or ""),
+        "assignees": row.get("assignees") or row.get("assignee"),
+        "classes": row.get("classes") or row.get("classification_ids") or row.get("cpc"),
+        "inventors": row.get("inventors") or row.get("inventor_harmonized"),
+        "citation_count": row.get("citation_count", 0),
+        "family_id": row.get("family_id"),
+        "country_code": row.get("country_code"),
+        "kind_code": row.get("kind_code"),
+        "title": row.get("title"),
+        "url": row.get("url") or row.get("source_link"),
+    }
+
+
+def _collect_publications(rows: list[object], limit: int) -> list[dict[str, object]]:
+    """Normalized publication dicts up to limit; non-dict rows are skipped."""
+    publications: list[dict[str, object]] = []
+    for row in rows[:limit]:
+        pub = _publication_row(row)
+        if pub is None:
+            continue
+        publications.append(pub)
+    return publications
+
+
+def _stats_year(row: object) -> tuple[str, int]:
+    """(kind, year): skip non-dicts, gap null/unparseable years, else ok."""
+    if not isinstance(row, dict):
+        return "skip", 0
+    raw = row.get("pub_year")
+    if raw is None:
+        return "gap", 0
+    try:
+        return "ok", int(raw)
+    except (TypeError, ValueError):
+        return "gap", 0
+
+
+def _add_counts(bucket: dict[str, object], row: dict[str, object]) -> None:
+    """Accumulate pub/family/citation counts; bad values keep the bucket."""
+    for key, field in (("pub_count", "pub_count"), ("family_count", "family_count"),
+                       ("total_citations", "total_citations")):
+        try:
+            bucket[field] = as_int(bucket.get(field, 0), what=field) + as_int(row.get(key) or 0, what=key)
+        except (TypeError, ValueError):
+            pass
+
+
+def _clean_cpc_counts(current: object) -> dict[str, int]:
+    """Validated CPC histogram copy; non-conforming entries are dropped."""
+    counts: dict[str, int] = {}
+    if not isinstance(current, dict):
+        return counts
+    for key, val in current.items():
+        if isinstance(key, str) and isinstance(val, int) and not isinstance(val, bool):
+            counts[key] = val
+    return counts
+
+
+def _add_cpc(bucket: dict[str, object], row: dict[str, object]) -> None:
+    """Merge one row's cpc_bag into the bucket histogram."""
+    counts = _clean_cpc_counts(bucket.get("cpc_counts"))
+    bag = row.get("cpc_bag")
+    if not isinstance(bag, (list, tuple)):
+        bucket["cpc_counts"] = counts
+        return
+    for code in bag:
+        key = str(code)
+        counts[key] = counts.get(key, 0) + 1
+    bucket["cpc_counts"] = counts
+
+
+def _top_cpc(bucket: dict[str, object]) -> str:
+    """Highest-count inventive CPC or __NONE__ when the bucket has none."""
+    counts = _clean_cpc_counts(bucket.get("cpc_counts"))
+    ranked = sorted(((n, c) for c, n in counts.items() if c != "__NONE__"),
+                    reverse=True)
+    return ranked[0][1] if ranked else "__NONE__"
+
+
+def _summarize_years(by_year: dict[int, dict[str, object]]) -> list[dict[str, object]]:
+    """Sorted yearly aggregates with top inventive CPC per year."""
+    years: list[dict[str, object]] = []
+    for year in sorted(by_year):
+        bucket = by_year[year]
+        years.append({"pub_year": year, "pub_count": bucket["pub_count"],
+                      "family_count": bucket["family_count"],
+                      "total_citations": bucket["total_citations"],
+                      "top_cpc": _top_cpc(bucket)})
+    return years
+
+
+def _accumulate_stats(
+    rows: list[object],
+) -> tuple[dict[int, dict[str, object]], int]:
+    """Year buckets plus gap count; null/unparseable years become gaps."""
+    by_year: dict[int, dict[str, object]] = {}
+    gaps = 0
+    for row in rows:
+        kind, year = _stats_year(row)
+        if kind == "skip":
+            continue
+        if kind == "gap":
+            gaps += 1
+            continue
+        if not isinstance(row, dict):
+            continue
+        bucket = by_year.setdefault(year, {"pub_count": 0, "family_count": 0,
+                                           "total_citations": 0, "cpc_counts": {}})
+        _add_counts(bucket, row)
+        _add_cpc(bucket, row)
+    return by_year, gaps
+
+
+
 def search_company_patents(company_id: str, *, start_date: str | None = None,
                            end_date: str | None = None, limit: int = 20,
                            assignees: list[str] | None = None,
@@ -117,73 +340,25 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
                            executor: _Executor | None = None,
                            data_root: Path | None = None) -> dict[str, object]:
     """Publications for documented assignee aliases; empty aliases refuse."""
-    if not company_id or not company_id.strip():
-        return {"status": "error", "source": SOURCE,
-                "error": "company_id is required", "error_type": "invalid_params"}
-    assignees = _clean_list(assignees) + _clean_list(aliases)
-    if not assignees:
-        return {"status": "unavailable", "source": SOURCE,
-                "reason": "documented assignee aliases required; never inferred",
-                "error": "assignees required", "error_type": "source_unavailable"}
-    if not _data_enabled():
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled or no BigQuery project"}
-    try:
-        from .. import config as _cfg
-    except ImportError:
-        _cfg = None
-    _project: str | None = None
-    if _cfg is not None:
-        try:
-            _project = _cfg.get_google_cloud_project()
-        except Exception:
-            _project = None
-    if _project is None:
-        _project = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
-    if not _project:
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled or no BigQuery project"}
-    try:
-        limit = max(1, min(limit, _MAX_LIMIT))
-    except (TypeError, ValueError):
-        return {"status": "error", "source": SOURCE,
-                "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}
+    comp_err, names = _company_error(company_id, assignees, aliases)
+    if comp_err is not None:
+        return comp_err
+    proj_err = _project_error()
+    if proj_err is not None:
+        return proj_err
+    lim_err, limit = _clamp_limit(limit, _MAX_LIMIT)
+    if lim_err is not None:
+        return lim_err
     date_error, start_date, end_date = _check_dates(start_date, end_date)
     if date_error is not None:
         return date_error
-    # Dateless -> bounded trailing 5-year window (5x365, deterministic).
-    if start_date is None and end_date is None:
-        _today = datetime.now(timezone.utc).date()
-        end_date = _today.isoformat()
-        start_date = (_today - timedelta(days=1825)).isoformat()
+    start_date, end_date = _trailing_window(start_date, end_date)
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
-    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
-                                 "limit": limit, "collector_version": "1", "sql_version": "1"}
-    if start_date is not None:
-        params["start_yyyymmdd"] = int(start_date.replace("-", ""))
-    if end_date is not None:
-        params["end_yyyymmdd"] = int(end_date.replace("-", ""))
+    params = _patent_params(names, countries, limit, start_date, end_date)
     result = _submit(_TEMPLATE, params, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
-    publications: list[dict[str, object]] = []
-    rows = result_rows(result)
-    for row in rows[:limit]:
-        if not isinstance(row, dict):
-            continue
-        publications.append({
-            "publication_id": row.get("publication_id") or row.get("id"),
-            "publication_date": str(row.get("publication_date") or row.get("date") or ""),
-            "assignees": row.get("assignees") or row.get("assignee"),
-            "classes": row.get("classes") or row.get("classification_ids") or row.get("cpc"),
-            "inventors": row.get("inventors") or row.get("inventor_harmonized"),
-            "citation_count": row.get("citation_count", 0),
-            "family_id": row.get("family_id"),
-            "country_code": row.get("country_code"),
-            "kind_code": row.get("kind_code"),
-            "title": row.get("title"),
-            "url": row.get("url") or row.get("source_link"),
-        })
+    publications = _collect_publications(result_rows(result), limit)
     return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
             "publications": publications, "count": len(publications)}
 
@@ -200,99 +375,22 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
     Null publication dates become gaps (excluded, counted); null citations
     count zero; years with no inventive CPC report ``__NONE__``.
     """
-    if not company_id or not company_id.strip():
-        return {"status": "error", "source": SOURCE,
-                "error": "company_id is required", "error_type": "invalid_params"}
-    assignees = _clean_list(assignees) + _clean_list(aliases)
-    if not assignees:
-        return {"status": "unavailable", "source": SOURCE,
-                "reason": "documented assignee aliases required; never inferred",
-                "error": "assignees required", "error_type": "source_unavailable"}
-    if not _data_enabled():
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled or no BigQuery project"}
-    try:
-        from .. import config as _cfg2
-    except ImportError:
-        _cfg2 = None
-    _project2: str | None = None
-    if _cfg2 is not None:
-        try:
-            _project2 = _cfg2.get_google_cloud_project()
-        except Exception:
-            _project2 = None
-    if _project2 is None:
-        _project2 = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip() or None
-    if not _project2:
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled or no BigQuery project"}
+    comp_err, names = _company_error(company_id, assignees, aliases)
+    if comp_err is not None:
+        return comp_err
+    proj_err = _project_error()
+    if proj_err is not None:
+        return proj_err
     date_error, start_date, end_date = _check_dates(start_date, end_date)
     if date_error is not None:
         return date_error
-    # Dateless -> bounded trailing 5-year window (5x365, deterministic).
-    if start_date is None and end_date is None:
-        _today = datetime.now(timezone.utc).date()
-        end_date = _today.isoformat()
-        start_date = (_today - timedelta(days=1825)).isoformat()
+    start_date, end_date = _trailing_window(start_date, end_date)
     countries = _clean_list(country_codes) or list(_DEFAULT_COUNTRIES)
-    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
-                                 "limit": _MAX_STATS, "collector_version": "1", "sql_version": "1"}
-    if start_date is not None:
-        params["start_yyyymmdd"] = int(start_date.replace("-", ""))
-    if end_date is not None:
-        params["end_yyyymmdd"] = int(end_date.replace("-", ""))
+    params = _patent_params(names, countries, _MAX_STATS, start_date, end_date)
     result = _submit(_STATS_TEMPLATE, params, executor, data_root)
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
-    by_year: dict[int, dict[str, object]] = {}
-    gaps = 0
-    rows = result_rows(result)
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        year = row.get("pub_year")
-        if year is None:
-            gaps += 1
-            continue
-        try:
-            year = int(year)
-        except (TypeError, ValueError):
-            gaps += 1
-            continue
-        bucket = by_year.setdefault(year, {"pub_count": 0, "family_count": 0,
-                                           "total_citations": 0, "cpc_counts": {}})
-        for key, field in (("pub_count", "pub_count"), ("family_count", "family_count"),
-                           ("total_citations", "total_citations")):
-            try:
-                bucket[field] = as_int(bucket.get(field, 0), what=field) + as_int(row.get(key) or 0, what=key)
-            except (TypeError, ValueError):
-                pass
-        _cpc = bucket.get("cpc_counts")
-        if not isinstance(_cpc, dict):
-            _cpc = dict[str, object]()
-            bucket["cpc_counts"] = _cpc
-        cpc_counts: dict[str, int] = {}
-        for _ck, _cv in _cpc.items():
-            if isinstance(_ck, str) and isinstance(_cv, int) and not isinstance(_cv, bool):
-                cpc_counts[_ck] = _cv
-        for code in row.get("cpc_bag") or []:
-            code_key = str(code)
-            cpc_counts[code_key] = cpc_counts.get(code_key, 0) + 1
-        bucket["cpc_counts"] = cpc_counts
-    years: list[dict[str, object]] = []
-    for year in sorted(by_year):
-        bucket = by_year[year]
-        _cpc2 = bucket.get("cpc_counts")
-        cpc_counts2: dict[str, int] = {}
-        if isinstance(_cpc2, dict):
-            for _ck2, _cv2 in _cpc2.items():
-                if isinstance(_ck2, str) and isinstance(_cv2, int) and not isinstance(_cv2, bool):
-                    cpc_counts2[_ck2] = _cv2
-        ranked = sorted(((n, c) for c, n in cpc_counts2.items() if c != "__NONE__"),
-                        reverse=True)
-        years.append({"pub_year": year, "pub_count": bucket["pub_count"],
-                      "family_count": bucket["family_count"],
-                      "total_citations": bucket["total_citations"],
-                      "top_cpc": ranked[0][1] if ranked else "__NONE__"})
+    by_year, gaps = _accumulate_stats(result_rows(result))
+    years = _summarize_years(by_year)
     return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
             "years": years, "gaps": gaps}

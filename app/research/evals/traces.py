@@ -107,7 +107,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(eval_traces)")}
         if "provider" not in cols:
             conn.execute("ALTER TABLE eval_traces ADD COLUMN provider TEXT NOT NULL DEFAULT 'fake'")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
     return conn
 
@@ -142,34 +142,48 @@ def _as_int(value: object) -> int:
     return 0
 
 
+def _coerce_int_wave(wave_id: int) -> int:
+    if wave_id < 1:
+        raise ValueError(f"trace: 'wave_id' must be >= 1, got {wave_id!r}")
+    return wave_id
+
+
+def _coerce_str_wave(wave_id: str) -> int | None:
+    text = wave_id.strip()
+    if not text.isdigit():
+        return None
+    value = int(text)
+    if value < 1:
+        raise ValueError(f"trace: 'wave_id' must be >= 1, got {wave_id!r}")
+    return value
+
+
 def _coerce_wave(wave_id: object) -> int:
     if isinstance(wave_id, bool):
-        raise ValueError(f"trace: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"trace: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if isinstance(wave_id, int):
-        if wave_id < 1:
-            raise ValueError(f"trace: 'wave_id' must be >= 1, got {wave_id!r}")
-        return wave_id
+        return _coerce_int_wave(wave_id)
     if isinstance(wave_id, str):
-        text = wave_id.strip()
-        if text.isdigit():
-            value = int(text)
-            if value < 1:
-                raise ValueError(f"trace: 'wave_id' must be >= 1, got {wave_id!r}")
-            return value
+        parsed = _coerce_str_wave(wave_id)
+        if parsed is not None:
+            return parsed
     raise ValueError(f"trace: 'wave_id' must be an int >= 1, got {wave_id!r}")
+
+
+def _payload_value(value: object) -> Scalar:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(value, sort_keys=True)
 
 
 def _payload_from_json(raw: str) -> Payload:
     decoded: object = json.loads(raw)
+    if not isinstance(decoded, dict):
+        return {}
     out: Payload = {}
-    if isinstance(decoded, dict):
-        for key, value in decoded.items():
-            if not isinstance(key, str):
-                continue
-            if value is None or isinstance(value, (str, int, float, bool)):
-                out[key] = value
-            else:
-                out[key] = json.dumps(value, sort_keys=True)
+    for key, value in decoded.items():
+        if isinstance(key, str):
+            out[key] = _payload_value(value)
     return out
 
 
@@ -238,7 +252,7 @@ class TraceRecorder:
                     )
                     + "\n"
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             logger.warning("trace record failed for %s: %s", self.trace_id, exc)
         return event_id
 
@@ -270,7 +284,7 @@ class TraceRecorder:
                     )
                     + "\n"
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             logger.warning("trace finish failed for %s: %s", self.trace_id, exc)
 
 
@@ -320,29 +334,53 @@ def create_trace(
                     "open",
                 ),
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("trace create failed for session %s: %s", session_id, exc)
     if job_parent is not None:
         recorder.record("parent", {"job_parent": job_parent})
     return recorder
 
 
-def _header_from_row(row: tuple[object, ...]) -> TraceHeader:
+def _header_new(row: tuple[object, ...]) -> TraceHeader:
     return TraceHeader(
         trace_id=_as_str(row[0]),
         session_id=_as_str(row[1]),
         wave_id=_coerce_wave(row[2]),
-        provider=_as_str(row[3]) if len(row) > 12 else "fake",
-        model=_as_str(row[4]) if len(row) > 12 else _as_str(row[3]),
-        prompt_version=_as_str(row[5]) if len(row) > 12 else _as_str(row[4]),
-        harness_version=_as_str(row[6]) if len(row) > 12 else _as_str(row[5]),
-        git_sha=_as_str(row[7]) if len(row) > 12 else _as_str(row[6]),
-        started_at=_as_str(row[8]) if len(row) > 12 else _as_str(row[7]),
-        completed_at=_as_opt_str(row[9]) if len(row) > 12 else _as_opt_str(row[8]),
-        duration_ms=_as_opt_float(row[10]) if len(row) > 12 else _as_opt_float(row[9]),
-        conclusion=_as_opt_str(row[11]) if len(row) > 12 else _as_opt_str(row[10]),
-        status=_as_str(row[12]) if len(row) > 12 else _as_str(row[11]),
+        provider=_as_str(row[3]),
+        model=_as_str(row[4]),
+        prompt_version=_as_str(row[5]),
+        harness_version=_as_str(row[6]),
+        git_sha=_as_str(row[7]),
+        started_at=_as_str(row[8]),
+        completed_at=_as_opt_str(row[9]),
+        duration_ms=_as_opt_float(row[10]),
+        conclusion=_as_opt_str(row[11]),
+        status=_as_str(row[12]),
     )
+
+
+def _header_legacy(row: tuple[object, ...]) -> TraceHeader:
+    return TraceHeader(
+        trace_id=_as_str(row[0]),
+        session_id=_as_str(row[1]),
+        wave_id=_coerce_wave(row[2]),
+        provider="fake",
+        model=_as_str(row[3]),
+        prompt_version=_as_str(row[4]),
+        harness_version=_as_str(row[5]),
+        git_sha=_as_str(row[6]),
+        started_at=_as_str(row[7]),
+        completed_at=_as_opt_str(row[8]),
+        duration_ms=_as_opt_float(row[9]),
+        conclusion=_as_opt_str(row[10]),
+        status=_as_str(row[11]),
+    )
+
+
+def _header_from_row(row: tuple[object, ...]) -> TraceHeader:
+    if len(row) > 12:
+        return _header_new(row)
+    return _header_legacy(row)
 
 
 def get_trace(trace_id: str, data_root: Path | None = None) -> TraceHeader | None:

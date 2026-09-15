@@ -16,7 +16,6 @@ import datetime as _dt
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -35,7 +34,7 @@ class Dataset:
     name: str
     schema: pa.Schema
     unique_keys: tuple[str, ...]
-    partition_field: Optional[str] = None
+    partition_field: str | None = None
 
 
 def _fields(*pairs: tuple[str, pa.DataType]) -> list[pa.Field]:
@@ -533,7 +532,7 @@ def dataset_names() -> list[str]:
     return sorted(DATASETS)
 
 
-def _partition_year(date_value: Optional[str]) -> Optional[str]:
+def _partition_year(date_value: str | None) -> str | None:
     if not date_value:
         return None
     try:
@@ -551,7 +550,57 @@ def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...
     return tuple(str(row.get(key) or "") for key in keys)
 
 
-def read_table(name: str, root: Optional[Path] = None, columns: Optional[list[str]] = None) -> pa.Table:
+def _existing_keys(name: str, root: Path) -> set[tuple[str, ...]]:
+    """Keys already stored for ``name`` (existing boundary)."""
+    ds = dataset(name)
+    existing: set[tuple[str, ...]] = set()
+    for table in read_table(name, root).to_batches():
+        cols = []
+        for key in ds.unique_keys:
+            try:
+                cols.append(table.column(key).to_pylist())
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+                cols.append([None] * table.num_rows)
+        existing.update(
+            tuple("" if v is None else str(v) for v in batch)
+            for batch in zip(*cols)
+        )
+    return existing
+
+
+def _drop_duplicates(name: str, rows: list[dict[str, object]], root: Path) -> list[dict[str, object]]:
+    """Rows whose unique key is not stored yet (existing boundary)."""
+    ds = dataset(name)
+    existing = _existing_keys(name, root)
+    return [row for row in rows if _unique_key(row, ds.unique_keys) not in existing]
+
+
+def _group_partitions(
+    ds: Dataset, new_rows: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    """New rows grouped by partition label (existing boundary)."""
+    by_partition: dict[str, list[dict[str, object]]] = {}
+    for row in new_rows:
+        if ds.partition_field:
+            year = _partition_year(str(row.get(ds.partition_field) or "")) or "unknown"
+        else:
+            year = "none"
+        by_partition.setdefault(year, []).append(row)
+    return by_partition
+
+
+def _append_partition(ds: Dataset, root: Path, year: str, part_rows: list[dict[str, object]]) -> None:
+    """One hive partition file (existing boundary)."""
+    partition_col = f"{ds.partition_field}_year" if ds.partition_field else "partition"
+    directory = root / ds.name / f"{partition_col}={year}"
+    columns = [f.name for f in ds.schema]
+    clean_rows = [{key: row.get(key) for key in columns} for row in part_rows]
+    table = pa.Table.from_pylist(clean_rows, schema=ds.schema)
+    pq.write_table(table, str(_exclusive_part_path(directory)))
+
+
+
+def read_table(name: str, root: Path | None = None, columns: list[str] | None = None) -> pa.Table:
     """Read a full dataset (all partitions) as a pyarrow Table."""
     root = Path(root) if root else get_data_root() / "parquet"
     ds = dataset(name)
@@ -565,48 +614,21 @@ def read_table(name: str, root: Optional[Path] = None, columns: Optional[list[st
     return pa.concat_tables(tables, promote_options="permissive")
 
 
-def write_rows(name: str, rows: list[dict[str, object]], root: Optional[Path] = None) -> int:
+def write_rows(name: str, rows: list[dict[str, object]], root: Path | None = None) -> int:
     """Append rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
     root = Path(root) if root else get_data_root() / "parquet"
     ds = dataset(name)
     if not rows:
         return 0
-    existing = set()
-    for table in read_table(name, root).to_batches():
-        cols = []
-        for key in ds.unique_keys:
-            try:
-                cols.append(table.column(key).to_pylist())
-            except Exception:
-                cols.append([None] * table.num_rows)
-        existing.update(
-            tuple("" if v is None else str(v) for v in batch)
-            for batch in zip(*cols)
-        )
-    new_rows = [
-        row for row in rows
-        if _unique_key(row, ds.unique_keys) not in existing
-    ]
+    new_rows = _drop_duplicates(name, rows, root)
     if not new_rows:
         return 0
-    by_partition: dict[str, list[dict[str, object]]] = {}
-    for row in new_rows:
-        if ds.partition_field:
-            year = _partition_year(str(row.get(ds.partition_field) or "")) or "unknown"
-        else:
-            year = "none"
-        by_partition.setdefault(year, []).append(row)
-    columns = [f.name for f in ds.schema]
-    for year, part_rows in by_partition.items():
-        partition_col = f"{ds.partition_field}_year" if ds.partition_field else "partition"
-        directory = root / ds.name / f"{partition_col}={year}"
-        clean_rows = [{key: row.get(key) for key in columns} for row in part_rows]
-        table = pa.Table.from_pylist(clean_rows, schema=ds.schema)
-        pq.write_table(table, str(_exclusive_part_path(directory)))
+    for year, part_rows in _group_partitions(ds, new_rows).items():
+        _append_partition(ds, root, year, part_rows)
     return len(new_rows)
 
 
-def count_rows(name: str, root: Optional[Path] = None) -> int:
+def count_rows(name: str, root: Path | None = None) -> int:
     return read_table(name, root).num_rows
 

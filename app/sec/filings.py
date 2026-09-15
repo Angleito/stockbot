@@ -38,6 +38,30 @@ def _date_str(value: str | date | datetime) -> str:
     return value
 
 
+def _forms_arg(forms: str | list[str] | tuple[str, ...] | None) -> str | list[str] | None:
+    if forms is None:
+        return None
+    return forms if isinstance(forms, str) else list(forms)
+
+
+def _filing_date_arg(start_date: str | date | datetime | None,
+                     end_date: str | date | datetime | None,
+                     as_of: str | None) -> str | None:
+    if start_date is None and end_date is None:
+        return None
+    # edgartools rejects open-ended ranges ("2026-09-07:"); close them:
+    # missing start means archive beginning, missing end means as_of/today.
+    end = _date_str(end_date or as_of or date.today().isoformat())
+    return f"{_date_str(start_date) if start_date else '1994-01-01'}:{end}"
+
+
+def _known_as_of(filing: Filing, as_of: str | None) -> bool:
+    if as_of is None:
+        return True
+    value, _basis = pit_of(filing)
+    return value is not None and value[:10] <= as_of
+
+
 def list_sec_filings(
     ticker_or_cik: str | int,
     forms: str | list[str] | tuple[str, ...] | None = None,
@@ -47,27 +71,15 @@ def list_sec_filings(
     limit: int | None = 50,
 ) -> list[Filing]:
     as_of = _check_as_of(as_of)
-    form_arg: str | list[str] | None = None
-    if forms is not None:
-        form_arg = forms if isinstance(forms, str) else list(forms)
-    filing_date_arg: str | None = None
-    if start_date is not None or end_date is not None:
-        # edgartools rejects open-ended ranges ("2026-09-07:"); close them:
-        # missing start means archive beginning, missing end means as_of/today.
-        end = _date_str(end_date or as_of or date.today().isoformat())
-        filing_date_arg = f"{_date_str(start_date) if start_date else '1994-01-01'}:{end}"
     filings_raw = get_company(ticker_or_cik).get_filings(
-        form=form_arg, filing_date=filing_date_arg)
+        form=_forms_arg(forms), filing_date=_filing_date_arg(start_date, end_date, as_of))
     out: list[Filing] = []
     for f in filings_raw:
         if limit is not None and len(out) >= limit:
             break
         x = filing_from_edgar(f)
-        if as_of is not None:
-            value, _basis = pit_of(x)
-            if value is None or value[:10] > as_of:
-                continue
-        out.append(x)
+        if _known_as_of(x, as_of):
+            out.append(x)
     return out
 
 

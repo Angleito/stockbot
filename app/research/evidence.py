@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
+
 from .models import JSONValue, pit_unverified, pit_violated, validate_json_mapping
 
 __all__ = [
@@ -76,11 +77,14 @@ class Evidence:
     # Correction chain: id of the prior record this record corrects; None for originals.
     superseded_by: str | None = None
 
-    def __post_init__(self) -> None:
+    def _check_wave_hash(self) -> None:
         if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int) or self.wave_id < 1:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'wave_id' must be an int >= 1")
         if evidence_content_hash(self.content) != self.content_hash:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: content_hash mismatch")
+
+    def __post_init__(self) -> None:
+        self._check_wave_hash()
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'confidence' must be within 0..1")
         object.__setattr__(self, "supports", tuple(self.supports))
@@ -147,20 +151,7 @@ def _iso(value: datetime | str | None) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else value
 
 
-def ingest_evidence(
-    ledger: EvidenceLedger,
-    evidence: Evidence,
-    *,
-    as_of: datetime | str | None,
-    on_reject: Callable[[str, dict[str, object]], None] | None = None,
-) -> Evidence:
-    """Provenance + PIT gate: source/ref/retrieved_at/session/wave/lineage present, known_at <= as_of.
-
-    Refusals journal ``evidence.rejected`` ({evidence_id, reason, known_at, as_of})
-    via ``on_reject`` (wire KernelCore's append_event with functools.partial) then raise.
-    """
-    reason = ""
-    detail = ""
+def _ingest_missing(evidence: Evidence) -> list[str]:
     missing = [
         key
         for key, value in (
@@ -174,34 +165,64 @@ def ingest_evidence(
     ]
     if isinstance(evidence.wave_id, bool) or not isinstance(evidence.wave_id, int):
         missing.append("wave_id")
+    return missing
+
+
+def _ingest_pit_gate(evidence: Evidence, as_of: datetime | str | None) -> tuple[str, str]:
+    try:
+        unverified = pit_unverified(as_of, evidence.known_at)
+        violated = False if unverified else pit_violated(as_of, evidence.known_at)
+    except ValueError as exc:
+        return "PROVENANCE_FAILURE", f"bad timestamp: {exc}"
+    if unverified:
+        return "PIT_UNVERIFIED", f"known_at unknown for historical as_of {_iso(as_of)}"
+    if violated:
+        return "PIT_VIOLATION", f"known_at {_iso(evidence.known_at)} > as_of {_iso(as_of)}"
+    return "", ""
+
+
+def _ingest_reject(
+    evidence: Evidence,
+    as_of: datetime | str | None,
+    reason: str,
+    detail: str,
+    on_reject: Callable[[str, dict[str, object]], None] | None,
+) -> None:
+    payload: dict[str, object] = {
+        "evidence_id": evidence.evidence_id,
+        "reason": reason,
+        "known_at": _iso(evidence.known_at),
+        "as_of": _iso(as_of),
+    }
+    if detail:
+        payload["detail"] = detail
+    if on_reject is not None:
+        try:
+            on_reject("evidence.rejected", payload)
+        except Exception as exc:
+            raise EvidenceRejectedError(evidence.evidence_id, reason, detail) from exc
+    raise EvidenceRejectedError(evidence.evidence_id, reason, detail)
+
+
+def ingest_evidence(
+    ledger: EvidenceLedger,
+    evidence: Evidence,
+    *,
+    as_of: datetime | str | None,
+    on_reject: Callable[[str, dict[str, object]], None] | None = None,
+) -> Evidence:
+    """Provenance + PIT gate: source/ref/retrieved_at/session/wave/lineage present, known_at <= as_of.
+
+    Refusals journal ``evidence.rejected`` ({evidence_id, reason, known_at, as_of})
+    via ``on_reject`` (wire KernelCore's append_event with functools.partial) then raise.
+    """
+    missing = _ingest_missing(evidence)
     if missing:
         reason, detail = "PROVENANCE_FAILURE", f"missing: {', '.join(missing)}"
     else:
-        try:
-            unverified = pit_unverified(as_of, evidence.known_at)
-            violated = False if unverified else pit_violated(as_of, evidence.known_at)
-        except ValueError as exc:
-            reason, detail = "PROVENANCE_FAILURE", f"bad timestamp: {exc}"
-        else:
-            if unverified:
-                reason, detail = "PIT_UNVERIFIED", f"known_at unknown for historical as_of {_iso(as_of)}"
-            elif violated:
-                reason, detail = "PIT_VIOLATION", f"known_at {_iso(evidence.known_at)} > as_of {_iso(as_of)}"
+        reason, detail = _ingest_pit_gate(evidence, as_of)
     if reason:
-        payload: dict[str, object] = {
-            "evidence_id": evidence.evidence_id,
-            "reason": reason,
-            "known_at": _iso(evidence.known_at),
-            "as_of": _iso(as_of),
-        }
-        if detail:
-            payload["detail"] = detail
-        if on_reject is not None:
-            try:
-                on_reject("evidence.rejected", payload)
-            except Exception as exc:
-                raise EvidenceRejectedError(evidence.evidence_id, reason, detail) from exc
-        raise EvidenceRejectedError(evidence.evidence_id, reason, detail)
+        _ingest_reject(evidence, as_of, reason, detail, on_reject)
     return ledger.append(evidence)
 
 
@@ -288,15 +309,25 @@ def _json_str_list(values: list[str]) -> list[JSONValue]:
     return out
 
 
-def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
-    """Rebuild validated Evidence (constructor re-checks hash/confidence)."""
-    d = dict(data)
+def _evidence_confidence(d: dict[str, object]) -> float | None:
+    confidence = d.get("confidence")
+    if confidence is None:
+        return None
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise EvidenceIntegrityError("evidence: 'confidence' must be a number or null")
+    return float(confidence)
+
+
+def _evidence_metadata(d: dict[str, object]) -> dict[str, object]:
     metadata = d.get("metadata", {})
     if not isinstance(metadata, dict):
         raise EvidenceIntegrityError("evidence: 'metadata' must be an object")
-    confidence = d.get("confidence")
-    if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float))):
-        raise EvidenceIntegrityError("evidence: 'confidence' must be a number or null")
+    return dict(metadata)
+
+
+def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
+    """Rebuild validated Evidence (constructor re-checks hash/confidence)."""
+    d = dict(data)
     return Evidence(
         evidence_id=_req_str(d, "evidence_id"),
         session_id=_req_str(d, "session_id"),
@@ -317,9 +348,9 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         agent_id=_opt_str(d, "agent_id"),
         supports=_str_list(d.get("supports", []), "supports"),
         contradicts=_str_list(d.get("contradicts", []), "contradicts"),
-        confidence=None if confidence is None else float(confidence),
+        confidence=_evidence_confidence(d),
         quality=_opt_str(d, "quality"),
-        metadata=validate_json_mapping(dict(metadata), "<evidence>: 'metadata'"),
+        metadata=validate_json_mapping(_evidence_metadata(d), "<evidence>: 'metadata'"),
         superseded_by=_opt_str(d, "superseded_by"),
     )
 

@@ -19,21 +19,32 @@ JSONScalar = str | int | float | bool | None
 type JSONValue = JSONScalar | list[JSONValue] | dict[str, JSONValue]
 
 
-def validate_json_value(value: object, where: str = "<dict>") -> JSONValue:
-    """Recursively normalize an object into a JSONValue (deep copy)."""
+def _json_scalars(value: object, where: str) -> JSONValue | None:
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{where}: non-finite float not allowed, got {value!r}")
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
+    return None
+
+
+def _json_dict(value: dict[object, object], where: str) -> dict[str, JSONValue]:
+    out: dict[str, JSONValue] = {}
+    for k, v in value.items():
+        if not isinstance(k, str):
+            raise ValueError(f"{where}: dict key must be a string, got {type(k).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        out[k] = validate_json_value(v, where)
+    return out
+
+
+def validate_json_value(value: object, where: str = "<dict>") -> JSONValue:
+    """Recursively normalize an object into a JSONValue (deep copy)."""
+    scalar = _json_scalars(value, where)
+    if scalar is not None or value is None:
+        return scalar
     if isinstance(value, (list, tuple)):
         return [validate_json_value(v, where) for v in value]
     if isinstance(value, dict):
-        out: dict[str, JSONValue] = {}
-        for k, v in value.items():
-            if not isinstance(k, str):
-                raise ValueError(f"{where}: dict key must be a string, got {type(k).__name__}")
-            out[k] = validate_json_value(v, where)
-        return out
+        return _json_dict(value, where)
     raise ValueError(f"{where}: not a JSON value, got {type(value).__name__}")
 
 
@@ -41,7 +52,7 @@ def validate_json_mapping(value: object, where: str = "<dict>") -> dict[str, JSO
     """Validate untrusted payload as a JSON object."""
     validated = validate_json_value(value, where)
     if not isinstance(validated, dict):
-        raise ValueError(f"{where}: must be a mapping, got {type(value).__name__}")
+        raise ValueError(f"{where}: must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return validated
 
 
@@ -185,7 +196,7 @@ def _opt_str(v: object, key: str, where: str) -> str | None:
     if v is None:
         return None
     if not isinstance(v, str):
-        raise ValueError(f"{where}: '{key}' must be a string or null, got {type(v).__name__}")
+        raise ValueError(f"{where}: '{key}' must be a string or null, got {type(v).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return v
 
 
@@ -193,7 +204,7 @@ def _opt_int(v: object, key: str, where: str) -> int | None:
     if v is None:
         return None
     if isinstance(v, bool) or not isinstance(v, int):
-        raise ValueError(f"{where}: '{key}' must be an int or null, got {v!r}")
+        raise ValueError(f"{where}: '{key}' must be an int or null, got {v!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return v
 
 
@@ -205,6 +216,13 @@ def _coerce_enum(allowed: frozenset[str], v: object, key: str, where: str) -> st
     raise ValueError(f"{where}: '{key}' must be one of {sorted(allowed)}, got {v!r}")
 
 
+def _parse_time_str(v: str, key: str, where: str) -> datetime:
+    try:
+        return normalize_time(datetime.fromisoformat(v.strip()))
+    except ValueError:
+        raise ValueError(f"{where}: '{key}' must be ISO-8601, got {v!r}") from None
+
+
 def _coerce_time(v: object, key: str, where: str) -> datetime | None:
     """Parse an ISO-8601 string or datetime (naive normalizes to UTC); None stays None."""
     if v is None:
@@ -212,10 +230,7 @@ def _coerce_time(v: object, key: str, where: str) -> datetime | None:
     if isinstance(v, datetime):
         return normalize_time(v)
     if isinstance(v, str) and v.strip():
-        try:
-            return normalize_time(datetime.fromisoformat(v.strip()))
-        except ValueError:
-            raise ValueError(f"{where}: '{key}' must be ISO-8601, got {v!r}") from None
+        return _parse_time_str(v, key, where)
     raise ValueError(f"{where}: '{key}' must be an ISO-8601 string, datetime, or null")
 
 
@@ -242,20 +257,20 @@ def pit_violated(as_of: datetime | str | None, known_at: datetime | str | None) 
     return known > start
 
 
-def pit_unverified(as_of: datetime | str | None, known_at: datetime | str | None) -> bool:
-    """True when historical as_of requires PIT proof but known_at is missing."""
-    if known_at is not None:
-        return False
+def _as_of_bounded(as_of: datetime | str | None) -> bool:
     if as_of is None:
         return False
     if isinstance(as_of, str):
         text = as_of.strip().lower()
-        if not text or text == "unbounded":
-            return False
-        return True
-    if isinstance(as_of, datetime):
-        return True
-    return False
+        return bool(text) and text != "unbounded"
+    return isinstance(as_of, datetime)
+
+
+def pit_unverified(as_of: datetime | str | None, known_at: datetime | str | None) -> bool:
+    """True when historical as_of requires PIT proof but known_at is missing."""
+    if known_at is not None:
+        return False
+    return _as_of_bounded(as_of)
 
 
 @dataclass(frozen=True)
@@ -279,7 +294,7 @@ class Failure:
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> Failure:
         """Parse and validate; raises ValueError on malformed input."""
         if not isinstance(d, dict):
-            raise ValueError(f"{_path}: failure must be a mapping, got {type(d).__name__}")
+            raise ValueError(f"{_path}: failure must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = f"{_path}: failure"
         out = cls(
             category=_coerce_enum(FAILURE_CATEGORY_VALUES, d.get("category"), "category", where),
@@ -314,25 +329,34 @@ class ResearchSession:
     final_result: dict[str, JSONValue] | None = None
     failure: Failure | None = None
 
-    def validate(self, where: str = "<session>") -> None:
-        """Raise ValueError on any contract violation."""
+    def _validate_ids(self, where: str) -> None:
         if not self.session_id:
             raise ValueError(f"{where}: 'session_id' must be a non-empty string")
         if not self.query:
             raise ValueError(f"{where}: 'query' must be a non-empty string")
         if not self.objective:
             raise ValueError(f"{where}: 'objective' must be a non-empty string")
+
+    def _validate_wave(self, where: str) -> None:
         _coerce_enum(STATUS_VALUES, self.status, "status", where)
         if isinstance(self.current_wave, bool) or not isinstance(self.current_wave, int):
-            raise ValueError(f"{where}: 'current_wave' must be an int")
+            raise ValueError(f"{where}: 'current_wave' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         if self.current_wave < 0:
             raise ValueError(f"{where}: 'current_wave' must be >= 0, got {self.current_wave}")
+
+    def _validate_targeting(self, where: str) -> None:
         if self.targeted_question is not None and not isinstance(self.targeted_question, str):
             raise ValueError(f"{where}: 'targeted_question' must be a string or null")
         if self.targeted_domain is not None and not isinstance(self.targeted_domain, str):
             raise ValueError(f"{where}: 'targeted_domain' must be a string or null")
         if self.failure is not None:
             self.failure.validate(f"{where}: failure")
+
+    def validate(self, where: str = "<session>") -> None:
+        """Raise ValueError on any contract violation."""
+        self._validate_ids(where)
+        self._validate_wave(where)
+        self._validate_targeting(where)
 
     def to_dict(self) -> dict[str, JSONValue]:
         """Serialize (datetimes as ISO-8601, failure nested as dict or None)."""
@@ -361,27 +385,41 @@ class ResearchSession:
         return d
 
     @classmethod
+    def _parse_failure(cls, d: Mapping[str, object], where: str) -> Failure | None:
+        raw_failure = d.get("failure")
+        if raw_failure is None:
+            return None
+        if not isinstance(raw_failure, dict):
+            raise ValueError(f"{where}: 'failure' must be a mapping or null")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        return Failure.from_dict(raw_failure, where)
+
+    @classmethod
+    def _parse_result(cls, d: Mapping[str, object], where: str) -> dict[str, JSONValue] | None:
+        raw_result = d.get("result", d.get("final_result"))
+        if raw_result is None:
+            return None
+        return validate_json_mapping(raw_result, f"{where}: 'final_result'")
+
+    @classmethod
+    def _parse_wave(cls, d: Mapping[str, object], where: str) -> int:
+        wave = d.get("current_wave", 0)
+        if isinstance(wave, bool) or not isinstance(wave, int):
+            raise ValueError(f"{where}: 'current_wave' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        return wave
+
+    @classmethod
+    def _parse_runs(cls, d: Mapping[str, object], where: str) -> list[JSONValue]:
+        raw_runs = d.get("committee_runs", [])
+        if not isinstance(raw_runs, list):
+            raise ValueError(f"{where}: 'committee_runs' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        return [validate_json_value(x, f"{where}: 'committee_runs'") for x in raw_runs]
+
+    @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ResearchSession:
         """Parse and validate; raises ValueError on malformed input."""
         if not isinstance(d, dict):
-            raise ValueError(f"{_path}: session must be a mapping, got {type(d).__name__}")
+            raise ValueError(f"{_path}: session must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = f"{_path}: session {d.get('session_id', '?')}"
-        raw_failure = d.get("failure")
-        failure: Failure | None = None
-        if raw_failure is not None:
-            if not isinstance(raw_failure, dict):
-                raise ValueError(f"{where}: 'failure' must be a mapping or null")
-            failure = Failure.from_dict(raw_failure, where)
-        raw_result = d.get("result", d.get("final_result"))
-        final_result: dict[str, JSONValue] | None = None
-        if raw_result is not None:
-            final_result = validate_json_mapping(raw_result, f"{where}: 'final_result'")
-        raw_runs = d.get("committee_runs", [])
-        if not isinstance(raw_runs, list):
-            raise ValueError(f"{where}: 'committee_runs' must be a list")
-        wave = d.get("current_wave", 0)
-        if isinstance(wave, bool) or not isinstance(wave, int):
-            raise ValueError(f"{where}: 'current_wave' must be an int")
         out = cls(
             session_id=_req_str(d, "session_id", where),
             created_at=_req_time(d, "created_at", where),
@@ -390,19 +428,19 @@ class ResearchSession:
             objective=_req_str(d, "objective", where),
             as_of=_coerce_time(d.get("as_of"), "as_of", where),
             status=_coerce_enum(STATUS_VALUES, d.get("status", SessionStatus.CREATED.value), "status", where),
-            current_wave=wave,
+            current_wave=cls._parse_wave(d, where),
             policy=validate_json_mapping(d.get("policy", {}), f"{where}: 'policy'"),
             budget=validate_json_mapping(d.get("budget", {}), f"{where}: 'budget'"),
             job_ids=_req_list_str(d, "job_ids", where),
             evidence_ids=_req_list_str(d, "evidence_ids", where),
             freeze_ids=_req_list_str(d, "freeze_ids", where),
             dossier_ids=_req_list_str(d, "dossier_ids", where),
-            committee_runs=[validate_json_value(x, f"{where}: 'committee_runs'") for x in raw_runs],
+            committee_runs=cls._parse_runs(d, where),
             unresolved_questions=_req_list_str(d, "unresolved_questions", where),
             targeted_question=_opt_str(d.get("targeted_question"), "targeted_question", where),
             targeted_domain=_opt_str(d.get("targeted_domain"), "targeted_domain", where),
-            final_result=final_result,
-            failure=failure,
+            final_result=cls._parse_result(d, where),
+            failure=cls._parse_failure(d, where),
         )
         out.validate(where)
         return out
@@ -433,26 +471,32 @@ class Job:
     diagnostics: dict[str, JSONValue] = field(default_factory=dict)
     failure: Failure | None = None
 
-    def validate(self, where: str = "<job>") -> None:
-        """Raise ValueError on any contract violation."""
+    def _validate_ids(self, where: str) -> None:
         if not self.job_id:
             raise ValueError(f"{where}: 'job_id' must be a non-empty string")
         if not self.session_id:
             raise ValueError(f"{where}: 'session_id' must be a non-empty string")
         if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int):
-            raise ValueError(f"{where}: 'wave_id' must be an int")
+            raise ValueError(f"{where}: 'wave_id' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         if self.wave_id < 1:
             raise ValueError(f"{where}: 'wave_id' must be >= 1, got {self.wave_id}")
-        _coerce_enum(JOB_TYPE_VALUES, self.job_type, "job_type", where)
-        _coerce_enum(JOB_STATUS_VALUES, self.status, "status", where)
+
+    def _validate_budgets(self, where: str) -> None:
         if not self.owner:
             raise ValueError(f"{where}: 'owner' must be a non-empty string")
         if isinstance(self.child_budget, bool) or not isinstance(self.child_budget, int):
-            raise ValueError(f"{where}: 'child_budget' must be an int")
+            raise ValueError(f"{where}: 'child_budget' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         if self.child_budget < 0:
             raise ValueError(f"{where}: 'child_budget' must be >= 0, got {self.child_budget}")
         if self.failure is not None:
             self.failure.validate(f"{where}: failure")
+
+    def validate(self, where: str = "<job>") -> None:
+        """Raise ValueError on any contract violation."""
+        self._validate_ids(where)
+        _coerce_enum(JOB_TYPE_VALUES, self.job_type, "job_type", where)
+        _coerce_enum(JOB_STATUS_VALUES, self.status, "status", where)
+        self._validate_budgets(where)
 
     def to_dict(self) -> dict[str, JSONValue]:
         """Serialize (datetimes as ISO-8601, failure/result nested or None)."""
@@ -480,24 +524,34 @@ class Job:
         }
 
     @classmethod
+    def _parse_failure(cls, d: Mapping[str, object], where: str) -> Failure | None:
+        raw_failure = d.get("failure")
+        if raw_failure is None:
+            return None
+        if not isinstance(raw_failure, dict):
+            raise ValueError(f"{where}: 'failure' must be a mapping or null")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        return Failure.from_dict(raw_failure, where)
+
+    @classmethod
+    def _parse_result(cls, d: Mapping[str, object], where: str) -> dict[str, JSONValue] | None:
+        raw_result = d.get("result")
+        if raw_result is None:
+            return None
+        return validate_json_mapping(raw_result, f"{where}: 'result'")
+
+    @classmethod
+    def _parse_children(cls, d: Mapping[str, object], where: str) -> int:
+        children = d.get("child_budget", 0)
+        if isinstance(children, bool) or not isinstance(children, int):
+            raise ValueError(f"{where}: 'child_budget' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        return children
+
+    @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> Job:
         """Parse and validate; raises ValueError on malformed input."""
         if not isinstance(d, dict):
-            raise ValueError(f"{_path}: job must be a mapping, got {type(d).__name__}")
+            raise ValueError(f"{_path}: job must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = f"{_path}: job {d.get('job_id', '?')}"
-        raw_failure = d.get("failure")
-        failure: Failure | None = None
-        if raw_failure is not None:
-            if not isinstance(raw_failure, dict):
-                raise ValueError(f"{where}: 'failure' must be a mapping or null")
-            failure = Failure.from_dict(raw_failure, where)
-        raw_result = d.get("result")
-        result: dict[str, JSONValue] | None = None
-        if raw_result is not None:
-            result = validate_json_mapping(raw_result, f"{where}: 'result'")
-        children = d.get("child_budget", 0)
-        if isinstance(children, bool) or not isinstance(children, int):
-            raise ValueError(f"{where}: 'child_budget' must be an int")
         out = cls(
             job_id=_req_str(d, "job_id", where),
             session_id=_req_str(d, "session_id", where),
@@ -515,10 +569,10 @@ class Job:
             model=_opt_str(d.get("model"), "model", where),
             token_budget=_opt_int(d.get("token_budget"), "token_budget", where),
             tool_budget=_opt_int(d.get("tool_budget"), "tool_budget", where),
-            child_budget=children,
-            result=result,
+            child_budget=cls._parse_children(d, where),
+            result=cls._parse_result(d, where),
             diagnostics=validate_json_mapping(d.get("diagnostics", {}), f"{where}: 'diagnostics'"),
-            failure=failure,
+            failure=cls._parse_failure(d, where),
         )
         out.validate(where)
         return out
@@ -527,7 +581,7 @@ class Job:
 def _req_time_wave(d: Mapping[str, object], where: str) -> int:
     wave = d.get("wave_id")
     if isinstance(wave, bool) or not isinstance(wave, int):
-        raise ValueError(f"{where}: 'wave_id' must be an int")
+        raise ValueError(f"{where}: 'wave_id' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return wave
 
 
@@ -546,16 +600,19 @@ class JournalEvent:
     previous_state: str | None = None
     new_state: str | None = None
 
-    def validate(self, where: str = "<journal>") -> None:
-        """Raise ValueError on any contract violation."""
+    def _validate_ids_seq(self, where: str) -> None:
         if not self.event_id:
             raise ValueError(f"{where}: 'event_id' must be a non-empty string")
         if not self.session_id:
             raise ValueError(f"{where}: 'session_id' must be a non-empty string")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
-            raise ValueError(f"{where}: 'sequence' must be an int")
+            raise ValueError(f"{where}: 'sequence' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         if self.sequence < 1:
             raise ValueError(f"{where}: 'sequence' must be >= 1, got {self.sequence}")
+
+    def validate(self, where: str = "<journal>") -> None:
+        """Raise ValueError on any contract violation."""
+        self._validate_ids_seq(where)
         if not self.event_type:
             raise ValueError(f"{where}: 'event_type' must be a non-empty string")
         if not self.actor_type:
@@ -582,11 +639,11 @@ class JournalEvent:
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> JournalEvent:
         """Parse and validate; raises ValueError on malformed input."""
         if not isinstance(d, dict):
-            raise ValueError(f"{_path}: journal event must be a mapping, got {type(d).__name__}")
+            raise ValueError(f"{_path}: journal event must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = f"{_path}: event {d.get('event_id', '?')}"
         seq = d.get("sequence")
         if isinstance(seq, bool) or not isinstance(seq, int):
-            raise ValueError(f"{where}: 'sequence' must be an int")
+            raise ValueError(f"{where}: 'sequence' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         out = cls(
             event_id=_req_str(d, "event_id", where),
             session_id=_req_str(d, "session_id", where),

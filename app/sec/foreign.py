@@ -29,7 +29,7 @@ def reporting_regime(
         filings = list_sec_filings(ticker_or_cik, limit=100, as_of=as_of)
         forms = sorted({getattr(f, "form", "") for f in filings
                         if getattr(f, "form", "")})
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {"ticker": str(ticker_or_cik), "regime": "unknown",
                 "evidence_forms": []}
     if any(f in ("40-F", "40-F/A") for f in forms):

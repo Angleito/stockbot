@@ -16,10 +16,10 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Optional, Sequence
+from typing import Sequence
 
 try:
     import fcntl  # Linux-only; short-interest locking is explicitly Linux-only.
@@ -32,9 +32,9 @@ from .. import finra_client
 from ..config import finra_use_mock, get_data_root
 from ..normalization import (
     SHORT_INTEREST_PARSER_VERSION,
-    normalize_sec_tickers,
-    normalize_sec_company_facts,
     normalize_finra_short_interest,
+    normalize_sec_company_facts,
+    normalize_sec_tickers,
 )
 from ..storage import parquet, raw_archive
 
@@ -66,23 +66,29 @@ def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
         return False
     return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
 
-def _short_interest_has_legacy_v1(parquet_root: Path) -> bool:
+def _parser_version_values(parquet_root: Path) -> list[object] | None:
+    """All parser_version values, or None when the table is unreadable."""
     try:
         table = parquet.read_table("short_interest", root=parquet_root, columns=["parser_version"])
-    except Exception:
-        return True
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
     try:
+        values: list[object] = []
         for batch in table.to_batches():
             try:
-                values = batch.column("parser_version").to_pylist()
-            except Exception:
-                return True
-            for v in values:
-                if str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION:
-                    return True
-        return False
-    except Exception:
+                values.extend(batch.column("parser_version").to_pylist())
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+                return None
+        return values
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+
+
+def _short_interest_has_legacy_v1(parquet_root: Path) -> bool:
+    values = _parser_version_values(parquet_root)
+    if values is None:
         return True
+    return any(str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION for v in values)
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -138,7 +144,28 @@ def _sec_get(url: str) -> bytes:
     return resp.content
 
 
-def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict[str, object]:
+def _parse_ticker_ciks(payload_json: object) -> dict[str, int]:
+    """ticker -> CIK from the SEC universe payload (skips malformed rows)."""
+    ticker_ciks: dict[str, int] = {}
+    items = payload_json.values() if isinstance(payload_json, dict) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        cik_raw = item.get("cik_str")
+        if cik_raw is None:
+            continue
+        try:
+            cik = int(cik_raw)
+        except (TypeError, ValueError):
+            continue
+        ticker_ciks[ticker] = cik
+    return ticker_ciks
+
+
+def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_TICKERS_URL
@@ -154,22 +181,7 @@ def refresh_sec_tickers(*, data_root: Optional[Path] = None) -> dict[str, object
         parquet.write_rows(name, rows, root=data_root / "parquet")
         for name, rows in datasets.items()
     )
-    ticker_ciks: dict[str, int] = {}
-    items = payload_json.values() if isinstance(payload_json, dict) else (payload_json or [])
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        ticker = str(item.get("ticker") or "").strip().upper()
-        if not ticker:
-            continue
-        cik_raw = item.get("cik_str")
-        if cik_raw is None:
-            continue
-        try:
-            cik = int(cik_raw)
-        except (TypeError, ValueError):
-            continue
-        ticker_ciks[ticker] = cik
+    ticker_ciks = _parse_ticker_ciks(payload_json)
     return {
         "source": "sec:company_tickers",
         "written": written,
@@ -194,7 +206,7 @@ def _normalize_and_write_company_facts(
     )
 
 
-def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> dict[str, object]:
+def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     url = SEC_FACTS_URL.format(cik=cik)
@@ -216,7 +228,7 @@ def refresh_sec_company_facts(cik: int, *, data_root: Optional[Path] = None) -> 
     }
 
 
-def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[str, object]:
+def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str, object]:
     """Replay archived SEC companyfacts payloads through normalize -> Parquet.
 
     Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
@@ -243,7 +255,7 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[s
                         retrieved_at=record.retrieved_at, url=record.url,
                         data_root=data_root,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                     failed.append({
                         "cik": cik_dir.name,
                         "sha256": record.sha256,
@@ -258,55 +270,65 @@ def replay_sec_facts_from_archive(*, data_root: Optional[Path] = None) -> dict[s
     }
 
 
-def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Path] = None) -> dict[str, object]:
-    data_root = Path(data_root) if data_root else get_data_root()
-    name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
-    url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
-    fields = (
-        "symbolCode", "issueName", "settlementDate", "currentShortPositionQuantity",
-        "previousShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity",
-    )
+def _finra_page_request(settlement_date: str, offset: int, fields: tuple[str, ...]) -> dict[str, object]:
+    """One FINRA consolidatedShortInterest page request body."""
+    return {
+        "limit": finra_client.MAX_LIMIT,
+        "offset": offset,
+        "fields": list(fields),
+        "compareFilters": [{
+            "compareType": "EQUAL",
+            "fieldName": "settlementDate",
+            "fieldValue": settlement_date,
+        }],
+    }
+
+
+def _finra_check_page_total(headers: Mapping[str, object], total: int | None) -> int:
+    """Prove snapshot completeness: Record-Total present and stable across pages."""
+    raw_total = headers.get("record-total")
+    if raw_total is None:
+        raise ValueError("FINRA omitted Record-Total; cannot prove the short-interest snapshot is complete.")
+    page_total = int(str(raw_total))
+    if total is not None and page_total != total:
+        raise ValueError("FINRA Record-Total changed while paging the snapshot.")
+    return page_total
+
+
+def _finra_extend_snapshot(all_rows: list[dict[str, object]], rows: object, total: int) -> int:
+    """Append one page of dict rows; returns the page size for the offset."""
+    page_rows: list[dict[str, object]] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    if not page_rows and len(all_rows) < total:
+        raise ValueError("FINRA pagination ended before the complete short-interest snapshot was retrieved.")
+    all_rows.extend(page_rows)
+    return len(page_rows)
+
+
+def _fetch_finra_snapshot(settlement_date: str, name: str, url: str, fields: tuple[str, ...], data_root: Path) -> list[dict[str, object]]:
+    """Page the full FINRA snapshot, archiving every raw page (write-once dedup)."""
     all_rows: list[dict[str, object]] = []
-    total: Optional[int] = None
+    total: int | None = None
     offset = 0
     while True:
         time.sleep(0.2)  # politeness pacing, same interval as the pre-cut pipeline
-        payload: dict[str, object] = {
-            "limit": finra_client.MAX_LIMIT,
-            "offset": offset,
-            "fields": list(fields),
-            "compareFilters": [{
-                "compareType": "EQUAL",
-                "fieldName": "settlementDate",
-                "fieldValue": settlement_date,
-            }],
-        }
+        payload = _finra_page_request(settlement_date, offset, fields)
         content, rows, headers = finra_client.ingestion_post_query("otcMarket", name, payload)
         raw_archive.archive(
             "finra", "data_page", f"otcMarket/consolidatedShortInterest:{settlement_date}:offset{offset}",
             content, url=url, metadata={"payload": payload, "headers": headers},
             root=data_root / "raw",
         )
-        raw_total = headers.get("record-total")
-        if raw_total is None:
-            raise ValueError("FINRA omitted Record-Total; cannot prove the short-interest snapshot is complete.")
-        page_total = int(str(raw_total))
-        if total is None:
-            total = page_total
-        elif page_total != total:
-            raise ValueError("FINRA Record-Total changed while paging the snapshot.")
-        page_rows = [row for row in rows if isinstance(row, dict)]
-        if not page_rows and len(all_rows) < total:
-            raise ValueError("FINRA pagination ended before the complete short-interest snapshot was retrieved.")
-        all_rows.extend(page_rows)
-        offset += len(page_rows)
+        total = _finra_check_page_total(headers, total)
+        offset += _finra_extend_snapshot(all_rows, rows, total)
         if len(all_rows) >= total:
             break
     if len(all_rows) != total:
         raise ValueError("FINRA pagination returned an incomplete short-interest snapshot.")
-    snapshot_hash = hashlib.sha256(
-        json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return all_rows
+
+
+def _write_finra_snapshot(all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str, data_root: Path) -> tuple[int, int, str]:
+    """Normalize + write one snapshot; backfill legacy known_at under the lock."""
     retrieved_at = _utc_now()
     with _finra_short_interest_lock(data_root / "parquet"):
         datasets = normalize_finra_short_interest(
@@ -318,7 +340,23 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
             parquet.write_rows(name, rows, root=data_root / "parquet")
             for name, rows in datasets.items()
         )
-        backfilled = _backfill_finra_known_at_locked(data_root)["rewritten"]
+        backfilled_raw = _backfill_finra_known_at_locked(data_root)["rewritten"]
+        backfilled = int(backfilled_raw) if isinstance(backfilled_raw, int) else 0
+    return written, backfilled, retrieved_at
+
+def refresh_finra_short_interest(settlement_date: str, *, data_root: Path | None = None) -> dict[str, object]:
+    data_root = Path(data_root) if data_root else get_data_root()
+    name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
+    url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
+    fields = (
+        "symbolCode", "issueName", "settlementDate", "currentShortPositionQuantity",
+        "previousShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity",
+    )
+    all_rows = _fetch_finra_snapshot(settlement_date, name, url, fields, data_root)
+    snapshot_hash = hashlib.sha256(
+        json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    written, backfilled, retrieved_at = _write_finra_snapshot(all_rows, settlement_date, snapshot_hash, url, data_root)
     return {
         "source": "finra:consolidatedShortInterest",
         "settlement_date": settlement_date,
@@ -330,12 +368,78 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Optional[Pa
     }
 
 
+def _normalize_ticker_ciks(ticker_ciks_raw: object) -> dict[str, int]:
+    """ticker -> CIK keeping only well-typed entries."""
+    ticker_ciks: dict[str, int] = {}
+    if isinstance(ticker_ciks_raw, dict):
+        for k, v in ticker_ciks_raw.items():
+            if isinstance(k, str) and isinstance(v, int):
+                ticker_ciks[k] = v
+    return ticker_ciks
+
+
+def _assert_fixed_row_present(staged_by_id: Mapping[str, object], row_id: str) -> dict[str, object]:
+    """Fixed row as found in the staged copy (raises when missing)."""
+    staged_row = staged_by_id.get(row_id)
+    if not isinstance(staged_row, dict):
+        raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing from staged copy")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return staged_row
+
+
+def _assert_fixed_row_stamped(staged_row: dict[str, object], row_id: str) -> None:
+    """Fixed row must carry known_at == retrieved_at and the v2 stamp."""
+    if str(staged_row.get("known_at")) != str(staged_row.get("retrieved_at")):
+        raise RuntimeError(f"backfill validation failed: fixed row {row_id} known_at != retrieved_at")
+    if str(staged_row.get("parser_version") or "") != SHORT_INTEREST_PARSER_VERSION:
+        raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing v2 stamp")
+
+
+def _assert_no_stamped_leftovers(staged: list[object]) -> None:
+    """No staged row may remain legacy settlement-stamped."""
+    for staged_row in staged:
+        if not isinstance(staged_row, dict):
+            continue
+        if _is_legacy_settlement_stamped(staged_row):
+            raise RuntimeError(
+                f"backfill validation failed: staged row {staged_row.get('row_id')} still settlement-stamped"
+            )
+
+
+def _resolve_enrichment_ciks(
+    tickers: Sequence[str], ciks: Sequence[int], ticker_ciks_raw: object,
+) -> tuple[list[str], dict[str, int], list[str], list[int]]:
+    """(requested tickers, ticker->cik, unresolved, enrich ciks)."""
+    requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
+    ticker_ciks = _normalize_ticker_ciks(ticker_ciks_raw)
+    unresolved = [t for t in requested if t not in ticker_ciks]
+    enrich_ciks = list(dict.fromkeys(
+        [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
+    ))
+    return requested, ticker_ciks, unresolved, enrich_ciks
+
+
+def _enrich_cik_facts(enrich_ciks: Sequence[int], cik_to_ticker: dict[int, str], data_root: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """SEC facts per CIK; failures reported per CIK, never blocking siblings."""
+    sec_facts: list[dict[str, object]] = []
+    failed_enrichments: list[dict[str, object]] = []
+    for cik in enrich_ciks:
+        try:
+            sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))
+        except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            failed_enrichments.append({
+                "ticker": cik_to_ticker.get(cik),
+                "cik": cik,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return sec_facts, failed_enrichments
+
+
 def prepare_short_interest_data(
     settlement_date: str,
     *,
     tickers: Sequence[str] = (),
     ciks: Sequence[int] = (),
-    data_root: Optional[Path] = None,
+    data_root: Path | None = None,
 ) -> dict[str, object]:
     """Refresh the SEC ticker universe and the full FINRA snapshot, and
     enrich SEC company facts only for the explicitly requested tickers/CIKs.
@@ -347,31 +451,13 @@ def prepare_short_interest_data(
     enrichment failure is reported in ``failed_enrichments`` and never
     blocks the FINRA snapshot.
     """
-    requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
+    data_root = Path(data_root) if data_root else get_data_root()
     sec_tickers = refresh_sec_tickers(data_root=data_root)
-    ticker_ciks_raw = sec_tickers["ticker_ciks"]
-    ticker_ciks: dict[str, int] = {}
-    if isinstance(ticker_ciks_raw, dict):
-        for k, v in ticker_ciks_raw.items():
-            if isinstance(k, str) and isinstance(v, int):
-                ticker_ciks[k] = v
-    unresolved = [t for t in requested if t not in ticker_ciks]
-    enrich_ciks = list(dict.fromkeys(
-        [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
-    ))
+    _, ticker_ciks, unresolved, enrich_ciks = _resolve_enrichment_ciks(
+        tickers, ciks, sec_tickers["ticker_ciks"])
     finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
     cik_to_ticker = {cik: ticker for ticker, cik in ticker_ciks.items()}
-    sec_facts: list[dict[str, object]] = []
-    failed_enrichments: list[dict[str, object]] = []
-    for cik in enrich_ciks:
-        try:
-            sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))
-        except Exception as exc:
-            failed_enrichments.append({
-                "ticker": cik_to_ticker.get(cik),
-                "cik": cik,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+    sec_facts, failed_enrichments = _enrich_cik_facts(enrich_ciks, cik_to_ticker, data_root)
     public_tickers = {k: v for k, v in sec_tickers.items() if k != "ticker_ciks"}
     public_tickers["ticker_count"] = len(ticker_ciks)
     return {
@@ -382,7 +468,7 @@ def prepare_short_interest_data(
         "failed_enrichments": failed_enrichments,
     }
 
-def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, object]:
+def backfill_finra_known_at(*, data_root: Path | None = None) -> dict[str, object]:
     """Rewrite legacy v1 settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
 
     Only legacy v1 settlement-stamped rows gain their own ``retrieved_at`` and
@@ -393,19 +479,16 @@ def backfill_finra_known_at(*, data_root: Optional[Path] = None) -> dict[str, ob
         return _backfill_finra_known_at_locked(root)
 
 
-def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
-    root = data_root
-    parquet_root = root / "parquet"
-    dataset_dir = parquet_root / "short_interest"
-    backup_dir = parquet_root / "short_interest-backfill-bak"
+def _recover_backfill_backup(dataset_dir: Path, backup_dir: Path) -> None:
+    """Restore an interrupted swap, or clear a stale backup."""
     if backup_dir.exists() and not dataset_dir.exists():
         backup_dir.rename(dataset_dir)
     elif backup_dir.exists():
         shutil.rmtree(backup_dir)
-    if not _short_interest_has_legacy_v1(parquet_root):
-        return {"rewritten": 0}
-    table = parquet.read_table("short_interest", root=parquet_root)
-    rows = table.to_pylist()
+
+
+def _legacy_stamped_fixes(rows: list[object]) -> list[dict[str, object]]:
+    """Legacy v1 settlement-stamped rows with known_at -> retrieved_at + v2 stamp."""
     fixed: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -415,37 +498,52 @@ def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
             row["known_at"] = str(row.get("retrieved_at") or "")
             row["parser_version"] = SHORT_INTEREST_PARSER_VERSION
             fixed.append(row)
-    if not fixed:
-        return {"rewritten": 0}
+    return fixed
+
+
+def _merge_fixed_rows(rows: list[object], fixed: list[dict[str, object]]) -> list[dict[str, object]]:
+    """All rows with fixed revisions overlaid by row_id."""
     by_id = {str(r.get("row_id")): r for r in rows if isinstance(r, dict)}
     for row in fixed:
         by_id[str(row.get("row_id"))] = row
-    corrected = list(by_id.values())
+    return list(by_id.values())
+
+
+def _validate_staged_backfill(staged: list[object], corrected: list[dict[str, object]], fixed: list[dict[str, object]]) -> None:
+    """Staged copy must hold every fixed row with known_at == retrieved_at + v2."""
+    if len(staged) != len(corrected):
+        raise RuntimeError(
+            f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}"
+        )
+    staged_by_id = {str(r.get("row_id")): r for r in staged if isinstance(r, dict)}
+    for row in fixed:
+        row_id = str(row.get("row_id"))
+        staged_row = _assert_fixed_row_present(staged_by_id, row_id)
+        _assert_fixed_row_stamped(staged_row, row_id)
+    _assert_no_stamped_leftovers(staged)
+
+
+
+
+def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
+    root = data_root
+    parquet_root = root / "parquet"
+    dataset_dir = parquet_root / "short_interest"
+    backup_dir = parquet_root / "short_interest-backfill-bak"
+    _recover_backfill_backup(dataset_dir, backup_dir)
+    if not _short_interest_has_legacy_v1(parquet_root):
+        return {"rewritten": 0}
+    table = parquet.read_table("short_interest", root=parquet_root)
+    rows = table.to_pylist()
+    fixed = _legacy_stamped_fixes(rows)
+    if not fixed:
+        return {"rewritten": 0}
+    corrected = _merge_fixed_rows(rows, fixed)
     staging = Path(tempfile.mkdtemp(prefix="short_interest-backfill-", dir=parquet_root))
     try:
         parquet.write_rows("short_interest", corrected, root=staging)
         staged = parquet.read_table("short_interest", root=staging).to_pylist()
-        if len(staged) != len(corrected):
-            raise RuntimeError(
-                f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}"
-            )
-        staged_by_id = {str(r.get("row_id")): r for r in staged if isinstance(r, dict)}
-        for row in fixed:
-            row_id = str(row.get("row_id"))
-            staged_row = staged_by_id.get(row_id)
-            if staged_row is None:
-                raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing from staged copy")
-            if str(staged_row.get("known_at")) != str(staged_row.get("retrieved_at")):
-                raise RuntimeError(f"backfill validation failed: fixed row {row_id} known_at != retrieved_at")
-            if str(staged_row.get("parser_version") or "") != SHORT_INTEREST_PARSER_VERSION:
-                raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing v2 stamp")
-        for staged_row in staged:
-            if not isinstance(staged_row, dict):
-                continue
-            if _is_legacy_settlement_stamped(staged_row):
-                raise RuntimeError(
-                    f"backfill validation failed: staged row {staged_row.get('row_id')} still settlement-stamped"
-                )
+        _validate_staged_backfill(staged, corrected, fixed)
         # short_interest parquet mutations hold _finra_short_interest_lock; network fetch stays outside
         if dataset_dir.exists():
             os.replace(dataset_dir, backup_dir)

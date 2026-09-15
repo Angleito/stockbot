@@ -1,6 +1,8 @@
 """Runtime narrowing for untyped JSON/BigQuery/SQLite boundaries."""
 from __future__ import annotations
+
 import json
+
 
 def result_rows(result: dict[str, object]) -> list[object]:
     raw = result.get("rows")

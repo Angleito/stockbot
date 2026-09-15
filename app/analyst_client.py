@@ -19,7 +19,6 @@ import logging
 import re
 import threading
 import time
-from typing import Optional
 
 import requests
 
@@ -43,8 +42,8 @@ _UA = (
 )
 
 _lock = threading.RLock()
-_session: Optional[requests.Session] = None
-_crumb: Optional[str] = None
+_session: requests.Session | None = None
+_crumb: str | None = None
 _crumb_at = 0.0
 
 _PERIOD_LABELS = {
@@ -102,8 +101,8 @@ def _reset_crumb() -> None:
     _crumb_at = 0.0
 
 
-def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
-    """Fetch quoteSummary for ticker; retries once after refreshing the crumb."""
+def _fetch_summary_response(ticker: str, modules: str) -> requests.Response:
+    """GET quoteSummary; retry once with a fresh crumb on 401/403."""
     url = (
         f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}"
         f"?modules={modules}&crumb={_get_crumb()}"
@@ -118,13 +117,11 @@ def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
             f"?modules={modules}&crumb={_get_crumb()}"
         )
         resp = _session_get(_ensure_session(), url, headers={"Accept": "application/json"})
-    resp.raise_for_status()
-    decoded: object = resp.json()
-    if not isinstance(decoded, dict):
-        raise ValueError(f"Yahoo returned no data for {ticker}")
-    summary: object = decoded.get("quoteSummary") or {}
-    if not isinstance(summary, dict):
-        raise ValueError(f"Yahoo returned no data for {ticker}")
+    return resp
+
+
+def _summary_result_list(summary: dict[str, object], ticker: str) -> list[object]:
+    """Narrow quoteSummary to its non-empty result list (same ValueErrors)."""
     result_obj: object = summary.get("result") or []
     if not isinstance(result_obj, list) or not result_obj:
         err: object = summary.get("error") or {}
@@ -132,13 +129,30 @@ def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
         raise ValueError(
             detail if isinstance(detail, str) else f"Yahoo returned no data for {ticker}"
         )
-    first: object = result_obj[0]
+    return result_obj
+
+
+def _first_summary_result(decoded: object, ticker: str) -> dict[str, object]:
+    """Narrow decoded payload to quoteSummary result[0] (same ValueErrors)."""
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    summary: object = decoded.get("quoteSummary") or {}
+    if not isinstance(summary, dict):
+        raise ValueError(f"Yahoo returned no data for {ticker}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    first: object = _summary_result_list(summary, ticker)[0]
     if not isinstance(first, dict):
-        raise ValueError(f"Yahoo returned no data for {ticker}")
+        raise ValueError(f"Yahoo returned no data for {ticker}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return first
 
 
-def _raw(value: object) -> Optional[float]:
+def _quote_summary(ticker: str, modules: str) -> dict[str, object]:
+    """Fetch quoteSummary for ticker; retries once after refreshing the crumb."""
+    resp = _fetch_summary_response(ticker, modules)
+    resp.raise_for_status()
+    return _first_summary_result(resp.json(), ticker)
+
+
+def _raw(value: object) -> float | None:
     if not isinstance(value, dict):
         return None
     raw: object = value.get("raw")
@@ -149,7 +163,7 @@ def _raw(value: object) -> Optional[float]:
     return None
 
 
-def _int(value: object) -> Optional[int]:
+def _int(value: object) -> int | None:
     raw = _raw(value)
     return int(raw) if raw is not None else None
 
@@ -198,19 +212,23 @@ def _trend_rows(data: dict[str, object]) -> list[dict[str, object]]:
     return rows
 
 
-def _recommendation_label(key: Optional[str], mean: Optional[float]) -> str:
+def _label_from_mean(mean: float) -> str:
+    if mean <= 1.5:
+        return "Strong Buy"
+    if mean <= 2.5:
+        return "Buy"
+    if mean <= 3.5:
+        return "Hold"
+    if mean <= 4.5:
+        return "Underperform"
+    return "Sell"
+
+
+def _recommendation_label(key: str | None, mean: float | None) -> str:
     if key and key in _RECOMMENDATION_LABELS:
         return _RECOMMENDATION_LABELS[key]
     if mean is not None:
-        if mean <= 1.5:
-            return "Strong Buy"
-        if mean <= 2.5:
-            return "Buy"
-        if mean <= 3.5:
-            return "Hold"
-        if mean <= 4.5:
-            return "Underperform"
-        return "Sell"
+        return _label_from_mean(mean)
     return "unknown"
 
 
@@ -227,7 +245,7 @@ def get_analyst_estimates(ticker: str) -> dict[str, object]:
         data = _quote_summary(
             ticker, "financialData,earningsTrend,defaultKeyStatistics"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("analyst estimates failed for %s: %s", ticker, e)
         return {"error": f"Analyst estimates unavailable for {ticker}: {e}"}
 
@@ -269,21 +287,27 @@ def get_analyst_estimates(ticker: str) -> dict[str, object]:
     cache.set(key, value)
     return value
 
+
+def _fetch_quote_price(ticker: str) -> float | None:
+    data = _quote_summary(ticker, "price")
+    price = _raw(_obj(data.get("price")).get("regularMarketPrice"))
+    if price is None:
+        data = _quote_summary(ticker, "financialData")
+        price = _raw(_obj(data.get("financialData")).get("currentPrice"))
+    return price
+
+
 def get_quote_price(ticker: str) -> dict[str, object]:
     """Latest Yahoo price with retrieval instant (uncached; 5-min TTL lives in valuation)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return {"price": None, "retrieved_at": None}
     try:
-        data = _quote_summary(ticker, "price")
-        price = _raw(_obj(data.get("price")).get("regularMarketPrice"))
-        if price is None:
-            data = _quote_summary(ticker, "financialData")
-            price = _raw(_obj(data.get("financialData")).get("currentPrice"))
+        price = _fetch_quote_price(ticker)
         if price is None:
             raise ValueError(f"Yahoo returned no price for {ticker}")
         return {"price": price, "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("quote price failed for %s: %s", ticker, e)
         return {"price": None, "retrieved_at": None}
 
@@ -308,7 +332,7 @@ def get_sp500_weight(ticker: str) -> dict[str, object]:
             }
         resp.raise_for_status()
         match = _find_weight(resp.text, ticker)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("sp500 weight failed for %s: %s", ticker, e)
         return {"error": f"S&P 500 index weight unavailable for {ticker}: {e}"}
     if match is None:
@@ -330,7 +354,7 @@ def get_sp500_weight(ticker: str) -> dict[str, object]:
     return value
 
 
-def _find_weight(html: str, ticker: str) -> Optional[dict[str, object]]:
+def _find_weight(html: str, ticker: str) -> dict[str, object] | None:
     body = re.search(r"<tbody>(.*?)</tbody>", html, re.S)
     if body is None:
         return None

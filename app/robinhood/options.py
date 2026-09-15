@@ -33,7 +33,7 @@ class MarketSnapshot:
     @property
     def mid(self) -> Decimal | None:
         if self.bid is not None and self.ask is not None:
-            return (self.bid + self.ask) / Decimal("2")
+            return (self.bid + self.ask) / Decimal(2)
         return None
 
 
@@ -62,45 +62,46 @@ class OptionQuote:
     @property
     def mid(self) -> Decimal | None:
         if self.bid is not None and self.ask is not None:
-            return (self.bid + self.ask) / Decimal("2")
+            return (self.bid + self.ask) / Decimal(2)
         return self.mark
 
 
-def normalize_option_quote(payload: Mapping[str, object], *, ticker: str = "") -> OptionQuote:
-    """Normalize common provider aliases while keeping absent values nullable."""
+def _coerce_option_int(raw: object) -> int | None:
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float, Decimal, str)):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _option_integer(payload: Mapping[str, object], name: str, *aliases: str) -> int | None:
+    raw: object = next((payload.get(key) for key in (name, *aliases) if payload.get(key) is not None), None)
+    if raw is None or raw == "":
+        return None
+    return _coerce_option_int(raw)
+
+
+def _normalize_option_type(payload: Mapping[str, object]) -> str:
+    option_type = str(_first_present(payload, "option_type", "type", "optionType") or "").lower()
+    if option_type in {"p", "put"}:
+        return "put"
+    if option_type in {"c", "call"}:
+        return "call"
+    raise ValueError("Option response is missing a supported option type")
+
+
+def _option_expiry_strike(payload: Mapping[str, object]) -> tuple[date, Decimal]:
     expiration = _date(_first_present(payload, "expiration", "expiration_date", "expirationDate"))
     strike = _decimal(_first_present(payload, "strike", "strike_price", "strikePrice"))
     if expiration is None or strike is None:
         raise ValueError("Option response is missing expiration or strike")
-    option_type = str(
-        _first_present(payload, "option_type", "type", "optionType") or ""
-    ).lower()
-    if option_type in {"p", "put"}:
-        option_type = "put"
-    elif option_type in {"c", "call"}:
-        option_type = "call"
-    else:
-        raise ValueError("Option response is missing a supported option type")
+    return expiration, strike
 
-    def integer(name: str, *aliases: str) -> int | None:
-        raw: object = next((payload.get(key) for key in (name, *aliases) if payload.get(key) is not None), None)
-        if raw is None or raw == "":
-            return None
-        try:
-            if isinstance(raw, bool):
-                return int(raw)
-            if isinstance(raw, int):
-                return raw
-            if isinstance(raw, float):
-                return int(raw)
-            if isinstance(raw, Decimal):
-                return int(raw)
-            if isinstance(raw, str):
-                return int(raw)
-        except (TypeError, ValueError):
-            return None
-        return None
 
+def _option_retrieved_at(payload: Mapping[str, object]) -> datetime:
     retrieved = _first_present(payload, "retrieved_at", "retrievedAt", "updated_at", "updatedAt")
     if isinstance(retrieved, str):
         retrieved_at = datetime.fromisoformat(retrieved.replace("Z", "+00:00"))
@@ -110,6 +111,14 @@ def normalize_option_quote(payload: Mapping[str, object], *, ticker: str = "") -
         retrieved_at = datetime.now(timezone.utc)
     if retrieved_at.tzinfo is None:
         retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
+    return retrieved_at
+
+
+def normalize_option_quote(payload: Mapping[str, object], *, ticker: str = "") -> OptionQuote:
+    """Normalize common provider aliases while keeping absent values nullable."""
+    expiration, strike = _option_expiry_strike(payload)
+    option_type = _normalize_option_type(payload)
+    retrieved_at = _option_retrieved_at(payload)
 
     return OptionQuote(
         contract_id=str(payload.get("contract_id") or payload.get("id") or payload.get("instrument_id") or ""),
@@ -136,8 +145,8 @@ def normalize_option_quote(payload: Mapping[str, object], *, ticker: str = "") -
         theta=_decimal(payload.get("theta")),
         vega=_decimal(payload.get("vega")),
         rho=_decimal(payload.get("rho")),
-        volume=integer("volume"),
-        open_interest=integer("open_interest", "openInterest"),
+        volume=_option_integer(payload, "volume"),
+        open_interest=_option_integer(payload, "open_interest", "openInterest"),
         retrieved_at=retrieved_at,
         source=str(payload.get("source") or "robinhood_mcp"),
     )

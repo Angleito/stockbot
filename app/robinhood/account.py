@@ -83,13 +83,25 @@ class BrokeragePosition:
     source: str = "robinhood_mcp"
 
 
-def _json_value(value: object) -> JSONValue:
+_UNSET: object = object()
+
+
+def _json_scalar(value: object) -> object:
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    return _UNSET
+
+
+def _json_value(value: object) -> JSONValue:
+    scalar = _json_scalar(value)
+    if scalar is not _UNSET:
+        if scalar is None or isinstance(scalar, (str, int, float, bool)):
+            return scalar
+        return str(scalar)
     if isinstance(value, list):
         return [_json_value(item) for item in value]
     if isinstance(value, dict):

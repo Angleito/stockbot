@@ -98,6 +98,33 @@ def _coerce_as_of(value: datetime | str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _validate_finding_shape(finding: Mapping[str, object], dossier_id: str) -> tuple[str, list[str]]:
+    """Single finding text + deduped evidence ids (raises on free-text)."""
+    text = finding.get("text")
+    ids = finding.get("evidence_ids")
+    if not isinstance(text, str) or not text.strip():
+        raise DossierIntegrityError(f"dossier {dossier_id}: finding 'text' must be a non-empty string")
+    if not isinstance(ids, list) or not ids or any(not isinstance(e, str) or not e for e in ids):
+        raise DossierIntegrityError(f"dossier {dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
+    uniq = list(dict.fromkeys(ids))
+    return text, uniq
+
+
+def _ground_findings(
+    findings: Sequence[Mapping[str, object]], dossier_id: str,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Validated findings + derived supporting set (order-stable, deduped)."""
+    grounded: list[dict[str, object]] = []
+    supporting: list[str] = []
+    for finding in findings:
+        text, uniq = _validate_finding_shape(finding, dossier_id)
+        grounded.append({"text": text, "evidence_ids": uniq})
+        for eid in uniq:
+            if eid not in supporting:
+                supporting.append(eid)
+    return grounded, supporting
+
+
 def create_dossier(
     *,
     dossier_id: str,
@@ -118,20 +145,7 @@ def create_dossier(
     non-empty citation set; free-text or whole-freeze citations are rejected.
     Inputs are copied so later caller mutation cannot leak in.
     """
-    supporting: list[str] = []
-    grounded: list[dict[str, object]] = []
-    supporting = []
-    for finding in findings:
-        text = finding.get("text")
-        ids = finding.get("evidence_ids")
-        if not isinstance(text, str) or not text.strip():
-            raise DossierIntegrityError(f"dossier {dossier_id}: finding 'text' must be a non-empty string")
-        if not isinstance(ids, list) or not ids or any(not isinstance(e, str) or not e for e in ids):
-            raise DossierIntegrityError(f"dossier {dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
-        grounded.append({"text": text, "evidence_ids": list(dict.fromkeys(ids))})
-        for eid in dict.fromkeys(ids):
-            if eid not in supporting:
-                supporting.append(eid)
+    grounded, supporting = _ground_findings(findings, dossier_id)
     return SECDossier(
         dossier_id=dossier_id,
         session_id=session_id,
@@ -154,44 +168,81 @@ def _require_str_list(coverage: Mapping[str, object], key: str, dossier_id: str)
         raise DossierIntegrityError(f"dossier {dossier_id}: coverage[{key!r}] must be a list of strings")
 
 
-def validate_dossier(dossier: SECDossier, ledger_ids: Collection[str]) -> None:
-    """Coverage contract + every supporting/contradicting/finding id must exist in the ledger."""
+def _check_dossier_identity(dossier: SECDossier) -> None:
+    """Non-empty dossier/session ids (first gate, no coverage touch)."""
     if not dossier.dossier_id:
         raise DossierIntegrityError("dossier: 'dossier_id' must be non-empty")
     if not dossier.session_id:
         raise DossierIntegrityError(f"dossier {dossier.dossier_id}: 'session_id' must be non-empty")
-    missing = [key for key in COVERAGE_KEYS if key not in dossier.coverage]
-    if missing:
-        raise DossierIntegrityError(f"dossier {dossier.dossier_id}: coverage missing keys {missing}")
-    for key in ("entities", "forms", "sources_examined", "exclusions"):
-        _require_str_list(dossier.coverage, key, dossier.dossier_id)
-    time_range = dossier.coverage.get("time_range")
-    if (
+
+
+def _check_coverage_time_range(coverage: Mapping[str, object], dossier_id: str) -> None:
+    """time_range must be {start: str|None, end: str|None}."""
+    time_range = coverage.get("time_range")
+    bad = (
         not isinstance(time_range, dict)
         or "start" not in time_range
         or "end" not in time_range
         or not (time_range["start"] is None or isinstance(time_range["start"], str))
         or not (time_range["end"] is None or isinstance(time_range["end"], str))
-    ):
+    )
+    if bad:
         raise DossierIntegrityError(
-            f"dossier {dossier.dossier_id}: coverage['time_range'] must be {{start: str|None, end: str|None}}"
+            f"dossier {dossier_id}: coverage['time_range'] must be {{start: str|None, end: str|None}}"
         )
-    if not isinstance(dossier.coverage.get("complete"), bool):
-        raise DossierIntegrityError(f"dossier {dossier.dossier_id}: coverage['complete'] must be a bool")
-    known = set(ledger_ids)
+
+
+def _check_coverage_contract(coverage: Mapping[str, object], dossier_id: str) -> None:
+    """Keys present + list types + time_range shape + complete flag."""
+    missing = [key for key in COVERAGE_KEYS if key not in coverage]
+    if missing:
+        raise DossierIntegrityError(f"dossier {dossier_id}: coverage missing keys {missing}")
+    for key in ("entities", "forms", "sources_examined", "exclusions"):
+        _require_str_list(coverage, key, dossier_id)
+    _check_coverage_time_range(coverage, dossier_id)
+    if not isinstance(coverage.get("complete"), bool):
+        raise DossierIntegrityError(f"dossier {dossier_id}: coverage['complete'] must be a bool")
+
+
+def _check_finding_ids_shape(ids: object, dossier_id: str) -> list[str]:
+    """Finding citation list shape (non-empty strings); returns the ids."""
+    if not isinstance(ids, list) or not ids or any(not isinstance(e, str) for e in ids):
+        raise DossierIntegrityError(f"dossier {dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
+    return list(ids)
+
+
+def _check_finding_membership(ids: list[str], known: set[str], supporting_set: set[str], dossier_id: str) -> None:
+    """Every cited id resolves to the ledger and the supporting set."""
+    for eid in ids:
+        if eid not in known:
+            raise DossierIntegrityError(f"dossier {dossier_id}: unknown evidence ids {[eid][:5]}")
+        if eid not in supporting_set:
+            raise DossierIntegrityError(f"dossier {dossier_id}: finding cites id outside supporting set: {eid!r}")
+
+
+def _check_single_finding_ref(
+    finding: object, known: set[str], supporting_set: set[str], dossier_id: str,
+) -> None:
+    """One finding mapping + membership (shape then ledger gates)."""
+    if not isinstance(finding, dict):
+        raise DossierIntegrityError(f"dossier {dossier_id}: finding must be a mapping")
+    ids = _check_finding_ids_shape(finding.get("evidence_ids"), dossier_id)
+    _check_finding_membership(ids, known, supporting_set, dossier_id)
+
+
+def _check_dossier_refs(dossier: SECDossier, known: set[str]) -> None:
+    """Supporting/contradicting sets resolve; each finding cites supporting."""
     cited = set(dossier.supporting_evidence_ids) | set(dossier.contradicting_evidence_ids)
     dangling = sorted(cited - known)
     if dangling:
         raise DossierIntegrityError(f"dossier {dossier.dossier_id}: unknown evidence ids {dangling[:5]}")
     supporting_set = set(dossier.supporting_evidence_ids)
     for finding in dossier.findings:
-        if not isinstance(finding, dict):
-            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding must be a mapping")
-        ids = finding.get("evidence_ids")
-        if not isinstance(ids, list) or not ids or any(not isinstance(e, str) for e in ids):
-            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding 'evidence_ids' must be a non-empty list of strings")
-        for eid in ids:
-            if eid not in known:
-                raise DossierIntegrityError(f"dossier {dossier.dossier_id}: unknown evidence ids {[eid][:5]}")
-            if eid not in supporting_set:
-                raise DossierIntegrityError(f"dossier {dossier.dossier_id}: finding cites id outside supporting set: {eid!r}")
+        _check_single_finding_ref(finding, known, supporting_set, dossier.dossier_id)
+
+
+def validate_dossier(dossier: SECDossier, ledger_ids: Collection[str]) -> None:
+    """Coverage contract + every supporting/contradicting/finding id must exist in the ledger."""
+    _check_dossier_identity(dossier)
+    _check_coverage_contract(dossier.coverage, dossier.dossier_id)
+    _check_dossier_refs(dossier, set(ledger_ids))

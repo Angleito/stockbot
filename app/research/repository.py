@@ -19,11 +19,11 @@ from pathlib import Path
 from ..config import get_data_root
 from . import journal as journal_log
 from .models import (
-    JSONValue,
+    SOURCE_RUNTIME_BUDGET_S,
     Job,
     JournalEvent,
+    JSONValue,
     ResearchSession,
-    SOURCE_RUNTIME_BUDGET_S,
     utcnow,
     validate_json_mapping,
     validate_json_value,
@@ -104,19 +104,21 @@ def _record_json(record: Mapping[str, object], where: str) -> str:
 
 
 def _iso_or_none(value: object, key: str, where: str) -> str | None:
+    raw: str | None = None
     if value is None:
         return None
     if isinstance(value, datetime):
-        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return aware.isoformat()
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(value.strip())
-        except ValueError:
-            raise ValueError(f"{where}: '{key}' must be ISO-8601, got {value!r}") from None
-        aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-        return aware.isoformat()
-    raise ValueError(f"{where}: '{key}' must be ISO-8601, datetime, or null")
+        raw = value.isoformat()
+    elif isinstance(value, str) and value.strip():
+        raw = value.strip()
+    else:
+        raise ValueError(f"{where}: '{key}' must be ISO-8601, datetime, or null")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(f"{where}: '{key}' must be ISO-8601, got {value!r}") from None
+    aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return aware.isoformat()
 
 
 def _chain_hash(prev_hash: str, event: JournalEvent) -> str:
@@ -127,8 +129,63 @@ def _chain_hash(prev_hash: str, event: JournalEvent) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def _default_max_tool_calls() -> int:
+    """Global dispatch ceiling (director default; 60 when director unavailable)."""
+    try:
+        from .director import DirectorBudgets
+
+        return DirectorBudgets().max_tool_calls
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return 60
+
+
+def _session_max_calls(session: ResearchSession, default_max: int) -> int:
+    """Session max_tool_calls (policy research section; default on bad shape)."""
+    raw_section: object = session.policy.get("research", {})
+    section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
+    raw_max: object = section.get("max_tool_calls", default_max)
+    return raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else default_max
+
+
+def _session_used_calls(session: ResearchSession) -> int:
+    """Consumed dispatch slots (budget tool_calls_used; 0 on bad shape)."""
+    raw_used: object = session.budget.get("tool_calls_used", 0)
+    return raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
+
+
+def _check_dispatch_budgets(job: Job, session_id: str, job_id: str, max_calls: int, used: int) -> None:
+    """Raise on exhausted per-job or per-session dispatch budget."""
+    if job.tool_budget is not None and job.tool_budget <= 0:
+        raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
+    if used >= max_calls:
+        raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
+
+
 def _job_id(job: Job) -> str:
     return job.job_id
+
+
+def _job_action(job: Job) -> JSONValue:
+    """EXECUTE_JOB payload for one runnable job."""
+    return {"verb": "EXECUTE_JOB", "job_id": job.job_id, "job_type": job.job_type,
+            "source_domain": job.source_domain or "sec",
+            "deadline": job.deadline.isoformat() if job.deadline is not None else None,
+            "budget_s": SOURCE_RUNTIME_BUDGET_S}
+
+
+def _status_action(status: str) -> JSONValue:
+    """Next step when no runnable job exists."""
+    actions: dict[str, JSONValue] = {
+        "created": {"verb": "PLAN"},
+        "planning": {"verb": "PLAN"},
+        "researching": {"verb": "WAIT", "reason": "no runnable jobs"},
+        "freezing": {"verb": "FREEZE"},
+        "analyzing": {"verb": "ANALYZE"},
+        "targeted_research": {"verb": "EXECUTE_JOB", "reason": "dispatch targeted research"},
+        "synthesizing": {"verb": "SYNTHESIZE"},
+    }
+    fallback: dict[str, JSONValue] = {"verb": "NONE", "reason": f"unknown status {status!r}"}
+    return actions.get(status, fallback)
 
 
 def pending_next_action(session: ResearchSession, jobs: list[Job]) -> JSONValue:
@@ -143,26 +200,10 @@ def pending_next_action(session: ResearchSession, jobs: list[Job]) -> JSONValue:
     if session.status in ("completed", "failed", "cancelled"):
         return {"verb": "NONE", "reason": f"session {session.status}"}
     if running:
-        first = running[0]
-        return {"verb": "EXECUTE_JOB", "job_id": first.job_id, "job_type": first.job_type,
-                "source_domain": first.source_domain or "sec",
-                "deadline": first.deadline.isoformat() if first.deadline is not None else None,
-                "budget_s": SOURCE_RUNTIME_BUDGET_S}
+        return _job_action(running[0])
     if queued:
-        first = queued[0]
-        return {"verb": "EXECUTE_JOB", "job_id": first.job_id, "job_type": first.job_type,
-                "source_domain": first.source_domain or "sec",
-                "deadline": first.deadline.isoformat() if first.deadline is not None else None,
-                "budget_s": SOURCE_RUNTIME_BUDGET_S}
-    return {
-        "created": {"verb": "PLAN"},
-        "planning": {"verb": "PLAN"},
-        "researching": {"verb": "WAIT", "reason": "no runnable jobs"},
-        "freezing": {"verb": "FREEZE"},
-        "analyzing": {"verb": "ANALYZE"},
-        "targeted_research": {"verb": "EXECUTE_JOB", "reason": "dispatch targeted research"},
-        "synthesizing": {"verb": "SYNTHESIZE"},
-    }.get(session.status, {"verb": "NONE", "reason": f"unknown status {session.status!r}"})
+        return _job_action(queued[0])
+    return _status_action(session.status)
 
 
 _SESSION_SQL = (
@@ -372,22 +413,10 @@ class ResearchRepository:
                         conn.execute(_JOB_SQL, _job_params(timed))
                         conn.commit()
                         raise ValueError(f"dispatch: job {job_id!r} deadline expired")
-                if job.tool_budget is not None and job.tool_budget <= 0:
-                    raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
-                try:
-                    from .director import DirectorBudgets
-
-                    default_max = DirectorBudgets().max_tool_calls
-                except Exception:
-                    default_max = 60
-                raw_section: object = session.policy.get("research", {})
-                section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
-                raw_max: object = section.get("max_tool_calls", default_max)
-                max_calls = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else default_max
-                raw_used: object = session.budget.get("tool_calls_used", 0)
-                used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
-                if used >= max_calls:
-                    raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
+                default_max = _default_max_tool_calls()
+                max_calls = _session_max_calls(session, default_max)
+                used = _session_used_calls(session)
+                _check_dispatch_budgets(job, session_id, job_id, max_calls, used)
                 spent = replace(job, tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None)
                 billed = replace(session, budget={**session.budget, "tool_calls_used": used + 1}, updated_at=utcnow())
                 billed.validate("<research.sqlite>")
@@ -397,10 +426,7 @@ class ResearchRepository:
                 conn.commit()
                 return billed, spent
             except Exception:
-                try:
-                    conn.rollback()
-                except sqlite3.Error:
-                    pass
+                conn.rollback()
                 raise
         finally:
             conn.close()
@@ -477,7 +503,7 @@ class ResearchRepository:
         for row in rows:
             payload_raw: object = json.loads(str(row["payload"]))
             if not isinstance(payload_raw, dict):
-                raise ValueError(f"<research.sqlite>: event {row['event_id']!r} payload must be a mapping")
+                raise ValueError(f"<research.sqlite>: event {row['event_id']!r} payload must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
             event = JournalEvent.from_dict(
                 {
                     "event_id": row["event_id"], "session_id": row["session_id"], "sequence": row["sequence"],
@@ -499,7 +525,7 @@ class ResearchRepository:
     def save_evidence(self, record: Mapping[str, object]) -> str:
         """Insert one evidence record; duplicate ids raise ValueError."""
         if not isinstance(record, Mapping):
-            raise ValueError("<research.sqlite>: evidence record must be a mapping")
+            raise ValueError("<research.sqlite>: evidence record must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = "<research.sqlite>: evidence"
         evidence_id = record.get("evidence_id")
         session_id = record.get("session_id")
@@ -542,7 +568,7 @@ class ResearchRepository:
     def save_freeze(self, record: Mapping[str, object]) -> str:
         """Insert one freeze record; duplicate ids raise ValueError."""
         if not isinstance(record, Mapping):
-            raise ValueError("<research.sqlite>: freeze record must be a mapping")
+            raise ValueError("<research.sqlite>: freeze record must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = "<research.sqlite>: freeze"
         freeze_id = record.get("freeze_id")
         session_id = record.get("session_id")
@@ -573,7 +599,7 @@ class ResearchRepository:
     def save_dossier(self, record: Mapping[str, object]) -> str:
         """Insert one immutable dossier record; duplicate ids raise ValueError."""
         if not isinstance(record, Mapping):
-            raise ValueError("<research.sqlite>: dossier record must be a mapping")
+            raise ValueError("<research.sqlite>: dossier record must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         where = "<research.sqlite>: dossier"
         dossier_id = record.get("dossier_id")
         session_id = record.get("session_id")

@@ -7,7 +7,7 @@ the versioned Parquet datasets.  Never exposes provider internals.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -17,11 +17,10 @@ from ..domain.market.securities import SecurityResolution
 from ..domain.portfolio import PortfolioSnapshot
 from ..domain.portfolio.snapshot import build_portfolio_snapshot
 from ..domain.portfolio.valuation import build_position
-from ..robinhood.account import BrokerageAccount, BrokeragePosition, CashBalance
+from ..robinhood.account import BrokeragePosition, CashBalance
 from ..robinhood.adapters import to_position_input, to_quote
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
 from ..storage import duckdb, mappers, parquet
-
 from .account_identity import local_account_id
 
 SNAPSHOT_SOURCE = "robinhood_mcp"
@@ -147,6 +146,47 @@ def persist_snapshot(
     )
 
 
+def _snapshot_header(row: Mapping[str, object]) -> tuple[str, datetime, str]:
+    """(snapshot id, created_at, broker) from the newest snapshot row."""
+    created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+    return str(row["snapshot_id"]), created_at, str(row["broker"])
+
+
+def _snapshot_decimals(row: Mapping[str, object]) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """(cash, invested, total) as canonical decimals (None stays None)."""
+    return (
+        mappers.canonical_decimal(
+            Decimal(str(row["cash"])) if row.get("cash") is not None else None
+        ),
+        mappers.canonical_decimal(
+            Decimal(str(row["invested_value"])) if row.get("invested_value") is not None else None
+        ),
+        mappers.canonical_decimal(
+            Decimal(str(row["total_value"])) if row.get("total_value") is not None else None
+        ),
+    )
+
+
+def _snapshot_account_ids(snapshot_id: str, positions: tuple[object, ...], *, data_root: Path | None) -> tuple[str, ...]:
+    """Write-order account ids, or position-derived for legacy snapshots."""
+    account_rows = duckdb.query(
+        "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ?",
+        params=[snapshot_id],
+        data_root=data_root,
+    )
+    account_ids = [str(row["account_id"]) for row in account_rows]
+    if account_ids:
+        return tuple(account_ids)
+    # Legacy snapshots predate portfolio_accounts: fall back to the
+    # position-derived reconstruction (accounts without positions are
+    # unrecoverable there, same as before this change).
+    legacy: list[str] = []
+    for position in positions:
+        account_id = str(getattr(position, "account_id", None))
+        if account_id not in legacy:
+            legacy.append(account_id)
+    return tuple(legacy)
+
 def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot | None:
     """Return the newest persisted snapshot, or None when none exists.
 
@@ -165,43 +205,24 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
     if not rows:
         return None
     row = rows[0]
-    snapshot_id = str(row["snapshot_id"])
-    created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
-    position_rows = duckdb.query(
-        "SELECT * FROM portfolio_positions WHERE snapshot_id = ?",
-        params=[snapshot_id],
-        data_root=data_root,
-    )
+    snapshot_id, created_at, broker = _snapshot_header(row)
     positions = tuple(
-        mappers.position_from_row(position_row, created_at) for position_row in position_rows
+        mappers.position_from_row(position_row, created_at)
+        for position_row in duckdb.query(
+            "SELECT * FROM portfolio_positions WHERE snapshot_id = ?",
+            params=[snapshot_id],
+            data_root=data_root,
+        )
     )
-    account_rows = duckdb.query(
-        "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ?",
-        params=[snapshot_id],
-        data_root=data_root,
-    )
-    account_ids = [str(row["account_id"]) for row in account_rows]
-    if not account_ids:
-        # Legacy snapshots predate portfolio_accounts: fall back to the
-        # position-derived reconstruction (accounts without positions are
-        # unrecoverable there, same as before this change).
-        for position in positions:
-            if position.account_id not in account_ids:
-                account_ids.append(position.account_id)
+    cash, invested_value, total_value = _snapshot_decimals(row)
     return PortfolioSnapshot(
         snapshot_id=snapshot_id,
         created_at=created_at,
-        broker=str(row["broker"]),
-        account_ids=tuple(account_ids),
-        cash=mappers.canonical_decimal(
-            Decimal(str(row["cash"])) if row.get("cash") is not None else None
-        ),
-        invested_value=mappers.canonical_decimal(
-            Decimal(str(row["invested_value"])) if row.get("invested_value") is not None else None
-        ),
-        total_value=mappers.canonical_decimal(
-            Decimal(str(row["total_value"])) if row.get("total_value") is not None else None
-        ),
+        broker=broker,
+        account_ids=_snapshot_account_ids(snapshot_id, positions, data_root=data_root),
+        cash=cash,
+        invested_value=invested_value,
+        total_value=total_value,
         positions=positions,
     )
 

@@ -69,7 +69,8 @@ def _role_arguments(tool: str, ticker: str, as_of: str) -> dict[str, object]:
 
 def _window_start(as_of: str) -> str:
     """One-year lookback window start (YYYY-MM-DD) for since-gated tools."""
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     try:
         end = _dt.fromisoformat(as_of.replace("Z", "+00:00"))
         start = (end - _td(days=365)).date().isoformat()
@@ -136,6 +137,96 @@ def _is_pit_eligible(known_at: object, as_of: str) -> bool:
     return False
 
 
+@dataclass
+class _ScoutStore:
+    """Accumulated scout evidence: eligible ids, rejected ids, prompt lines."""
+
+    assignment: ScoutAssignment
+    journal: Callable[[str, dict[str, object]], None] | None = None
+    evidence_ids: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
+    acquired: list[str] = field(default_factory=list)
+
+    def candidate_id(self, candidate: object) -> str | None:
+        """Evidence id when the candidate is a dict with a non-blank id."""
+        if not isinstance(candidate, dict):
+            return None
+        eid_raw = candidate.get("evidence_id")
+        return eid_raw if isinstance(eid_raw, str) and eid_raw else None
+
+    def accept(self, eid: str, candidate: dict[str, object]) -> None:
+        """Record one PIT-eligible id plus its one-line prompt rendering."""
+        if eid in self.evidence_ids:
+            return
+        self.evidence_ids.append(eid)
+        known = candidate.get("known_at")
+        header = f"{eid} (known_at={known})" if known else eid
+        snippet = candidate.get("claim_text") or candidate.get("content_snippet")
+        text = snippet.strip().replace("\n", " ")[:300] if isinstance(snippet, str) and snippet.strip() else ""
+        self.acquired.append(f"{header} :: {text}" if text else header)
+
+    def reject(self, eid: str) -> None:
+        """Record one PIT-ineligible id, journalled once."""
+        if eid in self.rejected:
+            return
+        self.rejected.append(eid)
+        if self.journal is not None:
+            self.journal("evidence.rejected", {"session_id": self.assignment.session_id, "evidence_id": eid})
+
+    def collect(self, resp: object) -> None:
+        """Fold one dispatch response's candidates into eligible/rejected sets."""
+        raw_ids = resp.get("evidence_ids") if isinstance(resp, dict) else None
+        candidates: Sequence[object] = raw_ids if isinstance(raw_ids, list) else []
+        for candidate in candidates:
+            eid = self.candidate_id(candidate)
+            if eid is None:
+                continue
+            assert isinstance(candidate, dict)
+            if _is_pit_eligible(candidate.get("known_at"), self.assignment.as_of):
+                self.accept(eid, candidate)
+            else:
+                self.reject(eid)
+
+
+def _fan_out(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
+    """Role tool fan-out: bounded per-ticker calls, six-evidence cap, coverage fallback."""
+    tickers = store.assignment.tickers or [""]
+    for tool_name, extra in _ROLE_TOOLS.get(store.assignment.role, ()):
+        for ticker in tickers:
+            if not ticker.strip():
+                continue
+            args = _role_arguments(tool_name, ticker.strip(), store.assignment.as_of)
+            args.update(extra)
+            store.collect(guarded_call("call_tool", {"name": tool_name, "arguments": args}))
+            if len(store.evidence_ids) >= 6:
+                break
+        if len(store.evidence_ids) >= 6:
+            break
+    if not store.evidence_ids:
+        store.collect(guarded_call("call_tool", {"name": "get_sec_search_coverage", "arguments": {}}))
+
+
+def _finish(assignment: ScoutAssignment, store: _ScoutStore, tools_used: int, model: ModelFn) -> ScoutResult:
+    """Draft grounded findings on the exact acquired evidence."""
+    prompt = build_scout_prompt(assignment)
+    if store.acquired:
+        prompt += "\nAcquired evidence (cite only these ids):\n" + "\n".join(f"- {line}" for line in store.acquired)
+    text = model(prompt)
+    findings: list[GroundedClaim] = parse_grounded_claims(text, frozen=store.evidence_ids)
+    unknowns: list[str] = []
+    if not store.evidence_ids:
+        unknowns.insert(0, "no PIT-eligible SEC evidence returned")
+    return ScoutResult(
+        assignment_id=assignment.assignment_id,
+        session_id=assignment.session_id,
+        coverage=f"role={assignment.role} tickers={len(assignment.tickers)} tool_calls={tools_used}",
+        findings=findings,
+        unknowns=unknowns,
+        limitations=store.rejected,
+        follow_up_requests=[],
+    )
+
+
 def run_scout(
     assignment: ScoutAssignment,
     *,
@@ -160,66 +251,9 @@ def run_scout(
 
     catalog = guarded_call("browse_tools", {})
     _ = catalog  # discovery hint only; the role plan below decides calls.
-    evidence_ids: list[str] = []
-    rejected: list[str] = []
-    acquired: list[str] = []
-
-    def _collect(resp: object) -> None:
-        raw_ids = resp.get("evidence_ids") if isinstance(resp, dict) else None
-        candidates: Sequence[object] = raw_ids if isinstance(raw_ids, list) else []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            eid_raw = candidate.get("evidence_id")
-            if not isinstance(eid_raw, str) or not eid_raw:
-                continue
-            if _is_pit_eligible(candidate.get("known_at"), assignment.as_of):
-                if eid_raw not in evidence_ids:
-                    evidence_ids.append(eid_raw)
-                    known = candidate.get("known_at")
-                    header = f"{eid_raw} (known_at={known})" if known else eid_raw
-                    snippet = candidate.get("claim_text") or candidate.get("content_snippet")
-                    text = snippet.strip().replace("\n", " ")[:300] if isinstance(snippet, str) and snippet.strip() else ""
-                    acquired.append(f"{header} :: {text}" if text else header)
-            else:
-                if eid_raw not in rejected:
-                    rejected.append(eid_raw)
-                    if journal is not None:
-                        journal(
-                            "evidence.rejected",
-                            {"session_id": assignment.session_id, "evidence_id": eid_raw},
-                        )
-    tickers = assignment.tickers or [""]
-    for tool_name, extra in _ROLE_TOOLS.get(assignment.role, ()):
-        for ticker in tickers:
-            if not ticker.strip():
-                continue
-            args = _role_arguments(tool_name, ticker.strip(), assignment.as_of)
-            args.update(extra)
-            _collect(guarded_call("call_tool", {"name": tool_name, "arguments": args}))
-            if len(evidence_ids) >= 6:
-                break
-        if len(evidence_ids) >= 6:
-            break
-    if not evidence_ids:
-        _collect(guarded_call("call_tool", {"name": "get_sec_search_coverage", "arguments": {}}))
-    prompt = build_scout_prompt(assignment)
-    if acquired:
-        prompt += "\nAcquired evidence (cite only these ids):\n" + "\n".join(f"- {line}" for line in acquired)
-    text = model(prompt)
-    findings: list[GroundedClaim] = parse_grounded_claims(text, frozen=evidence_ids)
-    unknowns: list[str] = []
-    if not evidence_ids:
-        unknowns.insert(0, "no PIT-eligible SEC evidence returned")
-    return ScoutResult(
-        assignment_id=assignment.assignment_id,
-        session_id=assignment.session_id,
-        coverage=f"role={assignment.role} tickers={len(assignment.tickers)} tool_calls={tools_used}",
-        findings=findings,
-        unknowns=unknowns,
-        limitations=rejected,
-        follow_up_requests=[],
-    )
+    store = _ScoutStore(assignment=assignment, journal=journal)
+    _fan_out(store, guarded_call)
+    return _finish(assignment, store, tools_used, model)
 
 
 __all__ = [

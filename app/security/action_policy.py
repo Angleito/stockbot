@@ -87,6 +87,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "research_cancel": "financial_research",
     "research_read": "financial_research",
     "research_add_evidence": "financial_research",
+    "research_submit_source_result": "financial_research",
     "research_add_analysis": "financial_research",
     "research_finalize": "financial_research",
     # Robinhood portfolio data (private).

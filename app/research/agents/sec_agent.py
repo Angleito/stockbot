@@ -11,12 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from importlib import import_module
 
-from .scout import DispatchFn, ModelFn, ScoutAssignment, ScoutResult, run_scout
+from .scout import DispatchFn, ModelFn, ScoutAssignment, ScoutResult
 from .source_agent import SourceDossier, assemble_dossier, decompose_question
+
+
 def _coerce_wave(wave_id: int | str) -> int:
     """Accept int>=1 or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):
-        raise ValueError(f"sec assignment: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"sec assignment: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if isinstance(wave_id, int):
         wave = wave_id
     elif isinstance(wave_id, str):
@@ -25,42 +27,55 @@ def _coerce_wave(wave_id: int | str) -> int:
             raise ValueError(f"sec assignment: 'wave_id' must be an int >= 1, got {wave_id!r}")
         wave = int(text)
     else:
-        raise ValueError(f"sec assignment: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"sec assignment: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if wave < 1:
         raise ValueError(f"sec assignment: 'wave_id' must be >= 1, got {wave_id!r}")
     return wave
 
 
-def _coerce_dossier(fallback: SourceDossier) -> object:
-    """Prefer canonical dossiers/sec SECDossier, preserving every scout field."""
+def _dossier_factory() -> object | None:
+    """Canonical create_dossier factory; None when unavailable."""
     try:
         dossiers_sec = import_module("app.research.dossiers.sec")
     except ImportError:
-        return fallback
+        return None
     factory = getattr(dossiers_sec, "create_dossier", None)
-    if not callable(factory):
+    return factory if callable(factory) else None
+
+
+def _fallback_payload(fallback: SourceDossier) -> tuple[dict[str, object], list[dict[str, object]], set[str]]:
+    """Coverage + findings + supporting ids translated from the local dossier."""
+    coverage: dict[str, object] = {
+        "entities": [],
+        "forms": [],
+        "time_range": {"start": None, "end": None},
+        "sources_examined": list(fallback.coverage_notes),
+        "complete": False,
+        "exclusions": [],
+    }
+    fallback_findings = list(getattr(fallback, "findings", []) or [])
+    findings: list[dict[str, object]] = [
+        {"text": claim.text, "evidence_ids": list(claim.evidence_ids)}
+        for claim in fallback_findings
+    ]
+    supporting: list[str] = []
+    for claim in fallback_findings:
+        for eid in claim.evidence_ids:
+            if eid not in supporting:
+                supporting.append(eid)
+    return coverage, findings, set(supporting)
+
+
+def _coerce_dossier(fallback: SourceDossier) -> object:
+    """Prefer canonical dossiers/sec SECDossier, preserving every scout field."""
+    factory = _dossier_factory()
+    if factory is None:
         return fallback
+    assert callable(factory)
     try:
-        entities: list[str] = []
-        forms: list[str] = []
-        coverage: dict[str, object] = {
-            "entities": entities,
-            "forms": forms,
-            "time_range": {"start": None, "end": None},
-            "sources_examined": list(fallback.coverage_notes),
-            "complete": False,
-            "exclusions": [],
-        }
-        fallback_findings = list(getattr(fallback, "findings", []) or [])
-        findings: list[dict[str, object]] = [
-            {"text": claim.text, "evidence_ids": list(claim.evidence_ids)}
-            for claim in fallback_findings
-        ]
-        supporting: list[str] = []
-        for claim in fallback_findings:
-            for eid in claim.evidence_ids:
-                if eid not in supporting:
-                    supporting.append(eid)
+        import app.research.dossiers.sec as dossiers_sec
+
+        coverage, findings, supporting = _fallback_payload(fallback)
         dossier = factory(
             dossier_id=fallback.dossier_id,
             session_id=fallback.session_id,
@@ -73,9 +88,9 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
         )
         validator = getattr(dossiers_sec, "validate_dossier", None)
         if callable(validator):
-            validator(dossier, set(supporting))
+            validator(dossier, supporting)
         return dossier
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return fallback
 
 

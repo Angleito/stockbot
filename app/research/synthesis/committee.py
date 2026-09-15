@@ -31,26 +31,73 @@ class CommitteeDisagreement:
         self.wave_id = _coerce_wave_id(self.wave_id)
 
 
+def _coerce_int_id(wave_id: int) -> int:
+    if wave_id >= 1:
+        return wave_id
+    raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
+
+
+def _coerce_str_id(wave_id: str) -> int:
+    text = wave_id.strip()
+    if text.isdigit():
+        value = int(text)
+        if value >= 1:
+            return value
+    raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
+
+
 def _coerce_wave_id(wave_id: int | str) -> int:
     """Accept canonical int or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):
-        raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if isinstance(wave_id, int):
-        if wave_id >= 1:
-            return wave_id
-        raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        return _coerce_int_id(wave_id)
     if isinstance(wave_id, str):
-        text = wave_id.strip()
-        if text.isdigit():
-            value = int(text)
-            if value >= 1:
-                return value
-        raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        return _coerce_str_id(wave_id)
     raise ValueError(f"committee: 'wave_id' must be an int >= 1, got {wave_id!r}")
 
 
 def _dedup(items: Sequence[str], cap: int = 20) -> list[str]:
     return list(dict.fromkeys(item for item in items if item))[:cap]
+
+
+def _shared_lines(stock_refs: list[str], bull_refs: list[str], bear_refs: list[str]) -> list[str]:
+    return [f"all three cite {eid}" for eid in stock_refs if eid in bull_refs and eid in bear_refs]
+
+
+def _solo_line(label: str, ids: list[str]) -> str | None:
+    if not ids:
+        return None
+    return f"{label}-only evidence: {', '.join(ids[:5])}"
+
+
+def _stance_lines(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, stock_refs: list[str], bull_refs: list[str], bear_refs: list[str]) -> tuple[list[str], list[str]]:
+    disagreement = [
+        f"bull ({bull.stance}) vs bear ({bear.stance}) on: {stock.question}",
+        f"base cites {len(stock_refs)} items; bull {len(bull_refs)}; bear {len(bear_refs)}",
+    ]
+    for line in (
+        _solo_line("bull", [eid for eid in bull_refs if eid not in bear_refs]),
+        _solo_line("bear", [eid for eid in bear_refs if eid not in bull_refs]),
+    ):
+        if line is not None:
+            disagreement.append(line)
+    return _shared_lines(stock_refs, bull_refs, bear_refs), disagreement
+
+
+def _merge_requests(
+    stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis
+) -> list[ResearchRequest]:
+    seen: dict[str, ResearchRequest] = {}
+    for request in (*stock.research_requests, *bull.research_requests, *bear.research_requests):
+        prior = seen.get(request.question)
+        if prior is None:
+            seen[request.question] = request
+        else:
+            for agent in request.requesting_agents:
+                if agent not in prior.requesting_agents:
+                    prior.requesting_agents.append(agent)
+    return list(seen.values())
 
 
 def compute_disagreement(
@@ -63,36 +110,15 @@ def compute_disagreement(
     stock_refs = claims_refs(stock.claims)
     bull_refs = claims_refs(bull.claims)
     bear_refs = claims_refs(bear.claims)
-    shared = [eid for eid in stock_refs if eid in bull_refs and eid in bear_refs]
-    agreement = [f"all three cite {eid}" for eid in shared]
-    disagreement = [
-        f"bull ({bull.stance}) vs bear ({bear.stance}) on: {stock.question}",
-        f"base cites {len(stock_refs)} items; bull {len(bull_refs)}; bear {len(bear_refs)}",
-    ]
-    only_bull = [eid for eid in bull_refs if eid not in bear_refs]
-    only_bear = [eid for eid in bear_refs if eid not in bull_refs]
-    if only_bull:
-        disagreement.append(f"bull-only evidence: {', '.join(only_bull[:5])}")
-    if only_bear:
-        disagreement.append(f"bear-only evidence: {', '.join(only_bear[:5])}")
-    uncertainties = _dedup([*stock.unknowns, *bull.unknowns, *bear.unknowns])
-    seen: dict[str, ResearchRequest] = {}
-    for request in (*stock.research_requests, *bull.research_requests, *bear.research_requests):
-        prior = seen.get(request.question)
-        if prior is None:
-            seen[request.question] = request
-        else:
-            for agent in request.requesting_agents:
-                if agent not in prior.requesting_agents:
-                    prior.requesting_agents.append(agent)
+    agreement, disagreement = _stance_lines(stock, bull, bear, stock_refs, bull_refs, bear_refs)
     return CommitteeDisagreement(
         session_id=stock.session_id,
         wave_id=_coerce_wave_id(stock.wave_id),
         freeze_id=stock.freeze_id,
         agreement=agreement,
         disagreement=disagreement,
-        critical_uncertainties=uncertainties,
-        requested_research=list(seen.values()),
+        critical_uncertainties=_dedup([*stock.unknowns, *bull.unknowns, *bear.unknowns]),
+        requested_research=_merge_requests(stock, bull, bear),
     )
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from . import GroundedClaim, ModelOutputFailure, ResearchRequest, claims_refs
+from . import GroundedClaim, ModelOutputFailure
 from .scout import ScoutAssignment, ScoutResult, ScoutRole
 
 # SEC-only allowlist: discovery wrappers + SEC/financial-statement tools.
@@ -63,7 +63,7 @@ def is_sec_tool(name: str) -> bool:
 def _coerce_wave(wave_id: int | str) -> int:
     """Accept int>=1 or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):
-        raise ValueError(f"source dossier: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"source dossier: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if isinstance(wave_id, int):
         wave = wave_id
     elif isinstance(wave_id, str):
@@ -72,7 +72,7 @@ def _coerce_wave(wave_id: int | str) -> int:
             raise ValueError(f"source dossier: 'wave_id' must be an int >= 1, got {wave_id!r}")
         wave = int(text)
     else:
-        raise ValueError(f"source dossier: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"source dossier: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if wave < 1:
         raise ValueError(f"source dossier: 'wave_id' must be >= 1, got {wave_id!r}")
     return wave
@@ -130,6 +130,29 @@ def decompose_question(
         for role in roles
     ]
 
+def _check_claim_refs(claim: GroundedClaim, known_set: set[str], session_id: str, journal: Callable[[str, dict[str, object]], None] | None) -> None:
+    """Fail-closed ref check: non-empty text, cited, freeze-contained ids."""
+    if not claim.text.strip():
+        raise ModelOutputFailure("each claim needs non-empty text")
+    if not claim.evidence_ids:
+        raise ModelOutputFailure(f"uncited finding: {claim.text[:120]!r}")
+    for eid in claim.evidence_ids:
+        if eid not in known_set:
+            if journal is not None:
+                journal("evidence.rejected", {"session_id": session_id, "evidence_id": eid})
+            raise ModelOutputFailure(f"unknown evidence id {eid!r}")
+
+
+def _merge_claim(findings: list[GroundedClaim], claim: GroundedClaim) -> None:
+    """Append new claim text or union evidence ids into the prior same-text claim."""
+    prior = next((c for c in findings if c.text == claim.text), None)
+    if prior is None:
+        findings.append(GroundedClaim(text=claim.text, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
+    else:
+        merged_ids = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
+        findings[findings.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged_ids)
+
+
 def assemble_dossier(
     *,
     dossier_id: str,
@@ -151,25 +174,9 @@ def assemble_dossier(
         coverage_notes.append(result.coverage)
         unknowns.extend(result.unknowns)
         limitations.extend(result.limitations)
-        result_findings = list(result.findings or [])
-        if not result_findings:
-            continue
-        for claim in result_findings:
-            if not claim.text.strip():
-                raise ModelOutputFailure("each claim needs non-empty text")
-            if not claim.evidence_ids:
-                raise ModelOutputFailure(f"uncited finding: {claim.text[:120]!r}")
-            for eid in claim.evidence_ids:
-                if eid not in known_set:
-                    if journal is not None:
-                        journal("evidence.rejected", {"session_id": session_id, "evidence_id": eid})
-                    raise ModelOutputFailure(f"unknown evidence id {eid!r}")
-            prior = next((c for c in findings if c.text == claim.text), None)
-            if prior is None:
-                findings.append(GroundedClaim(text=claim.text, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
-            else:
-                merged_ids = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
-                findings[findings.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged_ids)
+        for claim in list(result.findings or []):
+            _check_claim_refs(claim, known_set, session_id, journal)
+            _merge_claim(findings, claim)
     return SourceDossier(
         dossier_id=dossier_id,
         session_id=session_id,

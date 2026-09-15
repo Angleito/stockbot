@@ -12,9 +12,9 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from .config import get_data_root, get_sec_edgar_identity, init_config
+from .config import get_data_root, init_config
 
 os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", str(get_data_root() / "edgar"))
 
@@ -114,7 +114,7 @@ def _cached_or_fetch(key: str, fetch: Callable[[], dict[str, object]]) -> dict[s
             canonical["result_content_hash"] = _result_content_hash(canonical)
         try:
             cache.set(key, canonical)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
         out = dict(canonical)
         out["cache_hit"] = False
@@ -254,7 +254,7 @@ def _has_contiguous_gaps(period_ends: list[object], day_range: tuple[int, int], 
         ends = sorted(_dt.date.fromisoformat(str(p)[:10]) for p in period_ends)
     except (TypeError, ValueError):
         return False
-    return all(day_range[0] <= (b - a).days <= day_range[1] for a, b in zip(ends, ends[1:]))
+    return all(day_range[0] <= (b - a).days <= day_range[1] for a, b in itertools.pairwise(ends))
 
 
 def _has_contiguous_quarters(period_ends: list[object]) -> bool:
@@ -297,27 +297,49 @@ def _dividend_valuation_stub() -> dict[str, object]:
     }
 
 
+def _dividend_ttm_float(ttm: object) -> float | None:
+    """Parsed TTM value or None when absent/unparseable."""
+    if ttm is None:
+        return None
+    try:
+        if isinstance(ttm, (int, float, str, bytes)):
+            return float(ttm)
+        return float(str(ttm))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dividend_live_quote(ticker: str) -> dict[str, object] | None:
+    """Live quote dict or None when unavailable/not a dict."""
+    try:
+        from . import valuation as _valuation
+        quote = _valuation.get_live_quote(ticker)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    return dict(quote) if isinstance(quote, dict) else None
+
+
+def _dividend_quote_price(quote: dict[str, object]) -> object:
+    """Quote price or None when the lookup itself fails."""
+    try:
+        return quote.get("price") if quote.get("price") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _dividend_valuation(ticker: str, ttm: object, *, include_price: bool) -> dict[str, object]:
     """Point-in-time valuation: stale/absent TTM or historical requests expose no price."""
     nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None, **_dividend_valuation_stub()}
     if not include_price or ttm is None:
         return dict(nulls)
-    try:
-        ttm_f = float(ttm) if isinstance(ttm, (int, float, str, bytes)) else float(str(ttm))
-    except (TypeError, ValueError):
+    ttm_f = _dividend_ttm_float(ttm)
+    if ttm_f is None:
         return dict(nulls)
-    try:
-        from . import valuation as _valuation
-        quote = _valuation.get_live_quote(ticker)
-    except Exception:
+    quote = _dividend_live_quote(ticker)
+    if quote is None:
         return dict(nulls)
-    if not isinstance(quote, dict):
-        return dict(nulls)
-    try:
-        price = quote.get("price") if quote.get("price") is not None else None
-    except (TypeError, ValueError):
-        return dict(nulls)
-    if price is None or price <= 0:
+    price = _dividend_quote_price(quote)
+    if not isinstance(price, (int, float)) or price <= 0:
         return dict(nulls)
     return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at"), **_dividend_valuation_stub()}
 
@@ -366,7 +388,7 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
         result = dict(result)
         latest_end = result.pop("_latest_dividend_period_end", None)
         if result.get("dividend_status") != "insufficient_data":
-            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today()):
+            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today()):  # noqa: DTZ011 - trading-calendar local date has no tz meaning
                 result["ttm_dividend_per_share"] = None
                 result["dividend_status"] = "unknown"
             else:
@@ -375,196 +397,250 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
     return result
 
 
+def _fact_field(row: pd.Series[float], name: str, *alts: str) -> str | None:
+    """First present/non-blank meta field on a fact row (None when absent)."""
+    for k in (name, *alts):
+        try:
+            v = row.get(k)
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
+            continue
+        if v is not None and str(v) not in ("", "nan", "NaT"):
+            return str(v)
+    return None
+
+
+def _copy_fact_meta(r: pd.Series[float]) -> dict[str, object]:
+    """accession/form/filed meta off a fact row (first alias wins)."""
+    meta: dict[str, object] = {}
+    for _k in ("accession", "accn", "form", "filed", "filed_at"):
+        try:
+            _v = r.get(_k)
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            _v = None
+        if _v is not None and str(_v) not in ("", "nan", "NaT"):
+            _out = "accession" if _k in ("accession", "accn") else ("filed" if _k in ("filed", "filed_at") else _k)
+            meta.setdefault(_out, str(_v))
+    return meta
+
+
+def _fundamentals_overview(ticker: str, company: Company, _cik: object, facts_url: str | None) -> dict[str, object]:
+    """Ticker overview payload (name/CIK/industry plus facts URL)."""
+    out: dict[str, object] = {
+        "ticker": ticker,
+        "name": company.name,
+        "cik": company.cik,
+        "industry": getattr(company, "sic_description", None),
+    }
+    if facts_url:
+        out["source_url"] = facts_url
+    return out
+
+
+def _fundamentals_shares(ticker: str, company: Company, cik: object, facts_url: str | None) -> dict[str, object]:
+    """Latest SEC-reported shares outstanding with filing meta."""
+    facts = company.get_facts()
+    if facts is None:
+        return _no_data(ticker, "company facts not available")
+    df = facts.to_dataframe()
+    shares = df[df["concept"].isin(
+        ["us-gaap:CommonStockSharesOutstanding", "CommonStockSharesOutstanding", "dei:EntityCommonStockSharesOutstanding"]
+    )]
+    if shares.empty:
+        return _no_data(ticker, "shares outstanding not found in company facts")
+    latest = shares.sort_values("period_end").iloc[-1]
+    out: dict[str, object] = {
+        "ticker": ticker,
+        "shares_outstanding": float(latest["value"]),
+        "as_of": str(latest["period_end"]),
+        "source": "SEC EDGAR company facts",
+        "note": "SEC-reported shares outstanding, not public float",
+    }
+    if cik is not None:
+        out["cik"] = cik
+    if facts_url:
+        out["source_url"] = facts_url
+    for k, v in (("accession", _fact_field(latest, "accession", "accn")), ("form", _fact_field(latest, "form")), ("filed", _fact_field(latest, "filed", "filed_at"))):
+        if v:
+            out[k] = v
+    return out
+
+
+def _recent_quarterly_facts(df: pd.DataFrame, concept: str) -> pd.DataFrame | None:
+    """Quarterly facts for concept (None when absent; empty when no quarterly rows)."""
+    subset = df[df["concept"].isin([concept, concept.split(":")[-1]])].copy()
+    if subset.empty:
+        return None
+    subset["duration_days"] = _fact_duration_days(subset)
+    q = subset[
+        (subset["duration_days"] >= _QUARTER_DAYS[0])
+        & (subset["duration_days"] <= _QUARTER_DAYS[1])
+    ].copy()
+    if q.empty:
+        return q
+    q = _dedup_latest(q).sort_values("period_end")
+    return _quarters_with_derived_q4(q, df, concept)
+
+
+def _merge_eps_quarters(recent_diluted: pd.DataFrame, recent_basic: pd.DataFrame | None) -> list[dict[str, object]]:
+    """Diluted quarters with matching basic EPS and filing meta merged in."""
+    quarterly_eps: list[dict[str, object]] = []
+    for _, r_diluted in recent_diluted.iterrows():
+        q_entry: dict[str, object] = {
+            "fiscal_year": str(r_diluted["fiscal_year"]),
+            "fiscal_period": str(r_diluted["fiscal_period"]),
+            "eps_diluted": round(float(r_diluted["value"]), 2),
+            "period_end": str(r_diluted["period_end"]),
+        }
+        for k, v in _copy_fact_meta(r_diluted).items():
+            q_entry.setdefault(k, v)
+        if recent_basic is not None:
+            matching = recent_basic[recent_basic["period_end"] == r_diluted["period_end"]]
+            if not matching.empty:
+                q_entry["eps_basic"] = round(float(matching.iloc[0]["value"]), 2)
+        quarterly_eps.append(q_entry)
+    return quarterly_eps
+
+
+def _eps_result(ticker: str, quarterly_eps: list[dict[str, object]], recent_diluted: pd.DataFrame, recent_basic: pd.DataFrame | None, cik: object, facts_url: str | None) -> dict[str, object]:
+    """EPS payload with TTM totals once four quarters are present."""
+    result: dict[str, object] = {
+        "ticker": ticker,
+        "quarterly_eps": quarterly_eps,
+        "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
+    }
+    if cik is not None:
+        result["cik"] = cik
+    if facts_url:
+        result["source_url"] = facts_url
+    if len(recent_diluted) == 4:
+        result["ttm_eps_diluted"] = round(sum(float(r["value"]) for _, r in recent_diluted.iterrows()), 2)
+    if recent_basic is not None and len(recent_basic) == 4:
+        result["ttm_eps_basic"] = round(sum(float(r["value"]) for _, r in recent_basic.iterrows()), 2)
+    return result
+
+
+def _fundamentals_eps(ticker: str, company: Company, cik: object, facts_url: str | None) -> dict[str, object]:
+    """Quarterly diluted (+basic) EPS with TTM totals."""
+    facts = company.get_facts()
+    if facts is None:
+        return _no_data(ticker, "company facts not available")
+    df = facts.to_dataframe()
+    recent_diluted = _recent_quarterly_facts(df, "us-gaap:EarningsPerShareDiluted")
+    if recent_diluted is None:
+        return _no_data(ticker, "diluted EPS not found in company facts")
+    if recent_diluted.empty:
+        return _no_data(ticker, "no quarterly diluted EPS facts found")
+    recent_basic = _recent_quarterly_facts(df, "us-gaap:EarningsPerShareBasic")
+    if recent_basic is not None and recent_basic.empty:
+        recent_basic = None
+    quarterly_eps = _merge_eps_quarters(recent_diluted, recent_basic)
+    return _eps_result(ticker, quarterly_eps, recent_diluted, recent_basic, cik, facts_url)
+
+
+def _dividends_ttm(recent: pd.DataFrame) -> float | None:
+    """TTM dividend total over four contiguous quarters (None while building)."""
+    if len(recent) != 4:
+        return None
+    if not _has_contiguous_quarters(list(recent["period_end"])):
+        return None
+    return round(sum(float(r["value"]) for _, r in recent.iterrows()), 4)
+
+
+def _dividends_fy_rows(div: pd.DataFrame) -> list[dict[str, str | float]]:
+    """Full-year dividend facts as period_end/value rows."""
+    fy = div[
+        (div["duration_days"] >= _FY_DAYS[0])
+        & (div["duration_days"] <= _FY_DAYS[1])
+    ].copy()
+    if fy.empty:
+        return []
+    fy = _dedup_latest(fy)
+    return [{"period_end": str(r["period_end"]), "value": float(r["value"])} for _, r in fy.iterrows()]
+
+
+def _fundamentals_dividends(ticker: str, company: Company) -> dict[str, object]:
+    """Quarterly TTM dividends plus full-year annual history."""
+    facts = company.get_facts()
+    if facts is None:
+        return _no_data(ticker, "company facts not available")
+    df = facts.to_dataframe()
+    div = df[df["concept"].isin(
+        ["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT]
+    )].copy()
+    if div.empty:
+        return _null_dividend_payload(ticker)
+    div["duration_days"] = _fact_duration_days(div)
+    q = div[
+        (div["duration_days"] >= _QUARTER_DAYS[0])
+        & (div["duration_days"] <= _QUARTER_DAYS[1])
+    ].copy()
+    if not q.empty:
+        q = _dedup_latest(q).sort_values("period_end")
+        recent = _quarters_with_derived_q4(
+            q, df, "us-gaap:" + _DIVIDEND_CONCEPT
+        )
+    else:
+        recent = q
+    ttm = _dividends_ttm(recent)
+    latest_end: str | None = str(recent.iloc[-1]["period_end"]) if len(recent) else None
+    history, annual = _dividend_annual_history(_dividends_fy_rows(div))
+    return {
+        "ticker": ticker,
+        "dividend_status": "paying" if ttm is not None else "unknown",
+        "ttm_dividend_per_share": ttm,
+        **_dividend_growth(annual),
+        "annual_history": history,
+        "source": _DIVIDEND_SOURCE,
+        "_latest_dividend_period_end": latest_end,
+    }
+
+
+def _balance_sheet_stmt(financials: object) -> object:
+    """Balance-sheet statement handle (None when the SDK exposes neither view)."""
+    return getattr(financials, "balance_sheet", None) or getattr(financials, "get_balance_sheet", lambda: None)()
+
+
+def _balance_sheet_text(bs: object) -> dict[str, object]:
+    """Latest balance-sheet snapshot as a dict (raw string when unshaped)."""
+    try:
+        latest = bs.get_latest() if hasattr(bs, "get_latest") else bs
+        return latest.to_dict() if hasattr(latest, "to_dict") else {"raw": str(latest)}
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return {"raw": str(bs)}
+
+
+def _fundamentals_balance(ticker: str, company: Company, cik: object, facts_url: str | None) -> dict[str, object]:
+    """Latest balance-sheet snapshot with provenance."""
+    financials = company.get_financials()
+    bs = _balance_sheet_stmt(financials)
+    if bs is None:
+        return _no_data(ticker, "balance sheet not available")
+    data = _balance_sheet_text(bs)
+    out: dict[str, object] = {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
+    if cik is not None:
+        out["cik"] = cik
+    if facts_url:
+        out["source_url"] = facts_url
+    return out
+
+
 def _fetch_fundamentals(ticker: str, metric: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)
         if metric == "overview":
-            out: dict[str, object] = {
-                "ticker": ticker,
-                "name": company.name,
-                "cik": company.cik,
-                "industry": getattr(company, "sic_description", None),
-            }
-            if _facts_url:
-                out["source_url"] = _facts_url
-            return out
+            return _fundamentals_overview(ticker, company, _cik, _facts_url)
         if metric == "shares_outstanding":
-            facts = company.get_facts()
-            if facts is None:
-                return _no_data(ticker, "company facts not available")
-            df = facts.to_dataframe()
-            shares = df[df["concept"].isin(
-                ["us-gaap:CommonStockSharesOutstanding", "CommonStockSharesOutstanding", "dei:EntityCommonStockSharesOutstanding"]
-            )]
-            if shares.empty:
-                return _no_data(ticker, "shares outstanding not found in company facts")
-            latest = shares.sort_values("period_end").iloc[-1]
-            def _col(name: str, *alts: str) -> str | None:
-                for k in (name, *alts):
-                    try:
-                        v = latest.get(k)
-                    except Exception:
-                        continue
-                    if v is not None and str(v) not in ("", "nan", "NaT"):
-                        return str(v)
-                return None
-            out: dict[str, object] = {
-                "ticker": ticker,
-                "shares_outstanding": float(latest["value"]),
-                "as_of": str(latest["period_end"]),
-                "source": "SEC EDGAR company facts",
-                "note": "SEC-reported shares outstanding, not public float",
-            }
-            if _cik is not None:
-                out["cik"] = _cik
-            if _facts_url:
-                out["source_url"] = _facts_url
-            for k, v in (("accession", _col("accession", "accn")), ("form", _col("form")), ("filed", _col("filed", "filed_at"))):
-                if v:
-                    out[k] = v
-            return out
+            return _fundamentals_shares(ticker, company, _cik, _facts_url)
         if metric == "eps":
-            facts = company.get_facts()
-            if facts is None:
-                return _no_data(ticker, "company facts not available")
-            df = facts.to_dataframe()
-            # Fetch diluted EPS
-            eps_diluted = df[df["concept"].isin(["us-gaap:EarningsPerShareDiluted", "EarningsPerShareDiluted"])].copy()
-            if eps_diluted.empty:
-                return _no_data(ticker, "diluted EPS not found in company facts")
-            eps_diluted["duration_days"] = _fact_duration_days(eps_diluted)
-            # Keep only true quarterly facts (~3 months). XBRL company facts
-            # hold quarterly, YTD (6-9 month), and full-year values for the
-            # same period_end; summing YTD rows double-counts (see TTM fix).
-            q_diluted = eps_diluted[
-                (eps_diluted["duration_days"] >= 60)
-                & (eps_diluted["duration_days"] <= 115)
-            ].copy()
-            if q_diluted.empty:
-                return _no_data(ticker, "no quarterly diluted EPS facts found")
-            q_diluted = _dedup_latest(q_diluted).sort_values("period_end")
-            recent_diluted = _quarters_with_derived_q4(
-                q_diluted, df, "us-gaap:EarningsPerShareDiluted"
-            )
-
-            # Fetch basic (undiluted) EPS if available
-            eps_basic = df[df["concept"].isin(["us-gaap:EarningsPerShareBasic", "EarningsPerShareBasic"])].copy()
-            recent_basic = None
-            if not eps_basic.empty:
-                eps_basic["duration_days"] = _fact_duration_days(eps_basic)
-                q_basic = eps_basic[
-                    (eps_basic["duration_days"] >= 60)
-                    & (eps_basic["duration_days"] <= 115)
-                ].copy()
-                if not q_basic.empty:
-                    q_basic = _dedup_latest(q_basic).sort_values("period_end")
-                    recent_basic = _quarters_with_derived_q4(
-                        q_basic, df, "us-gaap:EarningsPerShareBasic"
-                    )
-            
-            # Merge diluted and basic into single quarterly list
-            quarterly_eps: list[dict[str, object]] = []
-            for _, r_diluted in recent_diluted.iterrows():
-                q_entry: dict[str, object] = {
-                    "fiscal_year": str(r_diluted["fiscal_year"]),
-                    "fiscal_period": str(r_diluted["fiscal_period"]),
-                    "eps_diluted": round(float(r_diluted["value"]), 2),
-                    "period_end": str(r_diluted["period_end"]),
-                }
-                for _k in ("accession", "accn", "form", "filed", "filed_at"):
-                    try:
-                        _v = r_diluted.get(_k)
-                    except Exception:
-                        _v = None
-                    if _v is not None and str(_v) not in ("", "nan", "NaT"):
-                        _out = "accession" if _k in ("accession", "accn") else ("filed" if _k in ("filed", "filed_at") else _k)
-                        q_entry.setdefault(_out, str(_v))
-                # Find matching basic EPS for same period
-                if recent_basic is not None:
-                    matching = recent_basic[recent_basic["period_end"] == r_diluted["period_end"]]
-                    if not matching.empty:
-                        q_entry["eps_basic"] = round(float(matching.iloc[0]["value"]), 2)
-                quarterly_eps.append(q_entry)
-
-            result: dict[str, object] = {
-                "ticker": ticker,
-                "quarterly_eps": quarterly_eps,
-                "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
-            }
-            if _cik is not None:
-                result["cik"] = _cik
-            if _facts_url:
-                result["source_url"] = _facts_url
-            if len(recent_diluted) == 4:
-                result["ttm_eps_diluted"] = round(sum(float(r["value"]) for _, r in recent_diluted.iterrows()), 2)
-            if recent_basic is not None and len(recent_basic) == 4:
-                result["ttm_eps_basic"] = round(sum(float(r["value"]) for _, r in recent_basic.iterrows()), 2)
-            return result
+            return _fundamentals_eps(ticker, company, _cik, _facts_url)
         if metric == "dividends":
-            facts = company.get_facts()
-            if facts is None:
-                return _no_data(ticker, "company facts not available")
-            df = facts.to_dataframe()
-            div = df[df["concept"].isin(
-                ["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT]
-            )].copy()
-            if div.empty:
-                return _null_dividend_payload(ticker)
-            div["duration_days"] = _fact_duration_days(div)
-            q = div[
-                (div["duration_days"] >= _QUARTER_DAYS[0])
-                & (div["duration_days"] <= _QUARTER_DAYS[1])
-            ].copy()
-            if not q.empty:
-                q = _dedup_latest(q).sort_values("period_end")
-                recent = _quarters_with_derived_q4(
-                    q, df, "us-gaap:" + _DIVIDEND_CONCEPT
-                )
-            else:
-                recent = q
-            ttm: float | None = None
-            latest_end: str | None = str(recent.iloc[-1]["period_end"]) if len(recent) else None
-            if len(recent) == 4 and _has_contiguous_quarters(list(recent["period_end"])):
-                ttm = round(sum(float(r["value"]) for _, r in recent.iterrows()), 4)
-            fy = div[
-                (div["duration_days"] >= _FY_DAYS[0])
-                & (div["duration_days"] <= _FY_DAYS[1])
-            ].copy()
-            if not fy.empty:
-                fy = _dedup_latest(fy)
-                fy_rows: list[dict[str, str | float]] = [{"period_end": str(r["period_end"]), "value": float(r["value"])} for _, r in fy.iterrows()]
-            else:
-                fy_rows = []
-            history, annual = _dividend_annual_history(fy_rows)
-            return {
-                "ticker": ticker,
-                "dividend_status": "paying" if ttm is not None else "unknown",
-                "ttm_dividend_per_share": ttm,
-                **_dividend_growth(annual),
-                "annual_history": history,
-                "source": _DIVIDEND_SOURCE,
-                "_latest_dividend_period_end": latest_end,
-            }
+            return _fundamentals_dividends(ticker, company)
         if metric == "balance_sheet":
-            financials = company.get_financials()
-            bs = getattr(financials, "balance_sheet", None) or getattr(financials, "get_balance_sheet", lambda: None)()
-            if bs is None:
-                return _no_data(ticker, "balance sheet not available")
-            try:
-                latest = bs.get_latest() if hasattr(bs, "get_latest") else bs
-                data = latest.to_dict() if hasattr(latest, "to_dict") else {"raw": str(latest)}
-            except Exception:
-                data = {"raw": str(bs)}
-            out: dict[str, object] = {"ticker": ticker, "balance_sheet": data, "source": "SEC EDGAR financials"}
-            if _cik is not None:
-                out["cik"] = _cik
-            if _facts_url:
-                out["source_url"] = _facts_url
-            return out
+            return _fundamentals_balance(ticker, company, _cik, _facts_url)
         return {"error": f"Unknown metric '{metric}'"}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_fundamentals(%s, %s) failed: %s", ticker, metric, e)
         return _no_data(ticker, f"error retrieving {metric}: {e}")
 
@@ -596,25 +672,49 @@ def _resolve_issuer_ticker(cik: int) -> str | None:
     try:
         tickers = Company(cik).tickers
         value = tickers[0] if tickers else ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         value = ""
     cache.set(key, value)
     return value or None
 
 
-def _ownership_feed_row(filing: Filing) -> dict[str, object]:
-    """One feed row with issuer/filer detail; never raises (detail degrades to filer-only)."""
+def _ownership_filing_doc(filing: Filing) -> tuple[dict[str, object], object | None]:
+    """Base feed row plus parsed doc (None doc degrades to filer-only)."""
     row: dict[str, object] = {
         "form": str(getattr(filing, "form", "")),
         "filed": str(getattr(filing, "filing_date", "")),
         "accession_no": getattr(filing, "accession_no", None),
     }
     try:
-        doc = filing.obj()
-    except Exception:
+        return row, filing.obj()
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         row["filer"] = str(getattr(filing, "company", ""))
         row["note"] = "filing detail unavailable"
-        return row
+        return row, None
+
+
+def _ownership_percent(doc: object) -> float | None:
+    """Beneficial-ownership percent or None when absent/unparseable."""
+    if getattr(doc, "total_percent", None) is None:
+        return None
+    try:
+        return round(float(getattr(doc, "total_percent")), 2)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    except (TypeError, ValueError):
+        return None
+
+
+def _ownership_shares(doc: object) -> int | None:
+    """Beneficial-ownership share count or None when absent/unparseable."""
+    if getattr(doc, "total_shares", None) is None:
+        return None
+    try:
+        return int(getattr(doc, "total_shares"))  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    except (TypeError, ValueError):
+        return None
+
+
+def _ownership_doc_detail(row: dict[str, object], doc: object) -> None:
+    """Issuer/filer/percent/shares detail onto the feed row (never raises)."""
     try:
         persons = getattr(doc, "reporting_persons", None) or []
         row["filers"] = [p.name for p in persons[:5]]
@@ -622,13 +722,90 @@ def _ownership_feed_row(filing: Filing) -> dict[str, object]:
         if issuer is not None:
             row["issuer"] = getattr(issuer, "name", None)
             row["issuer_cik"] = getattr(issuer, "cik", None)
-        if getattr(doc, "total_percent", None) is not None:
-            row["percent"] = round(float(doc.total_percent), 2)
-        if getattr(doc, "total_shares", None) is not None:
-            row["shares"] = int(doc.total_shares)
+        percent = _ownership_percent(doc)
+        if percent is not None:
+            row["percent"] = percent
+        shares = _ownership_shares(doc)
+        if shares is not None:
+            row["shares"] = shares
         row["event_date"] = str(getattr(doc, "date_of_event", "") or "") or None
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         row["note"] = "ownership detail unavailable (pre-XML filing)"
+
+
+def _ownership_forms(form_type: object) -> tuple[str, list[str] | None]:
+    """Normalized label plus feed forms (None forms = invalid form_type)."""
+    label = (form_type or "both").strip().upper() if isinstance(form_type, str) else "BOTH"
+    if label in ("BOTH", "13D/G", "13DG"):
+        return label, list(_OWNERSHIP_FEED_FORMS)
+    if label in ("SC 13D", "13D"):
+        return label, ["SC 13D", "SC 13D/A"]
+    if label in ("SC 13G", "13G"):
+        return label, ["SC 13G", "SC 13G/A"]
+    return label, None
+
+
+def _ownership_limit(limit: object) -> int | None:
+    """Clamped feed limit 1-25 (None when unparseable)."""
+    candidate: object = 10 if limit is None else limit
+    if isinstance(candidate, bool):
+        return None
+    if isinstance(candidate, float):
+        if not candidate.is_integer():
+            return None
+        candidate = int(candidate)
+    if isinstance(candidate, str):
+        text = candidate.strip()
+        try:
+            candidate = int(float(text)) if "." in text else int(text)
+        except ValueError:
+            return None
+    if not isinstance(candidate, int):
+        return None
+    return max(1, min(candidate, 25))
+
+
+def _ownership_form_rows(forms: list[str]) -> list[dict[str, object]]:
+    """Merged, deduped feed rows across form variants (one failure never sinks)."""
+    from edgar import get_current_filings
+
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for form in forms:
+        try:
+            # ponytail: 10 filings per variant (40 merged max); raise page_size if daily 13D/G volume exceeds it
+            feed = get_current_filings(form=form, page_size=10)
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
+            continue  # one variant failing must not sink the feed
+        for filing in feed:
+            accession = str(getattr(filing, "accession_no", ""))
+            if accession in seen:
+                continue
+            seen.add(accession)
+            rows.append(_ownership_feed_row(filing))
+    return rows
+
+
+def _attach_ownership_tickers(rows: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
+    """Newest-first rows trimmed to limit with best-effort issuer tickers."""
+    rows.sort(key=_filed_key, reverse=True)
+    trimmed = rows[:limit]
+    for row in trimmed:
+        issuer_cik = row.get("issuer_cik")
+        if issuer_cik:
+            try:
+                row["ticker"] = _resolve_issuer_ticker(int(str(issuer_cik)))
+            except (TypeError, ValueError):
+                row["ticker"] = None
+    return trimmed
+
+
+def _ownership_feed_row(filing: Filing) -> dict[str, object]:
+    """One feed row with issuer/filer detail; never raises (detail degrades to filer-only)."""
+    row, doc = _ownership_filing_doc(filing)
+    if doc is None:
+        return row
+    _ownership_doc_detail(row, doc)
     if not row.get("filers"):
         row["filers"] = [str(getattr(filing, "company", ""))]
     return row
@@ -639,46 +816,15 @@ def _filed_key(row: dict[str, object]) -> str:
     return str(row.get("filed", ""))
 
 
-def _fetch_recent_ownership_filings(form_type: str, limit: int) -> dict[str, object]:
-    label = (form_type or "both").strip().upper()
-    if label in ("BOTH", "13D/G", "13DG"):
-        forms = list(_OWNERSHIP_FEED_FORMS)
-    elif label in ("SC 13D", "13D"):
-        forms = ["SC 13D", "SC 13D/A"]
-    elif label in ("SC 13G", "13G"):
-        forms = ["SC 13G", "SC 13G/A"]
-    else:
+def _fetch_recent_ownership_filings(form_type: str, limit: object) -> dict[str, object]:
+    label, forms = _ownership_forms(form_type)
+    if forms is None:
         return {"error": f"Invalid form_type '{form_type}': use 'SC 13D', 'SC 13G', or 'both'"}
-    try:
-        limit = max(1, min(limit or 10, 25))
-    except (TypeError, ValueError):
+    clamped = _ownership_limit(limit)
+    if clamped is None:
         return {"error": f"Invalid limit '{limit}': use 1-25"}
     try:
-        from edgar import get_current_filings
-
-        rows: list[dict[str, object]] = []
-        seen: set[str] = set()
-        for form in forms:
-            try:
-                # ponytail: 10 filings per variant (40 merged max); raise page_size if daily 13D/G volume exceeds it
-                feed = get_current_filings(form=form, page_size=10)
-            except Exception:
-                continue  # one variant failing must not sink the feed
-            for filing in feed:
-                accession = str(getattr(filing, "accession_no", ""))
-                if accession in seen:
-                    continue
-                seen.add(accession)
-                rows.append(_ownership_feed_row(filing))
-        rows.sort(key=_filed_key, reverse=True)
-        rows = rows[:limit]
-        for row in rows:
-            issuer_cik = row.get("issuer_cik")
-            if issuer_cik:
-                try:
-                    row["ticker"] = _resolve_issuer_ticker(int(str(issuer_cik)))
-                except (TypeError, ValueError):
-                    row["ticker"] = None
+        rows = _attach_ownership_tickers(_ownership_form_rows(forms), clamped)
         return {
             "form_type": "both" if label in ("BOTH", "13D/G", "13DG") else label,
             "window": "SEC current-filings feed (~24h)",
@@ -686,7 +832,7 @@ def _fetch_recent_ownership_filings(form_type: str, limit: int) -> dict[str, obj
             "filings": rows,
             "source": "SEC EDGAR current filings (SC 13D/G)",
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_recent_ownership_filings(%s) failed: %s", form_type, e)
         return {"error": f"No data found: error retrieving recent {label} filings: {e}"}
 
@@ -699,6 +845,52 @@ def get_latest_earnings_release(ticker: str) -> dict[str, object]:
     return _cached_or_fetch(key, lambda: _fetch_latest_earnings_release(ticker))
 
 
+def _filing_202_text(eightk: object) -> str | None:
+    """Press-release text when the 8-K carries Item 2.02 (None otherwise)."""
+    items = getattr(eightk, "items", []) or []
+    if not any("2.02" in item for item in items):
+        return None
+    press_releases = getattr(eightk, "press_releases", None) or []
+    if not press_releases:
+        return None
+    text = press_releases[0].text()
+    return str(text) if text is not None else None
+
+
+def _earnings_out(ticker: str, filing: Filing, text: object, kind: str, cik: object) -> dict[str, object]:
+    """Earnings payload for an 8-K release or a 10-Q MD&A fallback."""
+    filed = filing.filing_date
+    accession = getattr(filing, "accession_no", None)
+    out: dict[str, object] = {
+        "ticker": ticker,
+        "filed": str(filed),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
+        "accession_no": accession,
+        "accession": accession,
+        "text": text,
+        "source": f"{kind} filed {filed} (accession {accession})",
+    }
+    _url = getattr(filing, "filing_url", None) or getattr(filing, "url", None) or _filing_dir_url(cik, accession)
+    if _url:
+        out["source_url"] = str(_url)
+    if cik is not None:
+        out["cik"] = cik
+    return out
+
+
+def _tenq_mda_text(company: Company) -> tuple[Filing | None, str | None]:
+    """Latest 10-Q MD&A text for the earnings fallback (None pair when absent)."""
+    tenq_filings = company.get_filings(form=["10-Q"])
+    if not tenq_filings:
+        return None, None
+    filing = tenq_filings[0]
+    assert isinstance(filing, Filing)
+    tenq = filing.obj()
+    mda = getattr(tenq, "management_discussion", None)
+    if mda is None:
+        return None, None
+    return filing, mda if isinstance(mda, str) else getattr(mda, "text", lambda: str(mda))()
+
+
 def _fetch_latest_earnings_release(ticker: str) -> dict[str, object]:
     try:
         company = Company(ticker)
@@ -706,55 +898,19 @@ def _fetch_latest_earnings_release(ticker: str) -> dict[str, object]:
         filings = company.get_filings(form=["8-K"])
         for filing in filings:
             eightk = filing.obj()
-            items = getattr(eightk, "items", []) or []
-            logger.debug("8-K %s items: %s", filing.accession_no, items)
-            if not any("2.02" in item for item in items):
+            logger.debug("8-K %s items: %s", filing.accession_no, getattr(eightk, "items", []))
+            text = _filing_202_text(eightk)
+            if text is None:
+                logger.debug("8-K %s has no usable Item 2.02 press release", filing.accession_no)
                 continue
-            press_releases = getattr(eightk, "press_releases", None) or []
-            if not press_releases:
-                logger.debug("8-K %s has Item 2.02 but no press_releases attr", filing.accession_no)
-                continue
-            text = press_releases[0].text()
-            out: dict[str, object] = {
-                "ticker": ticker,
-                "filed": str(getattr(filing, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
-                "accession_no": filing.accession_no,
-                "accession": filing.accession_no,
-                "text": text,
-                "source": f"8-K Item 2.02 filed {filing.filing_date} (accession {filing.accession_no})",
-            }
-            _url = getattr(filing, "filing_url", None) or getattr(filing, "url", None) or _filing_dir_url(_cik, filing.accession_no)
-            if _url:
-                out["source_url"] = str(_url)
-            if _cik is not None:
-                out["cik"] = _cik
-            return out
+            return _earnings_out(ticker, filing, text, "8-K Item 2.02", _cik)
         # Fallback: try latest 10-Q MD&A as earnings narrative source
         logger.debug("No 8-K Item 2.02 found for %s; falling back to 10-Q MD&A", ticker)
-        tenq_filings = company.get_filings(form=["10-Q"])
-        if tenq_filings:
-            filing = tenq_filings[0]
-            assert isinstance(filing, Filing)
-            tenq = filing.obj()
-            mda = getattr(tenq, "management_discussion", None)
-            if mda is not None:
-                text = mda if isinstance(mda, str) else getattr(mda, "text", lambda: str(mda))()
-                out: dict[str, object] = {
-                    "ticker": ticker,
-                    "filed": str(getattr(filing, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
-                    "accession_no": filing.accession_no,
-                    "accession": filing.accession_no,
-                    "text": text,
-                    "source": f"10-Q MD&A filed {filing.filing_date} (accession {filing.accession_no})",
-                }
-                _url = getattr(filing, "filing_url", None) or getattr(filing, "url", None) or _filing_dir_url(_cik, filing.accession_no)
-                if _url:
-                    out["source_url"] = str(_url)
-                if _cik is not None:
-                    out["cik"] = _cik
-                return out
+        filing, text = _tenq_mda_text(company)
+        if filing is not None and text is not None:
+            return _earnings_out(ticker, filing, text, "10-Q MD&A", _cik)
         return _no_data(ticker, "no 8-K Item 2.02 or 10-Q filing found")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_latest_earnings_release(%s) failed: %s", ticker, e)
         return _no_data(ticker, f"error retrieving earnings release: {e}")
 
@@ -769,7 +925,7 @@ def diff_risk_factors(ticker: str) -> dict[str, object]:
 def _risk_text(filing: Filing) -> str | None:
     try:
         rf = getattr(filing.obj(), "risk_factors", None)
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     if rf is None:
         return None
@@ -777,50 +933,66 @@ def _risk_text(filing: Filing) -> str | None:
     return text if text and str(text).strip() else None
 
 
+def _risk_pair_texts(company: Company) -> list[tuple[Filing, str]]:
+    """First two filings (10-Q then 10-K) carrying risk-factor text."""
+    with_text: list[tuple[Filing, str]] = []
+    for form in (["10-Q"], ["10-K"]):
+        for f in itertools.islice(company.get_filings(form=form), 8):
+            text = _risk_text(f)
+            if text is not None:
+                with_text.append((f, text))
+            if len(with_text) == 2:
+                break
+        if len(with_text) == 2:
+            break
+    return with_text
+
+
+def _risk_diff_text(latest: Filing, latest_text: str, prior: Filing, prior_text: str) -> str:
+    """Unified diff of prior vs latest risk-factor text (sentinel when unchanged)."""
+    diff = "\n".join(difflib.unified_diff(
+        prior_text.splitlines(), latest_text.splitlines(),
+        fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
+        lineterm="",
+    ))
+    return diff if diff.strip() else "No changes in risk factors language between the two filings."
+
+
+def _risk_diff_payload(ticker: str, latest: Filing, latest_text: str, prior: Filing, prior_text: str, cik: object) -> dict[str, object]:
+    """Risk-diff payload with filing provenance and source URLs."""
+    out: dict[str, object] = {
+        "ticker": ticker,
+        "latest_filed": str(latest.filing_date),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
+        "prior_filed": str(prior.filing_date),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
+        "latest_accession": getattr(latest, "accession_no", None),
+        "prior_accession": getattr(prior, "accession_no", None),
+        "accessions": [getattr(prior, "accession_no", None), getattr(latest, "accession_no", None)],
+        "diff": _risk_diff_text(latest, latest_text, prior, prior_text),
+        "source": f"{prior.form}s filed {prior.filing_date} and {latest.form}s filed {latest.filing_date}",
+    }
+    _urls = []
+    for _f in (prior, latest):
+        _u = getattr(_f, "filing_url", None) or getattr(_f, "url", None) or _filing_dir_url(cik, getattr(_f, "accession_no", None))
+        if _u:
+            _urls.append(str(_u))
+    if _urls:
+        out["source_urls"] = _urls
+        out["source_url"] = _urls[-1]
+    if cik is not None:
+        out["cik"] = cik
+    return out
+
+
 def _fetch_diff_risk_factors(ticker: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
-        with_text: list[tuple[Filing, str]] = []
-        for form in (["10-Q"], ["10-K"]):
-            for f in itertools.islice(company.get_filings(form=form), 8):
-                text = _risk_text(f)
-                if text is not None:
-                    with_text.append((f, text))
-                if len(with_text) == 2:
-                    break
-            if len(with_text) == 2:
-                break
+        with_text = _risk_pair_texts(company)
         if len(with_text) < 2:
             return _no_data(ticker, "fewer than two filings with risk factors found")
         (latest, latest_text), (prior, prior_text) = with_text[0], with_text[1]
-        diff = "\n".join(difflib.unified_diff(
-            prior_text.splitlines(), latest_text.splitlines(),
-            fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
-            lineterm="",
-        ))
-        out: dict[str, object] = {
-            "ticker": ticker,
-            "latest_filed": str(getattr(latest, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
-            "prior_filed": str(getattr(prior, "filing_date")),  # SDK annotates str but runtime yields a date (Arrow date32 .as_py())
-            "latest_accession": getattr(latest, "accession_no", None),
-            "prior_accession": getattr(prior, "accession_no", None),
-            "accessions": [getattr(prior, "accession_no", None), getattr(latest, "accession_no", None)],
-            "diff": diff if diff.strip() else "No changes in risk factors language between the two filings.",
-            "source": f"{prior.form}s filed {prior.filing_date} and {latest.form}s filed {latest.filing_date}",
-        }
-        _urls = []
-        for _f in (prior, latest):
-            _u = getattr(_f, "filing_url", None) or getattr(_f, "url", None) or _filing_dir_url(_cik, getattr(_f, "accession_no", None))
-            if _u:
-                _urls.append(str(_u))
-        if _urls:
-            out["source_urls"] = _urls
-            out["source_url"] = _urls[-1]
-        if _cik is not None:
-            out["cik"] = _cik
-        return out
-    except Exception as e:
+        return _risk_diff_payload(ticker, latest, latest_text, prior, prior_text, _cik)
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("diff_risk_factors(%s) failed: %s", ticker, e)
         return _no_data(ticker, f"error diffing risk factors: {e}")
 
@@ -832,40 +1004,43 @@ def get_financial_statements(ticker: str, statement_type: str) -> dict[str, obje
     return _cached_or_fetch(key, lambda: _fetch_financial_statements(ticker, statement_type))
 
 
+def _select_statement(financials: object, statement_type: str) -> tuple[object | None, dict[str, object] | None]:
+    """Statement handle for a known type (error dict for unknown types)."""
+    if statement_type == "income_statement":
+        return getattr(financials, "income_statement", getattr(financials, "income", None)), None
+    if statement_type == "balance_sheet":
+        return getattr(financials, "balance_sheet", getattr(financials, "balance", None)), None
+    if statement_type == "cash_flow":
+        return getattr(financials, "cash_flow_statement", getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None))), None
+    return None, {"error": f"Unknown statement type '{statement_type}'"}
+
+
+def _statement_text(stmt: object) -> str:
+    """Statement rendered as readable text (raw string when converters fail)."""
+    try:
+        if hasattr(stmt, "to_dataframe"):
+            return str(stmt.to_dataframe())
+        if hasattr(stmt, "to_string"):
+            return str(stmt.to_string())
+        return str(stmt)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return str(stmt)
+
+
 def _fetch_financial_statements(ticker: str, statement_type: str) -> dict[str, object]:
     try:
         company = Company(ticker)
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)
-        financials = company.get_financials()
-
-        if statement_type == "income_statement":
-            stmt = getattr(financials, "income_statement", getattr(financials, "income", None))
-        elif statement_type == "balance_sheet":
-            stmt = getattr(financials, "balance_sheet", getattr(financials, "balance", None))
-        elif statement_type == "cash_flow":
-            stmt = getattr(financials, "cash_flow_statement", getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None)))
-        else:
-            return {"error": f"Unknown statement type '{statement_type}'"}
-
+        stmt, err = _select_statement(company.get_financials(), statement_type)
+        if err is not None:
+            return err
         if stmt is None:
             return _no_data(ticker, f"{statement_type} not available")
-
-        # Convert to readable text format
-        try:
-            if hasattr(stmt, "to_dataframe"):
-                text = str(stmt.to_dataframe())
-            elif hasattr(stmt, "to_string"):
-                text = stmt.to_string()
-            else:
-                text = str(stmt)
-        except Exception:
-            text = str(stmt)
-
         out: dict[str, object] = {
             "ticker": ticker,
             "statement_type": statement_type,
-            "text": text,
+            "text": _statement_text(stmt),
             "source": f"SEC EDGAR {statement_type}",
         }
         if _cik is not None:
@@ -873,7 +1048,7 @@ def _fetch_financial_statements(ticker: str, statement_type: str) -> dict[str, o
         if _facts_url:
             out["source_url"] = _facts_url
         return out
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_financial_statements(%s, %s) failed: %s", ticker, statement_type, e)
         return _no_data(ticker, f"error retrieving {statement_type}: {e}")
 
@@ -885,6 +1060,77 @@ def get_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
     return _cached_or_fetch(key, lambda: _fetch_xbrl_facts(ticker, concept))
 
 
+def _xbrl_push_word(words: list[str], current: str) -> str:
+    """Append a finished word and reset the accumulator."""
+    if current:
+        words.append(current)
+    return ""
+
+
+def _xbrl_tokens(concept: str) -> list[str]:
+    """Significant query tokens split on case/space boundaries (len>2)."""
+    words: list[str] = []
+    current = ""
+    for ch in concept:
+        if ch.isalnum():
+            if ch.isupper() and current and not current[-1].isupper():
+                current = _xbrl_push_word(words, current)
+            current += ch
+        else:
+            current = _xbrl_push_word(words, current)
+    _xbrl_push_word(words, current)
+    return [w.lower() for w in words if len(w) > 2]
+
+
+def _xbrl_token_match(df: pd.DataFrame, concept: str):
+    """Rows whose concept holds every significant query token."""
+    tokens = _xbrl_tokens(concept)
+    if not tokens:
+        return df.iloc[0:0]
+    lowered = df["concept"].str.lower()
+    mask = lowered.str.contains(tokens[0], na=False, regex=False)
+    for token in tokens[1:]:
+        mask = mask & lowered.str.contains(token, na=False, regex=False)
+    return df[mask]
+
+
+def _xbrl_candidates(df: pd.DataFrame, concept: str):
+    """Concept matches: substring, then spaceless, then all-tokens fallback."""
+    concept_lower = concept.lower()
+    matching = df[df["concept"].str.lower().str.contains(concept_lower, na=False)]
+    if not matching.empty:
+        return matching
+    # Spaced guesses ("Net Income") never match spaceless GAAP names;
+    # retry against space-stripped values before reporting no data.
+    compact = concept_lower.replace(" ", "")
+    if compact != concept_lower:
+        stripped = df["concept"].str.lower().str.replace(" ", "", regex=False)
+        matching = df[stripped.str.contains(compact, na=False, regex=False)]
+        if not matching.empty:
+            return matching
+    # Last resort: all significant query tokens inside one concept
+    # ("Total Revenues" -> Revenues, "TotalRevenue" -> Revenues).
+    # Only runs when nothing matched.
+    return _xbrl_token_match(df, concept)
+
+
+def _xbrl_result_rows(matching: pd.DataFrame) -> list[dict[str, object]]:
+    """Most recent five matches as concept/value/period rows with filing meta."""
+    recent = matching.sort_values("period_end").tail(5)
+    result_list: list[dict[str, object]] = []
+    for _, r in recent.iterrows():
+        _row: dict[str, object] = {
+            "concept": str(r["concept"]),
+            "value": float(r["value"]),
+            "period_end": str(r["period_end"]),
+            "fiscal_period": str(r.get("fiscal_period", "N/A")),
+        }
+        for k, v in _copy_fact_meta(r).items():
+            _row.setdefault(k, v)
+        result_list.append(_row)
+    return result_list
+
+
 def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
     try:
         company = Company(ticker)
@@ -892,67 +1138,12 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
         if facts is None:
             return _no_data(ticker, "company facts not available")
         df = facts.to_dataframe()
-        
-        # Search for concept (case-insensitive, partial match)
-        concept_lower = concept.lower()
-        matching = df[df["concept"].str.lower().str.contains(concept_lower, na=False)]
-        if matching.empty:
-            # Spaced guesses ("Net Income") never match spaceless GAAP names;
-            # retry against space-stripped values before reporting no data.
-            compact = concept_lower.replace(" ", "")
-            if compact != concept_lower:
-                stripped = df["concept"].str.lower().str.replace(" ", "", regex=False)
-                matching = df[stripped.str.contains(compact, na=False, regex=False)]
-        
-        if matching.empty:
-            # Last resort: all significant query tokens inside one concept
-            # ("Total Revenues" -> Revenues, "TotalRevenue" -> Revenues).
-            # Only runs when nothing matched.
-            words: list[str] = []
-            current = ""
-            for ch in concept:
-                if ch.isalnum():
-                    if ch.isupper() and current and not current[-1].isupper():
-                        words.append(current)
-                        current = ""
-                    current += ch
-                elif current:
-                    words.append(current)
-                    current = ""
-            if current:
-                words.append(current)
-            tokens = [w.lower() for w in words if len(w) > 2]
-            if tokens:
-                lowered = df["concept"].str.lower()
-                mask = lowered.str.contains(tokens[0], na=False, regex=False)
-                for token in tokens[1:]:
-                    mask = mask & lowered.str.contains(token, na=False, regex=False)
-                matching = df[mask]
-
+        matching = _xbrl_candidates(df, concept)
         if matching.empty:
             return _no_data(ticker, f"no XBRL facts found for concept '{concept}'")
         if matching["concept"].nunique() > 1:
             return _no_data(ticker, f"ambiguous XBRL concept for '{concept}': {sorted(matching['concept'].unique().tolist())[:8]}")
-        
-        # Return recent values (most recent 5)
-        recent = matching.sort_values("period_end").tail(5)
-        result_list = []
-        for _, r in recent.iterrows():
-            _row = {
-                "concept": str(r["concept"]),
-                "value": float(r["value"]),
-                "period_end": str(r["period_end"]),
-                "fiscal_period": str(r.get("fiscal_period", "N/A")),
-            }
-            for _k in ("accession", "accn", "form", "filed", "filed_at"):
-                try:
-                    _v = r.get(_k)
-                except Exception:
-                    _v = None
-                if _v is not None and str(_v) not in ("", "nan", "NaT"):
-                    _row.setdefault("accession" if _k in ("accession", "accn") else ("filed" if _k in ("filed", "filed_at") else _k), str(_v))
-            result_list.append(_row)
-
+        result_list = _xbrl_result_rows(matching)
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)
         out: dict[str, object] = {
@@ -967,6 +1158,6 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
         if _facts_url:
             out["source_url"] = _facts_url
         return out
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_xbrl_facts(%s, %s) failed: %s", ticker, concept, e)
         return _no_data(ticker, f"error retrieving facts for '{concept}': {e}")

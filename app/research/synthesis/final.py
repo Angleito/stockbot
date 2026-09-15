@@ -16,6 +16,7 @@ from app.research.agents import GroundedClaim
 from app.research.agents.bearbot import BearAnalysis
 from app.research.agents.bullbot import BullAnalysis
 from app.research.agents.stockbot import StockbotAnalysis
+
 from .committee import CommitteeDisagreement, _coerce_wave_id
 
 
@@ -39,6 +40,27 @@ class FinalSynthesis:
         self.wave_id = _coerce_wave_id(self.wave_id)
 
 
+def _merge_final_claims(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[GroundedClaim]:
+    claims: list[GroundedClaim] = []
+    for claim in (*getattr(stock, "claims", []), *getattr(bull, "claims", []), *getattr(bear, "claims", [])):
+        prior = next((c for c in claims if c.text == claim.text), None)
+        if prior is None:
+            claims.append(GroundedClaim(text=claim.text, evidence_ids=list(claim.evidence_ids)))
+        else:
+            merged = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
+            claims[claims.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged)
+    return claims
+
+
+def _union_texts(groups: tuple[list[str], ...]) -> list[str]:
+    out: list[str] = []
+    for group in groups:
+        for item in group:
+            if item not in out:
+                out.append(item)
+    return out
+
+
 def synthesize_final(
     question: str,
     *,
@@ -59,22 +81,9 @@ def synthesize_final(
     to override the joined answer (e.g. a canned model draft in tests).
     Cited ids derive only from accepted per-claim mappings, never the whole freeze.
     """
-    claims: list[GroundedClaim] = []
-    for claim in (*getattr(stock, "claims", []), *getattr(bull, "claims", []), *getattr(bear, "claims", [])):
-        prior = next((c for c in claims if c.text == claim.text), None)
-        if prior is None:
-            claims.append(GroundedClaim(text=claim.text, evidence_ids=list(claim.evidence_ids)))
-        else:
-            merged = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
-            claims[claims.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged)
-    unknowns: list[str] = []
-    for unknown in (*stock.unknowns, *bull.unknowns, *bear.unknowns):
-        if unknown not in unknowns:
-            unknowns.append(unknown)
-    changes: list[str] = []
-    for change in (*stock.what_would_change, *bull.what_would_change, *bear.what_would_change):
-        if change not in changes:
-            changes.append(change)
+    claims = _merge_final_claims(stock, bull, bear)
+    unknowns = _union_texts((stock.unknowns, bull.unknowns, bear.unknowns))
+    changes = _union_texts((stock.what_would_change, bull.what_would_change, bear.what_would_change))
     joined = (
         f"Balanced: {stock.base_case} Bull: {bull.bull_case} Bear: {bear.bear_case} "
         f"Agreed: {'; '.join(disagreement.agreement) or 'none stated'}."

@@ -43,7 +43,7 @@ class LogStreamHandler(logging.Handler):
                 with urllib.request.urlopen(request, timeout=self.timeout):
                     pass
                 self._unreachable = False
-            except Exception:
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 if not self._unreachable:
                     self._unreachable = True
                     _LOGGER.warning(

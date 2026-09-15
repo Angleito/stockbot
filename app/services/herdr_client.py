@@ -14,6 +14,7 @@ import socket
 from collections.abc import Iterator
 from typing import Protocol
 
+
 class _RecvSocket(Protocol):
     def recv(self, n: int, /) -> bytes: ...
 
@@ -45,6 +46,40 @@ class WorkerMap:
         return self.worker_to_pane.get(worker)
 
 
+def _parse_framed_lines(buf: bytes) -> tuple[list[dict[str, object]], bytes]:
+    """Parse complete newline frames; leftovers stay buffered for next recv."""
+    messages: list[dict[str, object]] = []
+    while b"\n" in buf:
+        line, buf = buf.split(b"\n", 1)
+        if line.strip():
+            messages.append(json.loads(line))
+    return messages, buf
+
+
+def _request_frame(method: str, params: dict[str, object] | None) -> bytes:
+    """Newline-JSON request frame for one Herdr method call."""
+    payload: dict[str, object] = {"id": f"cli:{method}", "method": method, "params": params or {}}
+    return (json.dumps(payload) + "\n").encode()
+
+
+def _subscribe_entry(pane_id: str, match: str) -> dict[str, object]:
+    """Per-pane subscription: substring output match, or agent-status watch."""
+    if match:
+        return {"type": "pane.output_matched", "pane_id": pane_id,
+                "source": "recent",
+                "match": {"type": "substring", "value": match}}
+    return {"type": "pane.agent_status_changed", "pane_id": pane_id}
+
+
+def _subscribe_frame(pane_ids: list[str] | None, match: str) -> bytes:
+    """Newline-JSON events.subscribe frame for the operator watch set."""
+    subscriptions: list[dict[str, object]] = [{"type": "pane.created"}, {"type": "pane.closed"}]
+    for pane_id in pane_ids or []:
+        subscriptions.append(_subscribe_entry(pane_id, match))
+    payload: dict[str, object] = {"id": "sub_operator", "method": "events.subscribe",
+                "params": {"subscriptions": subscriptions}}
+    return (json.dumps(payload) + "\n").encode()
+
 class HerdrClient:
     """Thin newline-JSON client over ``HERDR_SOCKET_PATH`` (0600, operator-held)."""
 
@@ -66,15 +101,12 @@ class HerdrClient:
             if not chunk:
                 return
             buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if line.strip():
-                    yield json.loads(line)
+            messages, buf = _parse_framed_lines(buf)
+            yield from messages
 
     def request(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
-        payload: dict[str, object] = {"id": f"cli:{method}", "method": method, "params": params or {}}
         with self._connect() as sock:
-            sock.sendall((json.dumps(payload) + "\n").encode())
+            sock.sendall(_request_frame(method, params))
             for message in self._read_lines(sock):
                 return message
         raise ConnectionError("empty response from Herdr socket")
@@ -97,20 +129,8 @@ class HerdrClient:
         self, pane_ids: list[str] | None = None, match: str = ""
     ) -> Iterator[dict[str, object]]:
         """Yield narrow operator events; caller maps pane_id via WorkerMap."""
-        subscriptions: list[dict[str, object]] = [{"type": "pane.created"}, {"type": "pane.closed"}]
-        for pane_id in pane_ids or []:
-            if match:
-                subscriptions.append(
-                    {"type": "pane.output_matched", "pane_id": pane_id,
-                     "source": "recent",
-                     "match": {"type": "substring", "value": match}})
-            else:
-                subscriptions.append(
-                    {"type": "pane.agent_status_changed", "pane_id": pane_id})
-        payload: dict[str, object] = {"id": "sub_operator", "method": "events.subscribe",
-                    "params": {"subscriptions": subscriptions}}
         sock = self._connect()
-        sock.sendall((json.dumps(payload) + "\n").encode())
+        sock.sendall(_subscribe_frame(pane_ids, match))
         return self._read_lines(sock)
 
 

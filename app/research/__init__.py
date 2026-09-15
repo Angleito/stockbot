@@ -1,14 +1,5 @@
 """Stockbot research harness kernel: session -> jobs -> journal -> SQLite resume."""
 
-from .journal import (
-    EVIDENCE_REJECTED,
-    JournalEvent,
-    append_event,
-    hydrate,
-    list_events,
-    next_sequence,
-    rejection_payload,
-)
 from .jobs import (
     COMMITTEE_TYPES,
     active_jobs,
@@ -21,6 +12,15 @@ from .jobs import (
     inspect_job,
     list_children,
     start_job,
+)
+from .journal import (
+    EVIDENCE_REJECTED,
+    JournalEvent,
+    append_event,
+    hydrate,
+    list_events,
+    next_sequence,
+    rejection_payload,
 )
 from .models import (
     DEFAULT_BUDGET,
@@ -45,7 +45,12 @@ from .models import (
     validate_json_mapping,
     validate_json_value,
 )
-from .repository import ResearchRepository, ResumeState, get_research_db_path, pending_next_action
+from .repository import (
+    ResearchRepository,
+    ResumeState,
+    get_research_db_path,
+    pending_next_action,
+)
 from .session import (
     TERMINAL_STATUSES,
     TRANSITIONS,

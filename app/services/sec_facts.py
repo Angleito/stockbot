@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime as _dt
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from .. import edgar_client
 from ..domain.market.identity import resolve_ticker_aliases
@@ -104,20 +104,20 @@ RevisionKey = tuple[str, str, str]
 
 
 def _today() -> _dt.date:
-    return _dt.date.today()
+    return _dt.date.today()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
 
 
-def _validated_as_of(as_of: Optional[str]) -> Optional[_dt.date]:
+def _validated_as_of(as_of: str | None) -> _dt.date | None:
     """None -> today; otherwise strict YYYY-MM-DD or an error marker."""
     if as_of is None:
         return _today()
     try:
-        return _dt.datetime.strptime(as_of, "%Y-%m-%d").date()
+        return _dt.datetime.strptime(as_of, "%Y-%m-%d").date()  # noqa: DTZ007 - strict YYYY-MM-DD format gate parses a date-only string
     except (TypeError, ValueError):
         return None
 
 
-def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Optional[Path]) -> Optional[str]:
+def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Path | None) -> str | None:
     """Resolve a ticker to its entity id through the alias store.
 
     The alias horizon is end-of-day UTC on the as-of date so an alias
@@ -135,6 +135,23 @@ def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Optional[Path]) -> 
     return resolution.entity_id
 
 
+def _stored_text(value: object) -> str:
+    """Coerce a store text column: str as-is, None -> "", else str(value)."""
+    if isinstance(value, str):
+        return value
+    return "" if value is None else str(value)
+
+
+def _stored_opt_text(value: object) -> str | None:
+    """Coerce an optional store text column: str as-is, else None."""
+    return value if isinstance(value, str) else None
+
+
+def _stored_opt_int(value: object) -> int | None:
+    """Coerce an optional store int column: int as-is, else None."""
+    return value if isinstance(value, int) else None
+
+
 def _validated_fact_row(row: Mapping[str, object]) -> FinancialFactRow | None:
     """Narrow one raw store row to a FinancialFactRow; None when unusable.
 
@@ -150,28 +167,21 @@ def _validated_fact_row(row: Mapping[str, object]) -> FinancialFactRow | None:
         return None
     if not isinstance(value, (int, float)):
         return None
-    filed_at = row.get("filed_at")
-    accession = row.get("accession")
-    known_at = row.get("known_at")
-    fiscal_year = row.get("fiscal_year")
-    period_start = row.get("period_start")
-    fiscal_period = row.get("fiscal_period")
-    source_url = row.get("source_url")
     return {
         "concept": concept,
         "value": float(value),
         "period_end": period_end,
-        "filed_at": filed_at if isinstance(filed_at, str) else ("" if filed_at is None else str(filed_at)),
-        "accession": accession if isinstance(accession, str) else ("" if accession is None else str(accession)),
-        "known_at": known_at if isinstance(known_at, str) else ("" if known_at is None else str(known_at)),
-        "period_start": period_start if isinstance(period_start, str) else None,
-        "fiscal_year": fiscal_year if isinstance(fiscal_year, int) else None,
-        "fiscal_period": fiscal_period if isinstance(fiscal_period, str) else None,
-        "source_url": source_url if isinstance(source_url, str) else None,
+        "filed_at": _stored_text(row.get("filed_at")),
+        "accession": _stored_text(row.get("accession")),
+        "known_at": _stored_text(row.get("known_at")),
+        "period_start": _stored_opt_text(row.get("period_start")),
+        "fiscal_year": _stored_opt_int(row.get("fiscal_year")),
+        "fiscal_period": _stored_opt_text(row.get("fiscal_period")),
+        "source_url": _stored_opt_text(row.get("source_url")),
     }
 
 
-def _store_rows(entity_id: str, concepts: tuple[str, ...], as_of: _dt.date, data_root: Optional[Path]) -> list[FinancialFactRow]:
+def _store_rows(entity_id: str, concepts: tuple[str, ...], as_of: _dt.date, data_root: Path | None) -> list[FinancialFactRow]:
     clause, param = duckdb.as_of_clause(as_of.isoformat())
     placeholders = ",".join("?" for _ in concepts)
     rows = duckdb.query(
@@ -198,9 +208,9 @@ def _envelope(
     *,
     data_source: str,
     as_of_date: str,
-    requested_as_of: Optional[str] = None,
-    row_count: Optional[int] = None,
-    returned_count: Optional[int] = None,
+    requested_as_of: str | None = None,
+    row_count: int | None = None,
+    returned_count: int | None = None,
     truncated: bool = False,
 ) -> dict[str, object]:
     """Wrap a payload in the exact public envelope shape."""
@@ -225,7 +235,7 @@ def _envelope(
 # ---------------------------------------------------------------------------
 
 
-def _duration_days(row: FinancialFactRow) -> Optional[int]:
+def _duration_days(row: FinancialFactRow) -> int | None:
     start, end = row.get("period_start"), row.get("period_end")
     if not start or not end:
         return None
@@ -267,44 +277,53 @@ def _row_revision_order(row: Mapping[str, object]) -> tuple[str, str, str]:
     return (str(row.get("known_at") or ""), str(row.get("filed_at") or ""), str(row.get("accession") or ""))
 
 
-def _duration_rows(rows: Sequence[FinancialFactRow], concept: str, day_range: tuple[int, int]) -> list[FinancialFactRow]:
-    """Facts of a given duration for a concept, restatements resolved
-    by the true latest filed_at (accession DESC tie-break) — replacing
-    edgar_client._dedup_latest's fiscal-year proxy — newest period first."""
-    q: list[FinancialFactRow] = []
-    for row in rows:
-        if row.get("concept") != concept:
-            continue
-        duration = _duration_days(row)
-        if duration is not None and day_range[0] <= duration <= day_range[1]:
-            q.append(row)
+def _concept_duration_match(row: FinancialFactRow, concept: str, day_range: tuple[int, int]) -> bool:
+    """One fact of the concept whose duration falls inside day_range."""
+    if row.get("concept") != concept:
+        return False
+    duration = _duration_days(row)
+    return duration is not None and day_range[0] <= duration <= day_range[1]
+
+
+def _newer_filed_revision(row: FinancialFactRow, prev: FinancialFactRow) -> bool:
+    """True when row supersedes prev by true latest filed_at (accession tie-break)."""
+    return ((row["filed_at"] or ""), (row["accession"] or "")) > (
+        (prev["filed_at"] or ""), (prev["accession"] or "")
+    )
+
+
+def _dedup_latest_by_period_end(q: Sequence[FinancialFactRow]) -> list[FinancialFactRow]:
+    """Keep the newest filed revision per period end, newest period first."""
     by_end: dict[str, FinancialFactRow] = {}
     for row in q:
         key = row["period_end"]
         prev = by_end.get(key)
-        if prev is None or ((row["filed_at"] or ""), (row["accession"] or "")) > (
-            (prev["filed_at"] or ""), (prev["accession"] or "")
-        ):
+        if prev is None or _newer_filed_revision(row, prev):
             by_end[key] = row
     return sorted(by_end.values(), key=_row_period_end)
 
 
-def _derive_q4_from_facts(rows: Sequence[FinancialFactRow], concept: str, fy_end: _dt.date) -> Optional[FinancialFactRow]:
-    """Q4 = FY_total - YTD_through_Q3 for the fiscal year ending fy_end."""
-    fy = []
-    for row in rows:
-        if row.get("concept") != concept:
-            continue
-        duration = _duration_days(row)
-        if (
-            duration is not None
-            and _FY_DAYS[0] <= duration <= _FY_DAYS[1]
-            and row["period_end"] == fy_end.isoformat()
-        ):
-            fy.append(row)
-    if not fy:
-        return None
-    latest_fy = max(fy, key=_row_filed_accession)
+def _duration_rows(rows: Sequence[FinancialFactRow], concept: str, day_range: tuple[int, int]) -> list[FinancialFactRow]:
+    """Facts of a given duration for a concept, restatements resolved
+    by the true latest filed_at (accession DESC tie-break) — replacing
+    edgar_client._dedup_latest's fiscal-year proxy — newest period first."""
+    return _dedup_latest_by_period_end(
+        [row for row in rows if _concept_duration_match(row, concept, day_range)]
+    )
+
+
+def _fy_total_for_year(rows: Sequence[FinancialFactRow], concept: str, fy_end: _dt.date) -> FinancialFactRow | None:
+    """Latest FY-duration fact for the fiscal year ending fy_end."""
+    fy = [
+        row for row in rows
+        if row.get("concept") == concept
+        and row["period_end"] == fy_end.isoformat()
+        and _concept_duration_match(row, concept, _FY_DAYS)
+    ]
+    return max(fy, key=_row_filed_accession) if fy else None
+
+def _ytd_through_q3(rows: Sequence[FinancialFactRow], concept: str, fy_end: _dt.date) -> FinancialFactRow | None:
+    """Latest YTD-duration fact strictly before fy_end but within one quarter gap."""
     ytd = []
     for row in rows:
         if row.get("concept") != concept:
@@ -318,17 +337,28 @@ def _derive_q4_from_facts(rows: Sequence[FinancialFactRow], concept: str, fy_end
             continue
         if fy_end - _dt.timedelta(days=_MISSING_QUARTER_GAP_DAYS) <= row_end < fy_end:
             ytd.append(row)
-    if not ytd:
-        return None
-    ytd_q3 = sorted(ytd, key=_row_period_end)[-1]["value"]
-    latest_total = latest_fy["value"]
-    derived: FinancialFactRow = {
+    return max(ytd, key=_row_period_end) if ytd else None
+
+
+def _q4_from_totals(latest_fy: FinancialFactRow, ytd_q3: FinancialFactRow, fy_end: _dt.date) -> FinancialFactRow:
+    """Q4 = FY_total - YTD_through_Q3 anchored on the FY fact's identity."""
+    return {
         **latest_fy,
-        "value": latest_total - ytd_q3,
+        "value": latest_fy["value"] - ytd_q3["value"],
         "period_end": fy_end.isoformat(),
         "fiscal_period": "Q4",
     }
-    return derived
+
+
+def _derive_q4_from_facts(rows: Sequence[FinancialFactRow], concept: str, fy_end: _dt.date) -> FinancialFactRow | None:
+    """Q4 = FY_total - YTD_through_Q3 for the fiscal year ending fy_end."""
+    latest_fy = _fy_total_for_year(rows, concept, fy_end)
+    if latest_fy is None:
+        return None
+    ytd_q3 = _ytd_through_q3(rows, concept, fy_end)
+    if ytd_q3 is None:
+        return None
+    return _q4_from_totals(latest_fy, ytd_q3, fy_end)
 
 
 def _quarters_with_derived_q4(quarter_rows: Sequence[FinancialFactRow], all_rows: Sequence[FinancialFactRow], concept: str) -> list[FinancialFactRow]:
@@ -348,47 +378,64 @@ def _quarters_with_derived_q4(quarter_rows: Sequence[FinancialFactRow], all_rows
     return quarter[-4:]
 
 
-def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> Optional[dict[str, object]]:
-    """Deterministic store assembly over feed rows (pure; no storage)."""
-    recent_diluted = _quarters_with_derived_q4(
-        _duration_rows(rows, DILUTED_EPS_CONCEPT, _QUARTER_DAYS), rows, DILUTED_EPS_CONCEPT
+def _recent_concept_quarters(rows: Sequence[FinancialFactRow], concept: str) -> list[FinancialFactRow]:
+    """Last-4 quarterly facts for a concept with the derived-Q4 fallback."""
+    return _quarters_with_derived_q4(
+        _duration_rows(rows, concept, _QUARTER_DAYS), rows, concept
     )
+
+
+def _basic_match_for(period_end: str, recent_basic: Sequence[FinancialFactRow] | None) -> FinancialFactRow | None:
+    """Basic-EPS row sharing a diluted row's period end (None when absent)."""
+    if not recent_basic:
+        return None
+    return next((b for b in recent_basic if b["period_end"] == period_end), None)
+
+
+def _eps_entry(diluted: FinancialFactRow, recent_basic: Sequence[FinancialFactRow] | None) -> dict[str, object]:
+    """One quarterly entry: diluted value plus basic when the period matches."""
+    entry: dict[str, object] = {
+        "fiscal_year": str(diluted["fiscal_year"]) if diluted.get("fiscal_year") is not None else "",
+        "fiscal_period": (diluted.get("fiscal_period") or ""),
+        "eps_diluted": round(diluted["value"], 2),
+        "period_end": diluted["period_end"],
+    }
+    matching = _basic_match_for(diluted["period_end"], recent_basic)
+    if matching is not None:
+        entry["eps_basic"] = round(matching["value"], 2)
+    return entry
+
+
+def _eps_ttm(quarters: Sequence[FinancialFactRow] | None) -> float | None:
+    """TTM total once 4 quarters are present; None while the series builds."""
+    if quarters is None or len(quarters) != 4:
+        return None
+    return round(sum(r["value"] for r in quarters), 2)
+
+
+def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> dict[str, object] | None:
+    """Deterministic store assembly over feed rows (pure; no storage)."""
+    recent_diluted = _recent_concept_quarters(rows, DILUTED_EPS_CONCEPT)
     if not recent_diluted:
         return None
-    recent_basic = None
     basic_quarters = _duration_rows(rows, BASIC_EPS_CONCEPT, _QUARTER_DAYS)
-    if basic_quarters:
-        recent_basic = _quarters_with_derived_q4(basic_quarters, rows, BASIC_EPS_CONCEPT)
-
-    quarterly_eps: list[dict[str, object]] = []
-    for r in recent_diluted:
-        entry: dict[str, object] = {
-            "fiscal_year": str(r["fiscal_year"]) if r.get("fiscal_year") is not None else "",
-            "fiscal_period": (r.get("fiscal_period") or ""),
-            "eps_diluted": round(r["value"], 2),
-            "period_end": r["period_end"],
-        }
-        if recent_basic:
-            matching = next(
-                (b for b in recent_basic if b["period_end"] == entry["period_end"]), None
-            )
-            if matching is not None:
-                entry["eps_basic"] = round(matching["value"], 2)
-        quarterly_eps.append(entry)
-
+    recent_basic = _recent_concept_quarters(rows, BASIC_EPS_CONCEPT) if basic_quarters else None
+    quarterly_eps = [_eps_entry(r, recent_basic) for r in recent_diluted]
     result: dict[str, object] = {
         "ticker": ticker,
         "quarterly_eps": quarterly_eps,
         "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
     }
-    if len(recent_diluted) == 4:
-        result["ttm_eps_diluted"] = round(sum(r["value"] for r in recent_diluted), 2)
-    if recent_basic is not None and len(recent_basic) == 4:
-        result["ttm_eps_basic"] = round(sum(r["value"] for r in recent_basic), 2)
+    ttm_diluted = _eps_ttm(recent_diluted)
+    if ttm_diluted is not None:
+        result["ttm_eps_diluted"] = ttm_diluted
+    ttm_basic = _eps_ttm(recent_basic)
+    if ttm_basic is not None:
+        result["ttm_eps_basic"] = ttm_basic
     return result
 
 
-def _assemble_dividend_payload(ticker: str, rows: Sequence[FinancialFactRow], as_of: _dt.date) -> Optional[dict[str, object]]:
+def _assemble_dividend_payload(ticker: str, rows: Sequence[FinancialFactRow], as_of: _dt.date) -> dict[str, object] | None:
     """Deterministic store assembly over feed rows (pure; no storage)."""
     if not any(r.get("concept") == DIVIDEND_PER_SHARE_CONCEPT for r in rows):
         return None
@@ -455,7 +502,7 @@ def _validated_dividend_event(row: Mapping[str, object]) -> DividendEventRow | N
     }
 
 
-def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root: Optional[Path]) -> list[DividendEventRow]:
+def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root: Path | None) -> list[DividendEventRow]:
     """PIT-gated dividend events, deduped by id keeping max known_at.
 
     Amended filings produce different ids (amount is part of the id) so both
@@ -495,11 +542,128 @@ def _classify_dividend_event(row: CanonicalDividendEventRow, as_of: _dt.date) ->
     return "paid" if pay[:10] < as_of.isoformat() else "upcoming"
 
 
-def _extreme_event(cands: Sequence[CanonicalDividendEventRow], *, earliest: bool) -> Optional[CanonicalDividendEventRow]:
+def _extreme_event(cands: Sequence[CanonicalDividendEventRow], *, earliest: bool) -> CanonicalDividendEventRow | None:
     """Edge payment date wins; same-date revisions prefer latest known_at."""
     edge = (min if earliest else max)(str(r["payment_date"]) for r in cands)
     tied = [r for r in cands if str(r["payment_date"]) == edge]
     return max(tied, key=_row_known_at)
+
+
+def _is_typed_dividend_row(row: DividendEventRow) -> bool:
+    """Concrete dividend_type present (not blank/unknown)."""
+    return (row.get("dividend_type") or "") not in ("", "unknown")
+
+
+def _cluster_typed_rows(group: Sequence[DividendEventRow]) -> list[list[DividendEventRow]]:
+    """Group typed rows by exact dividend_type; regular never merges into special."""
+    clusters: list[list[DividendEventRow]] = []
+    for row in group:
+        if not _is_typed_dividend_row(row):
+            continue
+        for cluster in clusters:
+            if all((m.get("dividend_type") or "") == (row.get("dividend_type") or "")
+                   for m in cluster):
+                cluster.append(row)
+                break
+        else:
+            clusters.append([row])
+    return clusters
+
+
+def _amount_matched_clusters(amount: float | None, clusters: list[list[DividendEventRow]]) -> list[list[DividendEventRow]]:
+    """Clusters holding a row with the untyped row's amount (empty when None)."""
+    return [c for c in clusters
+            if amount is not None and any(m.get("amount_per_share") == amount for m in c)]
+
+
+def _place_untyped_row(row: DividendEventRow, clusters: list[list[DividendEventRow]], stray: list[DividendEventRow]) -> None:
+    """Attach one unknown row: unique amount match, single-identity amendment, else stray."""
+    matched = _amount_matched_clusters(row.get("amount_per_share"), clusters)
+    if len(matched) == 1:
+        matched[0].append(row)
+    elif matched:
+        stray.append(row)
+    elif len(clusters) <= 1:
+        (clusters[0].append(row) if clusters else stray.append(row))
+    else:
+        stray.append(row)
+
+
+def _backfill_mate_amount(out: CanonicalDividendEventRow, mate: DividendEventRow) -> None:
+    """Winner keeps its amount; a missing amount takes the mate's numeric value."""
+    mate_amount = mate.get("amount_per_share")
+    if out.get("amount_per_share") is None and isinstance(mate_amount, (int, float)):
+        out["amount_per_share"] = float(mate_amount)
+
+
+def _backfill_mate_type(out: CanonicalDividendEventRow, mate: DividendEventRow) -> None:
+    """Unknown winner type takes the mate's concrete type."""
+    mate_type = mate.get("dividend_type")
+    if (out.get("dividend_type") or "") in ("", "unknown") and isinstance(mate_type, str) and mate_type not in ("", "unknown"):
+        out["dividend_type"] = mate_type
+
+
+def _backfill_mate_text(out: CanonicalDividendEventRow, mate: DividendEventRow) -> None:
+    """Winner keeps its excerpt/concept; missing fields take the mate's."""
+    mate_excerpt = mate.get("evidence_excerpt")
+    if not out.get("evidence_excerpt") and isinstance(mate_excerpt, str) and mate_excerpt:
+        out["evidence_excerpt"] = mate_excerpt
+    mate_concept = mate.get("source_concept")
+    if not out.get("source_concept") and isinstance(mate_concept, str) and mate_concept:
+        out["source_concept"] = mate_concept
+
+
+def _attach_untyped_rows(group: Sequence[DividendEventRow], clusters: list[list[DividendEventRow]]) -> list[DividendEventRow]:
+    """Attach unknown rows to a unique amount-matched cluster (or the single
+    typed identity as an amendment); leftovers stay unresolved."""
+    stray: list[DividendEventRow] = []
+    for row in group:
+        if _is_typed_dividend_row(row):
+            continue
+        _place_untyped_row(row, clusters, stray)
+    return stray
+
+
+def _merge_bucket_mate(out: CanonicalDividendEventRow, mate: DividendEventRow) -> None:
+    """Fold one amendment mate into the winner: amount, type, excerpt, concept."""
+    _backfill_mate_amount(out, mate)
+    _backfill_mate_type(out, mate)
+    _backfill_mate_text(out, mate)
+
+
+def _canonicalize_bucket(bucket: Sequence[DividendEventRow]) -> CanonicalDividendEventRow:
+    """Newest revision wins; mates backfill amount/type/excerpt/concept."""
+    winner = max(bucket, key=_row_revision_order)
+    out: CanonicalDividendEventRow = {
+        **winner,
+        "source_types": sorted({m.get("source_type") for m in bucket if m.get("source_type")}),
+    }
+    for mate in bucket:
+        if mate is winner:
+            continue
+        _merge_bucket_mate(out, mate)
+    return out
+
+
+def _canonical_group_events(group: Sequence[DividendEventRow]) -> list[CanonicalDividendEventRow]:
+    """One (record_date, payment_date) bucket -> canonical rows."""
+    clusters = _cluster_typed_rows(group)
+    stray = _attach_untyped_rows(group, clusters)
+    if stray:
+        clusters.append(stray)
+    return [_canonicalize_bucket(bucket) for bucket in clusters]
+
+
+def _bucket_dated_events(events: Sequence[DividendEventRow]) -> tuple[list[DividendEventRow], dict[tuple[str, str], list[DividendEventRow]]]:
+    """Split undated rows (never merge) from (record_date, payment_date) buckets."""
+    undated = [r for r in events if not r.get("payment_date")]
+    groups: dict[tuple[str, str], list[DividendEventRow]] = {}
+    for row in events:
+        if not row.get("payment_date"):
+            continue
+        groups.setdefault(
+            ((row.get("record_date") or ""), row.get("payment_date")), []).append(row)
+    return undated, groups
 
 
 def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[CanonicalDividendEventRow]:
@@ -511,66 +675,10 @@ def _canonical_dividend_events(events: Sequence[DividendEventRow]) -> list[Canon
     identity (amendment); otherwise it stays unresolved instead of attaching
     to the first compatible bucket.
     """
-    undated = [r for r in events if not r.get("payment_date")]
-    groups: dict[tuple[str, str], list[DividendEventRow]] = {}
-    for row in events:
-        if not row.get("payment_date"):
-            continue
-        groups.setdefault(
-            ((row.get("record_date") or ""), row.get("payment_date")), []).append(row)
+    undated, groups = _bucket_dated_events(events)
     canonical: list[CanonicalDividendEventRow] = []
     for group in groups.values():
-        clusters: list[list[DividendEventRow]] = []
-        for row in group:
-            if (row.get("dividend_type") or "") in ("", "unknown"):
-                continue
-            for cluster in clusters:
-                if all((m.get("dividend_type") or "") == (row.get("dividend_type") or "")
-                       for m in cluster):
-                    cluster.append(row)
-                    break
-            else:
-                clusters.append([row])
-        stray: list[DividendEventRow] = []
-        for row in group:
-            if (row.get("dividend_type") or "") not in ("", "unknown"):
-                continue
-            amount = row.get("amount_per_share")
-            matched = [c for c in clusters
-                       if amount is not None and any(m.get("amount_per_share") == amount for m in c)]
-            if len(matched) == 1:
-                matched[0].append(row)
-            elif not matched and len(clusters) <= 1:
-                if clusters:
-                    clusters[0].append(row)
-                else:
-                    stray.append(row)
-            else:
-                stray.append(row)
-        if stray:
-            clusters.append(stray)
-        for bucket in clusters:
-            winner = max(bucket, key=_row_revision_order)
-            out: CanonicalDividendEventRow = {
-                **winner,
-                "source_types": sorted({m.get("source_type") for m in bucket if m.get("source_type")}),
-            }
-            for mate in bucket:
-                if mate is winner:
-                    continue
-                mate_amount = mate.get("amount_per_share")
-                if out.get("amount_per_share") is None and isinstance(mate_amount, (int, float)):
-                    out["amount_per_share"] = float(mate_amount)
-                mate_type = mate.get("dividend_type")
-                if (out.get("dividend_type") or "") in ("", "unknown") and isinstance(mate_type, str) and mate_type not in ("", "unknown"):
-                    out["dividend_type"] = mate_type
-                mate_excerpt = mate.get("evidence_excerpt")
-                if not out.get("evidence_excerpt") and isinstance(mate_excerpt, str) and mate_excerpt:
-                    out["evidence_excerpt"] = mate_excerpt
-                mate_concept = mate.get("source_concept")
-                if not out.get("source_concept") and isinstance(mate_concept, str) and mate_concept:
-                    out["source_concept"] = mate_concept
-            canonical.append(out)
+        canonical.extend(_canonical_group_events(group))
     undated_canonical: list[CanonicalDividendEventRow] = [
         {**r, "source_types": [r["source_type"]] if r["source_type"] else []}
         for r in undated
@@ -586,22 +694,18 @@ def _dividend_event_source_types(row: CanonicalDividendEventRow) -> list[str]:
     return [st] if st else []
 
 
-def _dividend_event_payload(events: Sequence[DividendEventRow], as_of: _dt.date, *, growth: Mapping[str, object] | None = None, ttm_dps: float | None = None, annual_history: Sequence[Mapping[str, object]] | None = None) -> dict[str, object]:
-    """last/next/past/coverage over classified events (pure; no storage)."""
-    canonical = _canonical_dividend_events(events)
-    upcoming: list[CanonicalDividendEventRow] = [
+def _classed_events(canonical: Sequence[CanonicalDividendEventRow], as_of: _dt.date, status: str) -> list[CanonicalDividendEventRow]:
+    """Canonical events with a classification, amount, and payment date."""
+    return [
         r for r in canonical
-        if _classify_dividend_event(r, as_of) == "upcoming"
+        if _classify_dividend_event(r, as_of) == status
         and r.get("amount_per_share") is not None and r.get("payment_date")
     ]
-    paid: list[CanonicalDividendEventRow] = [
-        r for r in canonical
-        if _classify_dividend_event(r, as_of) == "paid"
-        and r.get("amount_per_share") is not None and r.get("payment_date")
-    ]
-    nxt = _extreme_event(upcoming, earliest=True) if upcoming else None
-    last = _extreme_event(paid, earliest=False) if paid else None
-    past: list[dict[str, object]] = [
+
+
+def _past_event_rows(paid: Sequence[CanonicalDividendEventRow], as_of: _dt.date) -> list[dict[str, object]]:
+    """Newest-12 paid events as public past-event dicts."""
+    return [
         {
             "amount_per_share": r.get("amount_per_share"),
             "payment_date": r.get("payment_date"),
@@ -614,35 +718,57 @@ def _dividend_event_payload(events: Sequence[DividendEventRow], as_of: _dt.date,
         }
         for r in sorted(paid, key=_row_payment_date, reverse=True)[:12]
     ]
+
+
+def _events_coverage(canonical: Sequence[CanonicalDividendEventRow]) -> str:
+    """structured/text coverage over canonical source types."""
     has_xbrl = any("structured_xbrl" in _dividend_event_source_types(r) for r in canonical)
     has_text = any("filing_text" in _dividend_event_source_types(r) for r in canonical)
-    coverage = (
-        "structured_and_text" if has_xbrl and has_text
-        else "structured_only" if has_xbrl
-        else "text_only" if has_text
-        else "no_structured_events"
-    )
+    if has_xbrl and has_text:
+        return "structured_and_text"
+    if has_xbrl:
+        return "structured_only"
+    if has_text:
+        return "text_only"
+    return "no_structured_events"
+
+
+def _last_dividend_dict(last: CanonicalDividendEventRow | None) -> dict[str, object] | None:
+    """Latest paid event as the public last_dividend shape (None when absent)."""
+    if last is None:
+        return None
+    return {"amount_per_share": last["amount_per_share"],
+            "payment_date": last["payment_date"], "type": last.get("dividend_type")}
+
+
+def _next_dividend_dict(nxt: CanonicalDividendEventRow | None) -> dict[str, object] | None:
+    """Earliest upcoming event as the public next_declared_dividend shape."""
+    if nxt is None:
+        return None
+    return {
+        "amount_per_share": nxt["amount_per_share"],
+        "declaration_date": nxt.get("declaration_date"),
+        "record_date": nxt.get("record_date"),
+        "payment_date": nxt["payment_date"],
+        "status": "upcoming",
+        "source_url": nxt.get("source_url"),
+        "accession": nxt.get("accession"),
+    }
+
+
+def _dividend_event_payload(events: Sequence[DividendEventRow], as_of: _dt.date, *, growth: Mapping[str, object] | None = None, ttm_dps: float | None = None, annual_history: Sequence[Mapping[str, object]] | None = None) -> dict[str, object]:
+    """last/next/past/coverage over classified events (pure; no storage)."""
+    canonical = _canonical_dividend_events(events)
+    upcoming = _classed_events(canonical, as_of, "upcoming")
+    paid = _classed_events(canonical, as_of, "paid")
+    nxt = _extreme_event(upcoming, earliest=True) if upcoming else None
+    last = _extreme_event(paid, earliest=False) if paid else None
     analysis: dict[str, object] = analyze_dividends(paid_events=paid, as_of=as_of, ttm_dps=ttm_dps, growth=growth, annual_history=annual_history)
     return {
-        "last_dividend": (
-            {"amount_per_share": last["amount_per_share"],
-             "payment_date": last["payment_date"], "type": last.get("dividend_type")}
-            if last is not None else None
-        ),
-        "next_declared_dividend": (
-            {
-                "amount_per_share": nxt["amount_per_share"],
-                "declaration_date": nxt.get("declaration_date"),
-                "record_date": nxt.get("record_date"),
-                "payment_date": nxt["payment_date"],
-                "status": "upcoming",
-                "source_url": nxt.get("source_url"),
-                "accession": nxt.get("accession"),
-            }
-            if nxt is not None else None
-        ),
-        "past_events": past,
-        "events_coverage": coverage,
+        "last_dividend": _last_dividend_dict(last),
+        "next_declared_dividend": _next_dividend_dict(nxt),
+        "past_events": _past_event_rows(paid, as_of),
+        "events_coverage": _events_coverage(canonical),
         **analysis,
     }
 
@@ -667,7 +793,7 @@ _SAFETY_CONCEPTS = (
 )
 
 
-def _ttm_cash_total(rows: Sequence[FinancialFactRow], concept: str, *, outflow: bool = False) -> Optional[float]:
+def _ttm_cash_total(rows: Sequence[FinancialFactRow], concept: str, *, outflow: bool = False) -> float | None:
     """Trailing-4-quarter total via the shared quarterly + derived-Q4 machinery.
 
     Outflow concepts (CapEx, dividends paid) are cash-flow debits, usually
@@ -695,7 +821,7 @@ def _fy_annual_totals(rows: Sequence[FinancialFactRow], concept: str, *, outflow
     return annual
 
 
-def _latest_concept_value(rows: Sequence[FinancialFactRow], concept: str) -> Optional[FinancialFactRow]:
+def _latest_concept_value(rows: Sequence[FinancialFactRow], concept: str) -> FinancialFactRow | None:
     """Latest row for a concept by (period_end, filed_at, accession)."""
     cands = [r for r in rows if r.get("concept") == concept and r.get("period_end")]
     if not cands:
@@ -703,144 +829,168 @@ def _latest_concept_value(rows: Sequence[FinancialFactRow], concept: str) -> Opt
     return max(cands, key=_row_stored_order)
 
 
-def _debt_up_yoy(rows: Sequence[FinancialFactRow]) -> Optional[bool]:
+def _debt_base_value(latest: FinancialFactRow) -> tuple[_dt.date, float] | None:
+    """(period end, value) of the latest debt row; None when unparsable."""
+    try:
+        return _dt.date.fromisoformat(latest["period_end"][:10]), latest["value"]
+    except (TypeError, ValueError):
+        return None
+
+
+def _debt_yoy_base(rows: Sequence[FinancialFactRow], cutoff: str) -> FinancialFactRow | None:
+    """Latest debt row at least ~10 months older than the newest (None when absent)."""
+    older = [r for r in rows
+             if r.get("concept") == _DEBT_CONCEPT and (r.get("period_end") or "") <= cutoff]
+    return _latest_concept_value(older, _DEBT_CONCEPT) if older else None
+
+
+def _debt_up_yoy(rows: Sequence[FinancialFactRow]) -> bool | None:
     """Latest LongTermDebt vs the most recent row at least ~10 months older."""
     latest = _latest_concept_value(rows, _DEBT_CONCEPT)
     if latest is None:
         return None
-    try:
-        end = _dt.date.fromisoformat(latest["period_end"][:10])
-        now_val = latest["value"]
-    except (TypeError, ValueError):
+    parsed = _debt_base_value(latest)
+    if parsed is None:
         return None
-    cutoff = (end - _dt.timedelta(days=300)).isoformat()
-    older = [r for r in rows
-             if r.get("concept") == _DEBT_CONCEPT and (r.get("period_end") or "") <= cutoff]
-    if not older:
-        return None
-    base = _latest_concept_value(older, _DEBT_CONCEPT)
+    end, now_val = parsed
+    base = _debt_yoy_base(rows, (end - _dt.timedelta(days=300)).isoformat())
     if base is None:
         return None
-    try:
-        then_val = base["value"]
-    except (TypeError, ValueError):
-        return None
-    return now_val > then_val
+    return now_val > base["value"]
 
 
-def _assemble_dividend_safety(
-    rows: Sequence[FinancialFactRow],
-    dividend: Mapping[str, object],
-    *,
-    ttm_eps_diluted: Optional[float] = None,
-    ttm_yield: Optional[float] = None,
-) -> dict[str, object]:
-    """FCF/EPS safety on SEC inputs only (pure; no storage).
-
-    Absent concepts yield nulls with reasons, never zero-filled or borrowed.
-    """
+def _safety_ttm_inputs(rows: Sequence[FinancialFactRow], dividend: Mapping[str, object]) -> tuple[float | None, float | None, float | None, float | None]:
+    """(ttm dps, ocf, capex magnitude, dividends-paid magnitude)."""
     ttm_dps_raw = dividend.get("ttm_dividend_per_share")
     ttm_dps = float(ttm_dps_raw) if isinstance(ttm_dps_raw, (int, float)) else None
     ttm_ocf = _ttm_cash_total(rows, _OCF_CONCEPT)
     ttm_capx = _ttm_cash_total(rows, _CAPEX_CONCEPT, outflow=True)
     ttm_div_paid = _ttm_cash_total(rows, _DIV_PAID_CONCEPT, outflow=True)
-    ttm_fcf = round(ttm_ocf - ttm_capx, 2) if ttm_ocf is not None and ttm_capx is not None else None
+    return ttm_dps, ttm_ocf, ttm_capx, ttm_div_paid
 
-    safety: dict[str, object] = {
-        "ttm_fcf": ttm_fcf,
-        "ttm_dividends_paid": ttm_div_paid,
-        "methodology": _SAFETY_METHODOLOGY,
-    }
-    def _set(key: str, value: float | None, reason: Optional[str] = None) -> None:
-        safety[key] = value
-        if value is None and reason:
-            safety[f"{key}_reason"] = reason
-    flags: list[dict[str, object]] = []
 
-    def _flag(flag: str, status: Optional[bool], basis: str) -> None:
-        flags.append({"flag": flag, "status": status, "basis": basis})
+def _safety_fcf(ttm_ocf: float | None, ttm_capx: float | None) -> float | None:
+    """FCF = OCF - capex once both TTM legs exist."""
+    if ttm_ocf is None or ttm_capx is None:
+        return None
+    return round(ttm_ocf - ttm_capx, 2)
 
+
+def _safety_set(safety: dict[str, object], key: str, value: float | None, reason: str | None = None) -> None:
+    """Nullable ratio assignment with its reason key (never zero-filled)."""
+    safety[key] = value
+    if value is None and reason:
+        safety[f"{key}_reason"] = reason
+
+
+def _safety_earnings_ratio(safety: dict[str, object], flags: list[dict[str, object]], ttm_dps: float | None, ttm_eps_diluted: float | None) -> None:
+    """Earnings payout ratio + negative-EPS flag."""
     if ttm_eps_diluted is not None and ttm_eps_diluted <= 0:
-        _set("earnings_payout_ratio", None, f"ttm_eps_diluted {ttm_eps_diluted} <= 0")
-        _flag("negative_eps", True, f"ttm_eps_diluted {ttm_eps_diluted} <= 0; payout meaningless")
+        _safety_set(safety, "earnings_payout_ratio", None, f"ttm_eps_diluted {ttm_eps_diluted} <= 0")
+        flags.append({"flag": "negative_eps", "status": True,
+                      "basis": f"ttm_eps_diluted {ttm_eps_diluted} <= 0; payout meaningless"})
     elif ttm_dps is None or ttm_eps_diluted is None:
-        _set("earnings_payout_ratio", None, "missing ttm dps or diluted eps")
+        _safety_set(safety, "earnings_payout_ratio", None, "missing ttm dps or diluted eps")
     else:
-        _set("earnings_payout_ratio", round(ttm_dps / ttm_eps_diluted, 4))
+        _safety_set(safety, "earnings_payout_ratio", round(ttm_dps / ttm_eps_diluted, 4))
 
-    fcf_nonpositive = ttm_fcf is not None and ttm_fcf <= 0
-    if fcf_nonpositive:
-        _set("fcf_payout_ratio", None, f"ttm_fcf {ttm_fcf} <= 0")
-        _set("fcf_coverage", None, f"ttm_fcf {ttm_fcf} <= 0")
-        _flag("negative_or_zero_fcf", True, f"ttm_fcf {ttm_fcf} <= 0; payout/coverage meaningless")
+
+def _safety_fcf_ratios(safety: dict[str, object], flags: list[dict[str, object]], ttm_fcf: float | None, ttm_div_paid: float | None) -> None:
+    """FCF payout/coverage ratios + nonpositive/zero FCF or dividend flags."""
+    if ttm_fcf is not None and ttm_fcf <= 0:
+        _safety_set(safety, "fcf_payout_ratio", None, f"ttm_fcf {ttm_fcf} <= 0")
+        _safety_set(safety, "fcf_coverage", None, f"ttm_fcf {ttm_fcf} <= 0")
+        flags.append({"flag": "negative_or_zero_fcf", "status": True,
+                      "basis": f"ttm_fcf {ttm_fcf} <= 0; payout/coverage meaningless"})
     elif ttm_div_paid is None or ttm_fcf is None:
-        _set("fcf_payout_ratio", None, "missing ttm dividends-paid or fcf")
-        _set("fcf_coverage", None, "missing ttm dividends-paid or fcf")
+        _safety_set(safety, "fcf_payout_ratio", None, "missing ttm dividends-paid or fcf")
+        _safety_set(safety, "fcf_coverage", None, "missing ttm dividends-paid or fcf")
     elif ttm_div_paid == 0:
-        _set("fcf_payout_ratio", 0.0)
-        _set("fcf_coverage", None, "zero ttm dividends-paid")
-        _flag("zero_dividend", True, "ttm_dividends_paid is zero; coverage undefined")
+        _safety_set(safety, "fcf_payout_ratio", 0.0)
+        _safety_set(safety, "fcf_coverage", None, "zero ttm dividends-paid")
+        flags.append({"flag": "zero_dividend", "status": True,
+                      "basis": "ttm_dividends_paid is zero; coverage undefined"})
     else:
-        _set("fcf_payout_ratio", round(ttm_div_paid / ttm_fcf, 4))
-        _set("fcf_coverage", round(ttm_fcf / ttm_div_paid, 4))
+        _safety_set(safety, "fcf_payout_ratio", round(ttm_div_paid / ttm_fcf, 4))
+        _safety_set(safety, "fcf_coverage", round(ttm_fcf / ttm_div_paid, 4))
 
+
+def _safety_cash_ratio(safety: dict[str, object], rows: Sequence[FinancialFactRow], ttm_div_paid: float | None) -> None:
+    """Cash-to-annual-dividend multiple from the latest cash balance."""
     cash_row = _latest_concept_value(rows, _CASH_CONCEPT)
     try:
         cash = cash_row["value"] if cash_row is not None else None
     except (TypeError, ValueError):
         cash = None
     if cash is None or ttm_div_paid is None:
-        _set("cash_to_annual_dividend", None, "missing cash balance or ttm dividends-paid")
+        _safety_set(safety, "cash_to_annual_dividend", None, "missing cash balance or ttm dividends-paid")
     elif ttm_div_paid == 0:
-        _set("cash_to_annual_dividend", None, "zero ttm dividends-paid")
+        _safety_set(safety, "cash_to_annual_dividend", None, "zero ttm dividends-paid")
     else:
-        _set("cash_to_annual_dividend", round(cash / ttm_div_paid, 4))
+        _safety_set(safety, "cash_to_annual_dividend", round(cash / ttm_div_paid, 4))
 
-    _set("interest_coverage", None, "operating-income/interest-expense concepts not in store")
 
-    debt_up = _debt_up_yoy(rows)
-    safety["debt_up_yoy"] = debt_up
-    if debt_up is None:
-        safety["debt_up_yoy_reason"] = "missing current or year-ago long-term debt"
-
+def _safety_annual_tables(rows: Sequence[FinancialFactRow]) -> tuple[dict[int, float], dict[int, float], dict[int, float]]:
+    """(annual fcf, annual dividends-paid, annual earnings-preferred) tables."""
     ocf_ann = _fy_annual_totals(rows, _OCF_CONCEPT)
     capx_ann = _fy_annual_totals(rows, _CAPEX_CONCEPT, outflow=True)
     fcf_ann = {y: round(ocf_ann[y] - capx_ann[y], 2) for y in ocf_ann if y in capx_ann}
     paid_ann = _fy_annual_totals(rows, _DIV_PAID_CONCEPT, outflow=True)
+    return fcf_ann, paid_ann, ocf_ann
+
+
+def _safety_growth_verdict(dividend: Mapping[str, object], fcf_ann: dict[int, float]) -> tuple[float | None, float | None, str]:
+    """Dividend-vs-FCF 5y CAGR verdict (insufficient_data unless both exist)."""
     div_cagr_raw = dividend.get("growth_5y_cagr")
     div_cagr = float(div_cagr_raw) if isinstance(div_cagr_raw, (int, float)) else None
     fcf_cagr = _dividend_growth(fcf_ann)["growth_5y_cagr"]
     if div_cagr is None or fcf_cagr is None:
-        verdict = "insufficient_data"
-    elif div_cagr - fcf_cagr > 0.02:
-        verdict = "payout_expanding"
-    else:
-        verdict = "runway_supported"
-    safety["dividend_vs_fcf_growth_5y"] = {
-        "dividend_cagr": div_cagr, "fcf_cagr": fcf_cagr, "verdict": verdict,
-    }
+        return div_cagr, fcf_cagr, "insufficient_data"
+    if div_cagr - fcf_cagr > 0.02:
+        return div_cagr, fcf_cagr, "payout_expanding"
+    return div_cagr, fcf_cagr, "runway_supported"
 
+
+def _safety_yield_flag(flags: list[dict[str, object]], ttm_yield: float | None) -> None:
+    """High-absolute-yield flag (unknown without a current yield)."""
     if ttm_yield is None:
-        _flag("high_absolute_yield", None, "no current ttm yield (historical as_of or missing price)")
+        flags.append({"flag": "high_absolute_yield", "status": None,
+                      "basis": "no current ttm yield (historical as_of or missing price)"})
     else:
-        _flag("high_absolute_yield", ttm_yield >= 0.06, f"ttm_dividend_yield {ttm_yield}")
+        flags.append({"flag": "high_absolute_yield", "status": ttm_yield >= 0.06,
+                      "basis": f"ttm_dividend_yield {ttm_yield}"})
+
+
+def _safety_fcf_declined_flag(flags: list[dict[str, object]], fcf_ann: dict[int, float]) -> None:
+    """Year-over-year FCF decline flag over consecutive annual totals."""
     if fcf_ann and max(fcf_ann) - 1 in fcf_ann:
         latest_y = max(fcf_ann)
-        _flag("fcf_declined_yoy", fcf_ann[latest_y] < fcf_ann[latest_y - 1],
-              f"annual fcf {latest_y - 1} {fcf_ann[latest_y - 1]} -> {latest_y} {fcf_ann[latest_y]}")
+        flags.append({"flag": "fcf_declined_yoy", "status": fcf_ann[latest_y] < fcf_ann[latest_y - 1],
+                      "basis": f"annual fcf {latest_y - 1} {fcf_ann[latest_y - 1]} -> {latest_y} {fcf_ann[latest_y]}"})
     else:
-        _flag("fcf_declined_yoy", None, "missing consecutive annual fcf totals")
+        flags.append({"flag": "fcf_declined_yoy", "status": None,
+                      "basis": "missing consecutive annual fcf totals"})
+
+
+def _safety_payout_expanded_flag(flags: list[dict[str, object]], fcf_ann: dict[int, float], paid_ann: dict[int, float]) -> None:
+    """FCF payout expansion flag (>10pp YoY) over consecutive payout bases."""
     if fcf_ann and paid_ann and max(fcf_ann) - 1 in fcf_ann and max(fcf_ann) - 1 in paid_ann:
         latest_y = max(fcf_ann)
         prior_y = latest_y - 1
         if fcf_ann[latest_y] > 0 and fcf_ann[prior_y] > 0:
             cur, prev = paid_ann[latest_y] / fcf_ann[latest_y], paid_ann[prior_y] / fcf_ann[prior_y]
-            _flag("fcf_payout_expanded", cur - prev > 0.10,
-                  f"annual fcf payout {prev:.4f} ({prior_y}) -> {cur:.4f} ({latest_y})")
+            flags.append({"flag": "fcf_payout_expanded", "status": cur - prev > 0.10,
+                          "basis": f"annual fcf payout {prev:.4f} ({prior_y}) -> {cur:.4f} ({latest_y})"})
         else:
-            _flag("fcf_payout_expanded", None, "non-positive annual fcf base")
+            flags.append({"flag": "fcf_payout_expanded", "status": None,
+                          "basis": "non-positive annual fcf base"})
     else:
-        _flag("fcf_payout_expanded", None, "missing consecutive annual payout bases")
+        flags.append({"flag": "fcf_payout_expanded", "status": None,
+                      "basis": "missing consecutive annual payout bases"})
+
+
+def _safety_eps_declined_flag(flags: list[dict[str, object]], rows: Sequence[FinancialFactRow]) -> None:
+    """Earnings decline flag (diluted EPS, net-income fallback) over consecutive years."""
     eps_ann = _fy_annual_totals(rows, DILUTED_EPS_CONCEPT)
     eps_basis_name = "diluted eps"
     if not eps_ann:
@@ -848,25 +998,82 @@ def _assemble_dividend_safety(
         eps_basis_name = "net income"
     if eps_ann and max(eps_ann) - 1 in eps_ann:
         latest_y = max(eps_ann)
-        _flag("eps_declined_yoy", eps_ann[latest_y] < eps_ann[latest_y - 1],
-              f"annual {eps_basis_name} {latest_y - 1} {eps_ann[latest_y - 1]} -> "
-              f"{latest_y} {eps_ann[latest_y]}")
+        flags.append({"flag": "eps_declined_yoy", "status": eps_ann[latest_y] < eps_ann[latest_y - 1],
+                      "basis": f"annual {eps_basis_name} {latest_y - 1} {eps_ann[latest_y - 1]} -> "
+                      f"{latest_y} {eps_ann[latest_y]}"})
     else:
-        _flag("eps_declined_yoy", None, "missing consecutive annual earnings totals")
+        flags.append({"flag": "eps_declined_yoy", "status": None,
+                      "basis": "missing consecutive annual earnings totals"})
+
+
+def _safety_leverage_flag(flags: list[dict[str, object]], debt_up: bool | None) -> None:
+    """Leverage-rising flag from the YoY debt comparison."""
     if debt_up is None:
-        _flag("leverage_rising", None, "missing current or year-ago long-term debt")
+        flags.append({"flag": "leverage_rising", "status": None,
+                      "basis": "missing current or year-ago long-term debt"})
     else:
-        _flag("leverage_rising", debt_up, f"long-term debt {'up' if debt_up else 'not up'} year-over-year")
+        flags.append({"flag": "leverage_rising", "status": debt_up,
+                      "basis": f"long-term debt {'up' if debt_up else 'not up'} year-over-year"})
+
+
+def _safety_growth_flag(flags: list[dict[str, object]], dividend: Mapping[str, object]) -> None:
+    """Growth-deceleration flag (1y vs 5y CAGR)."""
     g1_raw, g5_raw = dividend.get("growth_1y"), dividend.get("growth_5y_cagr")
     g1 = float(g1_raw) if isinstance(g1_raw, (int, float)) else None
     g5 = float(g5_raw) if isinstance(g5_raw, (int, float)) else None
     if g1 is None or g5 is None:
-        _flag("growth_decelerating", None, "missing growth_1y or growth_5y_cagr")
+        flags.append({"flag": "growth_decelerating", "status": None,
+                      "basis": "missing growth_1y or growth_5y_cagr"})
     else:
-        _flag("growth_decelerating", g1 < g5, f"growth_1y {g1} vs growth_5y_cagr {g5}")
+        flags.append({"flag": "growth_decelerating", "status": g1 < g5,
+                      "basis": f"growth_1y {g1} vs growth_5y_cagr {g5}"})
 
+
+def _safety_trend_flags(flags: list[dict[str, object]], rows: Sequence[FinancialFactRow], dividend: Mapping[str, object], debt_up: bool | None, ttm_yield: float | None, fcf_ann: dict[int, float], paid_ann: dict[int, float]) -> None:
+    """Yield, FCF, payout, earnings, leverage, and growth risk flags."""
+    _safety_yield_flag(flags, ttm_yield)
+    _safety_fcf_declined_flag(flags, fcf_ann)
+    _safety_payout_expanded_flag(flags, fcf_ann, paid_ann)
+    _safety_eps_declined_flag(flags, rows)
+    _safety_leverage_flag(flags, debt_up)
+    _safety_growth_flag(flags, dividend)
+
+def _assemble_dividend_safety(
+    rows: Sequence[FinancialFactRow],
+    dividend: Mapping[str, object],
+    *,
+    ttm_eps_diluted: float | None = None,
+    ttm_yield: float | None = None,
+) -> dict[str, object]:
+    """FCF/EPS safety on SEC inputs only (pure; no storage).
+
+    Absent concepts yield nulls with reasons, never zero-filled or borrowed.
+    """
+    ttm_dps, ttm_ocf, ttm_capx, ttm_div_paid = _safety_ttm_inputs(rows, dividend)
+    ttm_fcf = _safety_fcf(ttm_ocf, ttm_capx)
+    safety: dict[str, object] = {
+        "ttm_fcf": ttm_fcf,
+        "ttm_dividends_paid": ttm_div_paid,
+        "methodology": _SAFETY_METHODOLOGY,
+    }
+    flags: list[dict[str, object]] = []
+    _safety_earnings_ratio(safety, flags, ttm_dps, ttm_eps_diluted)
+    _safety_fcf_ratios(safety, flags, ttm_fcf, ttm_div_paid)
+    _safety_cash_ratio(safety, rows, ttm_div_paid)
+    _safety_set(safety, "interest_coverage", None, "operating-income/interest-expense concepts not in store")
+    debt_up = _debt_up_yoy(rows)
+    safety["debt_up_yoy"] = debt_up
+    if debt_up is None:
+        safety["debt_up_yoy_reason"] = "missing current or year-ago long-term debt"
+    fcf_ann, paid_ann, _ = _safety_annual_tables(rows)
+    div_cagr, fcf_cagr, verdict = _safety_growth_verdict(dividend, fcf_ann)
+    safety["dividend_vs_fcf_growth_5y"] = {
+        "dividend_cagr": div_cagr, "fcf_cagr": fcf_cagr, "verdict": verdict,
+    }
+    _safety_trend_flags(flags, rows, dividend, debt_up, ttm_yield, fcf_ann, paid_ann)
     safety["risk_flags"] = flags
     return safety
+
 
 
 # ---------------------------------------------------------------------------
@@ -874,7 +1081,7 @@ def _assemble_dividend_safety(
 # ---------------------------------------------------------------------------
 
 
-def get_fundamentals(ticker: str, metric: str, as_of: Optional[str] = None) -> dict[str, object]:
+def get_fundamentals(ticker: str, metric: str, as_of: str | None = None) -> dict[str, object]:
     """Store-first fundamentals with a truthful data_source envelope."""
     explicit_as_of = as_of is not None
     requested = _validated_as_of(as_of)
@@ -903,58 +1110,89 @@ def _pit_unavailable(ticker: str, metric: str, requested: _dt.date) -> dict[str,
     }
 
 
-def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
+def _store_dividend_inputs(ticker: str, requested: _dt.date) -> tuple[list[FinancialFactRow], list[DividendEventRow]]:
+    """Store rows + dividend events for one ticker at the requested date."""
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
     store_rows: list[FinancialFactRow] = _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, data_root) if entity_id else []
-    payload: dict[str, object] | None = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
     events: list[DividendEventRow] = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
-    current = (requested == _today()) and not explicit_as_of
+    return store_rows, events
+
+
+def _unknown_status_payload(ticker: str, payload: dict[str, object] | None, events: Sequence[DividendEventRow]) -> dict[str, object] | None:
+    """Events-only fallback payload when XBRL facts are absent."""
     if payload is None and events:
-        payload = {"ticker": ticker, "dividend_status": "unknown",
-                   "ttm_dividend_per_share": None, **_dividend_growth({}),
-                   "annual_history": [], "source": _DIVIDEND_SOURCE}
+        return {"ticker": ticker, "dividend_status": "unknown",
+                "ttm_dividend_per_share": None, **_dividend_growth({}),
+                "annual_history": [], "source": _DIVIDEND_SOURCE}
+    return payload
+
+
+def _eps_ttm_for_safety(ticker: str, store_rows: Sequence[FinancialFactRow]) -> float | None:
+    """Diluted TTM EPS for the safety section (None while the series builds)."""
+    eps_payload = _assemble_eps_payload(ticker, store_rows)
+    eps_ttm_raw = eps_payload.get("ttm_eps_diluted") if eps_payload else None
+    return eps_ttm_raw if isinstance(eps_ttm_raw, (int, float)) else None
+
+
+def _events_analysis_inputs(payload: Mapping[str, object]) -> tuple[Mapping[str, object], float | None, list[Mapping[str, object]] | None]:
+    """Growth/TTM/history inputs the event payload derives from the XBRL payload."""
+    ttm_raw = payload.get("ttm_dividend_per_share")
+    ttm_dps = float(ttm_raw) if isinstance(ttm_raw, (int, float)) else None
+    history_raw = payload.get("annual_history")
+    annual_history = (
+        [h for h in history_raw if isinstance(h, Mapping)]
+        if isinstance(history_raw, list) else None
+    )
+    growth = {"growth_1y": payload.get("growth_1y"), "growth_5y_cagr": payload.get("growth_5y_cagr")}
+    return growth, ttm_dps, annual_history
+
+
+def _store_dividend_payload(ticker: str, payload: Mapping[str, object], events: Sequence[DividendEventRow], store_rows: Sequence[FinancialFactRow], requested: _dt.date, *, current: bool) -> dict[str, object]:
+    """Store-path merged payload: events analysis + valuation + safety."""
+    valuation = _dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), include_price=current)
+    growth, ttm_dps, annual_history = _events_analysis_inputs(payload)
+    safety = _assemble_dividend_safety(
+        store_rows, payload,
+        ttm_eps_diluted=_eps_ttm_for_safety(ticker, store_rows),
+    )
+    return {**payload, **_dividend_event_payload(
+        events, requested, growth=growth, ttm_dps=ttm_dps,
+        annual_history=annual_history),
+            **valuation, "safety": safety}
+
+
+def _live_dividend_payload(ticker: str, requested: _dt.date, *, current: bool) -> dict[str, object]:
+    """Live fallback payload with empty events and no safety section."""
+    payload = edgar_client.get_fundamentals(ticker, "dividends", include_dividend_price=current)
+    if "error" in payload:
+        return payload
+    live_history = payload.get("annual_history")
+    merged = {**payload, **_dividend_event_payload([], requested), "safety": None}
+    return _envelope(
+        ticker, "dividends", merged,
+        data_source="live", as_of_date=_today().isoformat(),
+        requested_as_of=requested.isoformat(),
+        row_count=len(live_history) if isinstance(live_history, list) else 0,
+    )
+
+
+def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
+    store_rows, events = _store_dividend_inputs(ticker, requested)
+    payload = _assemble_dividend_payload(ticker, store_rows, requested) if store_rows else None
+    payload = _unknown_status_payload(ticker, payload, events)
+    current = (requested == _today()) and not explicit_as_of
     if payload is not None:
-        valuation = _dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), include_price=current)
-        eps_payload = _assemble_eps_payload(ticker, store_rows)
-        eps_ttm_raw = eps_payload.get("ttm_eps_diluted") if eps_payload else None
-        eps_ttm = eps_ttm_raw if isinstance(eps_ttm_raw, (int, float)) else None
-        safety = _assemble_dividend_safety(
-            store_rows, payload,
-            ttm_eps_diluted=eps_ttm,
-        )
-        ttm_raw = payload.get("ttm_dividend_per_share")
-        ttm_dps = float(ttm_raw) if isinstance(ttm_raw, (int, float)) else None
-        history_raw = payload.get("annual_history")
-        annual_history = (
-            [h for h in history_raw if isinstance(h, Mapping)]
-            if isinstance(history_raw, list) else None
-        )
-        payload = {**payload, **_dividend_event_payload(
-            events, requested,
-            growth={"growth_1y": payload.get("growth_1y"), "growth_5y_cagr": payload.get("growth_5y_cagr")},
-            ttm_dps=ttm_dps,
-            annual_history=annual_history),
-                   **valuation, "safety": safety}
-        history_count = payload.get("annual_history")
+        merged = _store_dividend_payload(ticker, payload, events, store_rows, requested, current=current)
+        history_count = merged.get("annual_history")
         return _envelope(
-            ticker, "dividends", payload,
+            ticker, "dividends", merged,
             data_source="store", as_of_date=requested.isoformat(),
             row_count=len(history_count) if isinstance(history_count, list) else 0,
         )
     if explicit_as_of:
         return _pit_unavailable(ticker, "dividends", requested)
-    payload = edgar_client.get_fundamentals(ticker, "dividends", include_dividend_price=current)
-    if "error" in payload:
-        return payload
-    payload = {**payload, **_dividend_event_payload([], requested), "safety": None}
-    live_history = payload.get("annual_history")
-    return _envelope(
-        ticker, "dividends", payload,
-        data_source="live", as_of_date=_today().isoformat(),
-        requested_as_of=requested.isoformat(),
-        row_count=len(live_history) if isinstance(live_history, list) else 0,
-    )
+    return _live_dividend_payload(ticker, requested, current=current)
 
 
 def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
@@ -984,40 +1222,72 @@ def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = Fa
     )
 
 
+def _envelope_for_live(
+    ticker: str,
+    metric: str,
+    payload: Mapping[str, object],
+    requested: _dt.date | None,
+    row_count: int,
+    *,
+    returned_count: int | None = None,
+    truncated: bool = False,
+) -> dict[str, object]:
+    """Live-source envelope: today as_of_date stamped with the requested date."""
+    return _envelope(
+        ticker, metric, payload,
+        data_source="live", as_of_date=_today().isoformat(),
+        requested_as_of=requested.isoformat() if requested is not None else None,
+        row_count=row_count,
+        returned_count=returned_count,
+        truncated=truncated,
+    )
+
+
+def _latest_shares_row(requested: _dt.date, data_root: Path | None, entity_id: str) -> tuple[dict[str, object], float] | None:
+    """Newest (row, shares value) for shares-outstanding, else None."""
+    clause, param = duckdb.as_of_clause(requested.isoformat())
+    rows = duckdb.query(
+        "SELECT value, period_end, filed_at, accession, known_at, source_url "
+        "FROM financial_facts "
+        f"WHERE entity_id = ? AND concept = ? AND {clause} "
+        "ORDER BY period_end DESC, filed_at DESC, accession DESC LIMIT 1",
+        params=[entity_id, SHARES_OUTSTANDING_CONCEPT, param],
+        data_root=data_root,
+    )
+    if rows:
+        candidate_value = rows[0].get("value")
+        if isinstance(candidate_value, (int, float)):
+            return rows[0], float(candidate_value)
+    return None
+
+def _shares_store_payload(ticker: str, row: Mapping[str, object], shares_value: float | None) -> dict[str, object]:
+    """Store-path shares-outstanding payload anchored on the latest row."""
+    return {
+        "ticker": ticker,
+        "shares_outstanding": shares_value,
+        "as_of": str(row["period_end"]),
+        "source": "SEC EDGAR company facts",
+        "note": "SEC-reported shares outstanding, not public float",
+        "filed_at": str(row["filed_at"] or ""),
+        "accession": row.get("accession"),
+        "source_url": row.get("source_url"),
+        "known_at": str(row["known_at"] or ""),
+    }
+
+
 def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
     data_root = DEFAULT_DATA_ROOT
     entity_id = _resolve_entity(ticker, requested, data_root)
-    row: Optional[dict[str, object]] = None
+    row: dict[str, object] | None = None
     shares_value: float | None = None
     if entity_id:
-        clause, param = duckdb.as_of_clause(requested.isoformat())
-        rows = duckdb.query(
-            "SELECT value, period_end, filed_at, accession, known_at, source_url "
-            "FROM financial_facts "
-            f"WHERE entity_id = ? AND concept = ? AND {clause} "
-            "ORDER BY period_end DESC, filed_at DESC, accession DESC LIMIT 1",
-            params=[entity_id, SHARES_OUTSTANDING_CONCEPT, param],
-            data_root=data_root,
-        )
-        if rows:
-            candidate_value = rows[0].get("value")
-            if isinstance(candidate_value, (int, float)):
-                row = rows[0]
-                shares_value = float(candidate_value)
+        latest = _latest_shares_row(requested, data_root, entity_id)
+        if latest is not None:
+            row, shares_value = latest
     if row is not None:
-        payload = {
-            "ticker": ticker,
-            "shares_outstanding": shares_value,
-            "as_of": str(row["period_end"]),
-            "source": "SEC EDGAR company facts",
-            "note": "SEC-reported shares outstanding, not public float",
-            "filed_at": str(row["filed_at"] or ""),
-            "accession": row.get("accession"),
-            "source_url": row.get("source_url"),
-            "known_at": str(row["known_at"] or ""),
-        }
         return _envelope(
-            ticker, "shares_outstanding", payload,
+            ticker, "shares_outstanding",
+            _shares_store_payload(ticker, row, shares_value),
             data_source="store", as_of_date=requested.isoformat(),
             row_count=1,
         )
@@ -1026,12 +1296,16 @@ def _shares_outstanding_fundamental(ticker: str, requested: _dt.date, explicit_a
     payload = edgar_client.get_fundamentals(ticker, "shares_outstanding")
     if "error" in payload:
         return payload
-    return _envelope(
-        ticker, "shares_outstanding", payload,
-        data_source="live", as_of_date=_today().isoformat(),
-        requested_as_of=requested.isoformat(),
-        row_count=1,
-    )
+    return _envelope_for_live(ticker, "shares_outstanding", payload, requested, 1)
+
+
+def _live_row_count(metric: str, payload: Mapping[str, object]) -> int:
+    """1, or the balance-sheet entry count for balance_sheet payloads."""
+    if metric == "balance_sheet":
+        sheet = payload.get("balance_sheet")
+        if isinstance(sheet, dict):
+            return len(sheet)
+    return 1
 
 
 def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
@@ -1041,17 +1315,17 @@ def _live_only_fundamental(ticker: str, metric: str, requested: _dt.date, explic
     payload = edgar_client.get_fundamentals(ticker, metric)
     if "error" in payload:
         return payload
-    row_count = 1
-    if metric == "balance_sheet":
-        sheet = payload.get("balance_sheet")
-        if isinstance(sheet, dict):
-            row_count = len(sheet)
-    return _envelope(
-        ticker, metric, payload,
-        data_source="live", as_of_date=_today().isoformat(),
-        requested_as_of=requested.isoformat(),
-        row_count=row_count,
-    )
+    row_count = _live_row_count(metric, payload)
+    return _envelope_for_live(ticker, metric, payload, requested, row_count)
+
+
+def _xbrl_counts(payload: Mapping[str, object]) -> tuple[list[object], int]:
+    """(matching concepts, count) with the count defaulting to len(matching)."""
+    matching_raw = payload.get("matching_concepts")
+    matching: list[object] = matching_raw if isinstance(matching_raw, list) else []
+    count_raw = payload.get("count")
+    count: int = count_raw if isinstance(count_raw, int) and count_raw else len(matching)
+    return matching, count
 
 
 def get_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
@@ -1059,13 +1333,8 @@ def get_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
     payload = edgar_client.get_xbrl_facts(ticker, concept)
     if "error" in payload:
         return payload
-    matching_raw = payload.get("matching_concepts")
-    matching: list[object] = matching_raw if isinstance(matching_raw, list) else []
-    count_raw = payload.get("count")
-    count: int = count_raw if isinstance(count_raw, int) and count_raw else len(matching)
-    return _envelope(
-        ticker, "concept", payload,
-        data_source="live", as_of_date=_today().isoformat(),
-        row_count=count, returned_count=len(matching),
-        truncated=count > len(matching),
+    matching, count = _xbrl_counts(payload)
+    return _envelope_for_live(
+        ticker, "concept", payload, None, count,
+        returned_count=len(matching), truncated=count > len(matching),
     )

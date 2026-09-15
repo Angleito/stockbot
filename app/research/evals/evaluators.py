@@ -251,15 +251,17 @@ _PIT_PROVENANCE: frozenset[str] = frozenset(
 )
 
 
-def evaluate(inp: EvalInput) -> ScenarioResult:
-    """Run every hard invariant over one outcome and compute its s31 metrics."""
-    violations = tuple(v for v in (check(inp) for check in _CHECKS) if v is not None)
+def _eval_completeness(inp: EvalInput) -> float:
     completeness = 1.0
     if inp.requires_evidence and not inp.evidence_ids:
         completeness -= 0.5
     if inp.claims_untraced > 0:
         completeness -= 0.5
-    metrics = EvalMetrics(
+    return max(0.0, completeness)
+
+
+def _eval_metrics(inp: EvalInput, violations: tuple[str, ...]) -> EvalMetrics:
+    return EvalMetrics(
         success=not violations,
         wall_clock_ms=inp.wall_clock_ms,
         job_count=inp.job_count,
@@ -274,32 +276,63 @@ def evaluate(inp: EvalInput) -> ScenarioResult:
         estimated_cost=inp.estimated_cost,
         pit_provenance_violations=sum(1 for v in violations if v in _PIT_PROVENANCE),
         disagreement=len(set(inp.committee_freeze_ids)) > 1,
-        completeness=max(0.0, completeness),
+        completeness=_eval_completeness(inp),
     )
+
+
+def evaluate(inp: EvalInput) -> ScenarioResult:
+    """Run every hard invariant over one outcome and compute its s31 metrics."""
+    violations = tuple(v for v in (check(inp) for check in _CHECKS) if v is not None)
     return ScenarioResult(
-        scenario_name=inp.scenario_name, passed=not violations, violations=violations, metrics=metrics
+        scenario_name=inp.scenario_name, passed=not violations, violations=violations, metrics=_eval_metrics(inp, violations)
     )
+
+
+def _fixture_evidence(fixture: AgentFixture) -> tuple[tuple[str, ...], float, int]:
+    evidence = tuple(fixture["evidence_ids"])
+    requires = fixture["validator"]["requires_evidence"]
+    coverage = 1.0 if evidence else 0.0
+    untraced = 1 if (requires and not evidence) else 0
+    return evidence, coverage, untraced
 
 
 def eval_input_from_fixture(fixture: AgentFixture) -> EvalInput:
     """Convert a promoted fixture into an evaluable outcome."""
-    requires = fixture["validator"]["requires_evidence"]
-    evidence = tuple(fixture["evidence_ids"])
+    evidence, coverage, untraced = _fixture_evidence(fixture)
     return EvalInput(
         scenario_name=fixture["scenario_name"],
         answer_text=fixture["answer_excerpt"],
         tool_calls=tuple(fixture["tool_calls"]),
         evidence_ids=evidence,
-        evidence_coverage=1.0 if evidence else 0.0,
+        evidence_coverage=coverage,
         as_of=fixture["as_of"],
         known_ats=tuple(fixture["known_ats"]),
         budget_used=fixture["budget_used"] or 0,
         budget_cap=fixture["budget_cap"] or 0,
         freeze_before=fixture["freeze_before"],
         freeze_after=fixture["freeze_after"],
-        claims_untraced=1 if (requires and not evidence) else 0,
-        requires_evidence=requires,
+        claims_untraced=untraced,
+        requires_evidence=fixture["validator"]["requires_evidence"],
     )
+
+
+def _static_outcome(name: str) -> EvalInput:
+    scenario = get_scenario(name)
+    return EvalInput(
+        scenario_name=name,
+        answer_text="",
+        tool_calls=scenario.expected_tools,
+        as_of=scenario.as_of,
+        requires_evidence=scenario.requires_evidence,
+    )
+
+
+def _fixture_outcome(name: str, fixtures_dir: Path | None) -> EvalInput | None:
+    try:
+        return eval_input_from_fixture(load_fixture(name, fixtures_dir))
+    except (OSError, ValueError) as exc:
+        logger.warning("fixture %s unreadable, using static outcome: %s", name, exc)
+        return None
 
 
 def outcomes_from_fixtures(
@@ -310,22 +343,12 @@ def outcomes_from_fixtures(
     saved = set(list_fixtures(fixtures_dir))
     outcomes: list[EvalInput] = []
     for name in names:
-        scenario = get_scenario(name)
         if name in saved:
-            try:
-                outcomes.append(eval_input_from_fixture(load_fixture(name, fixtures_dir)))
+            loaded = _fixture_outcome(name, fixtures_dir)
+            if loaded is not None:
+                outcomes.append(loaded)
                 continue
-            except (OSError, ValueError) as exc:
-                logger.warning("fixture %s unreadable, using static outcome: %s", name, exc)
-        outcomes.append(
-            EvalInput(
-                scenario_name=name,
-                answer_text="",
-                tool_calls=scenario.expected_tools,
-                as_of=scenario.as_of,
-                requires_evidence=scenario.requires_evidence,
-            )
-        )
+        outcomes.append(_static_outcome(name))
     return outcomes
 
 
@@ -340,7 +363,7 @@ def _git_sha() -> str:
         )
         sha = proc.stdout.strip()
         return sha if sha else "unknown"
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return "unknown"
 
 
@@ -357,6 +380,47 @@ class EvalRunSummary:
     passed_count: int
     failed_count: int
     scenario_count: int
+
+
+def _persist_eval_run(
+    conn: sqlite3.Connection, eval_run_id: str, model: str, provider: str, prompt_version: str, sha: str, started_at: str
+) -> None:
+    conn.execute(
+        "INSERT INTO eval_runs (eval_run_id, model, provider, harness_version,"
+        " prompt_version, git_sha, started_at, scenario_version)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (eval_run_id, model, provider, HARNESS_VERSION, prompt_version, sha, started_at, SCENARIO_VERSION),
+    )
+
+
+def _persist_result(conn: sqlite3.Connection, eval_run_id: str, result: ScenarioResult) -> None:
+    conn.execute(
+        "INSERT INTO eval_scenario_results (eval_run_id, scenario_name, passed,"
+        " violations_json, metrics_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            eval_run_id,
+            result.scenario_name,
+            1 if result.passed else 0,
+            json.dumps(list(result.violations), sort_keys=True),
+            json.dumps(result.metrics.as_dict(), sort_keys=True),
+        ),
+    )
+
+
+def _persist_failures(conn: sqlite3.Connection, eval_run_id: str, model: str, result: ScenarioResult, started_at: str) -> None:
+    for violation in result.violations:
+        conn.execute(
+            "INSERT INTO failure_records (failure_id, eval_run_id, scenario_name,"
+            " violation, created_at, detail_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"fail:{uuid.uuid4().hex[:12]}",
+                eval_run_id,
+                result.scenario_name,
+                violation,
+                started_at,
+                json.dumps({"model": model, "scenario_version": SCENARIO_VERSION}, sort_keys=True),
+            ),
+        )
 
 
 def run_eval_suite(
@@ -377,37 +441,10 @@ def run_eval_suite(
     db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db) as conn:
         conn.executescript(_SCHEMA)
-        conn.execute(
-            "INSERT INTO eval_runs (eval_run_id, model, provider, harness_version,"
-            " prompt_version, git_sha, started_at, scenario_version)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (eval_run_id, model, provider, HARNESS_VERSION, prompt_version, sha, started_at, SCENARIO_VERSION),
-        )
+        _persist_eval_run(conn, eval_run_id, model, provider, prompt_version, sha, started_at)
         for result in results:
-            conn.execute(
-                "INSERT INTO eval_scenario_results (eval_run_id, scenario_name, passed,"
-                " violations_json, metrics_json) VALUES (?, ?, ?, ?, ?)",
-                (
-                    eval_run_id,
-                    result.scenario_name,
-                    1 if result.passed else 0,
-                    json.dumps(list(result.violations), sort_keys=True),
-                    json.dumps(result.metrics.as_dict(), sort_keys=True),
-                ),
-            )
-            for violation in result.violations:
-                conn.execute(
-                    "INSERT INTO failure_records (failure_id, eval_run_id, scenario_name,"
-                    " violation, created_at, detail_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        f"fail:{uuid.uuid4().hex[:12]}",
-                        eval_run_id,
-                        result.scenario_name,
-                        violation,
-                        started_at,
-                        json.dumps({"model": model, "scenario_version": SCENARIO_VERSION}, sort_keys=True),
-                    ),
-                )
+            _persist_result(conn, eval_run_id, result)
+            _persist_failures(conn, eval_run_id, model, result, started_at)
     passed = sum(1 for r in results if r.passed)
     return EvalRunSummary(
         eval_run_id=eval_run_id,
@@ -466,6 +503,20 @@ def get_eval_run(eval_run_id: str, data_root: Path | None = None) -> EvalRunRow 
     )
 
 
+def _decode_violations(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item for item in raw if isinstance(item, str))
+
+
+def _stored_row(cells: tuple[object, ...]) -> StoredScenarioResult:
+    return StoredScenarioResult(
+        scenario_name=_row_str(cells[0]),
+        passed=cells[1] == 1,
+        violations=_decode_violations(json.loads(_row_str(cells[2]))),
+    )
+
+
 def get_eval_results(eval_run_id: str, data_root: Path | None = None) -> list[StoredScenarioResult]:
     """Per-scenario results for one eval run."""
     with sqlite3.connect(_db_path(data_root)) as conn:
@@ -475,19 +526,7 @@ def get_eval_results(eval_run_id: str, data_root: Path | None = None) -> list[St
             " WHERE eval_run_id = ? ORDER BY scenario_name ASC",
             (eval_run_id,),
         ).fetchall()
-    out: list[StoredScenarioResult] = []
-    for row in rows:
-        cells = tuple(row)
-        decoded: object = json.loads(_row_str(cells[2]))
-        violations = tuple(item for item in decoded if isinstance(item, str)) if isinstance(decoded, list) else ()
-        out.append(
-            StoredScenarioResult(
-                scenario_name=_row_str(cells[0]),
-                passed=cells[1] == 1,
-                violations=violations,
-            )
-        )
-    return out
+    return [_stored_row(tuple(row)) for row in rows]
 
 
 @dataclass(frozen=True)
@@ -500,26 +539,25 @@ class ExperimentSummary:
     regressed: tuple[str, ...]
 
 
-def compare_experiments(
-    *, before_run_id: str, after_run_id: str, data_root: Path | None = None
-) -> ExperimentSummary:
-    """Diff two eval runs scenario by scenario and persist the experiment."""
-    before = {r.scenario_name: r.passed for r in get_eval_results(before_run_id, data_root)}
-    after = {r.scenario_name: r.passed for r in get_eval_results(after_run_id, data_root)}
-    improved = sorted(name for name, ok in after.items() if ok and not before.get(name, True))
-    regressed = sorted(name for name, ok in after.items() if not ok and before.get(name, False))
-    delta = sum(1 for ok in after.values() if ok) - sum(1 for ok in before.values() if ok)
-    summary = ExperimentSummary(
-        experiment_id=f"exp:{uuid.uuid4().hex[:12]}",
-        before_run_id=before_run_id,
-        after_run_id=after_run_id,
-        delta_passed=delta,
-        improved=tuple(improved),
-        regressed=tuple(regressed),
-    )
-    payload = json.dumps(
-        {"delta_passed": delta, "improved": improved, "regressed": regressed}, sort_keys=True
-    )
+def _improved(before: dict[str, bool], after: dict[str, bool]) -> tuple[str, ...]:
+    return tuple(sorted(name for name, ok in after.items() if ok and not before.get(name, True)))
+
+
+def _regressed(before: dict[str, bool], after: dict[str, bool]) -> tuple[str, ...]:
+    return tuple(sorted(name for name, ok in after.items() if not ok and before.get(name, False)))
+
+
+def _passed_count(results: dict[str, bool]) -> int:
+    return sum(1 for ok in results.values() if ok)
+
+
+def _experiment_diff(
+    before: dict[str, bool], after: dict[str, bool]
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    return _passed_count(after) - _passed_count(before), _improved(before, after), _regressed(before, after)
+
+
+def _persist_experiment(summary: ExperimentSummary, payload: str, data_root: Path | None) -> None:
     with sqlite3.connect(_db_path(data_root)) as conn:
         conn.executescript(_SCHEMA)
         conn.execute(
@@ -527,10 +565,31 @@ def compare_experiments(
             " created_at, summary_json) VALUES (?, ?, ?, ?, ?)",
             (
                 summary.experiment_id,
-                before_run_id,
-                after_run_id,
+                summary.before_run_id,
+                summary.after_run_id,
                 datetime.now(timezone.utc).isoformat(),
                 payload,
             ),
         )
+
+
+def compare_experiments(
+    *, before_run_id: str, after_run_id: str, data_root: Path | None = None
+) -> ExperimentSummary:
+    """Diff two eval runs scenario by scenario and persist the experiment."""
+    before = {r.scenario_name: r.passed for r in get_eval_results(before_run_id, data_root)}
+    after = {r.scenario_name: r.passed for r in get_eval_results(after_run_id, data_root)}
+    delta, improved, regressed = _experiment_diff(before, after)
+    summary = ExperimentSummary(
+        experiment_id=f"exp:{uuid.uuid4().hex[:12]}",
+        before_run_id=before_run_id,
+        after_run_id=after_run_id,
+        delta_passed=delta,
+        improved=improved,
+        regressed=regressed,
+    )
+    payload = json.dumps(
+        {"delta_passed": delta, "improved": list(improved), "regressed": list(regressed)}, sort_keys=True
+    )
+    _persist_experiment(summary, payload, data_root)
     return summary

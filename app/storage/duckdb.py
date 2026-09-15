@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Sequence
 
 import duckdb
 
@@ -53,7 +53,7 @@ def _data_roots(data_root: Path) -> tuple[Path, Path]:
     return parquet_root, db_root
 
 
-def _connect(data_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
+def _connect(data_root: Path | None = None) -> duckdb.DuckDBPyConnection:
     """Open (creating if needed) the warehouse database for a data root."""
     parquet_root, db_root = _data_roots(Path(data_root) if data_root else get_data_root())
     db_root.mkdir(parents=True, exist_ok=True)
@@ -95,7 +95,7 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
 def query(
     sql: str,
     params: Sequence[object] = (),
-    data_root: Optional[Path] = None,
+    data_root: Path | None = None,
 ) -> list[dict[str, object]]:
     """Run a read-only SQL query over the parquet views; returns rows as
     dicts.
@@ -119,7 +119,7 @@ def query(
 
 
 def ticker_alias_candidates(
-    ticker: str, as_of: datetime, data_root: Optional[Path] = None
+    ticker: str, as_of: datetime, data_root: Path | None = None
 ) -> list[TickerAlias]:
     """Return ticker alias rows knowable at ``as_of``, newest instant first.
 

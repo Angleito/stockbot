@@ -84,6 +84,20 @@ def material_events_from_8k(
     return out
 
 
+def _event_date_of(report: object, filing: object) -> str | None:
+    raw_date = getattr(report, "date_of_report", None) or getattr(filing, "filing_date", None)
+    return str(raw_date) if raw_date is not None else None
+
+
+def _known_at_of(filing: object, accession_no: str) -> str:
+    raw_known = (getattr(filing, "acceptance_datetime", None)
+                 or getattr(filing, "accepted_at", None)
+                 or getattr(filing, "filing_date", None))
+    if raw_known is None:
+        raise ValueError(f"no known_at for accession {accession_no!r}")
+    return str(raw_known)
+
+
 def load_report(accession_no: str) -> tuple[EightKReport, str | None, str]:
     """Live seam: accession -> (report, event_date, known_at). Raises on failure."""
     from .documents import get_by_accession_number
@@ -92,15 +106,8 @@ def load_report(accession_no: str) -> tuple[EightKReport, str | None, str]:
     filing = get_by_accession_number(accession_no)
     report = filing.obj()
     if not isinstance(report, EightKReport):
-        raise ValueError(f"no 8-K report for accession {accession_no!r}")
-    raw_date = getattr(report, "date_of_report", None) or getattr(filing, "filing_date", None)
-    event_date = str(raw_date) if raw_date is not None else None
-    raw_known = (getattr(filing, "acceptance_datetime", None)
-                 or getattr(filing, "accepted_at", None)
-                 or getattr(filing, "filing_date", None))
-    if raw_known is None:
-        raise ValueError(f"no known_at for accession {accession_no!r}")
-    return report, event_date, str(raw_known)
+        raise ValueError(f"no 8-K report for accession {accession_no!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return report, _event_date_of(report, filing), _known_at_of(filing, accession_no)
 
 
 def _event_order(event: RegulatoryEvent) -> tuple[str, str]:
@@ -129,7 +136,7 @@ def get_material_events(
     for filing in filings:
         try:
             report, event_date, known_at = load_report(filing.accession_no)
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             continue
         out.extend(material_events_from_8k(
             filing.accession_no,

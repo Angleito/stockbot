@@ -10,10 +10,8 @@ fetches anything — callers supply the bytes.
 from __future__ import annotations
 
 import warnings
-
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Optional
 
 from ..storage import raw_archive
 from .models import Filing
@@ -29,8 +27,8 @@ def archive_sec_filing(
     payloads: dict[str, bytes],
     *,
     url: str,
-    retrieved_at: Optional[str] = None,
-    root: Optional[Path] = None,
+    retrieved_at: str | None = None,
+    root: Path | None = None,
 ) -> dict[str, raw_archive.ArchiveRecord]:
     return {
         kind: raw_archive.archive(
@@ -50,8 +48,8 @@ def archive_sec_filing(
 def find_archived(
     accession_no: str,
     kind: str = "primary",
-    root: Optional[Path] = None,
-) -> Optional[raw_archive.ArchiveRecord]:
+    root: Path | None = None,
+) -> raw_archive.ArchiveRecord | None:
     """Return the archived record for an accession/kind, or None."""
     return raw_archive.find("sec", kind, accession_no, root=root)
 
@@ -61,9 +59,9 @@ def archive_sec_document(
     payload: bytes,
     *,
     url: str,
-    retrieved_at: Optional[str] = None,
-    metadata: Optional[dict[str, object]] = None,
-    root: Optional[Path] = None,
+    retrieved_at: str | None = None,
+    metadata: dict[str, object] | None = None,
+    root: Path | None = None,
 ) -> raw_archive.ArchiveRecord:
     """Archive one exact filing document under key ``(accession, document)``.
 
@@ -102,9 +100,9 @@ def find_archived_document(
     accession_no: str,
     document_name: str,
     *,
-    sha256: Optional[str] = None,
-    root: Optional[Path] = None,
-) -> Optional[raw_archive.ArchiveRecord]:
+    sha256: str | None = None,
+    root: Path | None = None,
+) -> raw_archive.ArchiveRecord | None:
     """Return the archived record for one accession/document, or None."""
     return raw_archive.find(
         "sec", DOCUMENT_KIND, _document_key(accession_no, document_name),
@@ -115,7 +113,7 @@ def iter_archived_documents(
     accession_no: str,
     document_name: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> Iterator[raw_archive.ArchiveRecord]:
     """All byte revisions for one accession/document, oldest first."""
     yield from raw_archive.iter_archive(

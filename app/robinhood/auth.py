@@ -15,11 +15,11 @@ import tempfile
 import threading
 import urllib.parse
 import webbrowser
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import override
-
 
 DEFAULT_TOKEN_PATH = Path.home() / ".stockbot" / "robinhood" / "oauth.json"
 ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading"
@@ -29,6 +29,27 @@ class OAuthStoreError(RuntimeError):
     """Raised when the persisted OAuth state cannot be read or written."""
 
 
+def _is_valid_origin(parsed: urllib.parse.SplitResult) -> bool:
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _origin_from_url(parsed: urllib.parse.SplitResult, port: int | None) -> str:
+    hostname = parsed.hostname
+    if not hostname:
+        raise OAuthStoreError("Robinhood MCP URL is invalid")
+    host = hostname.lower().rstrip(".")
+    if port is None or port == 443:
+        return f"https://{host}"
+    return f"https://{host}:{port}"
+
+
 def server_origin(server_url: str) -> str:
     """Return a canonical HTTPS origin suitable for OAuth-state binding."""
     try:
@@ -36,19 +57,9 @@ def server_origin(server_url: str) -> str:
         port = parsed.port
     except (TypeError, ValueError) as exc:
         raise OAuthStoreError("Robinhood MCP URL is invalid") from exc
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    if not _is_valid_origin(parsed):
         raise OAuthStoreError("Robinhood MCP URL must be an HTTPS URL without credentials, query, or fragment")
-    host = parsed.hostname.lower().rstrip(".")
-    if port is None or port == 443:
-        return f"https://{host}"
-    return f"https://{host}:{port}"
+    return _origin_from_url(parsed, port)
 
 
 def validate_robinhood_server_url(server_url: str) -> str:
@@ -204,6 +215,26 @@ def load_tokens_for_origin(
     return state
 
 
+def _stored_tokens(state: Mapping[str, object]) -> dict[str, object] | None:
+    tokens = state.get("tokens")
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        return None
+    return tokens
+
+
+def _is_token_expired(issued: object, expires_in: object, now: datetime | None) -> bool:
+    """True when expiry metadata marks the token corrupt or expired."""
+    if not isinstance(issued, str):
+        return True
+    if isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)):
+        return True
+    try:
+        issued_dt = datetime.fromisoformat(issued)
+    except (TypeError, ValueError):
+        return True
+    return (now if now is not None else datetime.now(timezone.utc)) >= issued_dt + timedelta(seconds=expires_in)
+
+
 def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datetime | None = None) -> bool:
     """True when persisted state exists for origin and the access token has
     not expired per its issued_at/expires_in metadata. Corrupt records are
@@ -215,19 +246,13 @@ def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datet
         return False
     if not state:
         return False
-    tokens = state.get("tokens")
-    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+    tokens = _stored_tokens(state)
+    if tokens is None:
         return False
     issued: object = state.get("issued_at")
-    expires_in = tokens.get("expires_in")
+    expires_in: object = tokens.get("expires_in")
     if issued is not None and expires_in is not None:
-        if not isinstance(issued, str):
-            return False
-        try:
-            issued_dt = datetime.fromisoformat(issued)
-        except (TypeError, ValueError):
-            return False
-        if (now if now is not None else datetime.now(timezone.utc)) >= issued_dt + timedelta(seconds=expires_in):
+        if _is_token_expired(issued, expires_in, now):
             return False
     return True
 

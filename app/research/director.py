@@ -29,7 +29,11 @@ from app.research.agents import ResearchRequest
 from app.research.agents.bearbot import BearAnalysis
 from app.research.agents.bullbot import BullAnalysis
 from app.research.agents.stockbot import StockbotAnalysis
-from app.research.synthesis.committee import CommitteeDisagreement, _coerce_wave_id, compute_disagreement
+from app.research.synthesis.committee import (
+    CommitteeDisagreement,
+    _coerce_wave_id,
+    compute_disagreement,
+)
 from app.research.synthesis.final import FinalSynthesis, synthesize_final
 
 StopReason = Literal[
@@ -160,6 +164,35 @@ def _is_actionable(request: ResearchRequest) -> bool:
     return request.requested_source_domain.strip().upper() == "SEC"
 
 
+def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float) -> WaveDecision | None:
+    """First exhausted budget wins; None when all budgets hold."""
+    if waves_used >= budgets.max_waves:
+        return WaveDecision(False, "max_waves", f"waves_used={waves_used} max={budgets.max_waves}")
+    if elapsed_s >= budgets.runtime_budget_s:
+        return WaveDecision(False, "runtime_exceeded", f"elapsed={elapsed_s}s budget={budgets.runtime_budget_s}s")
+    if jobs_used >= budgets.max_jobs:
+        return WaveDecision(False, "jobs_exceeded", f"jobs_used={jobs_used} max={budgets.max_jobs}")
+    if tool_calls_used >= budgets.max_tool_calls:
+        return WaveDecision(False, "budget_exhausted", f"tool_calls={tool_calls_used} max={budgets.max_tool_calls}")
+    return None
+
+
+def _research_stop(wave1: Wave1Result) -> WaveDecision:
+    """Material + actionable follow-up selection (authorized decision on success)."""
+    if wave1.disagreement is None or not wave1.disagreement.requested_research:
+        return WaveDecision(False, "no_questions", "committee requested no follow-up research")
+    material = [r for r in wave1.disagreement.requested_research if _is_material(r)]
+    if not material:
+        return WaveDecision(False, "low_gain", "no material follow-up (all low-gain or unmotivated)")
+    actionable = [r for r in material if _is_actionable(r)]
+    if not actionable:
+        return WaveDecision(False, "not_actionable", "material requests need non-SEC domains")
+    actionable.sort(key=_decision_key, reverse=True)
+    top = actionable[0]
+    return WaveDecision(True, "continue", f"wave2 authorized: {top.question}",
+                        targeted_question=top.question, targeted_domain=top.requested_source_domain)
+
+
 def decide_wave2(
     wave1: Wave1Result,
     *,
@@ -171,37 +204,10 @@ def decide_wave2(
     elapsed_s: float = 0.0,
 ) -> WaveDecision:
     """Gate exactly one targeted SEC wave; persist the reason either way."""
-    session_id = wave1.session_id
-    if waves_used >= budgets.max_waves:
-        decision = WaveDecision(False, "max_waves", f"waves_used={waves_used} max={budgets.max_waves}")
-    elif elapsed_s >= budgets.runtime_budget_s:
-        decision = WaveDecision(False, "runtime_exceeded", f"elapsed={elapsed_s}s budget={budgets.runtime_budget_s}s")
-    elif jobs_used >= budgets.max_jobs:
-        decision = WaveDecision(False, "jobs_exceeded", f"jobs_used={jobs_used} max={budgets.max_jobs}")
-    elif tool_calls_used >= budgets.max_tool_calls:
-        decision = WaveDecision(False, "budget_exhausted", f"tool_calls={tool_calls_used} max={budgets.max_tool_calls}")
-    elif wave1.disagreement is None or not wave1.disagreement.requested_research:
-        decision = WaveDecision(False, "no_questions", "committee requested no follow-up research")
-    else:
-        requests = wave1.disagreement.requested_research
-        material = [request for request in requests if _is_material(request)]
-        if not material:
-            decision = WaveDecision(False, "low_gain", "no material follow-up (all low-gain or unmotivated)")
-        else:
-            actionable = [request for request in material if _is_actionable(request)]
-            if not actionable:
-                decision = WaveDecision(False, "not_actionable", "material requests need non-SEC domains")
-            else:
-                actionable.sort(key=_decision_key, reverse=True)
-                top = actionable[0]
-                decision = WaveDecision(
-                    True,
-                    "continue",
-                    f"wave2 authorized: {top.question}",
-                    targeted_question=top.question,
-                    targeted_domain=top.requested_source_domain,
-                )
-    deps.record_stop(session_id, f"{decision.stop_reason}:{decision.reason_detail}")
+    decision = _budget_stop(budgets, waves_used, jobs_used, tool_calls_used, elapsed_s)
+    if decision is None:
+        decision = _research_stop(wave1)
+    deps.record_stop(wave1.session_id, f"{decision.stop_reason}:{decision.reason_detail}")
     return decision
 
 

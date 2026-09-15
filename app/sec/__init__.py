@@ -1,8 +1,40 @@
 """Generic SEC filing layer (edgartools only; no direct SEC HTTP)."""
 
 from .archive import archive_sec_filing, find_archived
-from .client import SECClientError, ensure_identity, find_sec_company, get_cik_lookup_candidates, get_company, get_submissions_metadata, resolve_cik, search_sec_filings
+from .client import (
+    SECClientError,
+    ensure_identity,
+    find_sec_company,
+    get_cik_lookup_candidates,
+    get_company,
+    get_submissions_metadata,
+    resolve_cik,
+    search_sec_filings,
+)
+from .context import (
+    get_governance_context,
+    get_institutional_ownership,
+    get_short_pressure_context,
+    get_transaction_context,
+)
 from .diffs import diff_filings
+from .dilution import dilution_profile, get_dilution_profile
+from .discovery import (
+    BACKFILL_PRIORITY,
+    BACKFILL_SOURCE,
+    SECDiscoveryService,
+    drain_backfill_queue,
+    ensure_backfill_worker,
+    find_sec_entities,
+    get_sec_search_coverage,
+    normalize_accession_no,
+    normalize_name,
+    resolve_sec_accession,
+    run_backfill_job,
+    search_sec_relationships,
+    stripped_name_key,
+    verify_sec_entity,
+)
 from .documents import (
     get_filing_exhibit,
     get_filing_exhibits,
@@ -12,15 +44,14 @@ from .documents import (
 )
 from .events8k import KNOWN_8K_ITEMS, extract_8k_events, parse_8k_events
 from .filings import get_sec_filing, list_sec_filings
-from .material import (
-    EIGHT_K_ITEM_EVENTS,
-    SEVERITY,
-    get_material_events,
-    load_report,
-    material_events_from_8k,
+from .foreign import reporting_regime
+from .governance import (
+    extract_proposals,
+    extract_votes,
+    get_governance_events,
+    load_proxy_text,
+    normalize_proxy,
 )
-from .dilution import dilution_profile, get_dilution_profile
-from .lineage import fact_lineage, period_lineage, xbrl_lineage
 from .insider import (
     TRANSACTION_KINDS,
     classify_transaction,
@@ -31,6 +62,14 @@ from .insider import (
     load_ownership,
     normalize_144,
     normalize_ownership_filing,
+)
+from .lineage import fact_lineage, period_lineage, xbrl_lineage
+from .material import (
+    EIGHT_K_ITEM_EVENTS,
+    SEVERITY,
+    get_material_events,
+    load_report,
+    material_events_from_8k,
 )
 from .models import (
     EVENT_TYPES,
@@ -50,15 +89,16 @@ from .models import (
     ProxyProposal,
     Registration,
     RegulatoryEvent,
+    SearchAttempt,
+    SearchCoverage,
     SECSearchRequest,
     SECSearchResult,
     SECTextHit,
-    SearchAttempt,
-    SearchCoverage,
     ShareholderVote,
     Transaction,
     pit_of,
 )
+from .normalization import document_from_attachment, filing_from_edgar
 from .offerings import (
     OFFERING_FORMS,
     REGISTRATION_FORMS,
@@ -73,28 +113,6 @@ from .ownership import (
     load_schedule,
     normalize_schedule,
 )
-from .context import (
-    get_governance_context,
-    get_institutional_ownership,
-    get_short_pressure_context,
-    get_transaction_context,
-)
-from .governance import (
-    extract_proposals,
-    extract_votes,
-    get_governance_events,
-    load_proxy_text,
-    normalize_proxy,
-)
-from .transactions import (
-    diff_transaction,
-    get_transaction_status,
-    load_transaction_text,
-    normalize_transaction,
-    update_transaction,
-)
-from .foreign import reporting_regime
-from .normalization import document_from_attachment, filing_from_edgar
 from .store import (
     claim_job,
     complete_job,
@@ -109,21 +127,12 @@ from .store import (
     requeue_job,
     store_filing,
 )
-from .discovery import (
-    BACKFILL_PRIORITY,
-    BACKFILL_SOURCE,
-    SECDiscoveryService,
-    drain_backfill_queue,
-    ensure_backfill_worker,
-    find_sec_entities,
-    get_sec_search_coverage,
-    normalize_accession_no,
-    normalize_name,
-    resolve_sec_accession,
-    run_backfill_job,
-    search_sec_relationships,
-    stripped_name_key,
-    verify_sec_entity,
+from .transactions import (
+    diff_transaction,
+    get_transaction_status,
+    load_transaction_text,
+    normalize_transaction,
+    update_transaction,
 )
 
 __all__ = [
@@ -188,6 +197,13 @@ __all__ = [
     "get_short_pressure_context",
     "get_transaction_context",
     "get_sec_filing",
+    "get_cik_lookup_candidates",
+    "get_submissions_metadata",
+    "SECDiscoveryService",
+    "normalize_accession_no",
+    "normalize_name",
+    "resolve_sec_accession",
+    "list_sec_filings",
     "list_sec_documents",
     "get_sec_document",
     "get_sec_filing_text",
@@ -217,6 +233,8 @@ __all__ = [
     "get_transaction_status",
     "load_transaction_text",
     "normalize_transaction",
+    "document_from_attachment",
+    "update_transaction",
     "reporting_regime",
     "stripped_name_key",
     "find_sec_entities",

@@ -9,13 +9,14 @@ via accession_no + source.
 import hashlib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Literal, Optional
+from typing import Literal
+
 from .cusip import normalize_cusip as normalize_cusip
 
 
 # Duck-typed PIT boundary: storage mapping rows and attribute records
 # (dataclasses, namespaces) share no nominal type, so object is honest here.
-def pit_of(record: object) -> tuple[Optional[str], Optional[str]]:
+def pit_of(record: object) -> tuple[str | None, str | None]:
     """Point-in-time timestamp precedence: known_at > accepted_at > filed_at.
 
     Returns (value, basis). (None, None) when the record carries no timestamp;
@@ -32,7 +33,7 @@ def pit_of(record: object) -> tuple[Optional[str], Optional[str]]:
     for basis in ("known_at", "accepted_at", "filed_at"):
         try:
             value = get(basis)
-        except Exception:
+        except Exception:  # noqa: BLE001 - duck-typed PIT read coerces faulty attrs to None, never raises
             value = None
         if value:
             return str(value), basis
@@ -46,15 +47,15 @@ class Filing:
     filer_cik: int
     filer_name: str
     filed_at: str  # YYYY-MM-DD
-    accepted_at: Optional[str]
+    accepted_at: str | None
     known_at: str
-    report_period: Optional[str]
-    primary_document: Optional[str]
+    report_period: str | None
+    primary_document: str | None
     is_amendment: bool
-    amendment_of: Optional[str]
+    amendment_of: str | None
     source: str  # filing homepage URL
-    subject_cik: Optional[int] = None
-    subject_name: Optional[str] = None
+    subject_cik: int | None = None
+    subject_name: str | None = None
     accepted_at_missing: bool = False
 
     def to_dict(self) -> dict[str, object]:
@@ -64,23 +65,23 @@ class Filing:
 @dataclass(frozen=True)
 class FilingDocument:
     accession_no: str
-    document_name: Optional[str]  # filename
-    description: Optional[str]
-    size: Optional[int]
+    document_name: str | None  # filename
+    description: str | None
+    size: int | None
     url: str
-    document_type: Optional[str]
-    file_type: Optional[str] = None
-    file_description: Optional[str] = None
+    document_type: str | None
+    file_type: str | None = None
+    file_description: str | None = None
     items: tuple[str, ...] = field(default_factory=tuple)
-    sic: Optional[str] = None
-    location: Optional[str] = None
-    state: Optional[str] = None
-    inc_state: Optional[str] = None
-    is_primary: Optional[bool] = None
-    filed_at: Optional[str] = None
-    accepted_at: Optional[str] = None
-    known_at: Optional[str] = None
-    source_url: Optional[str] = None
+    sic: str | None = None
+    location: str | None = None
+    state: str | None = None
+    inc_state: str | None = None
+    is_primary: bool | None = None
+    filed_at: str | None = None
+    accepted_at: str | None = None
+    known_at: str | None = None
+    source_url: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -88,23 +89,23 @@ class FilingDocument:
 
 @dataclass(frozen=True)
 class SECSearchRequest:
-    query: Optional[str] = None
-    ticker: Optional[str] = None
-    cik: Optional[str] = None
-    company_name: Optional[str] = None
-    person_name: Optional[str] = None
-    domain: Optional[str] = None
-    accession_no: Optional[str] = None
-    security_identifier: Optional[str] = None
-    forms: Optional[tuple[str, ...]] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    as_of: Optional[str] = None
+    query: str | None = None
+    ticker: str | None = None
+    cik: str | None = None
+    company_name: str | None = None
+    person_name: str | None = None
+    domain: str | None = None
+    accession_no: str | None = None
+    security_identifier: str | None = None
+    forms: tuple[str, ...] | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    as_of: str | None = None
     search_documents: bool = True
     search_entities: bool = True
     search_relationships: bool = True
     exhaustive: bool = False
-    max_results: Optional[int] = 20
+    max_results: int | None = 20
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -112,15 +113,15 @@ class SECSearchRequest:
 
 @dataclass(frozen=True)
 class EntityCandidate:
-    cik: Optional[int]
+    cik: int | None
     name: str
     tickers: tuple[str, ...] = field(default_factory=tuple)
-    exchange: Optional[str] = None
+    exchange: str | None = None
     match_source: str = ""
     match_score: float = 0.0
     match_type: str = ""
     verification_status: Literal["unverified", "verified", "ambiguous", "conflict", "not_found"] = "unverified"
-    entity_id: Optional[str] = None
+    entity_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -129,8 +130,8 @@ class EntityCandidate:
 @dataclass(frozen=True)
 class FilingParty:
     accession_no: str
-    entity_id: Optional[str]
-    cik: Optional[int]
+    entity_id: str | None
+    cik: int | None
     name: str
     role: str
     source: str
@@ -149,18 +150,18 @@ class SECTextHit:
     accession_no: str
     form: str
     filed_at: str
-    filer_cik: Optional[int] = None
-    filer_name: Optional[str] = None
-    matched_document: Optional[str] = None
-    file_type: Optional[str] = None
-    file_description: Optional[str] = None
+    filer_cik: int | None = None
+    filer_name: str | None = None
+    matched_document: str | None = None
+    file_type: str | None = None
+    file_description: str | None = None
     items: tuple[str, ...] = field(default_factory=tuple)
-    sic: Optional[str] = None
-    location: Optional[str] = None
-    state: Optional[str] = None
-    inc_state: Optional[str] = None
+    sic: str | None = None
+    location: str | None = None
+    state: str | None = None
+    inc_state: str | None = None
     score: float = 0.0
-    source_url: Optional[str] = None
+    source_url: str | None = None
     page: int = 1
 
     def to_dict(self) -> dict[str, object]:
@@ -174,17 +175,17 @@ class SearchAttempt:
     backend: str
     query: str
     filters: dict[str, object] = field(default_factory=dict)
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
+    started_at: str | None = None
+    completed_at: str | None = None
     status: Literal["complete", "source_limited", "partial", "failed", "not_applicable"] = "complete"
     results_reported: int = 0
     results_retrieved: int = 0
     pages_retrieved: int = 0
     truncated: bool = False
-    source_limit: Optional[str] = None
-    pit_basis: Optional[str] = None
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
+    source_limit: str | None = None
+    pit_basis: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -200,7 +201,7 @@ class SearchCoverage:
     results_reported: int = 0
     results_retrieved: int = 0
     pages: int = 0
-    date_coverage: Optional[str] = None
+    date_coverage: str | None = None
     forms_covered: tuple[str, ...] = field(default_factory=tuple)
     pending_backfill_jobs: tuple[str, ...] = field(default_factory=tuple)
 
@@ -233,7 +234,7 @@ class CurrentReportEvent:
     accession_no: str
     item_number: str
     item_name: str
-    event_date: Optional[str]
+    event_date: str | None
     text: str
     exhibit_refs: tuple[str, ...] = ()
 
@@ -286,7 +287,7 @@ class RegulatoryEvent:
     event_id: str
     issuer: str
     event_type: str
-    effective_date: Optional[str]
+    effective_date: str | None
     known_at: str
     source_accessions: tuple[str, ...]
     severity: str = "routine"
@@ -309,24 +310,24 @@ class RegulatoryEvent:
 @dataclass(frozen=True)
 class BeneficialOwnership:
     filer_name: str
-    filer_cik: Optional[str]
+    filer_cik: str | None
     issuer: str
     form: str
-    filed_at: Optional[str]
+    filed_at: str | None
     accession_no: str
-    shares: Optional[int] = None
-    percent: Optional[float] = None
-    sole_voting: Optional[int] = None
-    shared_voting: Optional[int] = None
-    sole_dispositive: Optional[int] = None
-    shared_dispositive: Optional[int] = None
+    shares: int | None = None
+    percent: float | None = None
+    sole_voting: int | None = None
+    shared_voting: int | None = None
+    sole_dispositive: int | None = None
+    shared_dispositive: int | None = None
     is_amendment: bool = False
-    purpose_text: Optional[str] = None
-    subject_cik: Optional[str] = None
-    subject_name: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
-    source_url: Optional[str] = None
+    purpose_text: str | None = None
+    subject_cik: str | None = None
+    subject_name: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
+    source_url: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -335,17 +336,17 @@ class BeneficialOwnership:
 @dataclass(frozen=True)
 class OwnershipChangeEvent:
     filer_name: str
-    filer_cik: Optional[str]
+    filer_cik: str | None
     issuer: str
     previous_accession: str
     current_accession: str
-    filed_at: Optional[str]
-    prev_shares: Optional[int] = None
-    curr_shares: Optional[int] = None
-    share_change: Optional[int] = None
-    prev_percent: Optional[float] = None
-    curr_percent: Optional[float] = None
-    percent_change: Optional[float] = None
+    filed_at: str | None
+    prev_shares: int | None = None
+    curr_shares: int | None = None
+    share_change: int | None = None
+    prev_percent: float | None = None
+    curr_percent: float | None = None
+    percent_change: float | None = None
     voting_changed: bool = False
     text_changed: bool = False
 
@@ -356,9 +357,9 @@ class OwnershipChangeEvent:
 @dataclass(frozen=True)
 class Insider:
     insider_name: str
-    insider_cik: Optional[str]
+    insider_cik: str | None
     issuer: str
-    position: Optional[str] = None
+    position: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -366,28 +367,28 @@ class Insider:
 
 @dataclass(frozen=True)
 class InsiderTransaction:
-    insider_name: Optional[str]
-    insider_cik: Optional[str]
+    insider_name: str | None
+    insider_cik: str | None
     issuer: str
     form: str
-    filed_at: Optional[str]
+    filed_at: str | None
     accession_no: str
-    transaction_date: Optional[str] = None
-    security: Optional[str] = None
-    transaction_code: Optional[str] = None
+    transaction_date: str | None = None
+    security: str | None = None
+    transaction_code: str | None = None
     transaction_kind: str = "other"
-    shares: Optional[int] = None
-    price: Optional[float] = None
-    acquired_disposed: Optional[str] = None
-    holdings_after: Optional[int] = None
-    issuer_cik: Optional[str] = None
-    is_director: Optional[bool] = None
-    is_officer: Optional[bool] = None
-    is_ten_percent: Optional[bool] = None
-    is_other: Optional[bool] = None
-    role_title: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
+    shares: int | None = None
+    price: float | None = None
+    acquired_disposed: str | None = None
+    holdings_after: int | None = None
+    issuer_cik: str | None = None
+    is_director: bool | None = None
+    is_officer: bool | None = None
+    is_ten_percent: bool | None = None
+    is_other: bool | None = None
+    role_title: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -395,16 +396,16 @@ class InsiderTransaction:
 
 @dataclass(frozen=True)
 class ProposedInsiderSale:
-    seller_name: Optional[str]
-    seller_cik: Optional[str]
+    seller_name: str | None
+    seller_cik: str | None
     issuer: str
-    filed_at: Optional[str]
+    filed_at: str | None
     accession_no: str
-    shares_proposed: Optional[int] = None
-    issuer_cik: Optional[str] = None
-    form: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
+    shares_proposed: int | None = None
+    issuer_cik: str | None = None
+    form: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -412,36 +413,36 @@ class ProposedInsiderSale:
 
 @dataclass(frozen=True)
 class InstitutionalHolding:
-    manager_name: Optional[str]
-    manager_cik: Optional[str]
+    manager_name: str | None
+    manager_cik: str | None
     accession_no: str
     source_row: int
     holding_id: str
-    report_period: Optional[str] = None
-    issuer_name: Optional[str] = None
-    entity_id: Optional[str] = None
-    security_id: Optional[str] = None
-    class_title: Optional[str] = None
-    cusip: Optional[str] = None
-    isin: Optional[str] = None
-    shares: Optional[int] = None
-    value: Optional[int] = None
-    put_call: Optional[str] = None
-    discretion: Optional[str] = None
-    other_manager: Optional[str] = None
-    shares_prn_type: Optional[str] = None
-    voting: Optional[str] = None
-    filed_at: Optional[str] = None
-    known_at: Optional[str] = None
-    document_name: Optional[str] = None
-    source_url: Optional[str] = None
+    report_period: str | None = None
+    issuer_name: str | None = None
+    entity_id: str | None = None
+    security_id: str | None = None
+    class_title: str | None = None
+    cusip: str | None = None
+    isin: str | None = None
+    shares: int | None = None
+    value: int | None = None
+    put_call: str | None = None
+    discretion: str | None = None
+    other_manager: str | None = None
+    shares_prn_type: str | None = None
+    voting: str | None = None
+    filed_at: str | None = None
+    known_at: str | None = None
+    document_name: str | None = None
+    source_url: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-def institutional_holding_id(accession_no: str, source_row: int, security_id: Optional[str]) -> str:
-    payload = f"{accession_no}\0{source_row}\0{security_id or ''}".encode("utf-8")
+def institutional_holding_id(accession_no: str, source_row: int, security_id: str | None) -> str:
+    payload = f"{accession_no}\0{source_row}\0{security_id or ''}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -449,11 +450,11 @@ def institutional_holding_id(accession_no: str, source_row: int, security_id: Op
 class Registration:
     issuer: str
     form: str
-    filed_at: Optional[str]
+    filed_at: str | None
     accession_no: str
-    offering_type: Optional[str] = None
-    securities_registered: Optional[int] = None
-    max_aggregate_price: Optional[float] = None
+    offering_type: str | None = None
+    securities_registered: int | None = None
+    max_aggregate_price: float | None = None
     is_shelf: bool = False
     status: str = "filed"
 
@@ -465,31 +466,31 @@ class Registration:
 class Offering:
     issuer: str
     form: str
-    filed_at: Optional[str]
+    filed_at: str | None
     accession_no: str
-    offering_type: Optional[str] = None
-    shares: Optional[int] = None
-    price_per_share: Optional[float] = None
-    gross_proceeds: Optional[float] = None
+    offering_type: str | None = None
+    shares: int | None = None
+    price_per_share: float | None = None
+    gross_proceeds: float | None = None
     underwriters: tuple[str, ...] = ()
-    has_warrants: Optional[bool] = None
-    has_convertibles: Optional[bool] = None
+    has_warrants: bool | None = None
+    has_convertibles: bool | None = None
     is_atm: bool = False
-    source_registration: Optional[str] = None
+    source_registration: str | None = None
     status: str = "filed"
     # Phase 7: filer/registrant split (registrant defaults to issuer, never
     # the reverse); amounts stay proposed/registered via amount_basis, never
     # issuance. Provenance mirrors Phase 6 ownership rows.
-    filer_cik: Optional[str] = None
-    filer_name: Optional[str] = None
-    registrant_cik: Optional[str] = None
-    registrant_name: Optional[str] = None
-    security_title: Optional[str] = None
-    amount_basis: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
-    source_url: Optional[str] = None
-    extraction_method: Optional[str] = None
+    filer_cik: str | None = None
+    filer_name: str | None = None
+    registrant_cik: str | None = None
+    registrant_name: str | None = None
+    security_title: str | None = None
+    amount_basis: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
+    source_url: str | None = None
+    extraction_method: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "underwriters", tuple(self.underwriters or ()))
@@ -520,20 +521,20 @@ class GovernanceEvent:
     issuer: str
     event_type: str
     accession_no: str
-    meeting_date: Optional[str] = None
-    filed_at: Optional[str] = None
+    meeting_date: str | None = None
+    filed_at: str | None = None
     contested: bool = False
-    source: Optional[str] = None
+    source: str | None = None
     # Phase 7: filer/subject split (subject only from structured/explicit
     # evidence, never a filer copy) plus document/PIT provenance.
-    filer_cik: Optional[str] = None
-    filer_name: Optional[str] = None
-    subject_cik: Optional[str] = None
-    subject_name: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
-    source_url: Optional[str] = None
-    extraction_method: Optional[str] = None
+    filer_cik: str | None = None
+    filer_name: str | None = None
+    subject_cik: str | None = None
+    subject_name: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
+    source_url: str | None = None
+    extraction_method: str | None = None
 
     def __post_init__(self):
         if self.event_type not in GOVERNANCE_EVENT_TYPES:
@@ -548,14 +549,14 @@ class ProxyProposal:
     proposal_id: str
     issuer: str
     accession_no: str
-    description: Optional[str] = None
-    proposal_type: Optional[str] = None
-    board_recommendation: Optional[str] = None
+    description: str | None = None
+    proposal_type: str | None = None
+    board_recommendation: str | None = None
     status: str = "unknown"
     # Phase 7: exact "start:end" offsets of the heading span backing
     # description, plus the matched document when known.
-    source_span: Optional[str] = None
-    document_name: Optional[str] = None
+    source_span: str | None = None
+    document_name: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -565,15 +566,15 @@ class ProxyProposal:
 class ShareholderVote:
     issuer: str
     accession_no: str
-    meeting_date: Optional[str] = None
-    description: Optional[str] = None
-    votes_for: Optional[int] = None
-    votes_against: Optional[int] = None
-    abstentions: Optional[int] = None
-    outcome: Optional[str] = None
+    meeting_date: str | None = None
+    description: str | None = None
+    votes_for: int | None = None
+    votes_against: int | None = None
+    abstentions: int | None = None
+    outcome: str | None = None
     # Phase 7: exact "start:end" offsets of the vote-count span.
-    source_span: Optional[str] = None
-    document_name: Optional[str] = None
+    source_span: str | None = None
+    document_name: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -584,19 +585,19 @@ class Transaction:
     event_id: str
     target: str
     accession_no: str
-    buyer: Optional[str] = None
+    buyer: str | None = None
     deal_type: str = "unknown"
-    announced_at: Optional[str] = None
-    consideration: Optional[str] = None
-    exchange_ratio: Optional[str] = None
-    implied_value: Optional[str] = None
-    financing: Optional[str] = None
-    termination_fee: Optional[str] = None
-    reverse_termination_fee: Optional[str] = None
-    vote_conditions: Optional[str] = None
-    regulatory_conditions: Optional[str] = None
-    tender_expiry: Optional[str] = None
-    expected_close: Optional[str] = None
+    announced_at: str | None = None
+    consideration: str | None = None
+    exchange_ratio: str | None = None
+    implied_value: str | None = None
+    financing: str | None = None
+    termination_fee: str | None = None
+    reverse_termination_fee: str | None = None
+    vote_conditions: str | None = None
+    regulatory_conditions: str | None = None
+    tender_expiry: str | None = None
+    expected_close: str | None = None
     competing_offer: bool = False
     status: str = "unknown"
     source_accessions: tuple[str, ...] = ()
@@ -604,18 +605,18 @@ class Transaction:
     # Subject comes only from structured/explicit evidence; target
     # additionally falls back to exact document spans, never a filer copy.
     # Status stays unknown without closing evidence.
-    filer_cik: Optional[str] = None
-    filer_name: Optional[str] = None
-    subject_cik: Optional[str] = None
-    subject_name: Optional[str] = None
-    acquirer_cik: Optional[str] = None
-    acquirer_name: Optional[str] = None
-    offeror: Optional[str] = None
-    security_title: Optional[str] = None
-    document_name: Optional[str] = None
-    known_at: Optional[str] = None
-    source_url: Optional[str] = None
-    extraction_method: Optional[str] = None
+    filer_cik: str | None = None
+    filer_name: str | None = None
+    subject_cik: str | None = None
+    subject_name: str | None = None
+    acquirer_cik: str | None = None
+    acquirer_name: str | None = None
+    offeror: str | None = None
+    security_title: str | None = None
+    document_name: str | None = None
+    known_at: str | None = None
+    source_url: str | None = None
+    extraction_method: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "source_accessions",

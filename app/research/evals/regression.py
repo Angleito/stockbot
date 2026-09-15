@@ -95,13 +95,15 @@ def build_fixture(
 ) -> AgentFixture:
     """Assemble a fixture; question/as_of default to the scenario definition."""
     scenario = get_scenario(scenario_name)
+    resolved_q = question if question is not None else scenario.question
+    resolved_as_of = as_of if as_of is not None else scenario.as_of
     return {
         "format": FIXTURE_FORMAT,
         "scenario_name": scenario.name,
         "family": scenario.family.value,
         "session_id": session_id,
-        "question": question if question is not None else scenario.question,
-        "as_of": as_of if as_of is not None else scenario.as_of,
+        "question": resolved_q,
+        "as_of": resolved_as_of,
         "tool_calls": list(tool_calls),
         "evidence_ids": list(evidence_ids),
         "known_ats": list(known_ats),
@@ -111,7 +113,7 @@ def build_fixture(
         "freeze_before": freeze_before,
         "freeze_after": freeze_after,
         "validator": {
-            "pit_as_of": as_of if as_of is not None else scenario.as_of,
+            "pit_as_of": resolved_as_of,
             "expected_tools": list(scenario.expected_tools),
             "requires_evidence": scenario.requires_evidence,
             "validators": list(VALIDATORS),
@@ -157,7 +159,7 @@ def promote_to_fixture(
 def _req_str(raw: dict[str, object], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str):
-        raise ValueError(f"fixture: {key!r} must be a string")
+        raise ValueError(f"fixture: {key!r} must be a string")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return value
 
 
@@ -166,7 +168,7 @@ def _opt_str(raw: dict[str, object], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"fixture: {key!r} must be a string or null")
+        raise ValueError(f"fixture: {key!r} must be a string or null")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return value
 
 
@@ -175,7 +177,7 @@ def _opt_int(raw: dict[str, object], key: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"fixture: {key!r} must be an int or null")
+        raise ValueError(f"fixture: {key!r} must be an int or null")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return value
 
 
@@ -186,21 +188,22 @@ def _req_str_list(raw: dict[str, object], key: str) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
-def load_fixture(scenario_name: str, fixtures_dir: Path | None = None) -> AgentFixture:
-    """Load and validate one fixture; ValueError on malformed content."""
-    dest_dir = fixtures_dir if fixtures_dir is not None else default_fixtures_dir()
-    path = dest_dir / f"{scenario_name}.json"
+def _fixture_raw(path: Path) -> tuple[dict[str, object], dict[str, object], bool]:
     decoded: object = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(decoded, dict):
-        raise ValueError(f"fixture {path}: top level must be an object")
+        raise ValueError(f"fixture {path}: top level must be an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     raw: dict[str, object] = {k: v for k, v in decoded.items() if isinstance(k, str)}
     validator_raw = raw.get("validator")
     if not isinstance(validator_raw, dict):
-        raise ValueError(f"fixture {path}: validator must be an object")
+        raise ValueError(f"fixture {path}: validator must be an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     vraw: dict[str, object] = {k: v for k, v in validator_raw.items() if isinstance(k, str)}
     flag = vraw.get("requires_evidence")
     if not isinstance(flag, bool):
-        raise ValueError(f"fixture {path}: requires_evidence must be bool")
+        raise ValueError(f"fixture {path}: requires_evidence must be bool")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return raw, vraw, flag
+
+
+def _fixture_body(raw: dict[str, object], vraw: dict[str, object], flag: bool) -> AgentFixture:
     return {
         "format": _req_str(raw, "format"),
         "scenario_name": _req_str(raw, "scenario_name"),
@@ -225,6 +228,14 @@ def load_fixture(scenario_name: str, fixtures_dir: Path | None = None) -> AgentF
     }
 
 
+def load_fixture(scenario_name: str, fixtures_dir: Path | None = None) -> AgentFixture:
+    """Load and validate one fixture; ValueError on malformed content."""
+    dest_dir = fixtures_dir if fixtures_dir is not None else default_fixtures_dir()
+    path = dest_dir / f"{scenario_name}.json"
+    raw, vraw, flag = _fixture_raw(path)
+    return _fixture_body(raw, vraw, flag)
+
+
 def list_fixtures(fixtures_dir: Path | None = None) -> list[str]:
     """Sorted scenario names with a saved fixture."""
     dest_dir = fixtures_dir if fixtures_dir is not None else default_fixtures_dir()
@@ -233,54 +244,105 @@ def list_fixtures(fixtures_dir: Path | None = None) -> list[str]:
     return sorted(p.stem for p in dest_dir.glob("*.json") if p.is_file())
 
 
-def run_deterministic_validators(fixture: AgentFixture) -> list[str]:
-    """s35 validators over one fixture; returns violation codes (empty = pass)."""
-    violations: list[str] = []
+def _v_fixture_pit(fixture: AgentFixture) -> str | None:
+    """PIT gate: any known_at after pit_as_of is a future crossing."""
     as_of = fixture["validator"]["pit_as_of"]
-    if as_of is not None:
-        for known_at in fixture["known_ats"]:
-            if known_at > as_of:
-                violations.append("future-crossing-as_of")
-                break
+    if as_of is None:
+        return None
+    for known_at in fixture["known_ats"]:
+        if known_at > as_of:
+            return "future-crossing-as_of"
+    return None
+
+
+def _v_fixture_evidence(fixture: AgentFixture) -> str | None:
+    """Evidence-required fixtures must cite at least one id."""
     if fixture["validator"]["requires_evidence"] and not fixture["evidence_ids"]:
-        violations.append("untraceable-dossier-claim")
+        return "untraceable-dossier-claim"
+    return None
+
+
+def _v_fixture_budget(fixture: AgentFixture) -> str | None:
+    """Over-budget fixtures fail the scheduler check."""
     used = fixture["budget_used"]
     cap = fixture["budget_cap"]
     if used is not None and cap is not None and used > cap:
-        violations.append("budget-violation")
+        return "budget-violation"
+    return None
+
+
+def _v_fixture_capability(fixture: AgentFixture) -> str | None:
+    """Unsupported families must not drive tools (capability policy)."""
     if fixture["family"] == "unsupported" and fixture["tool_calls"]:
-        violations.append("capability-policy-violation")
+        return "capability-policy-violation"
+    return None
+
+
+def _v_fixture_freeze(fixture: AgentFixture) -> str | None:
+    """Freeze ids are immutable across the fixture."""
     before = fixture["freeze_before"]
     after = fixture["freeze_after"]
     if before is not None and after is not None and before != after:
-        violations.append("frozen-mutation")
-    if fixture["scenario_name"] == "timeout-model-call-failed-resume":
-        excerpt = fixture["answer_excerpt"]
-        if any(marker not in excerpt for marker in _TIMEOUT_CLOSURE_MARKERS):
-            violations.append("timeout-without-failed-closure")
-    return violations
+        return "frozen-mutation"
+    return None
+
+
+def _v_fixture_timeout(fixture: AgentFixture) -> str | None:
+    """Timeout fixtures must carry the failed-closure markers."""
+    if fixture["scenario_name"] != "timeout-model-call-failed-resume":
+        return None
+    excerpt = fixture["answer_excerpt"]
+    if any(marker not in excerpt for marker in _TIMEOUT_CLOSURE_MARKERS):
+        return "timeout-without-failed-closure"
+    return None
+
+
+_FIXTURE_CHECKS = (
+    _v_fixture_pit,
+    _v_fixture_evidence,
+    _v_fixture_budget,
+    _v_fixture_capability,
+    _v_fixture_freeze,
+    _v_fixture_timeout,
+)
+
+
+def run_deterministic_validators(fixture: AgentFixture) -> list[str]:
+    """s35 validators over one fixture; returns violation codes (empty = pass)."""
+    return [code for code in (check(fixture) for check in _FIXTURE_CHECKS) if code is not None]
+
+
+def _trace_line(header: object, kinds: dict[str, int], count: int) -> str:
+    trace_id = getattr(header, "trace_id", "?")
+    wave_id = getattr(header, "wave_id", "?")
+    model = getattr(header, "model", "?")
+    status = getattr(header, "status", "?")
+    breakdown = ", ".join(f"{kind}={n}" for kind, n in sorted(kinds.items()))
+    return (
+        f"  trace {trace_id} wave={wave_id} model={model}"
+        f" status={status} events={count}"
+        + (f" [{breakdown}]" if breakdown else "")
+    )
+
+
+def _trace_lines(session_id: str, data_root: Path | None) -> list[str]:
+    from app.research.evals.traces import get_trace_events, list_traces
+
+    headers = list_traces(session_id, data_root)
+    if not headers:
+        return [f"session {session_id}: no traces recorded yet"]
+    lines = [f"session {session_id}: {len(headers)} trace(s)"]
+    for header in headers:
+        kinds: dict[str, int] = {}
+        for event in get_trace_events(header.trace_id, data_root):
+            kinds[event.event_type] = kinds.get(event.event_type, 0) + 1
+        lines.append(_trace_line(header, kinds, sum(kinds.values())))
+    return lines
 
 
 def inspect_session(session_id: str, data_root: Path | None = None) -> str:
     """Human-readable trace summary for one session; never raises."""
     try:
-        from app.research.evals.traces import get_trace_events, list_traces
-
-        headers = list_traces(session_id, data_root)
-        if not headers:
-            return f"session {session_id}: no traces recorded yet"
-        lines = [f"session {session_id}: {len(headers)} trace(s)"]
-        for header in headers:
-            events = get_trace_events(header.trace_id, data_root)
-            kinds: dict[str, int] = {}
-            for event in events:
-                kinds[event.event_type] = kinds.get(event.event_type, 0) + 1
-            breakdown = ", ".join(f"{kind}={count}" for kind, count in sorted(kinds.items()))
-            lines.append(
-                f"  trace {header.trace_id} wave={header.wave_id} model={header.model}"
-                f" status={header.status} events={len(events)}"
-                + (f" [{breakdown}]" if breakdown else "")
-            )
-        return "\n".join(lines)
-    except Exception as exc:
+        return "\n".join(_trace_lines(session_id, data_root))
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return f"session {session_id}: trace inspect unavailable ({exc})"

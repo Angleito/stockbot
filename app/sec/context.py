@@ -56,7 +56,7 @@ def _history(
         )
     except ValueError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
 
@@ -78,6 +78,14 @@ def get_institutional_ownership(
     }
 
 
+_CONTESTED_PROXY_FORMS = frozenset({"DFAN14A", "DEFC14A", "PREC14A"})
+
+
+def _count_contested(filings: list[Filing]) -> int:
+    """Contested-proxy filings by form family (structured parsing deferred)."""
+    return sum(1 for f in filings if f.form in _CONTESTED_PROXY_FORMS)
+
+
 def get_governance_context(
     ticker_or_cik: str | int,
     *,
@@ -89,13 +97,12 @@ def get_governance_context(
     filings = _history(
         ticker_or_cik, GOVERNANCE_FORMS, as_of=as_of, start_date=since, limit=limit,
     )
-    contested = [f for f in filings if f.form in ("DFAN14A", "DEFC14A", "PREC14A")]
     return {
         "ticker": str(ticker_or_cik).upper(),
         "since": since,
         "as_of": as_of,
         "count": len(filings),
-        "contested_filings": len(contested),
+        "contested_filings": _count_contested(filings),
         "filings": [_filing_pointer(f) for f in filings],
         "status": "unknown",
         "note": "Retrieval-level proxy context; contested vs routine is by form family until structured parsers land.",
@@ -120,6 +127,56 @@ def get_transaction_context(
     }
 
 
+_SHORT_POSITION_KEYS = (
+    "short_position", "shortPosition", "short_interest",
+    "current_short_position",
+)
+
+
+def _fetch_short_position(ticker: str) -> dict[str, object] | None:
+    """FINRA short interest or None; transport failure is missing data."""
+    try:
+        from .. import finra_client
+
+        short = finra_client.get_short_interest(ticker)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    return short if isinstance(short, dict) else None
+
+
+def _fetch_shares_outstanding(ticker: str) -> object:
+    """SEC shares outstanding value or None; failure is missing data."""
+    try:
+        from ..services import sec_facts
+
+        return sec_facts.get_fundamentals(
+            ticker, "shares_outstanding").get("shares_outstanding")
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+
+
+def _extract_short_position(short: dict[str, object] | None) -> int | float | None:
+    """First numeric short-position key; None when absent or non-numeric."""
+    if not isinstance(short, dict):
+        return None
+    for key in _SHORT_POSITION_KEYS:
+        value = short.get(key)
+        if isinstance(value, (int, float)):
+            return value
+    return None
+
+
+def _short_ratio(
+    short_position: int | float | None, shares: object,
+) -> float | None:
+    """Deterministic short/outstanding percent; None unless both quantify."""
+    if not isinstance(short_position, (int, float)):
+        return None
+    if not isinstance(shares, (int, float)) or shares <= 0:
+        return None
+    return round(short_position / shares * 100, 2)
+
+
 def get_short_pressure_context(ticker: str) -> dict[str, object]:
     """Short-interest context without manipulation claims (FTD deferred).
 
@@ -127,31 +184,10 @@ def get_short_pressure_context(ticker: str) -> dict[str, object]:
     deterministic ratio when both are available. Never asserts that short
     activity causes, or will cause, any price move.
     """
-    short: dict[str, object] | None = None
-    try:
-        from .. import finra_client
-
-        short = finra_client.get_short_interest(ticker)
-    except Exception:
-        short = None
-    shares: object = None
-    try:
-        from ..services import sec_facts
-
-        facts = sec_facts.get_fundamentals(ticker, "shares_outstanding")
-        shares = facts.get("shares_outstanding")
-    except Exception:
-        shares = None
-    short_position: int | float | None = None
-    if isinstance(short, dict):
-        for key in ("short_position", "shortPosition", "short_interest", "current_short_position"):
-            value = short.get(key)
-            if isinstance(value, (int, float)):
-                short_position = value
-                break
-    ratio: float | None = None
-    if isinstance(short_position, (int, float)) and isinstance(shares, (int, float)) and shares > 0:
-        ratio = round(short_position / shares * 100, 2)
+    short = _fetch_short_position(ticker)
+    shares = _fetch_shares_outstanding(ticker)
+    short_position = _extract_short_position(short)
+    ratio = _short_ratio(short_position, shares)
     return {
         "ticker": ticker.upper(),
         "short_position": short_position if short_position is not None else "not_available",

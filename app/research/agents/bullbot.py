@@ -12,7 +12,7 @@ within the freeze.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from . import GroundedClaim, ResearchRequest, parse_committee_output
@@ -22,7 +22,7 @@ from .scout import ModelFn
 def _coerce_wave(wave_id: int | str) -> int:
     """Accept int>=1 or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):
-        raise ValueError(f"bullbot: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"bullbot: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if isinstance(wave_id, int):
         wave = wave_id
     elif isinstance(wave_id, str):
@@ -31,7 +31,7 @@ def _coerce_wave(wave_id: int | str) -> int:
             raise ValueError(f"bullbot: 'wave_id' must be an int >= 1, got {wave_id!r}")
         wave = int(text)
     else:
-        raise ValueError(f"bullbot: 'wave_id' must be an int >= 1, got {wave_id!r}")
+        raise ValueError(f"bullbot: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if wave < 1:
         raise ValueError(f"bullbot: 'wave_id' must be >= 1, got {wave_id!r}")
     return wave
@@ -54,6 +54,22 @@ class BullAnalysis:
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave(self.wave_id)
+
+
+def _tag_requests(extra: list[ResearchRequest]) -> list[ResearchRequest]:
+    """Tag follow-ups with the bullbot agent."""
+    for request in extra:
+        if "bullbot" not in request.requesting_agents:
+            request.requesting_agents.append("bullbot")
+    return extra
+
+
+def _prose_or_placeholder(claims: list[GroundedClaim], frozen: list[str]) -> str:
+    """Joined claim text, or the empty-freeze placeholder."""
+    prose = "\n".join(c.text for c in claims).strip()
+    if prose:
+        return prose
+    return "No grounded claims in freeze." if frozen else "Freeze holds no evidence."
 
 
 def run_bullbot(
@@ -80,16 +96,10 @@ def run_bullbot(
     if evidence_text.strip():
         prompt += f"\nEvidence (cite ids; do not invent):\n{evidence_text.strip()}"
     text = model(prompt).strip()
-    extra: list[ResearchRequest] = list(follow_ups or [])
-    for request in extra:
-        if "bullbot" not in request.requesting_agents:
-            request.requesting_agents.append("bullbot")
+    extra = _tag_requests(list(follow_ups or []))
     claims, envelope_follow = parse_committee_output(text, frozen=frozen, agent="bullbot")
     unknowns: list[str] = [] if claims or frozen else ["freeze holds no evidence"]
-    prose = "\n".join(c.text for c in claims).strip()
-    if not prose:
-        prose = "No grounded claims in freeze." if frozen else "Freeze holds no evidence."
-    text = prose
+    text = _prose_or_placeholder(claims, frozen)
     extra = list(envelope_follow) + list(extra)
     return BullAnalysis(
         session_id=session_id,

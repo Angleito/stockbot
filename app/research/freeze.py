@@ -37,15 +37,18 @@ class EvidenceFreeze:
     evidence_ids: tuple[str, ...]
     content_hash: str
 
-    def __post_init__(self) -> None:
+    def _check_ids(self) -> None:
         if not self.freeze_id:
             raise FreezeIntegrityError("freeze: 'freeze_id' must be non-empty")
         if not self.session_id:
             raise FreezeIntegrityError("freeze: 'session_id' must be non-empty")
-        if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int) or self.wave_id < 1:
-            raise FreezeIntegrityError("freeze: 'wave_id' must be an int >= 1")
         if not self.content_hash:
             raise FreezeIntegrityError(f"freeze {self.freeze_id}: 'content_hash' must be non-empty")
+
+    def __post_init__(self) -> None:
+        self._check_ids()
+        if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int) or self.wave_id < 1:
+            raise FreezeIntegrityError("freeze: 'wave_id' must be an int >= 1")
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
 
 
@@ -70,6 +73,35 @@ def _coerce_time(value: datetime | str | None, key: str) -> datetime | None:
         raise FreezeIntegrityError(f"freeze: '{key}' must be an ISO-8601 datetime, got {value!r}") from None
 
 
+def _check_freeze_wave(freeze_id: str, wave_id: int) -> None:
+    if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
+        raise FreezeIntegrityError(f"freeze {freeze_id}: 'wave_id' must be an int >= 1")
+
+
+def _check_freeze_membership(freeze_id: str, session_id: str, wave_id: int, recs: list[Evidence]) -> None:
+    for record in recs:
+        w = record.wave_id
+        if record.session_id != session_id or isinstance(w, bool) or not isinstance(w, int) or w < 1 or w > wave_id:
+            raise FreezeIntegrityError(
+                f"freeze {freeze_id}: {record.evidence_id} belongs to {record.session_id}:{record.wave_id}"
+            )
+
+
+def _check_freeze_pit(freeze_id: str, frozen_as_of: datetime | None, recs: list[Evidence]) -> None:
+    for record in recs:
+        if pit_unverified(frozen_as_of, record.known_at):
+            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} unverified PIT (known_at unknown for historical as_of)")
+        if pit_violated(frozen_as_of, record.known_at):
+            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} violates PIT (known_at > as_of)")
+
+
+def _freeze_ids(freeze_id: str, recs: list[Evidence]) -> tuple[str, ...]:
+    ids = tuple(sorted({record.evidence_id for record in recs}))
+    if len(ids) != len(recs):
+        raise FreezeIntegrityError(f"freeze {freeze_id}: duplicate evidence ids")
+    return ids
+
+
 def create_freeze(
     *,
     freeze_id: str,
@@ -80,24 +112,12 @@ def create_freeze(
     created_at: datetime | str | None = None,
 ) -> EvidenceFreeze:
     """Snapshot through a wave: every record must belong to this session with 1 <= wave <= freeze wave, and satisfy PIT."""
-    if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
-        raise FreezeIntegrityError(f"freeze {freeze_id}: 'wave_id' must be an int >= 1")
+    _check_freeze_wave(freeze_id, wave_id)
     recs = list(records)
-    for record in recs:
-        w = record.wave_id
-        if record.session_id != session_id or isinstance(w, bool) or not isinstance(w, int) or w < 1 or w > wave_id:
-            raise FreezeIntegrityError(
-                f"freeze {freeze_id}: {record.evidence_id} belongs to {record.session_id}:{record.wave_id}"
-            )
+    _check_freeze_membership(freeze_id, session_id, wave_id, recs)
     frozen_as_of = _coerce_time(as_of, "as_of")
-    for record in recs:
-        if pit_unverified(frozen_as_of, record.known_at):
-            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} unverified PIT (known_at unknown for historical as_of)")
-        if pit_violated(frozen_as_of, record.known_at):
-            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} violates PIT (known_at > as_of)")
-    ids = tuple(sorted({record.evidence_id for record in recs}))
-    if len(ids) != len(recs):
-        raise FreezeIntegrityError(f"freeze {freeze_id}: duplicate evidence ids")
+    _check_freeze_pit(freeze_id, frozen_as_of, recs)
+    ids = _freeze_ids(freeze_id, recs)
     return EvidenceFreeze(
         freeze_id=freeze_id,
         session_id=session_id,
@@ -143,9 +163,7 @@ def _narrow_opt_time(value: object, key: str) -> datetime | str | None:
     raise FreezeIntegrityError(f"freeze: '{key}' must be a datetime, ISO-8601 string, or null")
 
 
-def freeze_from_dict(data: Mapping[str, object]) -> EvidenceFreeze:
-    """Rebuild a freeze; missing timestamps stay None, never invented."""
-    d = dict(data)
+def _freeze_ids_triplet(d: dict[str, object]) -> tuple[str, str, str]:
     freeze_id = d.get("freeze_id")
     session_id = d.get("session_id")
     content_hash = d.get("content_hash")
@@ -155,15 +173,26 @@ def freeze_from_dict(data: Mapping[str, object]) -> EvidenceFreeze:
         raise FreezeIntegrityError("freeze: 'session_id' must be a non-empty string")
     if not isinstance(content_hash, str) or not content_hash:
         raise FreezeIntegrityError("freeze: 'content_hash' must be a non-empty string")
+    return freeze_id, session_id, content_hash
+
+
+def _freeze_evidence_tuple(d: dict[str, object]) -> tuple[str, ...]:
     evidence_ids = d.get("evidence_ids", [])
     if not isinstance(evidence_ids, (list, tuple)) or any(not isinstance(x, str) for x in evidence_ids):
         raise FreezeIntegrityError("freeze: 'evidence_ids' must be a list of strings")
+    return tuple(evidence_ids)
+
+
+def freeze_from_dict(data: Mapping[str, object]) -> EvidenceFreeze:
+    """Rebuild a freeze; missing timestamps stay None, never invented."""
+    d = dict(data)
+    freeze_id, session_id, content_hash = _freeze_ids_triplet(d)
     return EvidenceFreeze(
         freeze_id=freeze_id,
         session_id=session_id,
         wave_id=_narrow_wave(d.get("wave_id")),
         created_at=_coerce_time(_narrow_opt_time(d.get("created_at"), "created_at"), "created_at") or utcnow(),
         as_of=_coerce_time(_narrow_opt_time(d.get("as_of"), "as_of"), "as_of"),
-        evidence_ids=tuple(evidence_ids),
+        evidence_ids=_freeze_evidence_tuple(d),
         content_hash=content_hash,
     )
