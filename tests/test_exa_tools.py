@@ -253,7 +253,8 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
             assert first.budget.reserve_tool_call()
         assert first.budget.reserve_tool_call() is False
         refused = execute_pi_tool("search_tools", {"query": "budget probe"}, first)
-        assert refused.get("error_type") == "budget_exhausted"
+        # §3: Pi per-run count exhaustion is distinct from kernel budgets.
+        assert refused.get("error_type") == "run_budget_exceeded"
         assert _end_run(run_one) == {"ok": True}
         assert _start_run(run_two) == {"ok": True}
         response = _bridge_search(run_two, "AMD revenue")
@@ -387,7 +388,8 @@ def test_pi_search_web_caps_at_25_per_run(monkeypatch: pytest.MonkeyPatch) -> No
         assert "content" in result
         assert "result_type" not in result
     capped = results[25]
-    assert capped.get("error_type") == "budget_exhausted"
+    # §3: Pi per-run search cap is distinct from kernel budgets.
+    assert capped.get("error_type") == "run_budget_exceeded"
     assert "error" in capped
     assert len(calls) == 25
 
@@ -407,7 +409,8 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
         capped = _bridge_search(run_a, "probe 25")
         capped_result = capped["result"]
         assert isinstance(capped_result, dict)
-        assert capped_result.get("error_type") == "budget_exhausted"
+        # §3: Pi per-run search cap is distinct from kernel budgets.
+        assert capped_result.get("error_type") == "run_budget_exceeded"
         assert len(calls) == 25
         assert _end_run(run_a) == {"ok": True}
         assert _start_run(run_b) == {"ok": True}
@@ -429,7 +432,8 @@ def test_pi_search_web_respects_runtime_budget(monkeypatch: pytest.MonkeyPatch) 
     session = PiSessionContext(session_id=_new_run_id("runtime"))
     session.budget.max_runtime = 0.0
     result = execute_pi_tool("search_web", {"query": "probe"}, session)
-    assert result.get("error_type") == "budget_exhausted"
+    # §3: Pi per-run runtime exhaustion surfaces as deadline_exceeded.
+    assert result.get("error_type") == "deadline_exceeded"
     assert "error" in result
     assert calls == []
 
@@ -450,7 +454,8 @@ def test_pi_search_evidence_tokens_enforce_budget(monkeypatch: pytest.MonkeyPatc
     session = PiSessionContext(session_id=_new_run_id("evidence-budget"))
     session.budget.max_evidence_tokens = 5
     result = execute_pi_tool("search_web", {"query": "AMD revenue"}, session)
-    assert result.get("error_type") == "budget_exhausted"
+    # §3: Pi evidence-token exhaustion is distinct from kernel budgets.
+    assert result.get("error_type") == "evidence_budget_exceeded"
     assert len(calls) == 1
     assert session.budget.evidence_tokens == 0
 

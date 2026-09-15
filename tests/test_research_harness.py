@@ -894,7 +894,9 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert "error" not in first, first
     second = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
-    assert second.get("error_type") == "budget_exhausted", second
+    # §3: explicit per-job kernel exhaustion passes through verbatim (no budget_exhausted collapse).
+    assert "tool_budget exhausted" in str(second.get("error", "")), second
+    assert second.get("error_type") != "budget_exhausted", second
     assert len(calls) == 1
     assert calls[0][0] == "search_web" and calls[0][1] == {"query": "NVDA demand"}
     assert repo.get_job(jid).tool_budget == 0
@@ -1689,8 +1691,9 @@ def test_reg_freeze_director_finalize_or_wave(tmp_path: Path, monkeypatch: pytes
         _svc.record_committee_analysis(sid, jid, role,
                                        {"claims": [{"text": "finding", "evidence_ids": [eid]}], "follow_ups": []}, repo=repo)
     out = _svc.decide_wave2(sid, repo=repo)
+    # §3: director gate set has no budget_exhausted (deleted); runtime_exceeded stays.
     assert out["stop_reason"] in ("no_questions", "low_gain", "not_actionable", "continue",
-                                  "max_waves", "jobs_exceeded", "budget_exhausted", "runtime_exceeded")
+                                  "max_waves", "jobs_exceeded", "runtime_exceeded")
 
 # --- synthesis (4): supported trace, inference labeled, unknown, manageable ---
 

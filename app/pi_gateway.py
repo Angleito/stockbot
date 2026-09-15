@@ -98,11 +98,6 @@ _UNAVAILABLE_NEXT_STEP = (
     "above states exactly what failed."
 )
 
-_BUDGET_EXHAUSTED_RESPONSE = (
-    "The research budget was exhausted before a final answer could be "
-    "produced. Retry with a narrower question or fewer tool calls."
-)
-
 _NON_DATA_LIST_KEYS = frozenset({"source_records", "warnings", "metrics", "trends"})
 
 
@@ -600,9 +595,6 @@ def _check_permit_and_schema(
 
 
 def _dispatch_value_error(exc: ValueError) -> dict[str, object]:
-    cmsg = str(exc).lower()
-    if "budget" in cmsg or "exhaust" in cmsg or "quota" in cmsg:
-        return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
     return {"error": str(exc)}
 
 
@@ -631,6 +623,32 @@ def _heartbeat_staged_job(name: str, staged: _StagedContext) -> None:
             _hb_svc.heartbeat_job(staged.job_id, repo=staged.store)
     except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
+
+
+def _run_budget_refusal(name: str, session: PiSessionContext) -> dict[str, object]:
+    """Distinct Pi run-budget refusal: runtime exhaustion vs call-count exhaustion."""
+    with session._lock:
+        remaining = session.budget.runtime_remaining()
+        if name == "search_web":
+            used = session.budget.search_calls
+            maximum = session.budget.max_search_calls
+        else:
+            used = session.budget.tool_calls
+            maximum = session.budget.max_tool_calls
+    if remaining <= 0:
+        return {
+            "error": f"Pi run runtime budget exceeded (remaining {remaining:.1f}s); retry with a narrower question or fewer tool calls.",
+            "error_type": "deadline_exceeded",
+        }
+    if name == "search_web":
+        return {
+            "error": f"Pi run search budget exceeded (used {used}/{maximum} search calls); retry with a narrower question or fewer tool calls.",
+            "error_type": "run_budget_exceeded",
+        }
+    return {
+        "error": f"Pi run tool budget exceeded (used {used}/{maximum} tool calls); retry with a narrower question or fewer tool calls.",
+        "error_type": "run_budget_exceeded",
+    }
 
 
 def _reserve_run_budget(name: str, session: PiSessionContext, dispatch_consumed: bool) -> bool:
@@ -1018,7 +1036,13 @@ def _finalize_success(
     text, envelope, _outcome = scanned
     final_text, evidence_allowed = _dlp_and_evidence_labels(name, text, envelope, session, run_id)
     if not evidence_allowed:
-        return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+        with session._lock:
+            _used = session.budget.evidence_tokens
+            _maximum = session.budget.max_evidence_tokens
+        return {
+            "error": f"Pi evidence-token budget exceeded (used {_used}/{_maximum} tokens); narrow the question or window.",
+            "error_type": "evidence_budget_exceeded",
+        }
     if recorder is not None:
         evidence_id = f"{run_id}:evid:{recorder.next_evidence_seq():04d}"
         _record_success_evidence(
@@ -1108,7 +1132,7 @@ def _run_pre_gates(
     # search_web draws from its dedicated pool, not the generic tool pool.
     # Session lock held only for the reserve; the handler below runs unlocked.
     if not _reserve_run_budget(name, session, dispatch_consumed):
-        return {"error": _BUDGET_EXHAUSTED_RESPONSE, "error_type": "budget_exhausted"}
+        return _run_budget_refusal(name, session)
     return staged, args_for_hash, dispatch_consumed
 
 

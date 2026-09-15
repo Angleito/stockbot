@@ -157,7 +157,9 @@ def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert "error" not in first, first
     second = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
-    assert second.get("error_type") == "budget_exhausted", second
+    # §3: explicit per-job kernel exhaustion passes through verbatim (no budget_exhausted collapse).
+    assert "tool_budget exhausted" in str(second.get("error", "")), second
+    assert second.get("error_type") != "budget_exhausted", second
     assert len(calls) == 1
 
 
