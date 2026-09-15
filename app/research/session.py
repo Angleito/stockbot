@@ -14,6 +14,8 @@ from .models import (
     default_policy,
     new_session_id,
     normalize_time,
+    resolve_source_policy,
+    resolve_temporal_scope,
     utcnow,
     validate_json_mapping,
 )
@@ -87,23 +89,37 @@ def create_session(
     session_id: str | None = None,
     policy: dict[str, JSONValue] | None = None,
     budget: dict[str, JSONValue] | None = None,
+    temporal: str | None = None,
 ) -> ResearchSession:
-    """Create a validated session in CREATED; as_of None means unbounded (never invented)."""
+    """Create a validated session in CREATED; persists source_policy + temporal_scope.
+
+    source_policy derives from policy['research_sources'] ({mode: all|allowlist,
+    sources}); absent key means the SEC-only allowlist default. temporal_scope
+    folds as_of + natural-language time in temporal/query; no time info means
+    latest-available with the cutoff set (None as_of only when explicitly unbounded).
+    """
     if not query:
         raise ValueError("<session>: 'query' must be a non-empty string")
     if not objective:
         raise ValueError("<session>: 'objective' must be a non-empty string")
     now = utcnow()
+    checked_policy = validate_json_mapping(policy, "<session>: 'policy'") if policy is not None else default_policy()
+    parsed_as_of = _parse_session_as_of(as_of)
+    temporal_scope = resolve_temporal_scope(as_of=parsed_as_of, temporal=temporal, query=query, now=now)
+    if temporal_scope.get("mode") == "unbounded":
+        parsed_as_of = None
     session = ResearchSession(
         session_id=session_id or new_session_id(),
         created_at=now,
         updated_at=now,
         query=query,
         objective=objective,
-        as_of=_parse_session_as_of(as_of),
+        as_of=parsed_as_of,
         status=C,
-        policy=validate_json_mapping(policy, "<session>: 'policy'") if policy is not None else default_policy(),
+        policy=checked_policy,
         budget=validate_json_mapping(budget, "<session>: 'budget'") if budget is not None else default_budget(),
+        source_policy=resolve_source_policy(checked_policy),
+        temporal_scope=temporal_scope,
     )
     session.validate("<session>")
     return session

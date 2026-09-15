@@ -75,12 +75,17 @@ from app.research.models import (
 from app.research.repository import ResearchRepository
 from app.research.synthesis.committee import CommitteeDisagreement, compute_disagreement
 
-__all__ = ["LiveModelError", "resume_live", "run_live"]
+__all__ = ["LiveModelError", "normalize_query", "resume_live", "run_live"]
 
+
+def normalize_query(query: str) -> str:
+    """Canonical query key: lowercase + whitespace-collapse for dedup."""
+    return " ".join(query.lower().split())
 
 _KNOWN_AT_KEYS = (
-    "known_at", "acceptanceDatetime", "acceptedDate", "filingDate",
-    "filedAt", "filed", "publishedAt", "published_at", "published",
+    "known_at", "accepted_at", "acceptanceDatetime", "acceptedDate",
+    "published_at", "publishedAt", "published",
+    "filingDate", "filedAt", "filed",
     "date", "timestamp",
 )
 
@@ -99,17 +104,18 @@ def _known_at_scopes(raw: Mapping[str, object]) -> list[object]:
             scopes.append(refs.get("known_at"))
     return scopes
 
-
 def _coerce_known_at(value: object) -> datetime | None:
-    """One candidate: datetime as-is, ISO string parsed, anything else skipped."""
+    """One candidate: datetime UTC-converted, ISO string parsed; anything else skipped."""
     from datetime import datetime as _dt
+    from datetime import timezone as _tz
     if isinstance(value, _dt):
-        return value
+        return value.replace(tzinfo=_tz.utc) if value.tzinfo is None else value.astimezone(_tz.utc)
     if isinstance(value, str) and value.strip():
         try:
-            return _dt.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = _dt.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError:
             return None
+        return parsed.replace(tzinfo=_tz.utc) if parsed.tzinfo is None else parsed.astimezone(_tz.utc)
     return None
 
 
@@ -230,15 +236,15 @@ def _merge_disagreement(
     )
 
 class BudgetLedger:
-    """One authoritative run budget: atomic consume, read-only total."""
-    def __init__(self, limit: int) -> None:
+    """One authoritative run budget: atomic consume, read-only total (None = unlimited)."""
+    def __init__(self, limit: int | None) -> None:
         self._limit = limit
         self._used = 0
         self._lock = threading.Lock()
     def consume_research_dispatch(self) -> bool:
-        """Increment once before a real research dispatch; False when exhausted."""
+        """Increment once before a real research dispatch; False only on an explicit int limit."""
         with self._lock:
-            if self._used >= self._limit:
+            if self._limit is not None and self._used >= self._limit:
                 return False
             self._used += 1
             return True
@@ -310,6 +316,7 @@ class _LiveRun:
         self.dossier_ids: list[str] = []
         self.source_jobs: list[str] = []
         self.budget = BudgetLedger(limits.max_tool_calls)
+        self.executed_queries: set[str] = set()
         self.t0: float = monotonic()
         self._lock = threading.Lock()
         self.trace: TraceRecorder | None = None
@@ -537,16 +544,39 @@ class _LiveRun:
             return {"matches": self._match_names(inner)}
         return raw
 
+    def _query_key(self, args: dict[str, object]) -> str:
+        """Normalized search key: tool args query lower + whitespace-collapse."""
+        inner_args = args.get("arguments")
+        query = inner_args.get("query") if isinstance(inner_args, dict) else args.get("query")
+        text = query if isinstance(query, str) else ""
+        return normalize_query(text)
+
+    def _duplicate_query(self, args: dict[str, object]) -> bool:
+        key = self._query_key(args)
+        if not key:
+            return False
+        if key in self.executed_queries:
+            return True
+        self.executed_queries.add(key)
+        return False
+
 
     def _guarded_tool_call(self, sid: str, inner: str, name: str, args: dict[str, object]) -> tuple[dict[str, object], float]:
-        """Policy + budget gates, timed dispatch, deadline and error checks; returns (raw, duration_ms)."""
+        """Policy + loop gates, timed dispatch, deadline and error checks; returns (raw, duration_ms).
+
+        Tool volume is unlimited by default; an explicit int BudgetLedger limit
+        still rejects via policy_rejection. Exact query repeats soft-skip as
+        duplicate_research_action (telemetry, no re-execution).
+        """
         if not is_sec_tool(inner):
             self._emit(sid, "policy.denied", {"tool": inner, "reason": "POLICY_DENIED"})
             raise ValueError(f"POLICY_DENIED: non-SEC tool {inner!r}")
         if not self.budget.consume_research_dispatch():
-            self._emit(sid, "budget.exhausted", {"tool": inner, "reason": "TOOL_BUDGET_EXHAUSTED"})
-            raise ValueError("TOOL_BUDGET_EXHAUSTED: run tool budget exhausted")
-        self._save_budget_used(sid, strict=True)
+            self._emit(sid, "budget.exhausted", {"tool": inner, "reason": "policy_rejection"})
+            raise ValueError("policy_rejection: explicit tool limit reached")
+        if inner == "search_sec_filings" and self._duplicate_query(args):
+            self._emit(sid, "tool.skipped", {"tool": inner, "reason": "duplicate_research_action"})
+            return {"evidence_ids": []}, 0.0
         from time import perf_counter as _pc
         _t0 = _pc()
         try:
@@ -883,11 +913,15 @@ class _LiveRun:
 
     @staticmethod
     def _ladder_category(low: str) -> FailureCategory | None:
-        """Shared keyword ladder: timeout, budget, policy arms; None falls through."""
+        """Shared keyword ladder: timeout, policy, and distinct loop arms; None falls through."""
         if "timeout" in low or "expired" in low or "timed_out" in low:
             return FailureCategory.TIMEOUT
-        if "budget" in low:
-            return FailureCategory.TOOL_BUDGET_EXHAUSTED
+        if "research_loop_detected" in low or "research_loop" in low:
+            return FailureCategory.RESEARCH_LOOP_DETECTED
+        if "duplicate_research_action" in low:
+            return FailureCategory.DUPLICATE_RESEARCH_ACTION
+        if "policy_rejection" in low:
+            return FailureCategory.POLICY_REJECTION
         if "policy" in low or "denied" in low:
             return FailureCategory.POLICY_DENIED
         return None
@@ -1224,9 +1258,15 @@ class _LiveRun:
             self.store.save_session(cur)
 
     def _store_empty_terminal(self, session_id: str) -> None:
-        """Persist completed no-evidence result (empty claims) and finish trace."""
+        """Persist completed no-evidence result (limitations answer, empty claims)."""
         try:
-            empty: dict[str, JSONValue] = {"answer": "", "freeze_id": "", "claims": []}
+            empty: dict[str, JSONValue] = {
+                "answer": ("No PIT-eligible SEC evidence was found; the question cannot be answered "
+                           "from SEC filings within the session scope. Limitations: SEC-only, "
+                           "as_of-filtered corpus."),
+                "freeze_id": "",
+                "claims": [],
+            }
             cur = self.store.get_session(session_id)
             cur = replace(cur, final_result=empty, updated_at=utcnow())
             if cur.status not in ("failed", "completed", "cancelled"):
@@ -1236,34 +1276,36 @@ class _LiveRun:
             pass
         try:
             if self.trace is not None:
-                self.trace.finish("no_questions:empty-wave1", "completed")
+                self.trace.finish("complete:empty-with-limitations", "completed")
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
 
     def _run_wave2(self, wave1: Wave1Result, targeted: str) -> dict[str, object] | None:
-        """One targeted SEC wave: fetch E2 -> freeze -> committee; None when E2 is empty."""
+        """One targeted SEC wave: fetch next-gen freeze -> committee; None when empty."""
         sid: str = wave1.session_id
         d1: CommitteeDisagreement | None = wave1.disagreement
         if d1 is None:
             return None
+        cur = self.store.get_session(sid)
+        nxt = max(cur.current_wave, len(cur.freeze_ids), wave1.wave_id) + 1
         sess = self.store.get_session(sid)
         if sess.status == SessionStatus.ANALYZING.value:
             sess = _session.transition_session(sess, SessionStatus.TARGETED_RESEARCH)
             self.store.save_session(sess)
-        sess = replace(self.store.get_session(sid), current_wave=2, updated_at=utcnow())
+        sess = replace(self.store.get_session(sid), current_wave=nxt, updated_at=utcnow())
         self.store.save_session(sess)
-        self._emit(sid, "wave.started", {"wave_id": 2, "targeted_question": targeted})
-        src2: str = self._open_source_job(sid, 2, targeted or self.question)
-        e2: list[str] = self._fetch_wave(sid, 2, targeted or self.question, src2, "w2-")
+        self._emit(sid, "wave.started", {"wave_id": nxt, "targeted_question": targeted})
+        src2: str = self._open_source_job(sid, nxt, targeted or self.question)
+        e2: list[str] = self._fetch_wave(sid, nxt, targeted or self.question, src2, "w2-")
         if not e2:
-            self._emit(sid, "wave.stopped", {"reason": "no_questions:empty-wave2"})
+            self._emit(sid, "wave.stopped", {"reason": "complete:empty-with-limitations"})
             return None
-        fid2: str = self._freeze_wave(sid, 2)
-        s2, b2, r2 = self._committee_wave(sid, 2, "w2-")
+        fid2: str = self._freeze_wave(sid, nxt)
+        s2, b2, r2 = self._committee_wave(sid, nxt, "w2-")
         d2: CommitteeDisagreement = compute_disagreement(s2, b2, r2)
         merged: CommitteeDisagreement = _merge_disagreement(d1, d2)
         w2result = Wave1Result(
-            session_id=sid, wave_id=2, freeze_id=fid2, evidence_ids=e2,
+            session_id=sid, wave_id=nxt, freeze_id=fid2, evidence_ids=e2,
             stock=s2, bull=b2, bear=r2, disagreement=merged,
         )
         return {
@@ -1375,9 +1417,9 @@ def _run_one_committee(run: _LiveRun, store: ResearchRepository, question: str, 
     sid = run._create_session(question, as_of_str, "one-committee")
     eids = run._fetch(sid)
     if not eids:
-        run._emit(sid, "wave.stopped", {"reason": "no_questions:empty-wave1"})
+        run._emit(sid, "wave.stopped", {"reason": "complete:empty-with-limitations"})
         run._store_empty_terminal(sid)
-        return _empty_terminal_result(sid, wave_id, eids, run.dossier_ids[0] if run.dossier_ids else "", "no_questions:empty-wave1")
+        return _empty_terminal_result(sid, wave_id, eids, run.dossier_ids[0] if run.dossier_ids else "", "complete:empty-with-limitations")
     fid = run._create_freeze(sid)
     sess = store.get_session(sid)
     if sess.status == SessionStatus.FREEZING.value:
@@ -1430,7 +1472,7 @@ def _close_wave1_result(run: _LiveRun, result: Wave1Result, did_out: str, interr
             "disagreement": None, "stop_reason": f"interrupted:{interrupt_after}",
         }
     run._store_empty_terminal(result.session_id)
-    return _empty_terminal_result(result.session_id, result.wave_id, list(result.evidence_ids), did_out, "no_questions:empty-wave1")
+    return _empty_terminal_result(result.session_id, result.wave_id, list(result.evidence_ids), did_out, "complete:empty-with-limitations")
 
 
 def run_live(
@@ -1770,12 +1812,12 @@ def resume_live(
     eids: list[str] = [e.evidence_id for e in run.ledger.list_session(session_id) if e.wave_id == wave]
     eids, _ = _fetch_or_reuse_wave(run, store, session_id, wave, question, eids)
     if not eids:
-        run._record_stop(session_id, "no_questions:empty-wave1")
+        run._record_stop(session_id, "complete:empty-with-limitations")
         run._store_empty_terminal(session_id)
         return {
             "session_id": session_id, "wave_id": wave, "freeze_id": "",
             "evidence_ids": eids, "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
             "stock": None, "bull": None, "bear": None, "disagreement": None,
-            "stop_reason": "no_questions:empty-wave1",
+            "stop_reason": "complete:empty-with-limitations",
         }
     return _close_resumed_wave(run, store, session_id, wave, eids)

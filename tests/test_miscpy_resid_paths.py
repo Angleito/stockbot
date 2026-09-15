@@ -120,8 +120,7 @@ def test_miscpy_freeze_wave_records_open_source_jobs(
     running = [j for j in repo.list_jobs(sid) if j.status == "running"][0]
     repo.save_job(_jobs.complete_job(running, result={"ok": True}))
     assert len(svc._freeze_wave_records(repo, sid, 1)) == 1
-    with pytest.raises(ValueError, match="has no evidence"):
-        svc._freeze_wave_records(repo, sid, 0)
+    assert svc._freeze_wave_records(repo, sid, 0) == []
 
 
 # -- finra _parse_live_methods: tuple/list/str/other arms --

@@ -347,7 +347,7 @@ def test_dispatch_sec_job_rejects_non_sec_tool(tmp_path: Path, monkeypatch: pyte
         svc.authorize_and_consume_dispatch(sid, sec_job, "get_short_interest", repo=repo)
     ok = svc.authorize_and_consume_dispatch(sid, sec_job, "get_sec_filing", repo=repo)
     assert ok["tool_calls_used"] == 1
-    assert repo.get_job(sec_job).tool_budget == 29
+    assert repo.get_job(sec_job).tool_budget is None  # §1 unlimited default
 
 
 def test_dispatch_unknown_job_remaps_to_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -749,11 +749,17 @@ def test_freeze_rejects_wrong_status_on_refreeze(tmp_path: Path, monkeypatch: py
         svc.freeze_session(sid, 1, repo=repo)
 
 
-def test_freeze_rejects_empty_wave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_freeze_empty_wave_proceeds_with_limitations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
-    sid, _ = _sid(repo)
-    with pytest.raises(ValueError, match="has no evidence"):
-        svc.freeze_session(sid, 1, repo=repo)
+    sid, src = _sid(repo)
+    svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"},
+                             evidence_ids=[], repo=repo)
+    out = svc.freeze_session(sid, 1, repo=repo)
+    assert out["freeze_id"] == f"{sid}:1:freeze"
+    pna = out["pending_next_action"]
+    assert isinstance(pna, dict)
+    assert pna["verb"] == "EXECUTE_COMMITTEE"
+    assert "limitation" in str(out.get("limitations", "")).lower()
 
 
 def test_freeze_tolerates_duplicate_save_and_reports_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -766,7 +772,7 @@ def test_freeze_tolerates_duplicate_save_and_reports_gate(tmp_path: Path, monkey
     assert out["freeze_id"] == f"{sid}:1:freeze"
 
 
-def test_freeze_insufficient_coverage_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_freeze_insufficient_coverage_proceeds_with_limitations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
@@ -777,7 +783,8 @@ def test_freeze_insufficient_coverage_gate(tmp_path: Path, monkeypatch: pytest.M
     assert out["coverage_gate"] == "insufficient"
     pna = out["pending_next_action"]
     assert isinstance(pna, dict)
-    assert pna["verb"] == "FINALIZE_INSUFFICIENT"
+    assert pna["verb"] == "EXECUTE_COMMITTEE"
+    assert "limitation" in str(out.get("limitations", "")).lower()
 
 
 def test_freeze_wave2_from_targeted_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1547,8 +1554,7 @@ def test_consume_exhausted_job_budget(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_consume_exhausted_session_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    s = _sess()
-    s = dataclasses.replace(s, budget={**s.budget, "tool_calls_used": 10**9})
+    s = _sess(budget={"total_tool_budget": 5, "tool_calls_used": 10**9})  # §1 explicit-int still enforced
     _, job = _jobs.create_job(s, list[Job]([]), job_type="source_agent", owner="t")
     repo.save_session_and_job(s, _jobs.start_job(job))
     with pytest.raises(ValueError, match="tool budget exhausted"):
@@ -1585,7 +1591,7 @@ def test_create_bad_wave_type() -> None:
 
 
 def test_create_wave_outside() -> None:
-    with pytest.raises(ValueError, match="wave_budget_exhausted"):
+    with pytest.raises(ValueError, match="wave_limit_exceeded"):  # §3 distinct error
         _jobs.create_job(_sess(), [], job_type="scout", owner="t", wave_id=999)
 
 
@@ -1620,7 +1626,7 @@ def test_create_deadline_ok_and_defaults() -> None:
     s, j = _jobs.create_job(_sess(), [], job_type="scout", owner="t", deadline="2025-06-01T00:00:00+00:00")
     assert j.deadline is not None
     s2, j2 = _jobs.create_job(_sess(), [], job_type="source_agent", owner="t")
-    assert j2.deadline is not None and j2.tool_budget is not None
+    assert j2.deadline is not None and j2.tool_budget is None  # §1 unlimited default
 
 
 # ---- decide_wave2 arms ----
@@ -1686,7 +1692,7 @@ def test_wave2_tools() -> None:
     deps, _ = _deps()
     w1 = Wave1Result(session_id="rs:x", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"])
     d = decide_wave2(w1, deps=deps, budgets=DirectorBudgets(max_tool_calls=0), tool_calls_used=0)
-    assert d.stop_reason == "budget_exhausted"
+    assert d.stop_reason == "no_questions"  # §1 director gate removed; dispatch enforces explicit ints
 
 
 def test_wave2_no_questions() -> None:
@@ -3854,7 +3860,7 @@ def test_categorize_fetch_error_ladder() -> None:
     setattr(tagged, "_failure_category", FailureCategory.POLICY_DENIED)
     assert _LiveRun._categorize_fetch_error(tagged) == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_fetch_error(TimeoutError("timed out")) == FailureCategory.TIMEOUT
-    assert _LiveRun._categorize_fetch_error(RuntimeError("tool budget exhausted")) == FailureCategory.TOOL_BUDGET_EXHAUSTED
+    assert _LiveRun._categorize_fetch_error(RuntimeError("tool budget exhausted")) == FailureCategory.TOOL_ERROR  # §3 bare budget no longer collapses
     assert _LiveRun._categorize_fetch_error(RuntimeError("POLICY_DENIED nope")) == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_fetch_error(RuntimeError("other")) == FailureCategory.TOOL_ERROR
 
@@ -3865,7 +3871,7 @@ def test_categorize_committee_error_ladder() -> None:
     tagged = RuntimeError("x")
     setattr(tagged, "_failure_category", FailureCategory.TOOL_ERROR)
     assert _LiveRun._categorize_committee_error(tagged) == FailureCategory.TOOL_ERROR
-    assert _LiveRun._categorize_committee_error(RuntimeError("budget gone")) == FailureCategory.TOOL_BUDGET_EXHAUSTED
+    assert _LiveRun._categorize_committee_error(RuntimeError("budget gone")) == FailureCategory.TIMEOUT  # §3 falls through to TIMEOUT
     assert _LiveRun._categorize_committee_error(RuntimeError("denied by policy")) == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_committee_error(RuntimeError("uncited claim here")) == FailureCategory.MODEL_OUTPUT_FAILURE
     assert _LiveRun._categorize_committee_error(RuntimeError("tool_error bad")) == FailureCategory.TOOL_ERROR
@@ -3879,7 +3885,7 @@ def test_categorize_scout_error_ladder() -> None:
     setattr(tagged, "_failure_category", FailureCategory.TIMEOUT)
     assert _LiveRun._categorize_scout_error(tagged, "") == FailureCategory.TIMEOUT
     assert _LiveRun._categorize_scout_error(TimeoutError("expired"), "") == FailureCategory.TIMEOUT
-    assert _LiveRun._categorize_scout_error(RuntimeError("scout tool budget exhausted"), "") == FailureCategory.TOOL_BUDGET_EXHAUSTED
+    assert _LiveRun._categorize_scout_error(RuntimeError("scout tool budget exhausted"), "") == FailureCategory.TOOL_ERROR  # §3 bare budget no longer collapses
     assert _LiveRun._categorize_scout_error(RuntimeError("policy denied"), "") == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_scout_error(RuntimeError("boom"), "model") == FailureCategory.MODEL_ERROR
     assert _LiveRun._categorize_scout_error(RuntimeError("boom"), "tool") == FailureCategory.TOOL_ERROR
@@ -3997,7 +4003,13 @@ def test_run_live_empty_wave_terminal(tmp_path: Path, monkeypatch: pytest.Monkey
             return json.dumps([])
         return json.dumps({"claims": [], "follow_ups": []})
     out = run_live("empty?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _empty_dispatch, _empty_model, repo=repo)
-    assert out["stop_reason"] == "no_questions:empty-wave1"
+    assert out["stop_reason"] == "complete:wave1"
+    assert out["freeze_id"] and out["evidence_ids"] == []
+    sid = out["session_id"]
+    assert isinstance(sid, str)
+    final = repo.get_session(sid).final_result
+    assert isinstance(final, dict) and str(final.get("answer", "")).strip()
+    assert final.get("freeze_id") == out["freeze_id"]
 
 
 def test_run_live_one_committee_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4012,7 +4024,7 @@ def test_run_live_one_committee_empty(tmp_path: Path, monkeypatch: pytest.Monkey
             return json.dumps([])
         return json.dumps({"claims": [], "follow_ups": []})
     out = run_live("empty?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _empty_dispatch, _empty_model, repo=repo, interrupt_after="one-committee")
-    assert out["stop_reason"] == "no_questions:empty-wave1"
+    assert out["stop_reason"] == "complete:empty-with-limitations"
 
 
 def test_policy_denied_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4042,7 +4054,7 @@ def test_tool_budget_exhausted_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from app.research.director import DirectorBudgets
     repo = ResearchRepository()
     budgets = DirectorBudgets(max_tool_calls=0)
-    with pytest.raises(Exception, match="TOOL_BUDGET_EXHAUSTED"):
+    with pytest.raises(Exception, match="policy_rejection|POLICY_REJECTION"):  # §1 explicit tool limit reached
         run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, budgets=budgets)
     # also direct ledger consume check
     from app.research.runner import BudgetLedger

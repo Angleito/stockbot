@@ -157,6 +157,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         requires_evidence=False,
         notes="Timeout closure: Pi TimeoutExpired must persist session FAILED + job FAILED(TIMEOUT) + model.failed/wave.stopped before raising LiveModelError; resume must show failed with zero RUNNING jobs and create no duplicates (timeout-requires-failed-job).",
     ),
+    Scenario(
+        name="gs-openai-sec-only",
+        family=ScenarioFamily.MULTI_STEP,
+        question="What happens to Goldman Sachs if OpenAI goes bankrupt?",
+        ticker="GS",
+        as_of=None,
+        expected_tools=("find_sec_entities", "list_sec_filings", "get_sec_document", "search_sec_filings"),
+        requires_evidence=True,
+        notes="SEC-only architecture eval: GS direct OpenAI exposure + indirect channels, latest filings pinned, unbounded useful reads, duplicate-no-progress rejected, raw preserved + derived views linked, one submit, freeze, same-freeze committee, unknown stays unknown, facts/inference split, material claims trace to raw.",
+    ),
 )
 
 

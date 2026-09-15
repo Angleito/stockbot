@@ -204,7 +204,7 @@ def test_run_one_committee_empty_and_full(tmp_path: Path, monkeypatch: pytest.Mo
         return []
     run_empty._fetch = _empty_fetch
     out0 = _run_one_committee(run_empty, repo, "q?", "", 1)
-    assert out0["stop_reason"] == "no_questions:empty-wave1"
+    assert out0["stop_reason"] == "complete:empty-with-limitations"
     assert out0["stock"] is None and out0["freeze_id"] == ""
     out = _run_one_committee(run, repo, "NVDA demand?", "2025-06-30T00:00:00+00:00", 1)
     assert out["stop_reason"] == "interrupted:one-committee"

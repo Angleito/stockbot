@@ -62,6 +62,33 @@ def _known_as_of(filing: Filing, as_of: str | None) -> bool:
     return value is not None and value[:10] <= as_of
 
 
+def resolve_latest_filing(
+    filings: list[Filing],
+    form: str = "10-K",
+    as_of: str | date | datetime | None = None,
+) -> Filing | None:
+    """Latest PIT-eligible filing of one form family (10-K/10-Q/8-K + /A); None when absent.
+
+    No-date questions pin this accession first, then check the latest 10-Q +
+    relevant 8-Ks; historical as_of/range questions may use older filings.
+    """
+    bound = _check_as_of(as_of)
+    want = form.strip().upper()
+    family = {want, f"{want}/A"} if not want.endswith("/A") else {want}
+    best: Filing | None = None
+    best_day = ""
+    for filing in filings:
+        if filing.form.strip().upper() not in family:
+            continue
+        if not _known_as_of(filing, bound):
+            continue
+        value, _basis = pit_of(filing)
+        day = value[:10] if value is not None else filing.filed_at
+        if best is None or day > best_day:
+            best, best_day = filing, day
+    return best
+
+
 def list_sec_filings(
     ticker_or_cik: str | int,
     forms: str | list[str] | tuple[str, ...] | None = None,

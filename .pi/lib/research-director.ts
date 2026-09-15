@@ -22,15 +22,8 @@ export function setResearchBridge(fn: BridgeCall): void {
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
 type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
 
-// ponytail: Mem is session pointer plus a local fetch backstop; stage still derives
-// from kernel inspect, but the attempt count itself is in-memory. Ceiling: restart or
-// resume resets the count, worst case 3 extra fetch prompts per restart. Terminal
-// persists via kernel research.session.cancel, so resume after cancel sees TERMINAL
-// and returns done. Upgrade path: kernel-persisted attempt count if restarts mid-fetch matter.
-const MAX_FETCH_ATTEMPTS = 3;
 interface Mem {
  sessionId: string;
- fetchAttempts: number;
 }
 const runs = new Map<string, Mem>();
 export function clearResearchRun(runId: string): void {
@@ -230,8 +223,8 @@ function fetchPrompt(sessionId: string, jobId: string, question: string, asOf?: 
   `Call call_tool with name="search_sec_filings" (or list_sec_filings / get_sec_document), then record each finding with ` +
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ${cutoff}` +
-  `Out-of-order calls fail closed; up to 3 SEC dispatches, then the driver closes the run as no_questions:empty-wave1 when SEC has no coverage. ` +
-  `When source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. Do not attempt to freeze. Do not keep adding evidence to fill the cap.`
+  `Out-of-order calls fail closed. If a query returned nothing new, try the next materially-new query (skip normalized duplicates); kernel enforces dedup/budget/deadline, Director decides freeze/waves. ` +
+  `When this source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. This only completes this source job and returns control to the Director; it never freezes, ends waves, or ends the session. Do not attempt to freeze.`
  );
 }
 
@@ -243,8 +236,8 @@ function wavePrompt(wave: number, sessionId: string, jobId: string, targeted: st
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ` +
   `known_at is required as ISO-8601 on or before the session cutoff ${asOf || "unbounded"}. ` +
-  `When source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. Do not attempt to freeze. Do not keep adding evidence to fill the cap. ` +
-  `If evidence is insufficient or you need more direction, include it in unresolved_questions; the director decides the next wave or asks NEED-USER.`
+  `When this source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. This only completes this source job and returns control to the Director; it never freezes, ends waves, or ends the session. Do not attempt to freeze. ` +
+  `If evidence is insufficient, include it in unresolved_questions; the director decides the next wave.`
  );
 }
 function wave2Prompt(sessionId: string, jobId: string, targeted: string, asOf?: string): string {
@@ -255,7 +248,7 @@ function trioJobIdsForFreeze(session: Json, fid: string): string[] {
  return strs(objs(session.committee_runs).find((e) => e.freeze_id === fid)?.jobs);
 }
 
-function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowedIds: string): string {
+function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowedIds: string, note = ""): string {
  const calls = mapping
   .map(
    (j) =>
@@ -263,7 +256,7 @@ function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowe
   )
   .join(" ");
  return (
-  `Fresh context? Reload first: Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "freeze", "resource_id": "${freezeId}"}, ` +
+  `${note}Fresh context? Reload first: Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "freeze", "resource_id": "${freezeId}"}, ` +
   `then Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "evidence", "resource_id": "<id>"} for each id you will cite. ` +
   `Committee may READ frozen state; it must NOT fetch new evidence. Then ` +
   `Evidence frozen as ${freezeId}. Author the trio now, one call per role (${calls}). ` +
@@ -298,7 +291,7 @@ async function freezeWave(sessionId: string, wave: number, dataRoot?: string, as
  return rpc("research.freeze.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
 }
 
-async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string): Promise<Advance> {
+async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
  let snapshot: InspectSnapshot;
  try {
   snapshot = await inspect(sessionId, dataRoot, asOf);
@@ -308,7 +301,7 @@ async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf
  const d = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
  const allowed = d.freezeEvidenceIds.join(", ");
  if (d.trio.done) {
-  return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `Trio complete for research session ${sessionId}. `, trioJobIdsForFreeze(snapshot.session, d.trio.fid)) };
+  return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `${note}Trio complete for research session ${sessionId}. `, trioJobIdsForFreeze(snapshot.session, d.trio.fid)) };
  }
  const seeded = d.trio.eligible.slice(0, 3);
  if (seeded.length === 0) {
@@ -317,12 +310,12 @@ async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf
    const started = await rpc("research.job.start", { session_id: sessionId, type: role, wave_id: wave }, dataRoot, asOf);
    const nid = str(started.job_id);
    if (!nid) throw new Error("research.job.start failed: missing job_id");
-   return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, [{ job_id: nid, job_type: role, wave_id: wave }], allowed) };
+   return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, [{ job_id: nid, job_type: role, wave_id: wave }], allowed, note) };
   } catch (err) {
    return { done: false, prompt: `Committee job (${role}) for research session ${sessionId} failed (${err instanceof Error ? err.message : String(err)}). Keep authoring analyses with Call call_tool with name="research_add_analysis".` };
   }
  }
- return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, seeded, allowed) };
+ return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, seeded, allowed, note) };
 }
 
 export async function startResearch(
@@ -335,7 +328,7 @@ export async function startResearch(
  const sessionId = str(created.session_id);
  if (!sessionId) throw new Error("research.session.create failed: missing session_id");
  const { session, jobs, latestFreeze } = await inspect(sessionId, dataRoot, asOf);
- runs.set(runId, { sessionId, fetchAttempts: 0 });
+ runs.set(runId, { sessionId });
  return { sessionId, prompt: fetchPrompt(sessionId, deriveState(session, jobs, latestFreeze).jobId, question, asOf) };
 }
 
@@ -345,7 +338,7 @@ export async function resumeResearch(
  dataRoot?: string,
  asOf?: string,
 ): Promise<{ sessionId: string; prompt: string }> {
- runs.set(runId, { sessionId, fetchAttempts: 0 });
+ runs.set(runId, { sessionId });
  const adv = await advanceOnAgentEnd(runId, "", dataRoot, asOf);
  // Terminal answers reuse the persisted final answer and leave no active run
  // binding (advance deletes it); every other state reuses the advance prompt.
@@ -374,17 +367,13 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  const d = deriveState(session, jobs, latestFreeze);
  const evidence = strs(session.evidence_ids);
  if (evidence.length === 0) {
-  m.fetchAttempts += 1;
-  if (m.fetchAttempts >= MAX_FETCH_ATTEMPTS) {
-   try {
-    await rpc("research.session.cancel", { session_id: sid }, dataRoot, asOf);
-   } catch {
-    // cancel is best-effort; the run still terminates locally.
-   }
-   runs.delete(runId);
-   return { done: true, answer: `Research session ${sid} closed: no SEC evidence after ${MAX_FETCH_ATTEMPTS} fetch attempts (no_questions:empty-wave1).` };
+  const activeSrc = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === d.activeWave);
+  const activeStatus = str(activeSrc?.status);
+  if (!activeSrc || activeStatus === "running" || activeStatus === "queued") {
+   return { done: false, prompt: fetchPrompt(sid, d.jobId, str(session.query) || str(session.objective) || sid, asOf) };
   }
-  return { done: false, prompt: fetchPrompt(sid, d.jobId, str(session.query) || str(session.objective) || sid, asOf) };
+  // Active source job closed with no evidence: fall through to freeze;
+  // empty-with-limitations freeze succeeds kernel-side and carries limitations forward.
  }
  const freezes = strs(session.freeze_ids);
  if (freezes.length === 0) {
@@ -398,12 +387,9 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
-  const verb = str((frozen.pending_next_action as Json | undefined)?.verb ?? (latestFreeze?.pending_next_action as Json | undefined)?.verb ?? "");
   const reason = str((frozen.pending_next_action as Json | undefined)?.reason ?? (latestFreeze?.pending_next_action as Json | undefined)?.reason ?? "");
-  // ponytail: director owns next-wave choice; insufficient ends the run with an explicit NEED-USER ask (no committee on thin evidence, no auto-loop). Ceiling: policy max_waves + job budgets backstop runaway waves; auto-start caps at wave 2, N>2 finalizes until reply-parsing lands.
-  if (verb === "FINALIZE_INSUFFICIENT")
-   return { done: true, answer: `SEC insufficient: ${reason || "no sufficient source coverage"}. NEED-USER: reply with the follow-up question or domain for wave 2, or confirm stop.` };
-  return seedTrio(sid, 1, dataRoot, asOf);
+  const limit = reason ? ` Evidence limitations: ${reason}.` : "";
+  return seedTrio(sid, 1, dataRoot, asOf, limit ? `${limit} ` : "");
  }
  if (!d.trio.done) {
   // Reuse running committee work on this exact freeze; start only the next
@@ -466,11 +452,9 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
-  const verbN = str((frozenN.pending_next_action as Json | undefined)?.verb ?? "");
   const reasonN = str((frozenN.pending_next_action as Json | undefined)?.reason ?? "");
-  if (verbN === "FINALIZE_INSUFFICIENT")
-   return { done: true, answer: `SEC insufficient: ${reasonN || "no sufficient source coverage"}. NEED-USER: reply with the follow-up question or domain for wave ${N + 1}, or confirm stop.` };
-  return seedTrio(sid, N, dataRoot, asOf);
+  const limitN = reasonN ? ` Evidence limitations: ${reasonN}.` : "";
+  return seedTrio(sid, N, dataRoot, asOf, limitN ? `${limitN} ` : "");
  }
  return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Waves complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `, trioJobIdsForFreeze(session, d.trio.fid)) };
 }

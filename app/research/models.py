@@ -9,10 +9,11 @@ kernel stands alone.
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 
 JSONScalar = str | int | float | bool | None
@@ -62,10 +63,10 @@ def utcnow() -> datetime:
 
 
 def normalize_time(value: datetime) -> datetime:
-    """Attach UTC to a naive datetime; aware values pass through."""
+    """Naive datetimes attach UTC; aware values convert to UTC (same instant, never relabeled)."""
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
-    return value
+    return value.astimezone(timezone.utc)
 
 
 def new_session_id() -> str:
@@ -121,7 +122,7 @@ class JobStatus(StrEnum):
 
 
 class FailureCategory(StrEnum):
-    """Closed failure vocabulary (16 values); free text lives in message."""
+    """Closed failure vocabulary (25 values); free text lives in message."""
 
     TIMEOUT = "timeout"
     TOKEN_BUDGET_EXHAUSTED = "token_budget_exhausted"
@@ -139,18 +140,27 @@ class FailureCategory(StrEnum):
     FREEZE_MISMATCH = "freeze_mismatch"
     COMMITTEE_DEADLOCK = "committee_deadlock"
     SYNTHESIS_FAILED = "synthesis_failed"
+    CONTEXT_CAPACITY_EXCEEDED = "context_capacity_exceeded"
+    RESPONSE_TOO_LARGE = "response_too_large"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    PROVIDER_ERROR = "provider_error"
+    TOOL_OUTPUT_LIMIT = "tool_output_limit"
+    STORAGE_ERROR = "storage_error"
+    POLICY_REJECTION = "policy_rejection"
+    DUPLICATE_RESEARCH_ACTION = "duplicate_research_action"
+    RESEARCH_LOOP_DETECTED = "research_loop_detected"
 
-# Control-plane bounds: single authority for source runtime, heartbeat staleness,
-# and per-source evidence cap. One constant each; delete duplicates elsewhere.
+# Control-plane bounds: single authority for source runtime and heartbeat staleness.
+# Budgets are session/tool/token/cost totals only; no per-source numeric gate.
 SOURCE_RUNTIME_BUDGET_S = 600
 HEARTBEAT_STALE_S = 120
 MAX_SOURCE_EVIDENCE_N = 8
 # ponytail: single nested defaults dict; per-job overrides only via explicit
 # create_job kwargs. Add sections when a new job type needs children/tools.
 DEFAULT_BUDGETS: dict[str, JSONValue] = {
-    "research": {"max_runtime": 600, "max_total_jobs": 20, "max_parallel": 6, "max_waves": 2},
-    "source": {"max_children": 4, "max_tool": 30},
-    "scout": {"max_children": 0, "max_tool": 12, "max_runtime": 120},
+    "research": {"max_runtime": 600, "max_total_jobs": 20, "max_parallel": 6, "max_waves": 2, "max_tool_calls": None},
+    "source": {"max_children": 4, "max_tool": None},
+    "scout": {"max_children": 0, "max_tool": None, "max_runtime": 120},
     "committee": {"max_parallel": 3},
 }
 
@@ -161,16 +171,356 @@ def default_policy() -> dict[str, JSONValue]:
     assert isinstance(out, dict)
     return out
 
-
 def default_budget() -> dict[str, JSONValue]:
-    """Fresh copy of the session budget (mirrors the research section)."""
+    """Fresh copy of the session budget (research section + dispatch totals)."""
     out = validate_json_value(DEFAULT_BUDGETS["research"], "<defaults>")
     assert isinstance(out, dict)
+    out["deadline_seconds"] = SOURCE_RUNTIME_BUDGET_S
+    out["total_tool_budget"] = None  # unlimited by default; explicit int only
+    out["total_token_budget"] = None
+    out["total_cost_budget"] = None
     return out
 
 
 DEFAULT_POLICY: dict[str, JSONValue] = default_policy()
 DEFAULT_BUDGET: dict[str, JSONValue] = default_budget()
+SOURCE_POLICY_MODES = frozenset({"all", "allowlist"})
+TEMPORAL_SCOPE_MODES = frozenset({"latest-available", "latest", "unbounded", "as_of", "range"})
+
+
+def default_source_policy() -> dict[str, JSONValue]:
+    """Fresh SEC-only allowlist (kernel default; mode all only when requested)."""
+    return {"allowed": ["SEC"], "denied": [], "mode": "allowlist"}
+
+
+def default_temporal_scope() -> dict[str, JSONValue]:
+    """Fresh latest-available scope (cutoff set at resolve time, never invented)."""
+    return {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+
+
+def validate_source_policy(value: object, where: str = "<dict>") -> dict[str, JSONValue]:
+    """Validate a source_policy mapping ({allowed, denied, mode}); returns a copy."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{where}: 'source_policy' must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    mode = value.get("mode", "all")
+    if not isinstance(mode, str) or mode.strip().lower() not in SOURCE_POLICY_MODES:
+        raise ValueError(f"{where}: 'source_policy.mode' must be one of {sorted(SOURCE_POLICY_MODES)}, got {value.get('mode')!r}")
+    allowed: list[JSONValue] = _json_str_list(_req_list_str(value, "allowed", where))
+    denied: list[JSONValue] = _json_str_list(_req_list_str(value, "denied", where))
+    return {
+        "allowed": allowed,
+        "denied": denied,
+        "mode": mode.strip().lower(),
+    }
+
+
+def resolve_source_policy(policy: Mapping[str, object] | None, where: str = "<session>") -> dict[str, JSONValue]:
+    """Build source_policy from a full policy or a bare research_sources mapping.
+
+    Accepts policy['research_sources'] ({mode: all|allowlist, sources}) or the
+    research_sources mapping itself; absent key means the SEC-only default.
+    """
+    if policy is None:
+        return default_source_policy()
+    if not isinstance(policy, Mapping):
+        raise ValueError(f"{where}: 'policy' must be a mapping, got {type(policy).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    raw: object = policy.get("research_sources", None)
+    if raw is None and "mode" in policy:
+        raw = policy
+    if raw is None:
+        return default_source_policy()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{where}: 'research_sources' must be a mapping, got {type(raw).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    mode = raw.get("mode", "all")
+    if not isinstance(mode, str) or mode.strip().lower() not in SOURCE_POLICY_MODES:
+        raise ValueError(f"{where}: 'research_sources.mode' must be one of {sorted(SOURCE_POLICY_MODES)}, got {raw.get('mode')!r}")
+    norm = mode.strip().lower()
+    sources = raw.get("sources", [])
+    if not isinstance(sources, list) or any(not isinstance(s, str) or not s.strip() for s in sources):
+        raise ValueError(f"{where}: 'research_sources.sources' must be a list of non-empty strings")
+    cleaned = [s.strip() for s in sources]
+    if norm == "allowlist" and not cleaned:
+        raise ValueError(f"{where}: 'research_sources.sources' must be non-empty for allowlist mode")
+    allowed_out: list[JSONValue] = list(cleaned)
+    denied_out: list[JSONValue] = []
+    return {"allowed": allowed_out, "denied": denied_out, "mode": norm}
+
+
+def source_domain_allowed(
+    source_policy: Mapping[str, object] | None,
+    source_domain: str | None,
+    where: str = "<session>",
+) -> bool:
+    """True when a job source_domain may run under source_policy (None is SEC-default)."""
+    if source_domain is None:
+        return True
+    if not isinstance(source_domain, str) or not source_domain.strip():
+        raise ValueError(f"{where}: 'source_domain' must be a non-empty string or null, got {source_domain!r}")
+    checked = validate_source_policy(source_policy if source_policy is not None else default_source_policy(), where)
+    want = source_domain.strip().lower()
+    raw_denied = checked.get("denied", [])
+    denied: set[str] = set()
+    if isinstance(raw_denied, list):
+        denied = {s.strip().lower() for s in raw_denied if isinstance(s, str)}
+    if want in denied:
+        return False
+    if checked.get("mode") == "all":
+        return True
+    raw_allowed = checked.get("allowed", [])
+    allowed: set[str] = set()
+    if isinstance(raw_allowed, list):
+        allowed = {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
+    return want in allowed
+
+
+_TEMPORAL_UNBOUNDED_RE = re.compile(
+    r"\b(unbounded|all\s+history|entire\s+history|no\s+(time\s+)?cut-?off|without\s+time\s+limit)\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_EARNINGS_RE = re.compile(r"\bbefore\s+earnings\b", re.IGNORECASE)
+_TEMPORAL_BETWEEN_RE = re.compile(
+    r"\bbetween\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})\b", re.IGNORECASE
+)
+_TEMPORAL_AS_OF_RE = re.compile(r"\bas\s+of\s+(\d{4}-\d{2}-\d{2})\b", re.IGNORECASE)
+_TEMPORAL_LAST_N_RE = re.compile(r"\blast\s+(\d+)\s+years?\b", re.IGNORECASE)
+_TEMPORAL_LAST_YEAR_RE = re.compile(r"\blast\s+year\b", re.IGNORECASE)
+_TEMPORAL_QUARTER_RE = re.compile(r"\bthis\s+quarter\b", re.IGNORECASE)
+_TEMPORAL_LATEST_RE = re.compile(r"\blatest[\s-]*available\b", re.IGNORECASE)
+_TEMPORAL_NOW_RE = re.compile(
+    r"\b(today|right\s+now|as\s+of\s+now|most\s+recent|current|latest)\b", re.IGNORECASE
+)
+
+
+def _temporal_day(text: str, where: str) -> str:
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        raise ValueError(f"{where}: invalid calendar date {text!r}") from None
+
+
+def _shift_years(moment: datetime, years: int) -> datetime:
+    try:
+        return moment.replace(year=moment.year - years)
+    except ValueError:  # Feb 29 -> Feb 28
+        return moment.replace(year=moment.year - years, day=28)
+
+
+def resolve_temporal_scope(
+    *,
+    as_of: datetime | str | None = None,
+    temporal: str | None = None,
+    query: str = "",
+    now: datetime | None = None,
+    where: str = "<session>",
+) -> dict[str, JSONValue]:
+    """Resolve persisted temporal_scope ({as_of, start, end, mode, raw}).
+
+    Explicit unbounded wording is the only path to mode 'unbounded'; no time
+    info means latest-available with the cutoff set (never invented, never None).
+    Raw wording is always kept.
+    """
+    moment = normalize_time(now) if isinstance(now, datetime) else utcnow()
+    if temporal is not None and (not isinstance(temporal, str) or not temporal.strip()):
+        raise ValueError(f"{where}: 'temporal' must be a non-empty string or null, got {temporal!r}")
+    raw = temporal.strip() if isinstance(temporal, str) else None
+    text = raw if raw is not None else (query if isinstance(query, str) else "")
+    cut = _coerce_time(as_of, "as_of", where)
+    if text and _TEMPORAL_UNBOUNDED_RE.search(text):
+        return {"as_of": None, "start": None, "end": None, "mode": "unbounded", "raw": raw}
+    if text:
+        between = _TEMPORAL_BETWEEN_RE.search(text)
+        if between is not None:
+            start = _temporal_day(between.group(1), where)
+            end = _temporal_day(between.group(2), where)
+            if start > end:
+                raise ValueError(f"{where}: temporal range start {start!r} is after end {end!r}")
+            return {"as_of": end, "start": start, "end": end, "mode": "range", "raw": raw}
+        asof_hit = _TEMPORAL_AS_OF_RE.search(text)
+        if asof_hit is not None:
+            day = _temporal_day(asof_hit.group(1), where)
+            return {"as_of": day, "start": None, "end": None, "mode": "as_of", "raw": raw}
+        last_n = _TEMPORAL_LAST_N_RE.search(text)
+        if last_n is not None:
+            start_dt = _shift_years(moment, max(int(last_n.group(1)), 1))
+            return {"as_of": moment.isoformat(), "start": start_dt.isoformat(), "end": moment.isoformat(), "mode": "range", "raw": raw}
+        if _TEMPORAL_LAST_YEAR_RE.search(text):
+            prev = moment.year - 1
+            return {"as_of": f"{prev}-12-31", "start": f"{prev}-01-01", "end": f"{prev}-12-31", "mode": "range", "raw": raw}
+        if _TEMPORAL_QUARTER_RE.search(text):
+            q0 = date(moment.year, 3 * ((moment.month - 1) // 3) + 1, 1).isoformat()
+            return {"as_of": moment.isoformat(), "start": q0, "end": moment.isoformat(), "mode": "range", "raw": raw}
+        if _TEMPORAL_EARNINGS_RE.search(text):
+            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
+        if _TEMPORAL_LATEST_RE.search(text):
+            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "latest-available", "raw": raw}
+        if _TEMPORAL_NOW_RE.search(text):
+            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
+    if cut is not None:
+        return {"as_of": cut.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
+    return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "latest-available", "raw": raw}
+
+
+def validate_temporal_scope(value: object, where: str = "<dict>") -> dict[str, JSONValue]:
+    """Validate a temporal_scope mapping ({as_of, start, end, mode, raw}); datetimes coerce to ISO strings."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{where}: 'temporal_scope' must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    mode = value.get("mode", "latest-available")
+    if not isinstance(mode, str) or mode.strip().lower() not in {*TEMPORAL_SCOPE_MODES, "latest"}:
+        raise ValueError(f"{where}: 'temporal_scope.mode' must be one of {sorted({*TEMPORAL_SCOPE_MODES, 'latest'})}, got {value.get('mode')!r}")
+    norm = "latest-available" if mode.strip().lower() == "latest" else mode.strip().lower()
+    out: dict[str, JSONValue] = {}
+    for key in ("as_of", "start", "end"):
+        parsed = _coerce_time(value.get(key), key, f"{where}: 'temporal_scope'")
+        out[key] = parsed.isoformat() if parsed is not None else None
+    out["mode"] = norm
+    raw = value.get("raw", None)
+    if raw is not None and not isinstance(raw, str):
+        raise ValueError(f"{where}: 'temporal_scope.raw' must be a string or null, got {type(raw).__name__}")
+    out["raw"] = raw
+    return out
+def _baseline_pit(filing: object) -> tuple[str | None, str | None]:
+    """Local PIT read (known_at > accepted_at > filed_at); mirrors app.sec.models.pit_of."""
+    def _get(name: str) -> object:
+        if isinstance(filing, Mapping):
+            return filing.get(name)
+        return getattr(filing, name, None)
+    for basis in ("known_at", "accepted_at", "filed_at"):
+        try:
+            value = _get(basis)
+        except Exception:  # noqa: BLE001 - duck-typed PIT read coerces faulty attrs to None, never raises
+            value = None
+        if value is None:
+            continue
+        text = value.isoformat() if isinstance(value, datetime) else str(value)
+        if text.strip():
+            return text, basis
+    return None, None
+
+
+def _baseline_day(pair: tuple[str, object]) -> str:
+    """Sort key for (day, filing) baseline pairs."""
+    return pair[0]
+_BASELINE_ANNUAL = frozenset({"10-K", "10-K/A"})
+_BASELINE_QUARTERLY = frozenset({"10-Q", "10-Q/A"})
+_BASELINE_CURRENT = frozenset({"8-K", "8-K/A"})
+
+
+def _baseline_form(filing: object) -> str:
+    """Filing form text from a Filing dataclass or mapping (empty when absent)."""
+    if isinstance(filing, Mapping):
+        raw = filing.get("form")
+    else:
+        raw = getattr(filing, "form", None)
+    return raw.strip().upper() if isinstance(raw, str) else ""
+
+
+def _baseline_accession(filing: object) -> str | None:
+    """Accession id from a Filing dataclass or mapping (None when absent)."""
+    if isinstance(filing, Mapping):
+        raw = filing.get("accession_no", filing.get("accession"))
+    else:
+        raw = getattr(filing, "accession_no", getattr(filing, "accession", None))
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _baseline_superseded_by(filing: object) -> str | None:
+    """Replacement accession when this filing declares itself superseded (None otherwise)."""
+    if isinstance(filing, Mapping):
+        raw = filing.get("superseded_by")
+    else:
+        raw = getattr(filing, "superseded_by", None)
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
+def _baseline_skipped(annual: object, day: str, annual_day: str) -> bool:
+    """True when the candidate loses to the current annual pick (older day, or tie kept first)."""
+    return annual is not None and day <= annual_day
+
+
+def select_latest_baseline(
+    filings: list[object],
+    as_of: datetime | str | None = None,
+) -> dict[str, object]:
+    """Pure PIT baseline pick: latest 10-K, latest 10-Q, and PIT-eligible 8-Ks.
+
+    A filing is eligible only when its PIT timestamp (known_at, else
+    accepted_at, else filed_at) is on/before as_of; None as_of is unbounded.
+    A 10-K/10-Q that names a PIT-eligible replacement via ``superseded_by``
+    never wins: the current-position read must pin the replacement, while
+    historical as_of/range questions may still use the older filing directly.
+    Every eligible 8-K/8-K/A counts as material, uncapped; newest first.
+    Consumed by the Context slice; pair with list_sec_filings(..., as_of=...)
+    which already PIT-filters at discovery.
+    """
+    bound = _coerce_time(as_of, "as_of", "<baseline>")
+    bound_day = bound.date().isoformat() if bound is not None else None
+    eligible: list[tuple[str, object]] = []
+    for filing in filings:
+        value, _basis = _baseline_pit(filing)
+        if value is None:
+            continue
+        day = value[:10]
+        if bound_day is not None and day > bound_day:
+            continue
+        eligible.append((day, filing))
+    by_accession = {acc: filing for _, filing in eligible for acc in [_baseline_accession(filing)] if acc is not None}
+
+    def _replacement_eligible(filing: object) -> bool:
+        nxt = _baseline_superseded_by(filing)
+        return nxt is not None and nxt in by_accession
+
+    annual: object = None
+    annual_day = ""
+    quarterly: object = None
+    quarterly_day = ""
+    currents: list[tuple[str, object]] = []
+    for day, filing in eligible:
+        form = _baseline_form(filing)
+        if form in _BASELINE_ANNUAL:
+            if _replacement_eligible(filing):
+                continue
+            if _baseline_skipped(annual, day, annual_day):
+                continue
+            annual, annual_day = filing, day
+        elif form in _BASELINE_QUARTERLY:
+            if _replacement_eligible(filing):
+                continue
+            if quarterly is None or day > quarterly_day:
+                quarterly, quarterly_day = filing, day
+        elif form in _BASELINE_CURRENT:
+            currents.append((day, filing))
+    currents.sort(key=_baseline_day, reverse=True)
+    return {
+        "annual_10k": annual,
+        "quarterly_10q": quarterly,
+        "material_8k": [filing for _, filing in currents],
+        "as_of": bound.isoformat() if bound is not None else None,
+    }
+
+
+def superseded_current_violation(
+    filings: list[object],
+    cited: object,
+    *,
+    as_of: datetime | str | None = None,
+) -> str | None:
+    """Current-position staleness check: latest 10-K pinned, superseded-only current claim rejected.
+
+    Returns an error string when ``cited`` rests solely on a superseded annual
+    while the PIT-eligible replacement is available; None when the citation
+    set is fresh (or the question is historical: as_of/range callers may use
+    older filings and should skip this gate). ``cited`` is accession(s).
+    """
+    base = select_latest_baseline(filings, as_of=as_of)
+    latest = base.get("annual_10k")
+    latest_acc = _baseline_accession(latest) if latest is not None else None
+    if latest_acc is None:
+        return None
+    raw_cited: list[object] = [cited] if isinstance(cited, str) else (list(cited) if isinstance(cited, (list, tuple)) else [])
+    cited_accs = [c.strip() for c in raw_cited if isinstance(c, str) and c.strip()]
+    if not cited_accs or latest_acc in cited_accs:
+        return None
+    return f"current-position claim cites superseded annual {cited_accs[0]!r} while latest 10-K {latest_acc!r} is PIT-eligible"
 
 STATUS_VALUES = frozenset(e.value for e in SessionStatus)
 JOB_TYPE_VALUES = frozenset(e.value for e in JobType)
@@ -318,6 +668,8 @@ class ResearchSession:
     current_wave: int = 0
     policy: dict[str, JSONValue] = field(default_factory=default_policy)
     budget: dict[str, JSONValue] = field(default_factory=default_budget)
+    source_policy: dict[str, JSONValue] = field(default_factory=default_source_policy)
+    temporal_scope: dict[str, JSONValue] = field(default_factory=default_temporal_scope)
     job_ids: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     freeze_ids: list[str] = field(default_factory=list)
@@ -357,6 +709,8 @@ class ResearchSession:
         self._validate_ids(where)
         self._validate_wave(where)
         self._validate_targeting(where)
+        validate_source_policy(self.source_policy, f"{where}: 'source_policy'")
+        validate_temporal_scope(self.temporal_scope, f"{where}: 'temporal_scope'")
 
     def to_dict(self) -> dict[str, JSONValue]:
         """Serialize (datetimes as ISO-8601, failure nested as dict or None)."""
@@ -371,6 +725,8 @@ class ResearchSession:
             "current_wave": self.current_wave,
             "policy": validate_json_mapping(self.policy, "<session>: 'policy'"),
             "budget": validate_json_mapping(self.budget, "<session>: 'budget'"),
+            "source_policy": validate_json_mapping(self.source_policy, "<session>: 'source_policy'"),
+            "temporal_scope": validate_json_mapping(self.temporal_scope, "<session>: 'temporal_scope'"),
             "job_ids": _json_str_list(self.job_ids),
             "evidence_ids": _json_str_list(self.evidence_ids),
             "freeze_ids": _json_str_list(self.freeze_ids),
@@ -413,6 +769,20 @@ class ResearchSession:
         if not isinstance(raw_runs, list):
             raise ValueError(f"{where}: 'committee_runs' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return [validate_json_value(x, f"{where}: 'committee_runs'") for x in raw_runs]
+    @classmethod
+    def _parse_source_policy(cls, d: Mapping[str, object], where: str) -> dict[str, JSONValue]:
+        raw = d.get("source_policy", None)
+        if raw is None:
+            return default_source_policy()
+        return validate_source_policy(raw, f"{where}: 'source_policy'")
+
+    @classmethod
+    def _parse_temporal_scope(cls, d: Mapping[str, object], where: str) -> dict[str, JSONValue]:
+        raw = d.get("temporal_scope", None)
+        if raw is None:
+            return default_temporal_scope()
+        return validate_temporal_scope(raw, f"{where}: 'temporal_scope'")
+
 
     @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ResearchSession:
@@ -431,6 +801,8 @@ class ResearchSession:
             current_wave=cls._parse_wave(d, where),
             policy=validate_json_mapping(d.get("policy", {}), f"{where}: 'policy'"),
             budget=validate_json_mapping(d.get("budget", {}), f"{where}: 'budget'"),
+            source_policy=cls._parse_source_policy(d, where),
+            temporal_scope=cls._parse_temporal_scope(d, where),
             job_ids=_req_list_str(d, "job_ids", where),
             evidence_ids=_req_list_str(d, "evidence_ids", where),
             freeze_ids=_req_list_str(d, "freeze_ids", where),

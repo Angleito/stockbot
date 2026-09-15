@@ -604,9 +604,9 @@ tools:
     source: sec
     entity_scope: single_document
     time_mode: as_of
-    summary: "Bounded text window of one filing document by accession number for targeted excerpt reading."
+    summary: "Bounded text window of one filing document by accession number (Required: accession_no); page with cursor/limit via next_cursor."
     version: 2
-    keywords: [accession, bounded, document, excerpt, factor, filing, get, known, main, md, number, one, read, reading, risk, say, sec, section, specific, such, targeted, text, window]
+    keywords: [0000320193, 000079, 12000, 25, accession, bounded, cursor, document, example, factor, filing, get, known, limit, main, md, next, no, number, one, page, read, reading, required, risk, say, sec, section, specific, such, text, via, window]
   - name: get_sec_filing
     domain: sec
     family: filing-catalog
@@ -640,9 +640,9 @@ tools:
     source: sec
     entity_scope: single_entity
     time_mode: date_range_or_as_of
-    summary: "List EDGAR filings for an exact ticker or CIK, filterable by form and date range."
+    summary: "List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier=\"AAPL\"); filterable by form and date range."
     version: 2
-    keywords: [cik, company, date, edgar, entity, exact, filed, filing, filterable, filtered, form, lately, list, listing, optionally, range, recent, sec, ticker]
+    keywords: [aapl, cik, company, date, edgar, end, entity, exact, filed, filing, filterable, filtered, form, identifier, lately, limit, list, listing, optional, optionally, range, recent, required, sec, start, ticker]
   - name: diff_risk_factors
     domain: sec
     family: filing-diff
@@ -690,7 +690,7 @@ tools:
     time_mode: date_range_or_as_of
     summary: "General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions."
     version: 2
-    keywords: [10, 10k, accession, acros, disclosed, disclosure, edgar, eft, entity, factor, filing, full, general, language, mention, number, risk, route, search, searching, sec, text, unknown]
+    keywords: [10, 10k, aapl, accession, acros, cik, company, disclosed, disclosure, domain, edgar, eft, entity, factor, filing, full, general, identifier, language, least, mention, name, no, number, one, person, query, required, risk, route, search, searching, sec, security, text, ticker, unknown]
   - name: thesis_create
     domain: thesis
     family: lifecycle

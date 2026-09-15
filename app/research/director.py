@@ -10,7 +10,7 @@ Pipeline (models decide content; infra owns everything else)::
 
 Stopping reasons (persisted via ``record_stop``): ``complete``,
 ``max_waves``, ``runtime_exceeded``, ``jobs_exceeded``,
-``budget_exhausted``, ``no_questions``, ``not_actionable``, ``low_gain``.
+``no_questions``, ``not_actionable``, ``low_gain``.
 
 Fake-model sketch (no live calls): inject ``DirectorDeps`` with lambdas
 returning canned ids/evidence/analyses; call ``run_wave1`` then
@@ -42,7 +42,6 @@ StopReason = Literal[
     "max_waves",
     "runtime_exceeded",
     "jobs_exceeded",
-    "budget_exhausted",
     "no_questions",
     "not_actionable",
     "low_gain",
@@ -56,7 +55,7 @@ WAVE2_ID = 2
 class DirectorBudgets:
     max_waves: int = 2
     max_jobs: int = 20
-    max_tool_calls: int = 60
+    max_tool_calls: int | None = None
     runtime_budget_s: float = 900.0
 
 
@@ -96,6 +95,28 @@ class WaveDecision:
     targeted_domain: str = ""
 
 
+def normalize_research_action(source: str, tool: str, query: str, ticker: str, forms: Sequence[str] | str, as_of: str, accession: str, objective: str) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
+    """Semantic action key: exact-tuple equality only (no fuzzy/lexical similarity)."""
+    form_tuple = tuple(forms) if isinstance(forms, Sequence) and not isinstance(forms, str) else ((forms,) if isinstance(forms, str) and forms else ())
+    return (source.strip().lower(), tool.strip(), query.strip(), ticker.strip().upper(), tuple(f.strip().upper() for f in form_tuple if isinstance(f, str)), as_of.strip(), accession.strip(), objective.strip())
+
+
+@dataclass
+class LoopDetector:
+    """Exact-repeat detector: same action + same result + no evidence progress."""
+    seen: dict[tuple[str, str, str, str, tuple[str, ...], str, str, str], tuple[str, int]] = field(default_factory=dict)
+    telemetry: list[dict[str, object]] = field(default_factory=list)
+    def check(self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str], result_hash: str, evidence_delta: int) -> dict[str, object]:
+        """Record one action outcome; reject exact no-progress repeats."""
+        prior = self.seen.get(action)
+        if prior is not None and prior[0] == result_hash and evidence_delta <= 0:
+            entry: dict[str, object] = {"action": list(action), "result_hash": result_hash, "reason": "research_loop_detected"}
+            self.telemetry.append(entry)
+            return {"duplicate": True, "reason": "research_loop_detected"}
+        self.seen[action] = (result_hash, evidence_delta)
+        return {"duplicate": False, "reason": ""}
+
+
 def _decision_key(request: ResearchRequest) -> tuple[int, int]:
     return (_gain_rank(request), len(request.requesting_agents))
 
@@ -121,9 +142,6 @@ def run_wave1(
     wid = _coerce_wave_id(wave_id)
     session_id = deps.create_session(question, as_of)
     evidence_ids = deps.fetch_wave_evidence(session_id)
-    if not evidence_ids:
-        deps.record_stop(session_id, "no_questions:empty-wave1")
-        return Wave1Result(session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=[])
     if interrupt_after == "source":
         deps.record_stop(session_id, "interrupted:source")
         return Wave1Result(session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=list(evidence_ids))
@@ -165,15 +183,19 @@ def _is_actionable(request: ResearchRequest) -> bool:
 
 
 def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float) -> WaveDecision | None:
-    """First exhausted budget wins; None when all budgets hold."""
+    """First exhausted budget wins; None when all budgets hold.
+
+    Tool calls are unlimited by default (max_tool_calls=None); the director
+    gate no longer stops on tool volume. Explicit int limits, when configured,
+    are enforced at dispatch (repository/runner), not here.
+    """
+    _ = tool_calls_used
     if waves_used >= budgets.max_waves:
         return WaveDecision(False, "max_waves", f"waves_used={waves_used} max={budgets.max_waves}")
     if elapsed_s >= budgets.runtime_budget_s:
         return WaveDecision(False, "runtime_exceeded", f"elapsed={elapsed_s}s budget={budgets.runtime_budget_s}s")
     if jobs_used >= budgets.max_jobs:
         return WaveDecision(False, "jobs_exceeded", f"jobs_used={jobs_used} max={budgets.max_jobs}")
-    if tool_calls_used >= budgets.max_tool_calls:
-        return WaveDecision(False, "budget_exhausted", f"tool_calls={tool_calls_used} max={budgets.max_tool_calls}")
     return None
 
 
@@ -239,10 +261,12 @@ __all__ = [
     "WAVE2_ID",
     "DirectorBudgets",
     "DirectorDeps",
+    "LoopDetector",
     "StopReason",
     "Wave1Result",
     "WaveDecision",
     "decide_wave2",
+    "normalize_research_action",
     "run_wave1",
     "synthesize_wave1",
 ]

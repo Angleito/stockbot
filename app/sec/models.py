@@ -192,6 +192,44 @@ class SearchAttempt:
 
 
 @dataclass(frozen=True)
+class MatchingPassage:
+    """One query hit within a document: which document, which query, score."""
+    document: str | None = None
+    query: str = ""
+    score: float = 0.0
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DocumentMatch:
+    """One filing grouped with its matching passages."""
+    accession: str = ""
+    matching_passages: tuple[MatchingPassage, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SearchRun:
+    """One executed query: provenance for positives, citation for negatives."""
+    id: str = ""
+    source: str = ""
+    query: str = ""
+    filters: dict[str, object] = field(default_factory=dict)
+    executed_at: str | None = None
+    as_of: str | None = None
+    matched_entities: int = 0
+    matched_documents: int = 0
+    matched_passages: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class SearchCoverage:
     status: Literal["complete", "complete_within_source_limits", "partial", "failed"] = "complete"
     sources_attempted: tuple[str, ...] = field(default_factory=tuple)
@@ -208,7 +246,6 @@ class SearchCoverage:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
-
 @dataclass(frozen=True)
 class SECSearchResult:
     search_id: str
@@ -224,6 +261,7 @@ class SECSearchResult:
     errors: tuple[str, ...] = field(default_factory=tuple)
     retrieval_order: tuple[str, ...] = field(default_factory=tuple)
     evidence_packet_ids: tuple[str, ...] = field(default_factory=tuple)
+    search_runs: tuple[SearchRun, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

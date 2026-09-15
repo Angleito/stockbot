@@ -126,11 +126,72 @@ class EgressDecision:
     allowed: bool
     reason: str | None
 
+def source_denied_reason(name: str, source_policy: object) -> str | None:
+    """Deny reason when a session source_policy excludes this tool; None when allowed."""
+    if source_policy is None:
+        return None
+    if not isinstance(source_policy, dict):
+        return "session source_policy must be a mapping"
+    raw_mode = source_policy.get("mode", "all")
+    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else "all"
+    if mode not in ("all", "allowlist"):
+        return f"unknown source_policy mode {raw_mode!r}"
+    raw_denied = source_policy.get("denied", [])
+    denied = {s.strip().lower() for s in raw_denied} if isinstance(raw_denied, list) else set()
+    lowered = name.strip().lower()
+    if any(d and d in lowered for d in denied if isinstance(d, str)):
+        return f"POLICY_DENIED: tool {name!r} denied by session source_policy"
+    if mode == "all":
+        return None
+    raw_allowed = source_policy.get("allowed", [])
+    if not isinstance(raw_allowed, list):
+        return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+    allowed = {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
+    # ponytail: "sec" matches the SEC_TOOLS allowlist only; substring would also
+    # match "securities" (a FINRA tool) so it never falls through to substring.
+    if "sec" in allowed and is_sec_tool_name(name):
+        return None
+    others = allowed - {"sec"}
+    if any(a and a in lowered for a in others):
+        return None
+    return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+
+
+def is_sec_tool_name(name: str) -> bool:
+    """True for SEC/financial-statement discovery tools; FINRA/Web/Market/Analyst excluded."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    try:
+        from app.research.agents.source_agent import SEC_TOOLS
+    except ImportError:
+        sec_tools: frozenset[str] = frozenset()
+        return TOOL_DOMAINS.get(name, "") != "portfolio_read" and name in sec_tools
+    if name in SEC_TOOLS:
+        return TOOL_DOMAINS.get(name) != "portfolio_read"
+    return False
+
+
+def _call_tool_inner(arguments: object) -> str | None:
+    """Inner tool name for a call_tool wrapper; None when absent/not-a-string."""
+    if not isinstance(arguments, dict):
+        return None
+    inner = arguments.get("name")
+    return inner.strip() if isinstance(inner, str) and inner.strip() else None
+
 
 def authorize_tool_call(
     name: str, arguments: dict[str, object], run_security: RunSecurityContext
 ) -> tuple[bool, str]:
     """Gate one tool call against intent plus the explicit session grant."""
+    denied = source_denied_reason(name, getattr(run_security, "source_policy", None))
+    if denied is not None:
+        return False, denied
+    if name == "call_tool":
+        inner = _call_tool_inner(arguments)
+        if inner is not None:
+            inner_denied = source_denied_reason(inner, getattr(run_security, "source_policy", None))
+            if inner_denied is not None:
+                return False, inner_denied
     domain = TOOL_DOMAINS.get(name)
     if domain == "portfolio_read":
         if run_security.authorization.portfolio_read:
@@ -139,6 +200,11 @@ def authorize_tool_call(
     if domain is not None and domain in run_security.original_intent.permitted_domains:
         return True, ""
     return False, "tool call exceeds original user intent"
+
+
+def filter_allowed_tools(names: list[str], source_policy: object) -> list[str]:
+    """Discovery-safe allowlist: browse/search results minus source-denied tools (never bypasses)."""
+    return [name for name in names if source_denied_reason(name, source_policy) is None]
 
 
 def _portfolio_context(query: str) -> bool:

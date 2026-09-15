@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   query TEXT NOT NULL, objective TEXT NOT NULL, as_of TEXT,
   status TEXT NOT NULL, current_wave INTEGER NOT NULL,
   policy TEXT NOT NULL, budget TEXT NOT NULL,
+  source_policy TEXT DEFAULT '{"allowed":["SEC"],"denied":[],"mode":"allowlist"}',
+  temporal_scope TEXT DEFAULT '{"as_of":null,"end":null,"mode":"latest-available","raw":null,"start":null}',
   job_ids TEXT NOT NULL, evidence_ids TEXT NOT NULL,
   freeze_ids TEXT NOT NULL, dossier_ids TEXT NOT NULL,
   committee_runs TEXT NOT NULL, unresolved_questions TEXT NOT NULL,
@@ -129,22 +131,61 @@ def _chain_hash(prev_hash: str, event: JournalEvent) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def _default_max_tool_calls() -> int:
-    """Global dispatch ceiling (director default; 60 when director unavailable)."""
+_DEFAULT_SOURCE_POLICY_JSON = '{"allowed":["SEC"],"denied":[],"mode":"allowlist"}'
+_DEFAULT_TEMPORAL_SCOPE_JSON = '{"as_of":null,"end":null,"mode":"latest-available","raw":null,"start":null}'
+
+
+def _session_policy_doc(names: set[str], row: sqlite3.Row) -> object:
+    """Stored source_policy JSON; pre-policy rows fall back to the SEC default."""
+    if "source_policy" not in names:
+        text = _DEFAULT_SOURCE_POLICY_JSON
+    else:
+        raw = row["source_policy"]
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            text = _DEFAULT_SOURCE_POLICY_JSON
+        else:
+            text = str(raw)
+    parsed: object = json.loads(text)
+    return parsed
+
+def _session_temporal_doc(names: set[str], row: sqlite3.Row, as_of: object, dts: object) -> object:
+    """Stored temporal_scope JSON; pre-policy rows inherit the session as_of cutoff."""
+    if "temporal_scope" in names:
+        raw = row["temporal_scope"]
+        if raw is not None and (not isinstance(raw, str) or raw.strip()):
+            stored: object = json.loads(str(raw))
+            return stored
+    defaults = dts() if callable(dts) else {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+    if not isinstance(defaults, dict):
+        return {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+    cut = as_of if isinstance(as_of, str) and as_of.strip() else None
+    mode = "as_of" if cut is not None else "latest-available"
+    return {**defaults, "as_of": cut, "mode": mode}
+
+
+def _default_max_tool_calls() -> int | None:
+    """Global dispatch ceiling (director default; None means unbounded)."""
     try:
         from .director import DirectorBudgets
 
         return DirectorBudgets().max_tool_calls
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return 60
+        return None
 
 
-def _session_max_calls(session: ResearchSession, default_max: int) -> int:
-    """Session max_tool_calls (policy research section; default on bad shape)."""
-    raw_section: object = session.policy.get("research", {})
-    section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
-    raw_max: object = section.get("max_tool_calls", default_max)
-    return raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else default_max
+def _session_max_calls(session: ResearchSession, default_max: int | None) -> int | None:
+    """Session max dispatches: budget total_tool_budget wins, else policy research.max_tool_calls; None unbounded."""
+    raw_total: object = session.budget.get("total_tool_budget", None)
+    if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0:
+        return raw_total
+    if raw_total is None:
+        raw_section: object = session.policy.get("research", {})
+        section: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
+        raw_max: object = section.get("max_tool_calls", default_max)
+        if raw_max is None:
+            return None
+        return raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else default_max
+    return default_max
 
 
 def _session_used_calls(session: ResearchSession) -> int:
@@ -153,11 +194,11 @@ def _session_used_calls(session: ResearchSession) -> int:
     return raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) and raw_used >= 0 else 0
 
 
-def _check_dispatch_budgets(job: Job, session_id: str, job_id: str, max_calls: int, used: int) -> None:
-    """Raise on exhausted per-job or per-session dispatch budget."""
+def _check_dispatch_budgets(job: Job, session_id: str, job_id: str, max_calls: int | None, used: int) -> None:
+    """Raise on exhausted per-job or per-session dispatch budget (None session cap allows)."""
     if job.tool_budget is not None and job.tool_budget <= 0:
         raise ValueError(f"dispatch: job {job_id!r} tool_budget exhausted")
-    if used >= max_calls:
+    if max_calls is not None and used >= max_calls:
         raise ValueError(f"dispatch: session {session_id!r} tool budget exhausted ({used}/{max_calls})")
 
 
@@ -208,10 +249,11 @@ def pending_next_action(session: ResearchSession, jobs: list[Job]) -> JSONValue:
 
 _SESSION_SQL = (
     "INSERT OR REPLACE INTO sessions (session_id, created_at, updated_at, query, objective,"
-    " as_of, status, current_wave, policy, budget, job_ids, evidence_ids, freeze_ids,"
+    " as_of, status, current_wave, policy, budget, source_policy, temporal_scope,"
+    " job_ids, evidence_ids, freeze_ids,"
     " dossier_ids, committee_runs, unresolved_questions, targeted_question, targeted_domain,"
     " final_result, failure)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 _JOB_SQL = (
     "INSERT OR REPLACE INTO jobs (job_id, session_id, wave_id, parent_job_id, job_type, owner,"
@@ -225,12 +267,16 @@ def _session_params(session: ResearchSession) -> tuple[object, ...]:
     """Positional params for _SESSION_SQL (caller validates first)."""
     policy = json.dumps(validate_json_mapping(session.policy, "<session>"), sort_keys=True)
     budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
+    from .models import validate_source_policy as _vsp
+    from .models import validate_temporal_scope as _vts
+    source_policy = json.dumps(_vsp(session.source_policy, "<session>"), sort_keys=True)
+    temporal_scope = json.dumps(_vts(session.temporal_scope, "<session>"), sort_keys=True)
     doc = session.to_dict()
     return (
         session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
         session.query, session.objective,
         session.as_of.isoformat() if session.as_of is not None else None,
-        session.status, session.current_wave, policy, budget,
+        session.status, session.current_wave, policy, budget, source_policy, temporal_scope,
         json.dumps(doc["job_ids"], sort_keys=True),
         json.dumps(doc["evidence_ids"], sort_keys=True),
         json.dumps(doc["freeze_ids"], sort_keys=True),
@@ -293,6 +339,28 @@ class ResearchRepository:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
             except sqlite3.Error:
                 pass
+        for col, default in (
+            ("source_policy", '\'{"allowed":["SEC"],"denied":[],"mode":"allowlist"}\''),
+            ("temporal_scope", '\'{"as_of":null,"end":null,"mode":"latest-available","raw":null,"start":null}\''),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT {default}")
+            except sqlite3.Error:
+                pass
+        try:
+            conn.execute(
+                "UPDATE sessions SET source_policy = ? WHERE source_policy IS NULL OR TRIM(source_policy) = ''",
+                (_DEFAULT_SOURCE_POLICY_JSON,),
+            )
+        except sqlite3.Error:
+            pass
+        try:
+            conn.execute(
+                "UPDATE sessions SET temporal_scope = ? WHERE temporal_scope IS NULL OR TRIM(temporal_scope) = ''",
+                (_DEFAULT_TEMPORAL_SCOPE_JSON,),
+            )
+        except sqlite3.Error:
+            pass
         try:
             conn.execute("ALTER TABLE jobs ADD COLUMN last_heartbeat_at TEXT")
         except sqlite3.Error:
@@ -340,6 +408,7 @@ class ResearchRepository:
 
     @staticmethod
     def _row_to_session(row: sqlite3.Row) -> ResearchSession:
+        from .models import default_temporal_scope as _dts
         doc: dict[str, object] = {
             "session_id": row["session_id"], "created_at": row["created_at"], "updated_at": row["updated_at"],
             "query": row["query"], "objective": row["objective"], "as_of": row["as_of"],
@@ -357,6 +426,9 @@ class ResearchRepository:
         names = set(row.keys())
         doc["targeted_question"] = row["targeted_question"] if "targeted_question" in names else None
         doc["targeted_domain"] = row["targeted_domain"] if "targeted_domain" in names else None
+        # ponytail: pre-policy rows carry NULL/blank columns; SEC default + session.as_of win.
+        doc["source_policy"] = _session_policy_doc(names, row)
+        doc["temporal_scope"] = _session_temporal_doc(names, row, doc["as_of"], _dts)
         return ResearchSession.from_dict(doc, "<research.sqlite>")
 
     # -- jobs ----------------------------------------------------------

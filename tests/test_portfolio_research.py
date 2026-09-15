@@ -468,3 +468,67 @@ def test_change_pct_is_none_when_prev_is_zero(data_root: Path) -> None:
 
     assert finra["short_interest_change"] == Decimal(100)
     assert finra["short_interest_change_pct"] is None
+
+def _metric(research: PortfolioResearchPosition, concept: str) -> dict[str, object]:
+    """Typed accessor: latest_sec_metrics[concept] is always a fact dict."""
+    fact = research.latest_sec_metrics[concept]
+    assert isinstance(fact, dict)
+    return fact
+
+
+# ---------------------------------------------------------------------------
+# Date-resolution: no-date latest, as-of cutoff, interval, last-quarter,
+# latest-doc respects cutoff. PIT home; deterministic seeds only.
+# ---------------------------------------------------------------------------
+
+
+def test_no_date_resolves_to_latest_available(data_root: Path) -> None:
+    _seed_entity(data_root)
+    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
+    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
+    latest = enrich_portfolio_research(_snapshot([_position()]), as_of=None, data_root=data_root)[0]
+    assert _metric(latest, "Revenue")["accession"] == "accn-rev-2"
+
+
+def test_as_of_2025_01_01_excludes_later_filings(data_root: Path) -> None:
+    _seed_entity(data_root)
+    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2024-12-31", "2024-12-31", "accn-old")
+    _seed_fact(data_root, "Revenue", 9_999_000_000.0, "2025-06-30", "2025-06-30", "accn-new")
+    early = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2025, 1, 1), data_root=data_root)[0]
+    assert _metric(early, "Revenue")["accession"] == "accn-old"
+    assert _metric(early, "Revenue")["filed_at"] == "2024-12-31"
+
+
+def test_interval_start_end_bounds_facts(data_root: Path) -> None:
+    _seed_entity(data_root)
+    _seed_fact(data_root, "Revenue", 1_000_000_000.0, "2025-03-31", "2025-04-30", "accn-q1")
+    _seed_fact(data_root, "Revenue", 2_000_000_000.0, "2025-06-30", "2025-07-30", "accn-q2")
+    mid = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2025, 5, 15), data_root=data_root)[0]
+    assert _metric(mid, "Revenue")["accession"] == "accn-q1"
+    later = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2025, 8, 1), data_root=data_root)[0]
+    assert _metric(later, "Revenue")["accession"] == "accn-q2"
+
+
+def test_last_quarter_range_picks_quarter_doc(data_root: Path) -> None:
+    _seed_entity(data_root)
+    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-03-31", "2026-05-05", "accn-q1")
+    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-05", "accn-q2")
+    end_q1 = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2026, 6, 29), data_root=data_root)[0]
+    assert _metric(end_q1, "Revenue")["accession"] == "accn-q1"
+    end_q2 = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2026, 8, 25), data_root=data_root)[0]
+    assert _metric(end_q2, "Revenue")["accession"] == "accn-q2"
+
+
+def test_latest_doc_respects_cutoff_not_newest_ingested(data_root: Path) -> None:
+    _seed_entity(data_root)
+    _seed_fact(data_root, "LongTermDebt", 2_100_000_000.0, "2026-03-31", "2026-05-05", "accn-cutoff")
+    _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-future")
+    at_cutoff = enrich_portfolio_research(
+        _snapshot([_position()]), as_of=date(2026, 8, 14), data_root=data_root)[0]
+    assert _metric(at_cutoff, "LongTermDebt")["accession"] == "accn-cutoff"
+    assert at_cutoff.research_data_freshness["sec_latest_filed_at"] == date(2026, 5, 5)

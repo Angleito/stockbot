@@ -14,6 +14,7 @@ General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q rou
 
 - Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.
 - SEC filings or filing full-text search when accession is unknown.
+- Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier; e.g. query="risk factors", ticker="AAPL".
 
 ## Reject when
 

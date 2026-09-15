@@ -40,15 +40,28 @@ class FinalSynthesis:
         self.wave_id = _coerce_wave_id(self.wave_id)
 
 
+def _bare_text(text: str) -> str:
+    """Claim text without a leading [CLASS] tag (merge key stays stable across passes)."""
+    if text.startswith("["):
+        head, _, rest = text[1:].partition("] ")
+        if rest and head in ("DIRECTLY_SUPPORTED", "INFERENCE", "UNKNOWN", "CONTRADICTED"):
+            return rest
+    return text
+
+
 def _merge_final_claims(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[GroundedClaim]:
+    from app.research.agents import classify_claim
     claims: list[GroundedClaim] = []
     for claim in (*getattr(stock, "claims", []), *getattr(bull, "claims", []), *getattr(bear, "claims", [])):
-        prior = next((c for c in claims if c.text == claim.text), None)
+        bare = _bare_text(claim.text)
+        prior = next((c for c in claims if _bare_text(c.text) == bare), None)
         if prior is None:
-            claims.append(GroundedClaim(text=claim.text, evidence_ids=list(claim.evidence_ids)))
+            label = classify_claim(bare, cited=bool(list(claim.evidence_ids)))
+            claims.append(GroundedClaim(text=f"[{label}] {bare}", evidence_ids=list(claim.evidence_ids)))
         else:
             merged = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
-            claims[claims.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged)
+            label = classify_claim(_bare_text(prior.text), cited=bool(merged))
+            claims[claims.index(prior)] = GroundedClaim(text=f"[{label}] {_bare_text(prior.text)}", evidence_ids=merged)
     return claims
 
 

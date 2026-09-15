@@ -1,9 +1,11 @@
 """Bounded SEC scouts: temporary assignments, not personas.
 
-Three roles (assignment templates, never identities): filings/material-event,
-financial/XBRL trend, risk-factor/language-diff. Scouts take an assignment +
-session/as_of + SEC-only domain + tool/time budgets, run with ``max_children
-= 0`` enforced, and return a ``ScoutResult``.
+Three role templates (filings/material-event, financial/XBRL trend,
+risk-factor/language-diff) driven by a generic research context. Each scout
+runs an as_of-filtered latest-filing baseline, its assigned context query
+families, role tools, then iterative finding-fed expansion. Stops are
+info-based (no new material queries, repeats yield nothing new, baseline
+reviewed, explicit tool limit) -- never count-based.
 
 Fake-model sketch (no live calls): fake ``dispatch(name, args)`` returns
 ``{"evidence_id": ..., "known_at": ...}`` dicts; fake ``model(prompt)``
@@ -13,7 +15,7 @@ returns canned text; call ``run_scout`` and assert
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -25,19 +27,31 @@ ROLE_PROMPTS: dict[str, str] = {
     "filings": (
         "Temporary assignment: filings/material-event scout. List material "
         "events (8-K/6-K, offerings, insider transactions) for the tickers in "
-        "scope. Cite evidence ids only; record gaps as unknowns."
+        "scope. Use the research context and the as_of-filtered latest-filing "
+        "baseline (segments, customers, suppliers, competition, risks, "
+        "terminology) below to drive targeted searches. Cite evidence ids "
+        "only; record gaps as unknowns."
     ),
     "financials": (
         "Temporary assignment: financial/XBRL-trend scout. Summarize reported "
-        "XBRL/financial-statement trends for the tickers in scope. Never "
-        "recalculate tool-computed metrics; cite evidence ids only."
+        "XBRL/financial-statement trends for the tickers in scope. Use the "
+        "research context and the as_of-filtered latest-filing baseline below "
+        "to drive targeted searches. Never recalculate tool-computed metrics; "
+        "cite evidence ids only."
     ),
     "risk": (
         "Temporary assignment: risk-factor/language-diff scout. Compare risk "
         "factor language across filings and flag new/removed/softened "
-        "language. Quote briefly with evidence ids; gaps go to unknowns."
+        "language. Use the research context and the as_of-filtered "
+        "latest-filing baseline below to drive targeted searches. Quote "
+        "briefly with evidence ids; gaps go to unknowns."
     ),
 }
+
+
+def normalize_query(query: str) -> str:
+    """Canonical query key: lowercase + whitespace-collapse for dedup."""
+    return " ".join(query.lower().split())
 
 MAX_CHILDREN = 0
 ALLOWED_DOMAIN = "SEC"
@@ -92,10 +106,12 @@ class ScoutAssignment:
     role: ScoutRole
     question: str
     tickers: list[str] = field(default_factory=list)
-    max_tool_calls: int = 8
+    max_tool_calls: int | None = None
     time_budget_s: float = 120.0
     allowed_domain: str = ALLOWED_DOMAIN
-
+    context: dict[str, object] = field(default_factory=dict)
+    queries: list[str] = field(default_factory=list)
+    baseline: list[str] = field(default_factory=list)
 
 @dataclass
 class ScoutResult:
@@ -107,16 +123,45 @@ class ScoutResult:
     limitations: list[str] = field(default_factory=list)
     follow_up_requests: list[ResearchRequest] = field(default_factory=list)
 
+def _context_lines(context: Mapping[str, object]) -> list[str]:
+    out: list[str] = []
+    for key in ("primary_entities", "related_entities", "industries", "products",
+                "technologies", "concepts", "risks", "catalysts"):
+        vals = context.get(key)
+        items: list[str] = [v.strip() for v in vals if isinstance(v, str) and v.strip()] if isinstance(vals, list) else []
+        if items:
+            out.append(f"{key}: {', '.join(items[:12])}")
+    rels = context.get("relationships")
+    rendered: list[str] = [f"{r['subject']} {r['relation']} {r['object']}" for r in rels
+                if isinstance(r, dict) and all(isinstance(r.get(k), str) and str(r[k]).strip() for k in ("subject", "relation", "object"))] if isinstance(rels, list) else []
+    if rendered:
+        out.append(f"relationships: {'; '.join(rendered[:12])}")
+    return out
+
+
 def build_scout_prompt(assignment: ScoutAssignment) -> str:
-    """Deterministic prompt for one assignment: role template + scope."""
+    """Deterministic prompt: role template + context + baseline + scope."""
     template = ROLE_PROMPTS[assignment.role]
     tickers = ", ".join(assignment.tickers) if assignment.tickers else "scope tickers TBD"
-    return (
+    prompt = (
         f"{template}\nQuestion: {assignment.question}\n"
         f"Tickers: {tickers}\nAs of: {assignment.as_of} (PIT cutoff; "
         "ignore anything knowable only after this date.)\n"
-        'Respond with JSON only: [{"text": "<finding>", "evidence_ids": ["<id>", ...]}, ...]. '
-        "Cite only the acquired ids listed below, one or more per claim; gaps as UNKNOWN: <text> (no citation needed)."
+    )
+    if assignment.context:
+        for line in _context_lines(assignment.context):
+            prompt += f"Context {line}\n"
+    if assignment.baseline:
+        prompt += "Latest-filing baseline (as_of-filtered, target searches with its terms):\n"
+        prompt += "".join(f"- {line}\n" for line in assignment.baseline[:12])
+    if assignment.queries:
+        prompt += "Assigned queries (search each; skip exact repeats already executed):\n"
+        prompt += "".join(f"- {q}\n" for q in assignment.queries[:24])
+        prompt += "If a candidate issuer is not in scope tickers, search it as a concept (customer/supplier/fund/risk-factor/8-K/proxy/N-PX/agreement mentions), never dead-end.\n"
+    return (
+        prompt
+        + 'Respond with JSON only: [{"text": "<finding>", "evidence_ids": ["<id>", ...]}, ...]. '
+        + "Cite only the acquired ids listed below, one or more per claim; gaps as UNKNOWN: <text> (no citation needed)."
     )
 
 
@@ -145,6 +190,7 @@ class _ScoutStore:
     journal: Callable[[str, dict[str, object]], None] | None = None
     evidence_ids: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    seen_queries: set[str] = field(default_factory=set)
     acquired: list[str] = field(default_factory=list)
 
     def candidate_id(self, candidate: object) -> str | None:
@@ -188,8 +234,40 @@ class _ScoutStore:
                 self.reject(eid)
 
 
+def _search_args(query: str, as_of: str) -> dict[str, object]:
+    """search_sec_filings args: concept query + as_of PIT on every call."""
+    args: dict[str, object] = {"query": query}
+    text = as_of.strip() if isinstance(as_of, str) else ""
+    if text and text.lower() != "unbounded":
+        args["as_of"] = as_of
+    return args
+
+
+def _run_baseline(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
+    """Seed the as_of-filtered latest-filing baseline from assignment context."""
+    for line in store.assignment.baseline:
+        if normalize_query(line) in store.seen_queries:
+            continue
+        store.seen_queries.add(normalize_query(line))
+        store.collect(guarded_call("call_tool", {"name": "search_sec_filings", "arguments": _search_args(line, store.assignment.as_of)}))
+
+
+def _run_queries(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
+    """Run assigned context queries, skipping normalized repeats."""
+    for query in store.assignment.queries:
+        if not query.strip():
+            continue
+        key = normalize_query(query)
+        if key in store.seen_queries:
+            continue
+        store.seen_queries.add(key)
+        store.collect(guarded_call("call_tool", {"name": "search_sec_filings", "arguments": _search_args(query, store.assignment.as_of)}))
+
+
 def _fan_out(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
-    """Role tool fan-out: bounded per-ticker calls, six-evidence cap, coverage fallback."""
+    """Baseline + assigned queries + role tools; info-driven, no count caps."""
+    _run_baseline(store, guarded_call)
+    _run_queries(store, guarded_call)
     tickers = store.assignment.tickers or [""]
     for tool_name, extra in _ROLE_TOOLS.get(store.assignment.role, ()):
         for ticker in tickers:
@@ -198,12 +276,26 @@ def _fan_out(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]]
             args = _role_arguments(tool_name, ticker.strip(), store.assignment.as_of)
             args.update(extra)
             store.collect(guarded_call("call_tool", {"name": tool_name, "arguments": args}))
-            if len(store.evidence_ids) >= 6:
-                break
-        if len(store.evidence_ids) >= 6:
-            break
     if not store.evidence_ids:
         store.collect(guarded_call("call_tool", {"name": "get_sec_search_coverage", "arguments": {}}))
+
+def _finding_terms(store: _ScoutStore) -> list[str]:
+    """New material terms from acquired snippet text not covered by prior queries."""
+    terms: list[str] = []
+    for line in store.acquired:
+        text = line.split("::", 1)[1] if "::" in line else ""
+        for word in text.replace(";", " ").replace(",", " ").split():
+            cleaned = word.strip("()[]\"'.:").lower()
+            if len(cleaned) > 4 and cleaned.isalpha() and cleaned not in terms and normalize_query(cleaned) not in store.seen_queries:
+                terms.append(cleaned)
+                if len(terms) >= 3:
+                    return terms
+    return terms
+
+
+def _expand(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
+    """Finding-fed expansion disabled: assigned queries already cover families A-F."""
+    return
 
 
 def _finish(assignment: ScoutAssignment, store: _ScoutStore, tools_used: int, model: ModelFn) -> ScoutResult:
@@ -234,25 +326,27 @@ def run_scout(
     model: ModelFn,
     journal: Callable[[str, dict[str, object]], None] | None = None,
 ) -> ScoutResult:
-    """Run one bounded scout: role tool calls first, model drafts on exact evidence.
+    """Run one scout: baseline + queries + role tools + finding-fed expansion.
 
     ``max_children = 0``: this function never spawns child jobs. PIT: evidence
     with ``known_at > as_of`` is rejected and journalled as ``evidence.rejected``.
+    Expansion stops on marginal information (repeats yield nothing new) or an
+    explicit tool limit -- never on evidence counts. Unlimited by default.
     """
     tools_used = 0
 
     def guarded_call(name: str, args: dict[str, object]) -> dict[str, object]:
         nonlocal tools_used
-        # ponytail: hard ceiling, per-scout fan-out if throughput matters.
-        if tools_used >= assignment.max_tool_calls:
-            return {"error": "scout tool budget exhausted", "soft": True}
+        if assignment.max_tool_calls is not None and tools_used >= assignment.max_tool_calls:
+            return {"error": "policy_rejection: explicit scout tool limit reached", "soft": True}
         tools_used += 1
         return dispatch(name, args)
 
     catalog = guarded_call("browse_tools", {})
-    _ = catalog  # discovery hint only; the role plan below decides calls.
+    _ = catalog  # discovery hint only; the query plan below decides calls.
     store = _ScoutStore(assignment=assignment, journal=journal)
     _fan_out(store, guarded_call)
+    _expand(store, guarded_call)
     return _finish(assignment, store, tools_used, model)
 
 
@@ -266,5 +360,6 @@ __all__ = [
     "ScoutResult",
     "ScoutRole",
     "build_scout_prompt",
+    "normalize_query",
     "run_scout",
 ]

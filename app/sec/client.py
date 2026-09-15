@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         Filing,
         SearchAttempt,
         SearchCoverage,
+        SearchRun,
         SECSearchRequest,
         SECSearchResult,
         SECTextHit,
@@ -296,6 +297,7 @@ def _failed_search_result(
         ),
         attempts=tuple(attempts), warnings=tuple(warnings),
         errors=tuple(errors), retrieval_order=("efts",),
+        search_runs=(_search_run(search_id, request.query or "", _search_filters(forms, start_date, end_date, request.as_of), request.as_of, []),),
     )
 
 
@@ -656,6 +658,29 @@ def _search_coverage(
         forms_covered=forms_covered,
     )
 
+def _search_run(
+    search_id: str,
+    query: str,
+    filters: dict[str, object],
+    as_of: str | None,
+    hits: list[SECTextHit] | tuple[SECTextHit, ...],
+) -> SearchRun:
+    """One SearchRun row: executed-at now, PIT basis, match counts."""
+    from .models import SearchRun
+
+    return SearchRun(
+        id=search_id,
+        source="efts",
+        query=query,
+        filters=dict(filters),
+        executed_at=_utcnow(),
+        as_of=as_of,
+        matched_entities=0,
+        matched_documents=len({h.accession_no for h in hits}),
+        matched_passages=len(hits),
+    )
+
+
 def _build_search_result(
     search_id: str,
     request: SECSearchRequest,
@@ -675,6 +700,7 @@ def _build_search_result(
     from .models import SECSearchResult
 
     limits = _coverage_limits(status, warnings, reported, len(hits))
+    runs = (_search_run(search_id, request.query or "", _search_filters(forms, start_date, end_date, request.as_of), request.as_of, list(hits)),)
     return SECSearchResult(
         search_id=search_id,
         request=request,
@@ -686,6 +712,7 @@ def _build_search_result(
         warnings=tuple(warnings),
         errors=tuple(errors),
         retrieval_order=("efts",),
+        search_runs=runs,
     )
 
 

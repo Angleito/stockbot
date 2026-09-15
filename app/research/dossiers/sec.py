@@ -44,7 +44,16 @@ class DossierIntegrityError(ValueError):
 
 
 def default_coverage() -> dict[str, object]:
-    """Empty coverage: explicitly incomplete until a scout fills it."""
+    """Empty coverage: explicitly incomplete until a scout fills it.
+
+    ``resolved``/``partially_resolved``/``unresolved`` track SEC-answerable
+    question state (SEC vs overall sufficiency stays separate: a dossier can
+    resolve its SEC slice while the overall question needs non-SEC sources);
+    ``source_limitations`` records source-scoped gaps; unknowns survive to the
+    freeze via ``unknowns``/``open_questions``. Negative-evidence keys
+    (forms/dates/partitions/docs/gaps + complete) scope every no-hit claim:
+    a non-exhaustive negative stays scoped, never universal.
+    """
     return {
         "entities": [],
         "forms": [],
@@ -52,6 +61,14 @@ def default_coverage() -> dict[str, object]:
         "sources_examined": [],
         "complete": False,
         "exclusions": [],
+        "resolved": [],
+        "partially_resolved": [],
+        "unresolved": [],
+        "source_limitations": [],
+        "dates": [],
+        "partitions": [],
+        "docs": [],
+        "gaps": [],
     }
 
 
@@ -143,7 +160,10 @@ def create_dossier(
 
     Each finding must be ``{"text": str, "evidence_ids": [str, ...]}`` with a
     non-empty citation set; free-text or whole-freeze citations are rejected.
-    Inputs are copied so later caller mutation cannot leak in.
+    Inputs are copied so later caller mutation cannot leak in. ``coverage``
+    may carry ``resolved``/``partially_resolved``/``unresolved`` plus
+    ``source_limitations``; ``unknowns`` and ``open_questions`` are preserved
+    verbatim so unknowns survive to the freeze.
     """
     grounded, supporting = _ground_findings(findings, dossier_id)
     return SECDossier(
@@ -193,15 +213,27 @@ def _check_coverage_time_range(coverage: Mapping[str, object], dossier_id: str) 
 
 
 def _check_coverage_contract(coverage: Mapping[str, object], dossier_id: str) -> None:
-    """Keys present + list types + time_range shape + complete flag."""
+    """Keys present + list types + time_range shape + complete flag.
+
+    Resolution keys (resolved/partially_resolved/unresolved/source_limitations)
+    are optional so older callers still validate; when present they must be
+    string lists. Negative-evidence keys (dates/partitions/docs/gaps) are
+    optional but, when present, must be string lists so no-hit claims carry
+    their {forms,dates,partitions,docs,gaps,complete} scope.
+    """
     missing = [key for key in COVERAGE_KEYS if key not in coverage]
     if missing:
         raise DossierIntegrityError(f"dossier {dossier_id}: coverage missing keys {missing}")
     for key in ("entities", "forms", "sources_examined", "exclusions"):
         _require_str_list(coverage, key, dossier_id)
+    for key in ("resolved", "partially_resolved", "unresolved", "source_limitations",
+                "dates", "partitions", "docs", "gaps"):
+        if key in coverage:
+            _require_str_list(coverage, key, dossier_id)
     _check_coverage_time_range(coverage, dossier_id)
     if not isinstance(coverage.get("complete"), bool):
         raise DossierIntegrityError(f"dossier {dossier_id}: coverage['complete'] must be a bool")
+
 
 
 def _check_finding_ids_shape(ids: object, dossier_id: str) -> list[str]:

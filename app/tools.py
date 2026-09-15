@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from . import (
     analyst_client,
@@ -147,7 +147,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs.",
+            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier (a call with none is rejected). Optional: forms, start_date, end_date, as_of, exhaustive, limit. Example: {\"query\": \"risk factors\", \"ticker\": \"AAPL\", \"forms\": [\"10-K\"], \"limit\": 10}.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -174,11 +174,11 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for an exact ticker or CIK (Apple: AAPL); does NOT search company names.",
+            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Required: identifier (ticker or CIK, e.g. identifier=\"AAPL\"); missing identifier is rejected; does NOT search company names; resolve names via find_sec_entities first. Optional: forms, start_date, end_date, as_of, limit. Example: {\"identifier\": \"AAPL\", \"forms\": [\"10-K\"], \"limit\": 10}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "identifier": {"type": "string"},
+                    "identifier": {"type": "string", "description": "Ticker or CIK, e.g. AAPL."},
                     "forms": {"type": "array", "items": {"type": "string"}},
                     "start_date": {"type": "string"},
                     "end_date": {"type": "string"},
@@ -260,10 +260,10 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "get_sec_document",
-            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Defaults to the first 12000 characters; page with offset/max_chars. Load only the document relevant to the question, never full history. When the accession is already known, pass it; use get_material_events only to discover what changed.",
+            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Required: accession_no. Optional: document_name (exact file), section (within-document heading filter), query (within-document substring filter), cursor (alias for offset, default 0; overrides offset when both are given), limit (alias for max_chars, 1..32000, default 12000; overrides max_chars when both are given), offset/max_chars (legacy aliases), as_of, raw (default false; true returns raw source text, still bounded). Returns text plus metadata, section, source_refs [{accession, document, offset}], and cursor/next_cursor for pagination. Example: {\"accession_no\": \"0000320193-25-000079\", \"section\": \"Risk Factors\", \"cursor\": 0, \"limit\": 12000}; next page with {\"accession_no\": \"...\", \"cursor\": <next_cursor>}. Load only the document relevant to the question, never full history. When the accession is already known, pass it; use get_material_events only to discover what changed.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "document_name": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0)."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000)."}},
+            "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "document_name": {"type": "string", "description": "Exact filing file name; omit for the primary document."}, "section": {"type": "string", "description": "Within-document heading filter, e.g. Risk Factors."}, "query": {"type": "string", "description": "Within-document substring filter."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0). Legacy alias; cursor overrides it when both are given."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000). Legacy alias; limit overrides it when both are given."}, "cursor": {"type": "integer", "description": "Character offset into the document text (default 0). Overrides offset when both are given."}, "limit": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000). Overrides max_chars when both are given."}, "raw": {"type": "boolean", "description": "Return raw source text, still bounded (default false)."}},
                 "required": ["accession_no"]
             }
         }
@@ -2840,8 +2840,8 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         source="sec",
         entity_scope="single_document",
         time_mode="as_of",
-        summary="Bounded text window of one filing document by accession number for targeted excerpt reading.",
-        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.", "What the main document in a filing says; main-document text for a known accession.",),
+        summary="Bounded text window of one filing document by accession number (Required: accession_no); page with cursor/limit via next_cursor.",
+        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.", "What the main document in a filing says; main-document text for a known accession.", "Example: accession_no=\"0000320193-25-000079\", section=\"Risk Factors\", cursor=0, limit=12000; next page with cursor=next_cursor.",),
         reject_when=(
             "Do NOT use for filing metadata by accession (get_sec_filing).",
             "Do NOT use to list a filing's documents or exhibits (list_sec_documents).",
@@ -3092,8 +3092,8 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         source="sec",
         entity_scope="single_entity",
         time_mode="date_range_or_as_of",
-        summary="List EDGAR filings for an exact ticker or CIK, filterable by form and date range.",
-        choose_when=("Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.",),
+        summary="List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier=\"AAPL\"); filterable by form and date range.",
+        choose_when=("Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.", "Required identifier (ticker or CIK, e.g. identifier=\"AAPL\"); optional forms, start_date, end_date, as_of, limit.",),
         reject_when=(
             "Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.",
             "Do NOT use for disclosure search without known identifier (search_sec_filings).",
@@ -3148,7 +3148,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="multi_entity",
         time_mode="date_range_or_as_of",
         summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
-        choose_when=("Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.", "SEC filings or filing full-text search when accession is unknown.",),
+        choose_when=("Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.", "SEC filings or filing full-text search when accession is unknown.", "Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier; e.g. query=\"risk factors\", ticker=\"AAPL\".",),
         reject_when=(
             "Not a filing lister for a known ticker (list_sec_filings).",
             "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",
@@ -4011,6 +4011,26 @@ def _mention_hit(hit: dict[str, object]) -> dict[str, object]:
     return base
 
 
+def _passage_row(hit: dict[str, object]) -> dict[str, object]:
+    """One matching passage: document + query + score only."""
+    score = hit.get("score")
+    return {
+        "document": hit.get("matched_document"),
+        "query": hit.get("query"),
+        "score": float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else 0.0,
+    }
+
+
+def _document_matches(hits: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Hits grouped by accession with their matching passages."""
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for hit in hits:
+        key = hit.get("accession_no")
+        accession = key if isinstance(key, str) and key else ""
+        grouped.setdefault(accession, []).append(_passage_row(hit))
+    return [{"accession": accession, "matching_passages": passages} for accession, passages in grouped.items()]
+
+
 def _mention_hits(raw: object) -> list[dict[str, object]]:
     """Text hits as mention packets."""
     if not isinstance(raw, (list, tuple)):
@@ -4018,10 +4038,18 @@ def _mention_hits(raw: object) -> list[dict[str, object]]:
     return [_mention_hit(hit) for hit in raw if isinstance(hit, dict)]
 
 
+def _search_runs(raw: object) -> list[dict[str, object]]:
+    """SearchRun dicts from the result packet, else empty."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [{str(k): v for k, v in run.items()} for run in raw if isinstance(run, dict)]
+
 def _envelope_pit_basis(attempts: list[dict[str, object]]) -> str | None:
     """Most common attempt pit_basis, else None."""
     bases: list[object] = [a.get("pit_basis") for a in attempts if a.get("pit_basis") is not None]
     return max(set(str(b) for b in bases), key=_bases_count_key(bases)) if bases else None
+
+
 def _envelope_counts(data: dict[str, object], cov: dict[str, object]) -> dict[str, object]:
     """Reported/retrieved/pages plus entity/filing/document sizes."""
     def _len_of(key: str) -> int:
@@ -4041,6 +4069,7 @@ def _envelope_backfill(cov: dict[str, object]) -> list[object]:
     """Pending backfill jobs, else empty."""
     return list(cov["pending_backfill_jobs"]) if isinstance(cov.get("pending_backfill_jobs"), (list, tuple)) else []
 
+
 def _search_envelope(result: SECSearchResult) -> dict[str, object]:
     """SECSearchResult -> model packet: roles, ledger, PIT, jobs, evidence."""
     data = result.to_dict()
@@ -4048,6 +4077,8 @@ def _search_envelope(result: SECSearchResult) -> dict[str, object]:
     attempts = _envelope_attempts(data.get("attempts"))
     hits = _mention_hits(data.get("text_hits"))
     request = _envelope_dict(data.get("request"))
+    runs = _search_runs(data.get("search_runs"))
+    documents = _document_matches(hits)
     return {
         "subject": request.get("query") or request.get("company_name"),
         "query": request.get("query"),
@@ -4055,11 +4086,18 @@ def _search_envelope(result: SECSearchResult) -> dict[str, object]:
         "request": request,
         "count": len(hits),
         "entities": data.get("entities"),
+        "entity_matches": data.get("entities"),
         "filings": data.get("filings"),
+        "filing_candidates": data.get("filings"),
+        "documents": data.get("documents"),
+        "document_matches": documents,
         "parties": data.get("relationships"),
+        "relationships": data.get("relationships"),
+        "relationship_matches": data.get("relationships"),
         "hits": hits,
         "coverage": cov,
         "attempts": attempts,
+        "search_runs": runs,
         "counts": _envelope_counts(data, cov),
         "pit_basis": _envelope_pit_basis(attempts),
         "warnings": data.get("warnings"),
@@ -4121,6 +4159,13 @@ def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
         sec.SECDiscoveryService(data_root=get_data_root()).search(request))
 
 
+class _DocView(TypedDict, total=False):
+    """get_sec_document view kwargs (section/query/raw only when supplied)."""
+    section: str
+    query: str
+    raw: bool
+
+
 def _doc_offset(raw: object) -> int:
     """Lenient offset coercion (bool/float/str all narrow to int, None is 0)."""
     if isinstance(raw, bool):
@@ -4146,16 +4191,33 @@ def _doc_max_chars(raw: object) -> int | None:
         return int(raw.strip()) if raw.strip() else 12_000
     return int(str(raw))
 
+def _doc_view_kwargs(args: dict[str, object]) -> _DocView:
+    """section/query/raw only when the model supplied them (legacy fakes stay green)."""
+    extra: _DocView = {}
+    section = _str_or_none(args.get("section"))
+    query = _str_or_none(args.get("query"))
+    if section is not None:
+        extra["section"] = section
+    if query is not None:
+        extra["query"] = query
+    if args.get("raw") is not None:
+        extra["raw"] = bool(args.get("raw", False))
+    return extra
+
+
 def _get_sec_document(args: dict[str, object], model: str) -> dict[str, object]:
     """Archive-first document read; model callers always get a bounded window."""
     del model
     try:
+        cursor = args.get("cursor")
+        limit = args.get("limit")
         return sec.get_sec_document(
             str(args["accession_no"]), _str_or_none(args.get("document_name")),
             as_of=_str_or_none(args.get("as_of")),
-            offset=_doc_offset(args.get("offset", 0)),
-            max_chars=_doc_max_chars(args.get("max_chars", 12_000)),
+            offset=_doc_offset(cursor if cursor is not None else args.get("offset", 0)),
+            max_chars=_doc_max_chars(limit if limit is not None else args.get("max_chars", 12_000)),
             data_root=get_data_root(),
+            **_doc_view_kwargs(args),
         )
     except (KeyError, ValueError) as exc:
         return {"error": str(exc), "error_type": "invalid_tool_arguments"}

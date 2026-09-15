@@ -107,6 +107,8 @@ class RunSecurityContext:
 
     `original_intent` is chat-derived and never carries `portfolio_read`;
     `authorization` is the explicit session grant for private domains.
+    `source_policy` is the kernel-persisted session policy ({allowed, denied,
+    mode}); None means no session scoping (legacy path).
     """
 
     original_intent: OriginalIntent
@@ -118,3 +120,4 @@ class RunSecurityContext:
     private_ingress: bool = False
     quarantined_items: int = 0
     security_events: list[dict[str, object]] = field(default_factory=list)
+    source_policy: dict[str, object] | None = None

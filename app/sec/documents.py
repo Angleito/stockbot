@@ -1,11 +1,13 @@
 """Document-level retrieval off a filing accession."""
 
 import hashlib
+import re
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 if TYPE_CHECKING:
     # Provider SDK filing type at the boundary only; never constructed here.
@@ -14,6 +16,146 @@ from .models import Filing, FilingDocument, pit_of
 from .normalization import document_from_attachment, filing_from_edgar
 
 _MAX_CHARS = 32_000
+_VIEW_MAX_SECTIONS = 50
+
+_IXBLR_NOISE_RE = re.compile(r"<[A-Za-z][\w.-]*:[^>]*>.*?</[A-Za-z][\w.-]*:[^>]*>|<[A-Za-z][\w.-]*:[^>]*/>", re.IGNORECASE | re.DOTALL)
+_STYLE_SCRIPT_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\x0b\x0c\r]+")
+_HEADING_RE = re.compile(r"^\s*(item\s+\d+[a-z]?(?:\([^)]*\))?\.?.*|part\s+[ivx]+\.?|signatures?)\s*$", re.IGNORECASE)
+
+
+class _ViewTextParser(HTMLParser):
+    """Minimal stdlib renderer: block structure + tables, inline text otherwise."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._cell: list[str] | None = None
+        self._row: list[str] | None = None
+
+    @override
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        name = tag.lower().split(":")[-1]
+        if name in ("br", "p", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "li"):
+            self._chunks.append("\n")
+        if name == "tr":
+            self._row = []
+        elif name in ("td", "th"):
+            self._cell = []
+        elif name == "table":
+            self._chunks.append("\n")
+
+    @override
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.lower().split(":")[-1]
+        if name in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(_WS_RE.sub(" ", "".join(self._cell)).strip())
+            self._cell = None
+        elif name == "tr" and self._row is not None:
+            cells = [c for c in self._row if c]
+            if cells:
+                self._chunks.append(" | ".join(cells) + "\n")
+            self._row = None
+        elif name == "table":
+            self._chunks.append("\n")
+        elif name in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"):
+            self._chunks.append("\n")
+
+    @override
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+        else:
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _strip_noise(source: str) -> str:
+    """Drop CSS/layout/XBRL noise before parsing; keep textual markup."""
+    text = _STYLE_SCRIPT_RE.sub("\n", source)
+    text = _COMMENT_RE.sub("", text)
+    return _IXBLR_NOISE_RE.sub("", text)
+
+
+def _render_text(source: str) -> str:
+    """Model-readable text: tables as pipes, headings/paragraphs preserved."""
+    cleaned = _strip_noise(source)
+    if "<" not in cleaned or ">" not in cleaned:
+        lines = [_WS_RE.sub(" ", ln).strip() for ln in cleaned.splitlines()]
+        return "\n".join(ln for ln in lines if ln)
+    parser = _ViewTextParser()
+    try:
+        parser.feed(cleaned)
+        parser.close()
+    except Exception:  # noqa: BLE001 - malformed filing HTML degrades to tag-strip, never raises
+        return _WS_RE.sub(" ", _TAG_RE.sub(" ", cleaned)).strip()
+    lines = [_WS_RE.sub(" ", ln).strip(" |") for ln in parser.text().splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _split_sections(view: str) -> list[tuple[str | None, int]]:
+    """(heading, char_offset) scan: first block unheaded, then ITEM/PART/SIGNATURES."""
+    sections: list[tuple[str | None, int]] = []
+    offset = 0
+    current: str | None = None
+    for line in view.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped and _HEADING_RE.match(stripped) and len(stripped) < 160:
+            current = stripped
+            sections.append((current, offset))
+        elif not sections:
+            sections.append((None, 0))
+        offset += len(line)
+    if not sections:
+        sections.append((None, 0))
+    return sections[: _VIEW_MAX_SECTIONS + 1]
+
+
+def _section_names(view: str) -> list[str]:
+    return [name for name, _ in _split_sections(view) if name][: _VIEW_MAX_SECTIONS]
+
+
+def _select_section(view: str, section: str | None) -> tuple[str, str | None, int]:
+    """Narrow a rendered view to one heading; returns (text, resolved, base_offset)."""
+    if section is None or not section.strip():
+        return view, None, 0
+    want = section.strip().lower()
+    spans = _split_sections(view)
+    bounds: list[tuple[str, int, int]] = []
+    for i, (name, start) in enumerate(spans):
+        end = spans[i + 1][1] if i + 1 < len(spans) else len(view)
+        if name is not None:
+            bounds.append((name, start, end))
+    for name, start, end in bounds:
+        if want in name.lower() or name.lower() in want:
+            return view[start:end], name, start
+    available = "; ".join(name for name, _, _ in bounds[:12]) or "none"
+    raise ValueError(f"section not found: {section!r}; available sections: {available}")
+
+
+def _select_query(view: str, query: str | None) -> tuple[str, int]:
+    """Narrow a rendered view to the first query hit with context; (text, base_offset)."""
+    if query is None or not query.strip():
+        return view, 0
+    at = view.lower().find(query.strip().lower())
+    if at < 0:
+        raise ValueError(f"query not found in document: {query!r}")
+    start = max(0, at - 2000)
+    return view[start:], start
+
+
+def _source_uri_for(accession_no: str, document_name: object) -> str:
+    doc = document_name if isinstance(document_name, str) and document_name else "primary"
+    return f"source://sec/{accession_no}/{doc}"
+
+
+def render_sec_view(source: str) -> str:
+    """Public seam for the derived model-readable view (raw stays in the archive)."""
+    return _render_text(source)
 
 def _normalize_accession(accession_no: str) -> str:
     """Tolerate pasting variants of the same identifier (never invent one):
@@ -193,8 +335,13 @@ def _bounded_response(*, accession_no: str, document_name: object,
                       source_url: object, filed_at: object, known_at: object,
                       retrieved_at: object, offset: int, max_chars: int | None,
                       cache_hit: bool, cache_type: str,
-                      warnings: Iterable[str] | None = None) -> dict[str, object]:
-    total = len(full_text)
+                      warnings: Iterable[str] | None = None,
+                      view_text: str | None = None, view_base: int = 0,
+                      resolved_section: str | None = None,
+                      raw_view: bool = False,
+                      available_sections: list[str] | None = None) -> dict[str, object]:
+    effective = view_text if view_text is not None else full_text
+    total = len(effective)
     if offset > total:
         raise ValueError(f"offset {offset} beyond document length {total}")
     end = total if max_chars is None else min(offset + max_chars, total)
@@ -203,7 +350,7 @@ def _bounded_response(*, accession_no: str, document_name: object,
         "document_name": document_name,
         "description": description,
         "url": url,
-        "text": full_text[offset:end],
+        "text": effective[offset:end],
         "content_hash": content_hash,
         "source_content_hash": source_content_hash,
         "source_representation": source_representation,
@@ -221,7 +368,46 @@ def _bounded_response(*, accession_no: str, document_name: object,
     }
     if warnings:
         out["warnings"] = list(warnings)
+    if view_text is not None:
+        uri = _source_uri_for(accession_no, document_name)
+        out["view"] = "raw" if raw_view else "rendered"
+        out["section"] = resolved_section
+        out["available_sections"] = list(available_sections) if available_sections is not None else _section_names(view_text)
+        out["metadata"] = {
+            "accession_no": accession_no,
+            "document_name": document_name,
+            "section": resolved_section,
+            "source_uri": uri,
+            "source_url": source_url,
+            "filed_at": filed_at,
+            "known_at": known_at,
+            "content_hash": content_hash,
+            "source_content_hash": source_content_hash,
+        }
+        out["source_uri"] = uri
+        out["source_refs"] = [{
+            "accession": accession_no,
+            "document": document_name if isinstance(document_name, str) else None,
+            "offset": view_base + offset,
+            "source_uri": uri,
+        }]
+        out["cursor"] = offset
+        out["next_cursor"] = end if end < len(view_text) else None
+    else:
+        out["cursor"] = offset
+        out["next_cursor"] = end if end < total else None
     return out
+
+
+def _build_view(full: str, *, section: str | None, query: str | None, raw: bool) -> tuple[str, str | None, int, bool, list[str]]:
+    """Derived window over stored text; returns (view, resolved, base, is_raw, sections)."""
+    if raw:
+        return full, section.strip() if isinstance(section, str) and section.strip() else None, 0, True, []
+    rendered = _render_text(full)
+    sections = _section_names(rendered)
+    narrowed, resolved, base = _select_section(rendered, section)
+    queried, qbase = _select_query(narrowed, query)
+    return queried, resolved, base + qbase, False, sections
 
 
 def _download_bytes_of(attachment: object) -> bytes | None:
@@ -379,9 +565,12 @@ def _archived_body_of(row: dict[str, object]) -> tuple[str, object]:
 def _archived_bounded(accession_no: str, document_name: str | None,
                       row: dict[str, object], full: str, source_url: object,
                       offset: int, max_chars: int | None,
-                      rev_warnings: list[str] | None) -> dict[str, object]:
+                      rev_warnings: list[str] | None, *,
+                      section: str | None = None, query: str | None = None,
+                      raw: bool = False) -> dict[str, object]:
     name_raw = row.get("document_name")
     doc_name = (name_raw if isinstance(name_raw, str) else None) or document_name
+    view, resolved, base, is_raw, sections = _build_view(full, section=section, query=query, raw=raw)
     return _bounded_response(
         accession_no=accession_no,
         document_name=doc_name,
@@ -399,12 +588,16 @@ def _archived_bounded(accession_no: str, document_name: str | None,
         offset=offset, max_chars=max_chars,
         cache_hit=True, cache_type="stockbot_archive",
         warnings=rev_warnings,
+        view_text=view, view_base=base, resolved_section=resolved,
+        raw_view=is_raw, available_sections=sections,
     )
 
 
 def _archived_response(accession_no: str, document_name: str | None,
                        rows: list[dict[str, object]], *, as_of: str | None,
-                       offset: int, max_chars: int | None) -> dict[str, object]:
+                       offset: int, max_chars: int | None,
+                       section: str | None = None, query: str | None = None,
+                       raw: bool = False) -> dict[str, object]:
     row, rev_warnings = _winning_revision(
         accession_no, document_name, rows, as_of=as_of)
     if isinstance(row, dict) and row.get("error_type") == "pit_revision_conflict":
@@ -412,7 +605,8 @@ def _archived_response(accession_no: str, document_name: str | None,
     full, source_url = _archived_body_of(row)
     return _archived_bounded(
         accession_no, document_name, row, full, source_url,
-        offset, max_chars, rev_warnings)
+        offset, max_chars, rev_warnings,
+        section=section, query=query, raw=raw)
 
 
 def _attachment_attr_of(attachment: object, name: str) -> object:
@@ -491,7 +685,9 @@ def _live_source_url(url: object, meta: Filing) -> str | None:
 def _live_response(accession_no: str, document_name: str | None, *,
                    attachment: object, meta: Filing,
                    offset: int, max_chars: int | None,
-                   data_root: Path | str | None) -> dict[str, object]:
+                   data_root: Path | str | None,
+                   section: str | None = None, query: str | None = None,
+                   raw: bool = False) -> dict[str, object]:
     _name, description, url, doc_name = _attachment_meta_of(
         attachment, document_name, meta.primary_document)
     source_bytes, normalized, representation = _normalized_text_of(attachment)
@@ -502,6 +698,7 @@ def _live_response(accession_no: str, document_name: str | None, *,
         representation=representation, normalized=normalized,
         source_content_hash=source_content_hash, content_hash=content_hash,
         meta=meta, source_url=source_url, data_root=data_root)
+    view, resolved, base, is_raw, sections = _build_view(normalized, section=section, query=query, raw=raw)
     return _bounded_response(
         accession_no=accession_no,
         document_name=doc_name,
@@ -519,6 +716,8 @@ def _live_response(accession_no: str, document_name: str | None, *,
         offset=offset, max_chars=max_chars,
         cache_hit=False, cache_type="live_or_edgartools_http",
         warnings=warnings or None,
+        view_text=view, view_base=base, resolved_section=resolved,
+        raw_view=is_raw, available_sections=sections,
     )
 
 
@@ -533,26 +732,43 @@ def _checked_live_meta(accession_no: str, as_of: str | None) -> tuple[EdgarFilin
     return filing, meta
 
 
+def _coerce_window_alias(offset: int, max_chars: int | None,
+                         cursor: int | str | float | None,
+                         limit: int | str | float | None) -> tuple[int, int | None]:
+    """cursor/limit aliases win over offset/max_chars; None falls back to the legacy value."""
+    return _check_window(cursor if cursor is not None else offset,
+                         limit if limit is not None else max_chars)
+
+
 def get_sec_document(accession_no: str, document_name: str | None = None, as_of: str | None = None, *,
                      offset: int = 0, max_chars: int | None = None,
-                     data_root: Path | str | None = None) -> dict[str, object]:
+                     data_root: Path | str | None = None,
+                     section: str | None = None, query: str | None = None,
+                     cursor: int | str | float | None = None,
+                     limit: int | str | float | None = None,
+                     raw: bool = False) -> dict[str, object]:
     """Exact document retrieval; EFTS callers pass the matched document name.
     Primary-document fallback applies only when document_name is None.
 
     Archive-first: stored revisions under the selected root win with
     ``known_at <= as_of``; a local miss fetches through EdgarTools once and
-    writes the archive through. Omitted ``max_chars`` returns the full
-    normalized text for internal callers; model callers pass a bound.
+    writes the archive through. Raw filing bytes stay durably addressable via
+    ``raw_archive_path``/``source://sec/<accession>/<document>``; the bounded
+    ``text`` is a derived rendered view (section/query narrow it, cursor/limit
+    paginate it) with per-span ``source_refs``. Pass ``raw=True`` for the
+    bounded raw-source window instead. Omitted ``max_chars``/``limit`` returns
+    the full stored text for internal callers; model callers pass a bound.
     """
     from .filings import _check_as_of
 
-    offset, max_chars = _check_window(offset, max_chars)
+    offset, max_chars = _coerce_window_alias(offset, max_chars, cursor, limit)
     as_of = _check_as_of(as_of)
     accession_no = accession_no if isinstance(accession_no, str) else str(accession_no)
     _filing_row, rows = _stored_candidates(accession_no, document_name, as_of, data_root)
     if rows:
         return _archived_response(accession_no, document_name, rows, as_of=as_of,
-                                  offset=offset, max_chars=max_chars)
+                                  offset=offset, max_chars=max_chars,
+                                  section=section, query=query, raw=raw)
     filing, meta = _checked_live_meta(accession_no, as_of)
     attachment = _resolve_in(filing, accession_no, document_name)
     if isinstance(attachment, str):
@@ -564,11 +780,12 @@ def get_sec_document(accession_no: str, document_name: str | None = None, as_of:
             "text": attachment,
         }
     return _live_response(accession_no, document_name, attachment=attachment, meta=meta,
-                          offset=offset, max_chars=max_chars, data_root=data_root)
+                          offset=offset, max_chars=max_chars, data_root=data_root,
+                          section=section, query=query, raw=raw)
 
 
 def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_of: str | None = None) -> str:
-    text = get_sec_document(accession_no, document_name, as_of=as_of)["text"]
+    text = get_sec_document(accession_no, document_name, as_of=as_of, raw=True)["text"]
     if not isinstance(text, str):
         raise ValueError(f"no text for accession: {accession_no!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return text

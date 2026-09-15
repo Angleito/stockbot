@@ -9,6 +9,7 @@ fake), pass a ``model`` callable returning canned JSON, assert on
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -35,6 +36,24 @@ class ModelOutputFailure(ValueError):
         super().__init__(message)
         self._failure_category = FailureCategory.MODEL_OUTPUT_FAILURE
 
+CLAIM_CLASSES = ("DIRECTLY_SUPPORTED", "INFERENCE", "UNKNOWN", "CONTRADICTED")
+
+_MANAGEABLE_RE = re.compile(r"\b(manageab\w*|immaterial\w*|absorb\w*|contained|digestible|modest|limited\s+impact)\b", re.IGNORECASE)
+
+
+def classify_claim(text: str, *, cited: bool) -> str:
+    """Deterministic claim label: uncited manageable/immaterial reads are never DIRECTLY_SUPPORTED."""
+    upper = (text or "").upper()
+    if "CONTRADICT" in upper:
+        return "CONTRADICTED"
+    if "UNKNOWN" in upper or "UNCERTAIN" in upper or "UNCLEAR" in upper:
+        return "UNKNOWN"
+    if "INFERENCE" in upper or "INFER" in upper or "MAY " in f" {upper} " or "LIKELY" in upper or "SUGGEST" in upper:
+        return "INFERENCE"
+    if not cited:
+        return "INFERENCE" if _MANAGEABLE_RE.search(text or "") else "UNKNOWN"
+    return "DIRECTLY_SUPPORTED"
+
 
 @dataclass
 class GroundedClaim:
@@ -42,6 +61,16 @@ class GroundedClaim:
 
     text: str
     evidence_ids: list[str] = field(default_factory=list)
+
+    @property
+    def claim_class(self) -> str:
+        """Deterministic classification; manageable/immaterial without support is INFERENCE/UNKNOWN."""
+        return classify_claim(self.text, cited=bool(self.evidence_ids))
+
+    @property
+    def label(self) -> str:
+        """Alias for claim_class (eval hook)."""
+        return self.claim_class
 
 
 def _frozen_set(frozen: Sequence[str]) -> set[str]:
@@ -159,4 +188,4 @@ def parse_committee_output(text: str, *, frozen: Sequence[str], agent: str) -> t
     return claims, [_build_follow_up(item, agent) for item in raw_follow[:3]]
 
 
-__all__ = ["GroundedClaim", "ModelOutputFailure", "ResearchRequest", "claims_refs", "parse_committee_output", "parse_grounded_claims"]
+__all__ = ["CLAIM_CLASSES", "GroundedClaim", "ModelOutputFailure", "ResearchRequest", "claims_refs", "classify_claim", "parse_committee_output", "parse_grounded_claims"]

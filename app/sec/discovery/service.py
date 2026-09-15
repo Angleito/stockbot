@@ -38,6 +38,7 @@ from ..models import (
     Offering,
     SearchAttempt,
     SearchCoverage,
+    SearchRun,
     SECSearchRequest,
     SECSearchResult,
     SECTextHit,
@@ -1021,7 +1022,7 @@ def _finalize_entities(state: _EntitySearchState, max_results: int | None,
 def _warn_entity_empty(state: _EntitySearchState,
                        entities: list[EntityCandidate], query: str) -> None:
     if not entities and not state.errors:
-        state.warnings.append(f"no SEC entity candidates for {query!r}")
+        state.warnings.append(f"no SEC entity candidates for {query!r} (no direct corpus; other routes still searched)")
 
 
 def _warn_entity_cap(state: _EntitySearchState,
@@ -4845,6 +4846,40 @@ def _search_adopted_limited(state: _SearchState) -> bool:
                for s in state.adopted_not_complete)
 
 
+def _search_attempt_filters(attempt: SearchAttempt) -> dict[str, object]:
+    """Attempt filters as a plain dict (never the live mapping)."""
+    return dict(attempt.filters or {})
+
+
+def _search_run_counts(ranked: tuple[SECTextHit, ...], accessions: set[str]) -> tuple[int, int]:
+    """(matched_documents, matched_passages) for one run."""
+    for hit in ranked:
+        accessions.add(hit.accession_no)
+    return len(accessions), len(ranked)
+
+def _search_runs(state: _SearchState, request: SECSearchRequest, ranked: tuple[SECTextHit, ...], as_of: str | None) -> tuple[SearchRun, ...]:
+    """One SearchRun per executed attempt: query + filters + PIT + match counts."""
+    _ = request
+    runs: list[SearchRun] = []
+    for attempt in state.attempts:
+        if attempt.status == "not_applicable":
+            continue
+        accessions: set[str] = set()
+        matched_documents, matched_passages = _search_run_counts(
+            tuple(h for h in ranked if h.query == attempt.query), accessions)
+        runs.append(SearchRun(
+            id=attempt.attempt_id,
+            source=attempt.backend,
+            query=attempt.query,
+            filters=_search_attempt_filters(attempt),
+            executed_at=attempt.completed_at or state.now,
+            as_of=as_of,
+            matched_entities=len(state.entities),
+            matched_documents=matched_documents,
+            matched_passages=matched_passages,
+        ))
+    return tuple(runs)
+
 def _search_finalize(state: _SearchState, request: SECSearchRequest,
                      global_forms: list[str], result_limit: int | None,
                      evidence_max_items: int, evidence_max_chars: int
@@ -4893,6 +4928,7 @@ def _search_finalize(state: _SearchState, request: SECSearchRequest,
         errors=tuple(state.errors),
         retrieval_order=tuple(state.retrieval_order),
         evidence_packet_ids=packet,
+        search_runs=_search_runs(state, request, ranked, as_of),
     )
 
 
@@ -5251,8 +5287,7 @@ def _rel_not_found(state: _RelState, entity: object,
                      resolution: str) -> None:
     state.record("entity-resolution", "not_applicable",
                  resolution=resolution, reason="no verified candidate")
-    state.warnings.append(f"no SEC entity candidates for {str(entity)!r}")
-
+    state.warnings.append(f"no SEC entity candidates for {str(entity)!r} (no direct corpus; mentions still searched)")
 
 def _rel_no_context(state: _RelState, entity: object,
                     resolution: str) -> None:

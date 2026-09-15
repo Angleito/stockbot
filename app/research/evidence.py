@@ -10,15 +10,20 @@ from hashlib import sha256
 from .models import JSONValue, pit_unverified, pit_violated, validate_json_mapping
 
 __all__ = [
+    "DiscoveryRecord",
     "Evidence",
     "EvidenceIntegrityError",
     "EvidenceLedger",
     "EvidenceNotFoundError",
+    "EvidenceRecord",
     "EvidenceRejectedError",
+    "RECORD_KINDS",
+    "discovery_only",
     "evidence_content_hash",
     "evidence_from_dict",
     "evidence_to_dict",
     "ingest_evidence",
+    "substantive_records",
 ]
 
 
@@ -46,6 +51,31 @@ class EvidenceNotFoundError(KeyError):
 def evidence_content_hash(content: str) -> str:
     """Canonical content hash (sha256 hex over utf-8)."""
     return sha256(content.encode("utf-8")).hexdigest()
+
+
+RECORD_KINDS = frozenset({"discovery", "evidence"})
+
+
+@dataclass(frozen=True)
+class DiscoveryRecord:
+    """One catalog/tool-discovery hit: provenance of the search, never substantive coverage."""
+
+    record_id: str
+    session_id: str
+    tool: str
+    query: str
+    search_id: str | None = None
+    retrieved_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """One substantive sourced claim over frozen SEC evidence (the coverage unit)."""
+
+    record_id: str
+    session_id: str
+    evidence_id: str
+    claim_text: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +106,12 @@ class Evidence:
     metadata: dict[str, JSONValue] = field(default_factory=dict)
     # Correction chain: id of the prior record this record corrects; None for originals.
     superseded_by: str | None = None
+    # discovery = catalog hit (never substantive coverage alone); evidence = sourced claim.
+    record_kind: str = "evidence"
+
+    def _check_record_kind(self) -> None:
+        if self.record_kind not in RECORD_KINDS:
+            raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'record_kind' must be discovery|evidence, got {self.record_kind!r}")
 
     def _check_wave_hash(self) -> None:
         if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int) or self.wave_id < 1:
@@ -84,6 +120,7 @@ class Evidence:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: content_hash mismatch")
 
     def __post_init__(self) -> None:
+        self._check_record_kind()
         self._check_wave_hash()
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'confidence' must be within 0..1")
@@ -143,6 +180,33 @@ class EvidenceLedger:
 
     def __len__(self) -> int:
         return len(self._records)
+
+def discovery_only(records: object) -> bool:
+    """True when every record is discovery-kind (no substantive evidence)."""
+    items: list[object] = list(records) if isinstance(records, (list, tuple)) else []
+    if not items:
+        return False
+    kinds: list[str] = []
+    for item in items:
+        kind = getattr(item, "record_kind", None)
+        if kind is None and isinstance(item, Mapping):
+            kind = item.get("record_kind", item.get("metadata", {}).get("record_kind") if isinstance(item.get("metadata"), dict) else None)
+        kinds.append(str(kind) if kind is not None else "evidence")
+    return bool(kinds) and all(k == "discovery" for k in kinds)
+
+
+def substantive_records(records: object) -> list[object]:
+    """Filter to evidence-kind records (discovery never satisfies coverage alone)."""
+    items: list[object] = list(records) if isinstance(records, (list, tuple)) else []
+    out: list[object] = []
+    for item in items:
+        kind = getattr(item, "record_kind", None)
+        if kind is None and isinstance(item, Mapping):
+            meta = item.get("metadata")
+            kind = item.get("record_kind", meta.get("record_kind") if isinstance(meta, dict) else None)
+        if kind is None or str(kind) == "evidence":
+            out.append(item)
+    return out
 
 
 def _iso(value: datetime | str | None) -> str | None:
@@ -226,6 +290,7 @@ def ingest_evidence(
     return ledger.append(evidence)
 
 
+
 def evidence_to_dict(evidence: Evidence) -> dict[str, JSONValue]:
     """Evidence -> JSON-able dict (datetimes as ISO); the JSON blob is source of truth."""
     return {
@@ -252,6 +317,7 @@ def evidence_to_dict(evidence: Evidence) -> dict[str, JSONValue]:
         "quality": evidence.quality,
         "metadata": dict(evidence.metadata),
         "superseded_by": evidence.superseded_by,
+        "record_kind": evidence.record_kind,
     }
 
 
@@ -272,14 +338,17 @@ def _opt_str(d: dict[str, object], key: str) -> str | None:
 
 
 def _req_dt(d: dict[str, object], key: str) -> datetime:
+    from datetime import timezone as _tz
     value = d.get(key)
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=_tz.utc) if value.tzinfo is None else value.astimezone(_tz.utc)
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError:
             pass
+        else:
+            return parsed.replace(tzinfo=_tz.utc) if parsed.tzinfo is None else parsed.astimezone(_tz.utc)
     raise EvidenceIntegrityError(f"evidence: '{key}' must be an ISO-8601 datetime")
 
 
@@ -325,6 +394,18 @@ def _evidence_metadata(d: dict[str, object]) -> dict[str, object]:
     return dict(metadata)
 
 
+def _evidence_record_kind(d: dict[str, object]) -> str:
+    """discovery|evidence; metadata.record_kind fallback; absent means evidence (back-compat)."""
+    raw = d.get("record_kind")
+    if raw is None:
+        meta = d.get("metadata")
+        raw = meta.get("record_kind") if isinstance(meta, dict) else None
+    if raw is None:
+        return "evidence"
+    if isinstance(raw, str) and raw in RECORD_KINDS:
+        return raw
+    raise EvidenceIntegrityError(f"evidence: 'record_kind' must be discovery|evidence, got {raw!r}")
+
 def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
     """Rebuild validated Evidence (constructor re-checks hash/confidence)."""
     d = dict(data)
@@ -349,8 +430,8 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         supports=_str_list(d.get("supports", []), "supports"),
         contradicts=_str_list(d.get("contradicts", []), "contradicts"),
         confidence=_evidence_confidence(d),
-        quality=_opt_str(d, "quality"),
         metadata=validate_json_mapping(_evidence_metadata(d), "<evidence>: 'metadata'"),
         superseded_by=_opt_str(d, "superseded_by"),
+        record_kind=_evidence_record_kind(d),
     )
 

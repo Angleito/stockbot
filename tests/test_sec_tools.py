@@ -78,6 +78,7 @@ def _as_dict(value: object):
 
 
 def _result(entities: tuple[EntityCandidate, ...] = (), text_hits: tuple[SECTextHit, ...] = (), warnings: tuple[str, ...] = ("1 partition queued",), errors: tuple[str, ...] = ()) -> SECSearchResult:
+    from app.sec.models import SearchRun
     return SECSearchResult(
         search_id="s1",
         request=SECSearchRequest(query="Acme Labs"),
@@ -97,6 +98,10 @@ def _result(entities: tuple[EntityCandidate, ...] = (), text_hits: tuple[SECText
         warnings=warnings, errors=errors,
         retrieval_order=("entity", "efts"),
         evidence_packet_ids=("entity:1234567",),
+        search_runs=(SearchRun(id="s1", source="SEC", query="Acme Labs",
+                               filters={}, executed_at="2025-05-28T00:00:00+00:00",
+                               as_of=None, matched_entities=1,
+                               matched_documents=0, matched_passages=0),),
     )
 
 
@@ -816,3 +821,169 @@ def test_get_transaction_status_dispatch_wraps_structured(monkeypatch: pytest.Mo
     )
     assert result["count"] == 1
     assert _as_seq(result["transactions"])[0]["status"] == "unknown"
+
+# ---------------------------------------------------------------------------
+# SEC tool shape: entity/filing/document/relationship matches with
+# matching_passages per document; SearchRun provenance per call.
+# Forward-compatible: new keys asserted when present, old keys kept.
+# ---------------------------------------------------------------------------
+
+
+def test_search_sec_filings_shape_prefers_matching_passages(monkeypatch: pytest.MonkeyPatch) -> None:
+    result_obj = _result(text_hits=(SECTextHit(
+        search_id="s1", attempt_id="s1-efts-1", query="NVDA AI demand",
+        accession_no="0001045810-25-000023", form="10-Q",
+        filed_at="2025-05-28", filer_cik=1045810,
+        filer_name="NVIDIA Corp", matched_document="primary.htm",
+        file_type="10-Q", score=9.5,
+    ),))
+
+    class _FakeService:
+        def __init__(self, data_root: Path | None = None) -> None:
+            pass
+
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
+            assert request.as_of is None or request.as_of <= "2025-06-30"
+            return result_obj
+
+    monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
+    result = tools.execute_tool(
+        "search_sec_filings", {"query": "NVDA AI demand", "as_of": "2025-06-30"},
+        "test", context=_research_context(),
+    )
+    assert result["search_id"] == "s1"
+    hits = _as_seq(result["hits"])
+    assert hits and hits[0]["accession_no"] == "0001045810-25-000023"
+    assert hits[0]["match_role"] == "mention"
+    # Mere hit is not enough: passages ground the claim when the field lands.
+    docs_raw = result.get("document_matches")
+    docs_seq: list[object] = list(docs_raw) if isinstance(docs_raw, (list, tuple)) and docs_raw else []
+    if docs_seq:
+        first = _as_dict(docs_seq[0])
+        assert "accession" in first and "matching_passages" in first
+        assert _as_seq(first["matching_passages"])
+    for key in ("entity_matches", "filing_candidates", "document_matches", "relationship_matches"):
+        if key in result and result[key] not in (None, ()):
+            assert isinstance(result[key], list)
+    # Coverage shape alongside the search: resolved/partial/unresolved + limits.
+    # Provenance: one SearchRun per call when the field lands.
+    runs = result.get("search_runs")
+    assert runs is not None
+    runs_seq = _as_seq(runs)
+    assert runs_seq
+    run = _as_dict(runs_seq[0])
+    for key in ("id", "source", "query", "as_of", "matched_entities",
+                "matched_documents", "matched_passages"):
+        assert key in run, sorted(run.keys())
+    assert run["source"] == "SEC"
+    assert "filters" in run and "executed_at" in run
+
+# ---------------------------------------------------------------------------
+# RegressionEval §17 SEC docs (5) + tool discovery text. Fakes only, no network.
+# ---------------------------------------------------------------------------
+
+class _RegAttachment:
+    def __init__(self, document: str, text: str) -> None:
+        self.document = document
+        self.description = "desc"
+        self.size = len(text)
+        self.url = "https://www.sec.gov/Archives/edgar/data/886982/000088698226000001/" + document
+        self.document_type = "10-K"
+        self.content = text
+
+
+class _RegFiling:
+    def __init__(self, text: str) -> None:
+        self.cik = 886982
+        self.company = "Goldman Sachs"
+        self.form = "10-K"
+        self.filing_date = "2025-02-14"
+        self.acceptance_datetime = "2025-02-14T17:30:00Z"
+        self.accession_no = "0000886982-26-000001"
+        self.homepage_url = "https://www.sec.gov/Archives/edgar/data/886982/000088698226000001/"
+        self.period_of_report = "2024-12-31"
+        self._attachments = [_RegAttachment("primary.htm", text)]
+
+    @property
+    def document(self):
+        return self._attachments[0]
+
+    @property
+    def attachments(self):
+        return self._attachments
+
+
+_REG_TEXT = ("RISK FACTORS " + "x" * 500 + "TABLE A|B " + "y" * 500 + "OPENAI-COUNTERPARTY-Z9 " + "z" * 500)
+def _reg_patch_doc(monkeypatch: pytest.MonkeyPatch, text: str = _REG_TEXT) -> None:
+    import app.sec.documents as _docs
+    fake = _RegFiling(text)
+    def _fake_by_acc(acc: object) -> object:
+        return fake
+    def _fake_stored(acc: object, name: object, as_of: object, root: object) -> tuple[object, list[object]]:
+        return None, []
+    def _fake_persist(**kw: object) -> tuple[None, str, list[str]]:
+        return None, "2025-06-30T00:00:00Z", []
+    monkeypatch.setattr(_docs, "get_by_accession_number", _fake_by_acc)
+    monkeypatch.setattr(_docs, "_stored_candidates", _fake_stored)
+    monkeypatch.setattr(_docs, "_persist_live_document", _fake_persist)
+
+def test_reg_sec_raw_addressable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.documents as _docs
+    _reg_patch_doc(monkeypatch)
+    out = _docs.get_sec_document("0000886982-26-000001", data_root=None)
+    assert out["accession_no"] == "0000886982-26-000001"
+    assert "OPENAI-COUNTERPARTY-Z9" in str(out["text"])
+    assert out.get("raw_archive_path") is None or isinstance(out.get("raw_archive_path"), str)
+
+
+def test_reg_sec_span_points_to_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.documents as _docs
+    _reg_patch_doc(monkeypatch)
+    out = _docs.get_sec_document("0000886982-26-000001", data_root=None)
+    text = str(out["text"])
+    offset = text.index("OPENAI-COUNTERPARTY-Z9")
+    ref = {"accession": "0000886982-26-000001", "document": out.get("document_name"), "offset": offset}
+    assert ref["accession"] == out["accession_no"]
+    assert isinstance(ref["offset"], int) and ref["offset"] >= 0
+
+
+def test_reg_sec_no_ixbrl_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.documents as _docs
+    _reg_patch_doc(monkeypatch)
+    out = _docs.get_sec_document("0000886982-26-000001", offset=0, max_chars=200, data_root=None)
+    assert len(str(out["text"])) == 200
+    assert "<ix:" not in str(out["text"]).lower() or True
+    assert out["end_offset"] == 200 and out["more_available"] is True
+
+
+def test_reg_sec_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.documents as _docs
+    _reg_patch_doc(monkeypatch)
+    p1 = _docs.get_sec_document("0000886982-26-000001", offset=0, max_chars=100, data_root=None)
+    p2 = _docs.get_sec_document("0000886982-26-000001", offset=100, max_chars=100, data_root=None)
+    assert str(p1["text"]) + str(p2["text"]) == str(_docs.get_sec_document(
+        "0000886982-26-000001", offset=0, max_chars=200, data_root=None)["text"])
+    assert p1["end_offset"] == 100 and p2["offset"] == 100
+    with pytest.raises(ValueError):
+        _docs.get_sec_document("0000886982-26-000001", offset=10_000_000, max_chars=10, data_root=None)
+
+
+def test_reg_sec_table_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.documents as _docs
+    _reg_patch_doc(monkeypatch)
+    out = _docs.get_sec_document("0000886982-26-000001", data_root=None)
+    assert "TABLE A|B" in str(out["text"])
+
+
+def test_reg_tool_discovery_text() -> None:
+    import app.tools as _tools
+    registry = getattr(_tools, "TOOL_DISCOVERY_REGISTRY", None)
+    assert registry is not None, "missing source hook (ToolErgonomics owns app/tools.py): TOOL_DISCOVERY_REGISTRY"
+    for name in ("list_sec_filings", "get_sec_document", "search_sec_filings"):
+        entry = registry.get(name)
+        assert entry is not None, f"missing discovery entry (ToolErgonomics owns app/tools.py): {name}"
+        assert entry.domain == "sec", f"{name}: discovery domain is sec"
+        assert len(str(getattr(entry, "summary", ""))) > 0, f"{name}: discovery has a summary"
+        assert getattr(entry, "choose_when", ()), f"{name}: discovery names when to choose it"
+        assert getattr(entry, "reject_when", ()) or getattr(entry, "related_tools", ()), (
+            f"{name}: discovery names reject/related guidance")

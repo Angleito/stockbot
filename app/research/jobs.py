@@ -21,6 +21,7 @@ from .models import (
     JobType,
     ResearchSession,
     new_job_id,
+    source_domain_allowed,
     utcnow,
     validate_json_mapping,
 )
@@ -29,12 +30,16 @@ __all__ = [
     "COMMITTEE_TYPES",
     "active_jobs",
     "cancel_job",
+    "check_source_allowed",
     "children_allowed",
     "complete_job",
     "create_job",
     "default_tool_budget",
     "fail_job",
     "inspect_job",
+    "job_deadline_seconds",
+    "job_token_budget",
+    "job_tool_budget",
     "list_children",
     "start_job",
 ]
@@ -76,11 +81,33 @@ def children_allowed(policy: Mapping[str, object], job_type: str) -> int:
 
 
 def default_tool_budget(policy: Mapping[str, object], job_type: str) -> int | None:
-    """Default tool budget for a type, or None when the type is unbilled."""
+    """Default tool budget for a type, or None when unbounded/unbilled."""
     section_name = _JOBTYPE_SECTION.get(job_type)
     if section_name is None:
         return None
+    raw: object = _section(policy, section_name, "<job>").get("max_tool", None)
+    if raw is None:
+        return None
     return _limit(_section(policy, section_name, "<job>"), "max_tool", "<job>")
+
+
+def job_tool_budget(session: ResearchSession, job_type: str) -> int | None:
+    """Tool budget for a type from session policy+budgets (session totals only)."""
+    return default_tool_budget(session.policy, job_type)
+
+
+def job_token_budget(session: ResearchSession) -> int | None:
+    """Session token budget (budget total_token_budget; None when unbounded)."""
+    raw = session.budget.get("total_token_budget", None)
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
+
+
+def job_deadline_seconds(session: ResearchSession) -> int:
+    """Per-job deadline seconds from session budget (deadline_seconds; safety default)."""
+    raw = session.budget.get("deadline_seconds", None)
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+        return int(raw)
+    return SOURCE_RUNTIME_BUDGET_S
 
 
 def active_jobs(jobs: list[Job]) -> list[Job]:
@@ -116,14 +143,24 @@ def _check_capacity(session: ResearchSession, jobs: list[Job], jtype: str, wave_
     policy = session.policy
     max_waves = _research_limit(policy, "max_waves")
     if wave_id < 1 or wave_id > max_waves:
-        raise ValueError(f"<job>: wave_budget_exhausted: wave {wave_id} outside 1..{max_waves}")
+        raise ValueError(f"<job>: wave_limit_exceeded: wave {wave_id} outside 1..{max_waves}")
     if len(session.job_ids) >= _research_limit(policy, "max_total_jobs"):
-        raise ValueError("<job>: job_budget_exhausted: session max_total_jobs reached")
+        raise ValueError("<job>: job_limit_exceeded: session max_total_jobs reached")
     mine = [j for j in jobs if j.session_id == session.session_id]
     if len(active_jobs(mine)) >= _research_limit(policy, "max_parallel"):
         raise ValueError("<job>: parallelism_exceeded: session max_parallel reached")
     _check_committee(mine, policy, jtype)
     return mine
+
+
+def check_source_allowed(session: ResearchSession, source_domain: str | None) -> None:
+    """Kernel gate: job source_domain must be allowed by the persisted source_policy."""
+    if source_domain is None:
+        return
+    if not source_domain_allowed(session.source_policy, source_domain, "<job>"):
+        raise ValueError(
+            f"<job>: policy_denied: source_domain {source_domain!r} denied by session source_policy"
+        )
 
 
 def _check_parent(mine: list[Job], policy: Mapping[str, object], parent_job_id: str | None) -> None:
@@ -154,6 +191,8 @@ def _build_job(session: ResearchSession, *, jtype: str, owner: str, wave_id: int
     """Assemble, validate, and attach one queued job."""
     policy = session.policy
     parsed_deadline = _parse_deadline(deadline)
+    if parsed_deadline is None and jtype == JobType.SOURCE_AGENT.value:
+        parsed_deadline = utcnow() + timedelta(seconds=job_deadline_seconds(session))
     job = Job(
         job_id=job_id or new_job_id(),
         session_id=session.session_id,
@@ -164,10 +203,10 @@ def _build_job(session: ResearchSession, *, jtype: str, owner: str, wave_id: int
         source_domain=source_domain,
         status=JobStatus.QUEUED.value,
         created_at=utcnow(),
-        deadline=parsed_deadline if parsed_deadline is not None else (utcnow() + timedelta(seconds=SOURCE_RUNTIME_BUDGET_S)) if jtype == JobType.SOURCE_AGENT.value else None,
+        deadline=parsed_deadline,
         model=model,
-        token_budget=token_budget,
-        tool_budget=tool_budget if tool_budget is not None else default_tool_budget(policy, jtype),
+        token_budget=token_budget if token_budget is not None else job_token_budget(session),
+        tool_budget=tool_budget if tool_budget is not None else job_tool_budget(session, jtype),
         child_budget=child_budget if child_budget is not None else children_allowed(policy, jtype),
     )
     job.validate("<job>")
@@ -206,6 +245,7 @@ def create_job(
         raise ValueError(f"<job>: 'wave_id' must be an int, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     mine = _check_capacity(session, jobs, jtype, wave_id)
     _check_parent(mine, session.policy, parent_job_id)
+    check_source_allowed(session, source_domain)
     return _build_job(session, jtype=jtype, owner=owner, wave_id=wave_id, parent_job_id=parent_job_id, source_domain=source_domain, model=model, token_budget=token_budget, tool_budget=tool_budget, child_budget=child_budget, deadline=deadline, job_id=job_id)
 
 

@@ -52,6 +52,10 @@ def _fallback_payload(fallback: SourceDossier) -> tuple[dict[str, object], list[
         "sources_examined": list(fallback.coverage_notes),
         "complete": False,
         "exclusions": [],
+        "dates": [],
+        "partitions": [],
+        "docs": [],
+        "gaps": [],
     }
     fallback_findings = list(getattr(fallback, "findings", []) or [])
     findings: list[dict[str, object]] = [
@@ -149,10 +153,14 @@ def assignments_for(
     tickers: Sequence[str],
     dispatch: DispatchFn,
 ) -> list[ScoutAssignment]:
-    """Catalog-driven decomposition (split for testability)."""
+    """Catalog-driven decomposition (split for testability).
+
+    No-date questions pin the latest 10-K accession first (latest 10-Q +
+    relevant 8-Ks checked next); causal channels expand dynamically per the
+    source-agent context prompt, never a fixed issuer list.
+    """
     return decompose_question(
         question, session_id=session_id, as_of=as_of, tickers=tickers, dispatch=dispatch
     )
-
 
 __all__ = ["assignments_for", "run_sec_assignment"]
