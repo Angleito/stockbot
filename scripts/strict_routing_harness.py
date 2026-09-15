@@ -18,6 +18,7 @@ Strict verdict per contract: exact tool-name match required; any non-target
 research dispatch (clean or errored) = FAIL; unparseable call_tool args =
 FAIL; infra excused ONLY on ratelimit|429|timeout|latency.
 """
+import argparse
 import json
 import os
 import re
@@ -98,6 +99,11 @@ _TOOL_ARGS: dict[str, dict[str, object]] = {
 }
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    return parser.parse_args(argv)
+
+
 def _dispatch_real(cid: int, ordered: list[str]) -> list[str]:
     """Dispatch each tool through the real gateway path; return the inner
     names whose handlers actually ran, in dispatch order. Never raises."""
@@ -134,22 +140,44 @@ def _trace_rows(inner_names: list[str]) -> list[dict[str, str]]:
     ]
 
 
+def _decode_inner(raw: object) -> str | None:
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+    inner = payload.get("name") if isinstance(payload, dict) else None
+    return inner if isinstance(inner, str) and inner else None
+
+
 def _parse_dispatched(rows: list[dict[str, str]]) -> tuple[list[str], int]:
     """Strict inner-name parse: returns (ordered names, unparseable count)."""
     names: list[str] = []
     bad = 0
     for row in rows:
-        raw = row.get("arguments")
-        try:
-            payload = json.loads(raw) if isinstance(raw, str) else None
-        except (json.JSONDecodeError, TypeError):
-            payload = None
-        inner = payload.get("name") if isinstance(payload, dict) else None
-        if isinstance(inner, str) and inner:
-            names.append(inner)
-        else:
+        inner = _decode_inner(row.get("arguments"))
+        if inner is None:
             bad += 1
+        else:
+            names.append(inner)
     return names, bad
+
+
+def _missing_required(required: list[str], dispatched: list[str]) -> list[str]:
+    return sorted(set(required) - set(dispatched))
+
+
+def _infra_excused(missing: list[str], infra_error_names: tuple[tuple[str, str], ...]) -> bool:
+    errors = dict(infra_error_names)
+    return bool(missing) and all(_INFRA_RE.search(errors.get(m, "") or "") for m in missing)
+
+
+def _verdict_missing(required: list[str], dispatched: list[str], infra_error_names: tuple[tuple[str, str], ...]) -> tuple[bool, bool, str] | None:
+    missing = _missing_required(required, dispatched)
+    if not missing and all(t in dispatched for t in required):
+        return None
+    if _infra_excused(missing, infra_error_names):
+        return False, True, "infra-excused"
+    return False, False, f"missing required {missing}"
 
 
 def strict_verdict(required: list[str], sequence: list[str], rows: list[dict[str, str]], infra_error_names: tuple[tuple[str, str], ...] = ()) -> tuple[bool, bool, str]:
@@ -157,14 +185,9 @@ def strict_verdict(required: list[str], sequence: list[str], rows: list[dict[str
     dispatched, bad = _parse_dispatched(rows)
     if bad:
         return False, False, "unparseable call_tool args"
-    if not all(t in dispatched for t in required):
-        missing = sorted(set(required) - set(dispatched))
-        if missing and all(
-            _INFRA_RE.search(e or "") for e in
-            [dict(infra_error_names).get(m, "") for m in missing]
-        ):
-            return False, True, "infra-excused"
-        return False, False, f"missing required {missing}"
+    missing_verdict = _verdict_missing(required, dispatched, infra_error_names)
+    if missing_verdict is not None:
+        return missing_verdict
     if not _is_ordered_subsequence(sequence, dispatched):
         return False, False, "sequence not ordered subsequence"
     strays = sorted(set(dispatched) - set(required))
@@ -173,34 +196,55 @@ def strict_verdict(required: list[str], sequence: list[str], rows: list[dict[str
     return True, False, "ok"
 
 
-def _fixture_ground_truth():
+def _str_list(value: object) -> list[str]:
+    return [str(t) for t in value] if isinstance(value, list) else []
+
+
+def _case_ground_truth(case: dict[str, object]) -> tuple[list[str], list[str]]:
+    empty: tuple[list[str], list[str]] = ([], [])
+    eb = case.get("expected_behavior")
+    if not isinstance(eb, dict):
+        return empty
+    req = _str_list(eb.get("required_tools") or eb.get("expected_tools") or [])
+    seq = _str_list(eb.get("required_tool_sequence") or [])
+    return sorted(req), seq
+
+
+def _fixture_ground_truth() -> dict[int, tuple[list[str], list[str]]]:
     with open(os.path.join(ROOT, "evals", "eval_set.json")) as f:
         cases = {c["id"]: c for c in json.load(f)}
-    truth = {}
-    for cid, case in cases.items():
-        eb = case.get("expected_behavior", {})
-        req = eb.get("required_tools") or eb.get("expected_tools") or []
-        truth[cid] = (sorted(req), eb.get("required_tool_sequence") or [])
-    return truth
+    return {cid: _case_ground_truth(case) for cid, case in cases.items()}
 
 
-def main():
-    truth = _fixture_ground_truth()
+def check_workload_drift(truth: dict[int, tuple[list[str], list[str]]]) -> str | None:
     for cid, required, sequence in WORKLOAD:
         want = (sorted(required), sequence)
         if truth.get(cid) != want:
-            print(f"workload drift at Q{cid}: harness={want} fixture={truth.get(cid)}",
-                  file=sys.stderr)
-            return 2
+            return f"workload drift at Q{cid}: harness={want} fixture={truth.get(cid)}"
+    return None
 
+
+def scoring_set(required: list[str], sequence: list[str]) -> list[str]:
+    # Scoring set unions the ordered sequence (Q13/15/18): sequence
+    # tools must be dispatched in order AND exactly match — no strays.
+    return sorted(set(required) | set(sequence))
+
+
+def dispatch_order(scoring: list[str], sequence: list[str]) -> list[str]:
+    return list(sequence) + [t for t in scoring if t not in sequence]
+
+
+def run_query(cid: int, required: list[str], sequence: list[str]) -> tuple[bool, bool, str]:
+    scoring = scoring_set(required, sequence)
+    rows = _trace_rows(_dispatch_real(cid, dispatch_order(scoring, sequence)))
+    return strict_verdict(scoring, sequence, rows)
+
+
+def run_workload() -> tuple[int, int]:
     passed, counted = 0, 0
     for cid, required, sequence in WORKLOAD:
-        # Scoring set unions the ordered sequence (Q13/15/18): sequence
-        # tools must be dispatched in order AND exactly match — no strays.
-        scoring = sorted(set(required) | set(sequence))
-        ordered = list(sequence) + [t for t in scoring if t not in sequence]
-        rows = _trace_rows(_dispatch_real(cid, ordered))
-        ok, excused, reason = strict_verdict(scoring, sequence, rows)
+        scoring = scoring_set(required, sequence)
+        ok, excused, reason = run_query(cid, required, sequence)
         if excused:
             print(f"[EXCUSED] Q{cid}: {reason}", file=sys.stderr)
             continue
@@ -208,11 +252,14 @@ def main():
         passed += ok
         print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {','.join(scoring)} ({reason})",
               file=sys.stderr)
+    return passed, counted
 
+
+def strictness_probes() -> list[tuple[str, list[str], list[str], list[dict[str, str]]]]:
     # Scripted wrong-tool mutations must FAIL, proving strictness:
     # short-interest (Q11), insider (Q31), filing-diff pair (Q33), plus an
     # unparseable-args probe (Q1).
-    probes: list[tuple[str, list[str], list[str], list[dict[str, str]]]] = [
+    return [
         ("short-interest", ["get_short_interest"], [],
          _trace_rows(["get_reg_sho_volume"])),
         ("insider", ["get_insider_activity"], [],
@@ -222,18 +269,39 @@ def main():
         ("unparseable", ["get_fundamentals"], [],
          [{"tool_name": "call_tool", "arguments": "not-json{{{ "}]),
     ]
-    for label, required, sequence, rows in probes:
+
+
+def run_probes() -> str | None:
+    for label, required, sequence, rows in strictness_probes():
         ok, excused, reason = strict_verdict(required, sequence, rows)
         print(f"[PROBE-{label}] {'FAIL' if not ok else 'PASS'} ({reason})",
               file=sys.stderr)
         if ok or excused:
-            print(f"strictness probe '{label}' did not FAIL", file=sys.stderr)
-            return 2
+            return f"strictness probe '{label}' did not FAIL"
+    return None
 
+
+def build_report(passed: int, counted: int) -> str:
     accuracy = passed / counted if counted else 1.0
     wrong = counted - passed
-    sys.stdout.write(f"METRIC strict_routing_accuracy={accuracy:.4f}\n")
-    sys.stdout.write(f"METRIC wrong_tool_count={wrong}\n")
+    return f"METRIC strict_routing_accuracy={accuracy:.4f}\nMETRIC wrong_tool_count={wrong}\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parse_args(argv)
+    drift = check_workload_drift(_fixture_ground_truth())
+    if drift is not None:
+        print(drift, file=sys.stderr)
+        return 2
+
+    passed, counted = run_workload()
+
+    probe_failure = run_probes()
+    if probe_failure is not None:
+        print(probe_failure, file=sys.stderr)
+        return 2
+
+    sys.stdout.write(build_report(passed, counted))
     return 0
 
 

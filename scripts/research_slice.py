@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.analytics import screens  # noqa: E402
 
+TABLE_HEADERS = ("Rank", "Ticker", "Short now", "Short prior", "Short chg %", "SI % now", "SI % prior", "PP chg", "Shares now", "Shares prior", "Shares chg %")
+
 
 def _fmt(value: object) -> str:  # object: screen rows are untyped app-side dicts; display-only, never flows back
     if value is None:
@@ -29,28 +31,29 @@ def _fmt(value: object) -> str:  # object: screen rows are untyped app-side dict
     return str(value)
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--as-of", required=True, help="YYYY-MM-DD (or ISO timestamp)")
     parser.add_argument("--limit", type=int, default=screens.DEFAULT_LIMIT)
     parser.add_argument("--data-root", default=None, help="data directory (default: project data/)")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
-    result = screens.short_interest_change_screen(
+
+def fetch_screen(args: argparse.Namespace) -> dict[str, object]:
+    return screens.short_interest_change_screen(
         args.as_of, limit=args.limit, data_root=Path(args.data_root) if args.data_root else None
     )
-    if "error" in result:
-        print(f"error: {result['error']}", file=sys.stderr)
-        return 1
 
-    print(f"Short-interest change + shares-outstanding change (calc {result['calculation_version']})")
-    print(f"As of: {result['as_of']} | current settlement: {result['settlement_current']} | prior settlement: {result['settlement_prior'] or '-'}")
-    print(f"Coverage: {result['coverage']}")
-    headers = ("Rank", "Ticker", "Short now", "Short prior", "Short chg %", "SI % now", "SI % prior", "PP chg", "Shares now", "Shares prior", "Shares chg %")
-    widths = [len(h) for h in headers]
+
+def extract_entries(result: dict[str, object]) -> list[dict[str, object]]:
     entries_raw = result.get("entries")
-    entries: list[dict[str, object]] = [e for e in entries_raw if isinstance(e, dict)] if isinstance(entries_raw, list) else []
-    rows = [
+    if not isinstance(entries_raw, list):
+        return []
+    return [e for e in entries_raw if isinstance(e, dict)]
+
+
+def build_rows(entries: list[dict[str, object]]) -> list[tuple[str, ...]]:
+    return [
         (
             str(e["rank"]), str(e["ticker"]), _fmt(e["short_shares_current"]), _fmt(e["short_shares_prior"]),
             _fmt(e["short_change_pct"]), _fmt(e["short_interest_percent_current"]),
@@ -60,21 +63,61 @@ def main() -> int:
         )
         for e in entries
     ]
+
+
+def _column_widths(rows: list[tuple[str, ...]]) -> list[int]:
+    widths = [len(h) for h in TABLE_HEADERS]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
-    print(" | ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
-    print("-+-".join("-" * w for w in widths))
+    return widths
+
+
+def _render_header(result: dict[str, object]) -> list[str]:
+    prior = str(result["settlement_prior"] or "-")
+    lines: list[str] = [
+        f"Short-interest change + shares-outstanding change (calc {result['calculation_version']})",
+        f"As of: {result['as_of']} | current settlement: {result['settlement_current']} | prior settlement: {prior}",
+        f"Coverage: {result['coverage']}",
+    ]
+    return lines
+
+
+def _render_grid(rows: list[tuple[str, ...]], widths: list[int]) -> list[str]:
+    lines: list[str] = [
+        " | ".join(h.ljust(widths[i]) for i, h in enumerate(TABLE_HEADERS)),
+        "-+-".join("-" * w for w in widths),
+    ]
     for row in rows:
-        print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
-    print("\nEvidence links:")
+        lines.append(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+    return lines
+
+
+def format_table(result: dict[str, object]) -> str:
+    rows = build_rows(extract_entries(result))
+    return "\n".join(_render_header(result) + _render_grid(rows, _column_widths(rows)))
+
+
+def format_evidence(entries: list[dict[str, object]]) -> str:
+    lines: list[str] = ["", "Evidence links:"]
     for e in entries:
-        print(f"  {e['ticker']}:")
-        print(f"    FINRA snapshot: {e['finra_source_url']} (settlement {e['settlement_current']})")
+        lines.append(f"  {e['ticker']}:")
+        lines.append(f"    FINRA snapshot: {e['finra_source_url']} (settlement {e['settlement_current']})")
         if e["sec_accession_current"]:
-            print(f"    Shares fact (now): {e['sec_source_url_current']} accession {e['sec_accession_current']} filed {e['sec_filed_at_current']}")
+            lines.append(f"    Shares fact (now): {e['sec_source_url_current']} accession {e['sec_accession_current']} filed {e['sec_filed_at_current']}")
         if e["sec_accession_prior"]:
-            print(f"    Shares fact (prior): {e['sec_source_url_prior']} accession {e['sec_accession_prior']} filed {e['sec_filed_at_prior']}")
+            lines.append(f"    Shares fact (prior): {e['sec_source_url_prior']} accession {e['sec_accession_prior']} filed {e['sec_filed_at_prior']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    result = fetch_screen(args)
+    if "error" in result:
+        print(f"error: {result['error']}", file=sys.stderr)
+        return 1
+    print(format_table(result))
+    print(format_evidence(extract_entries(result)))
     return 0
 
 
