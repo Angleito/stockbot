@@ -62,6 +62,21 @@ def _known_as_of(filing: Filing, as_of: str | None) -> bool:
     return value is not None and value[:10] <= as_of
 
 
+def _form_family(form: str) -> set[str]:
+    """One form family: the base form plus its `/A` amendment (or just itself)."""
+    want = form.strip().upper()
+    return {want} if want.endswith("/A") else {want, f"{want}/A"}
+
+
+def _filing_day(filing: Filing) -> str:
+    value, _basis = pit_of(filing)
+    return filing.filed_at if value is None else value[:10]
+
+
+def _newer(match: Filing, day: str, best: Filing | None, best_day: str) -> tuple[Filing, str]:
+    return (match, day) if best is None or day > best_day else (best, best_day)
+
+
 def resolve_latest_filing(
     filings: list[Filing],
     form: str = "10-K",
@@ -73,19 +88,13 @@ def resolve_latest_filing(
     relevant 8-Ks; historical as_of/range questions may use older filings.
     """
     bound = _check_as_of(as_of)
-    want = form.strip().upper()
-    family = {want, f"{want}/A"} if not want.endswith("/A") else {want}
+    family = _form_family(form)
     best: Filing | None = None
     best_day = ""
     for filing in filings:
-        if filing.form.strip().upper() not in family:
+        if filing.form.strip().upper() not in family or not _known_as_of(filing, bound):
             continue
-        if not _known_as_of(filing, bound):
-            continue
-        value, _basis = pit_of(filing)
-        day = value[:10] if value is not None else filing.filed_at
-        if best is None or day > best_day:
-            best, best_day = filing, day
+        best, best_day = _newer(filing, _filing_day(filing), best, best_day)
     return best
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from . import jobs as _jobs
 from . import session as _session
+from .freeze import EvidenceFreeze
 from .evidence import (
     Evidence,
     evidence_content_hash,
@@ -24,6 +25,7 @@ from .evidence import (
 )
 from .models import (
     JSONValue,
+    ResearchSession,
     default_policy,
     utcnow,
     validate_json_mapping,
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
     from .agents.bullbot import BullAnalysis
     from .agents.stockbot import StockbotAnalysis
     from .director import Wave1Result, WaveDecision
-    from .models import Job, ResearchSession
+    from .models import Job
     from .synthesis.committee import CommitteeDisagreement
 
 __all__ = [
@@ -414,30 +416,51 @@ def _evidence_identity(data: Mapping[str, object], ev_type: str, claim: object,
                      _norm_lower(subject), _norm_lower(tail)))
 
 
+def _positive_claim_text(data: Mapping[str, object]) -> str:
+    """Claim text for provenance routing; non-strings stay positive."""
+    claim = data.get("claim_text", data.get("claim", ""))
+    return claim if isinstance(claim, str) else ""
+
+
+def _positive_accession(data: Mapping[str, object]) -> object:
+    """First accession candidate; None when absent."""
+    for key in ("source_record_id", "accession_no", "accession"):
+        value = data.get(key)
+        if value:
+            return value
+    return None
+
+
+def _positive_has_passage(data: Mapping[str, object]) -> bool:
+    """True when a document/section/passage citation is present."""
+    for key in ("matching_passage", "passage", "fact", "section", "document"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _positive_is_search_hit(data: Mapping[str, object]) -> bool:
+    """True when the item carries search-run provenance."""
+    return data.get("search_id") is not None or data.get("query") is not None
+
+
+def _require_positive_accession(accession: object) -> None:
+    """Positives need a document-hit accession."""
+    if isinstance(accession, str) and accession.strip():
+        return
+    raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (positive claim needs accession)")
+
+
 def _require_positive_provenance(ev_type: str, data: Mapping[str, object]) -> None:
     """Positives need a document hit: accession + passage/section/fact + known_at."""
     if ev_type != "filing_observation":
         return
-    claim = data.get("claim_text", data.get("claim", ""))
-    text = claim if isinstance(claim, str) else ""
-    if _is_negative_claim(text):
+    if _is_negative_claim(_positive_claim_text(data)):
         return
-    accession = data.get("source_record_id") or data.get("accession_no") or data.get("accession")
-    explicit = (data.get("matching_passage") or data.get("passage") or data.get("fact")
-                or data.get("section") or data.get("document"))
-    if isinstance(explicit, str) and explicit.strip():
-        passage: object = explicit
-    elif data.get("search_id") is not None or data.get("query") is not None:
+    if not _positive_has_passage(data) and _positive_is_search_hit(data):
         raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (search hit without passage is not evidence; cite document/section/passage)")
-    else:
-        content = data.get("content")
-        claim_text = data.get("claim_text", data.get("claim", ""))
-        passage = ((content if isinstance(content, str) and content.strip() else None)
-                   or (claim_text if isinstance(claim_text, str) and claim_text.strip() else None))
-        if isinstance(accession, str) and accession.strip() and passage is None:
-            passage = f"accession {accession}"
-    if not isinstance(accession, str) or not accession.strip():
-        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (positive claim needs accession)")
+    _require_positive_accession(_positive_accession(data))
 
 
 def _require_search_coverage(data: Mapping[str, object]) -> None:
@@ -458,6 +481,14 @@ def _is_negative_claim(text: str) -> bool:
 NEGATIVE_COVERAGE_KEYS = ("forms", "dates", "partitions", "docs", "gaps", "complete")
 
 
+def _negative_coverage_lists(cov: dict[str, object]) -> None:
+    """Every coverage partition list must be a list; complete must be a bool."""
+    for key in ("forms", "dates", "partitions", "docs", "gaps"):
+        if not isinstance(cov.get(key), list):
+            raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (negative coverage[{key!r}] must be a list)")
+    if not isinstance(cov.get("complete"), bool):
+        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (negative coverage['complete'] must be a bool)")
+
 def _negative_coverage(data: Mapping[str, object]) -> dict[str, object]:
     """Negative-evidence coverage envelope ({forms,dates,partitions,docs,gaps,complete})."""
     raw = data.get("coverage", data.get("search_coverage"))
@@ -467,11 +498,7 @@ def _negative_coverage(data: Mapping[str, object]) -> dict[str, object]:
     missing = [k for k in NEGATIVE_COVERAGE_KEYS if k not in cov]
     if missing:
         raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (negative coverage missing {missing})")
-    for key in ("forms", "dates", "partitions", "docs", "gaps"):
-        if not isinstance(cov.get(key), list):
-            raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (negative coverage[{key!r}] must be a list)")
-    if not isinstance(cov.get("complete"), bool):
-        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (negative coverage['complete'] must be a bool)")
+    _negative_coverage_lists(cov)
     return cov
 
 
@@ -483,26 +510,41 @@ def _require_negative_scope(text: str, cov: dict[str, object]) -> None:
     universal = lowered.startswith(("no ", "none ", "absent", "does not exist", "no evidence of", "no such "))
     if universal:
         raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (universal negative needs coverage complete:true; else scope the claim)")
-def _require_negative_provenance(ev_type: str, data: Mapping[str, object]) -> None:
-    """Negatives cite the executed SearchRun; an arbitrary filing never proves absence."""
-    if ev_type != "filing_observation":
-        return
+
+def _negative_claim_text(data: Mapping[str, object]) -> str:
+    """Claim text for negative routing; non-strings stay positive."""
     claim = data.get("claim_text", data.get("claim", ""))
-    text = claim if isinstance(claim, str) else ""
-    if not _is_negative_claim(text):
-        return
+    return claim if isinstance(claim, str) else ""
+
+
+def _require_negative_search_run(data: Mapping[str, object]) -> None:
+    """Negatives cite the executed SearchRun (search_id + query)."""
     search_id = data.get("search_id")
-    query = data.get("query")
     if not isinstance(search_id, str) or not search_id.strip():
         raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative claim needs search_id of the executed SearchRun)")
+    query = data.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative claim needs query of the executed SearchRun)")
+
+
+def _require_negative_no_filing_ref(data: Mapping[str, object]) -> None:
+    """A negative cites the SearchRun id only; a filing ref proves no absence."""
     for key in ("accession_no", "accession"):
         ref = data.get(key)
         if isinstance(ref, str) and ref.strip():
             raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative cites SearchRun ID only; arbitrary filing proves no absence)")
-    cov = _negative_coverage(data)
-    _require_negative_scope(text, cov)
+
+
+def _require_negative_provenance(ev_type: str, data: Mapping[str, object]) -> None:
+    """Negatives cite the executed SearchRun; an arbitrary filing never proves absence."""
+    if ev_type != "filing_observation":
+        return
+    text = _negative_claim_text(data)
+    if not _is_negative_claim(text):
+        return
+    _require_negative_search_run(data)
+    _require_negative_no_filing_ref(data)
+    _require_negative_scope(text, _negative_coverage(data))
 
 
 def _require_filing_provenance(ev_type: str, data: Mapping[str, object], subject: str) -> None:
@@ -554,22 +596,49 @@ def _evidence_ids_names(data: Mapping[str, object], session_id: str, job: Job) -
     return evidence_id, source_name, _str_tuple(data.get("supports", ())), _str_tuple(data.get("contradicts", ()))
 
 
+def _svc_explicit_kind(data: Mapping[str, object]) -> object:
+    """Explicit record_kind from the item or its metadata; None when absent."""
+    kind_raw: object = data.get("record_kind")
+    if kind_raw is not None:
+        return kind_raw
+    meta: object = data.get("metadata")
+    return meta.get("record_kind") if isinstance(meta, dict) else None
+
+
+def _svc_record_kind(data: Mapping[str, object], ev_type: str) -> str:
+    """discovery for search_coverage or an explicit discovery marker; else evidence."""
+    kind_raw = _svc_explicit_kind(data)
+    if isinstance(kind_raw, str) and kind_raw in ("discovery", "evidence"):
+        return kind_raw
+    return "discovery" if ev_type == "search_coverage" else "evidence"
+
+
+def _svc_claim_text(claim: object, kind: str, ev_type: str, evidence_id: str, content: str) -> str:
+    """Claim text: the claim when non-blank, else a discovery label or content lead."""
+    if isinstance(claim, str) and claim.strip():
+        return claim[:2000]
+    if kind == "discovery":
+        return f"{ev_type} {evidence_id}"
+    return content[:500]
+
+
+def _svc_opt_str(data: Mapping[str, object], key: str) -> str | None:
+    """One optional string field; non-strings coerce to None."""
+    raw = data.get(key)
+    return raw if isinstance(raw, str) else None
+
+
+def _svc_opt_float(data: Mapping[str, object], key: str) -> float | None:
+    """One optional numeric field; non-numerics coerce to None."""
+    raw = data.get(key)
+    return float(raw) if isinstance(raw, (int, float)) else None
+
 def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_id: str, wave: int,
                            evidence_id: str, source_name: str, subject: str, claim: object,
                            content: str, supports: tuple[str, ...], contradicts: tuple[str, ...],
                            metadata: dict[str, JSONValue], identity_key: str, ev_type: str) -> Evidence:
     """Assemble the Evidence row from coerced fields (no I/O)."""
-    source_uri_raw = data.get("source_uri")
-    source_record_id_raw = data.get("source_record_id")
-    confidence_raw = data.get("confidence")
-    quality_raw = data.get("quality")
-    superseded_by_raw = data.get("superseded_by")
-    kind_raw: object = data.get("record_kind")
-    meta: object = data.get("metadata")
-    if kind_raw is None and isinstance(meta, dict):
-        kind_raw = meta.get("record_kind")
-    kind = kind_raw if isinstance(kind_raw, str) and kind_raw in ("discovery", "evidence") else ("discovery" if ev_type == "search_coverage" else "evidence")
-    claim_text = claim[:2000] if isinstance(claim, str) and claim.strip() else (f"{ev_type} {evidence_id}" if kind == "discovery" else content[:500])
+    kind = _svc_record_kind(data, ev_type)
     return Evidence(
         evidence_id=evidence_id,
         session_id=session_id,
@@ -577,14 +646,12 @@ def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_i
         source_type=str(data.get("source_type", "pi")),
         source_name=source_name,
         subject=subject,
-        claim_text=claim_text,
+        claim_text=_svc_claim_text(claim, kind, ev_type, evidence_id, content),
         content=content,
         content_hash=evidence_content_hash(content),
         retrieved_at=_coerce_dt(data.get("retrieved_at")) or utcnow(),
-        source_uri=source_uri_raw if isinstance(source_uri_raw, str) else None,
-        source_record_id=source_record_id_raw
-        if isinstance(source_record_id_raw, str)
-        else None,
+        source_uri=_svc_opt_str(data, "source_uri"),
+        source_record_id=_svc_opt_str(data, "source_record_id"),
         published_at=_coerce_dt(data.get("published_at")),
         known_at=_coerce_dt(data.get("known_at")),
         effective_at=_coerce_dt(data.get("effective_at")),
@@ -592,10 +659,10 @@ def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_i
         agent_id=str(data.get("agent_id", "pi")),
         supports=supports,
         contradicts=contradicts,
-        confidence=float(confidence_raw) if isinstance(confidence_raw, (int, float)) else None,
-        quality=quality_raw if isinstance(quality_raw, str) else None,
+        confidence=_svc_opt_float(data, "confidence"),
+        quality=_svc_opt_str(data, "quality"),
         metadata={**metadata, "identity_key": identity_key, "evidence_type": ev_type},
-        superseded_by=superseded_by_raw if isinstance(superseded_by_raw, str) else None,
+        superseded_by=_svc_opt_str(data, "superseded_by"),
         record_kind=kind,
     )
 
@@ -719,23 +786,46 @@ def _submit_live_job(store: ResearchRepository, job_id: str):
     return job, found
 
 
-def _submit_dossier(store: ResearchRepository, job: Job, found: ResearchSession, useful: object,
-                    ids: list[str], unresolved: list[str] | None, cov: dict[str, object] | None = None) -> tuple[str, set[str]]:
-    """Validate refs + persist the SEC dossier (idempotent); return (dossier_id, ledger_ids)."""
-    from .dossiers import create_dossier, default_coverage
-    from .dossiers.sec import dossier_to_dict
+_SUBMIT_COVERAGE_KEYS = ("resolved", "partially_resolved", "unresolved", "source_limitations",
+                         "dates", "partitions", "docs", "gaps")
 
-    ledger_ids = {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id)}
+
+def _submit_ledger_ids(store: ResearchRepository, job: Job) -> set[str]:
+    """Evidence ids persisted for this session."""
+    return {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id)}
+
+
+def _submit_require_refs(ledger_ids: set[str], ids: list[str]) -> None:
+    """Every cited evidence id must already be persisted."""
     missing = [e for e in ids if e not in ledger_ids]
     if missing:
         raise ValueError(f"submit_source_result: ERR_EVIDENCE_NOT_FOUND {missing[:3]}")
-    dossier_id = f"{job.session_id}:{job.wave_id}:sec"
+
+
+def _submit_coverage_merge(coverage: dict[str, object], cov: dict[str, object] | None, key: str) -> None:
+    """Copy one caller-supplied string list into the coverage envelope."""
+    values = (cov or {}).get(key)
+    if isinstance(values, list) and all(isinstance(v, str) for v in values):
+        coverage[key] = list(values)
+
+
+def _submit_coverage_dict(cov: dict[str, object] | None, useful: object) -> dict[str, object]:
+    """Coverage envelope: default coverage plus caller-supplied string lists."""
+    from .dossiers import default_coverage
+
     coverage = {**default_coverage(), "complete": useful == "sufficient"}
-    for key in ("resolved", "partially_resolved", "unresolved", "source_limitations",
-                "dates", "partitions", "docs", "gaps"):
-        values = (cov or {}).get(key)
-        if isinstance(values, list) and all(isinstance(v, str) for v in values):
-            coverage[key] = list(values)
+    for key in _SUBMIT_COVERAGE_KEYS:
+        _submit_coverage_merge(coverage, cov, key)
+    return coverage
+
+
+def _submit_persist_dossier(store: ResearchRepository, job: Job, found: ResearchSession,
+                            dossier_id: str, coverage: dict[str, object], ids: list[str],
+                            unresolved: list[str] | None) -> None:
+    """Persist the SEC dossier + link it to the session; duplicate saves are no-ops."""
+    from .dossiers import create_dossier
+    from .dossiers.sec import dossier_to_dict
+
     dossier = create_dossier(
         dossier_id=dossier_id, session_id=job.session_id, wave_id=job.wave_id,
         subject=found.query[:120], coverage=coverage,
@@ -749,6 +839,14 @@ def _submit_dossier(store: ResearchRepository, job: Job, found: ResearchSession,
     cur = store.get_session(job.session_id)
     if dossier_id not in cur.dossier_ids:
         store.save_session(replace(cur, dossier_ids=[*cur.dossier_ids, dossier_id], updated_at=utcnow()))
+
+def _submit_dossier(store: ResearchRepository, job: Job, found: ResearchSession, useful: object,
+                    ids: list[str], unresolved: list[str] | None, cov: dict[str, object] | None = None) -> tuple[str, set[str]]:
+    """Validate refs + persist the SEC dossier (idempotent); return (dossier_id, ledger_ids)."""
+    ledger_ids = _submit_ledger_ids(store, job)
+    _submit_require_refs(ledger_ids, ids)
+    dossier_id = f"{job.session_id}:{job.wave_id}:sec"
+    _submit_persist_dossier(store, job, found, dossier_id, _submit_coverage_dict(cov, useful), ids, unresolved)
     return dossier_id, ledger_ids
 
 
@@ -953,14 +1051,31 @@ def _freeze_ready_session(store: ResearchRepository, session_id: str, wave_id: i
     return found
 
 
+def _freeze_row_kind(record: Mapping[str, object]) -> str:
+    """Stored row kind; metadata.record_kind fallback; absent means evidence."""
+    raw = record.get("record_kind")
+    if raw is None:
+        meta = record.get("metadata")
+        if isinstance(meta, Mapping):
+            return str(meta.get("record_kind", "evidence"))
+        return "evidence"
+    return str(raw)
+
+
+def _freeze_open_source_jobs(store: ResearchRepository, session_id: str, wave_id: int) -> list[str]:
+    """Open source/scout job ids blocking the wave freeze."""
+    return [j.job_id for j in store.list_jobs(session_id)
+            if j.wave_id == wave_id and j.job_type in ("source_agent", "scout")
+            and j.status in ("queued", "running")]
+
+
 def _freeze_wave_records(store: ResearchRepository, session_id: str, wave_id: int):
     from .evidence import evidence_from_dict
 
-    recs = [evidence_from_dict(record) for record in store.list_evidence(session_id) if str(record.get("record_kind", (record.get("metadata") or {}).get("record_kind") if isinstance(record.get("metadata"), dict) else "evidence")) != "discovery"]
-    wave_recs = [e for e in recs if e.wave_id <= wave_id]
-    open_src = [j.job_id for j in store.list_jobs(session_id)
-                if j.wave_id == wave_id and j.job_type in ("source_agent", "scout")
-                and j.status in ("queued", "running")]
+    rows = [r for r in store.list_evidence(session_id) if _freeze_row_kind(r) != "discovery"]
+    wave_recs = [evidence_from_dict(r) for r in rows]
+    wave_recs = [e for e in wave_recs if e.wave_id <= wave_id]
+    open_src = _freeze_open_source_jobs(store, session_id, wave_id)
     if open_src:
         raise ValueError(f"freeze_session: {len(open_src)} source jobs still open for wave {wave_id}: {open_src}")
     return wave_recs
@@ -977,6 +1092,59 @@ def _freeze_coverage_note(store: ResearchRepository, session_id: str) -> str:
     return ""
 
 
+def _freeze_save_idempotent(store: ResearchRepository, frozen: EvidenceFreeze) -> None:
+    """Persist the freeze; a duplicate save is a no-op (idempotent retry)."""
+    from . import freeze as _freeze
+
+    if not isinstance(frozen, EvidenceFreeze):
+        raise ValueError(f"freeze: expected EvidenceFreeze, got {type(frozen).__name__}")
+    try:
+        store.save_freeze(_freeze.freeze_to_dict(frozen))
+    except ValueError:
+        pass
+
+
+def _freeze_track_session(store: ResearchRepository, found: ResearchSession, fid: str, wave_id: int) -> ResearchSession:
+    """Walk RESEARCHING->FREEZING, attach the freeze id, advance the wave."""
+    from .models import SessionStatus
+
+    out = _session.transition_session(found, SessionStatus.FREEZING)
+    if fid not in out.freeze_ids:
+        out = replace(out, freeze_ids=[*out.freeze_ids, fid], updated_at=utcnow())
+    store.save_session(out)
+    if wave_id > out.current_wave:
+        out = replace(out, current_wave=wave_id, updated_at=utcnow())
+        store.save_session(out)
+    return out
+
+
+def _freeze_empty_note(wave_recs: Sequence[object], note: str) -> str:
+    """Empty waves freeze with a limitations note; non-empty waves keep the gate note."""
+    if note or wave_recs:
+        return note
+    return "no PIT-eligible SEC evidence for this wave; proceeding with limitations"
+
+def _freeze_committee_jobs(store: ResearchRepository, session_id: str, wave_id: int) -> list[str]:
+    """Pre-existing committee job ids for this wave; empty when none exist."""
+    jobs = store.list_jobs(session_id)
+    return [j.job_id for j in jobs if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot")]
+
+
+def _freeze_result_payload(frozen: EvidenceFreeze, committee: list[str], wave_id: int, fid: str, note: str) -> dict[str, object]:
+    """Freeze payload: freeze dict plus the caller-driven committee verb."""
+    from . import freeze as _freeze
+
+    if not isinstance(frozen, EvidenceFreeze):
+        raise ValueError(f"freeze: expected EvidenceFreeze, got {type(frozen).__name__}")
+    out_dict = _freeze.freeze_to_dict(frozen)
+    out_dict["pending_next_action"] = {"verb": "EXECUTE_COMMITTEE",
+        "jobs": committee or ["stockbot", "bullbot", "bearbot"], "wave_id": wave_id, "freeze_id": fid}
+    if not note:
+        return out_dict
+    out_dict["coverage_gate"] = "insufficient"
+    out_dict["limitations"] = note
+    return out_dict
+
 def freeze_session(
     session_id: str,
     wave_id: int = 1,
@@ -985,7 +1153,6 @@ def freeze_session(
 ) -> dict[str, object]:
     """Freeze wave evidence (PIT-checked) and move RESEARCHING -> FREEZING."""
     from . import freeze as _freeze
-    from .models import SessionStatus
 
     store = _repo(repo)
     found = _freeze_ready_session(store, session_id, wave_id)
@@ -993,33 +1160,13 @@ def freeze_session(
     fid = f"{session_id}:{wave_id}:freeze"
     frozen = _freeze.create_freeze(freeze_id=fid, session_id=session_id, wave_id=wave_id, records=wave_recs, as_of=found.as_of)
     _freeze.verify_freeze(frozen, wave_recs)
-    try:
-        store.save_freeze(_freeze.freeze_to_dict(frozen))
-    except ValueError:
-        pass
-    out = _session.transition_session(found, SessionStatus.FREEZING)
-    if fid not in out.freeze_ids:
-        out = replace(out, freeze_ids=[*out.freeze_ids, fid], updated_at=utcnow())
-    store.save_session(out)
-    if wave_id > out.current_wave:
-        out = replace(out, current_wave=wave_id, updated_at=utcnow())
-        store.save_session(out)
+    _freeze_save_idempotent(store, frozen)
+    _freeze_track_session(store, found, fid, wave_id)
     _emit(store, session_id, "freeze.created", {"freeze_id": fid, "wave_id": wave_id})
-    note = _freeze_coverage_note(store, session_id)
-    if not wave_recs and not note:
-        note = "no PIT-eligible SEC evidence for this wave; proceeding with limitations"
+    note = _freeze_empty_note(wave_recs, _freeze_coverage_note(store, session_id))
     # Committee creation stays caller-driven: freeze returns the verb + roles and
     # reuses pre-existing committee job ids when present, never auto-creating.
-    jobs = store.list_jobs(session_id)
-    existing = [j.job_id for j in jobs if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot")]
-    out_dict = _freeze.freeze_to_dict(frozen)
-    if note:
-        out_dict["coverage_gate"] = "insufficient"
-    out_dict["pending_next_action"] = {"verb": "EXECUTE_COMMITTEE",
-        "jobs": existing or ["stockbot", "bullbot", "bearbot"], "wave_id": wave_id, "freeze_id": fid}
-    if note:
-        out_dict["limitations"] = note
-    return out_dict
+    return _freeze_result_payload(frozen, _freeze_committee_jobs(store, session_id, wave_id), wave_id, fid, note)
 
 
 def create_committee_jobs(session_id: str, wave_id: int = 1, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, object]:

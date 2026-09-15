@@ -24,6 +24,14 @@ _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t\x0b\x0c\r]+")
 _HEADING_RE = re.compile(r"^\s*(item\s+\d+[a-z]?(?:\([^)]*\))?\.?.*|part\s+[ivx]+\.?|signatures?)\s*$", re.IGNORECASE)
+_BLOCK_TAGS = frozenset({"br", "p", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "li", "table"})
+_CELL_TAGS = frozenset({"td", "th"})
+_END_BLOCK_TAGS = frozenset({"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "table"})
+
+
+def _tag_name(tag: str) -> str:
+    """Parser tag without namespace prefix, lowercased (filings mix `ix:`/`xbrli:` prefixes)."""
+    return tag.lower().split(":")[-1]
 
 
 class _ViewTextParser(HTMLParser):
@@ -37,30 +45,33 @@ class _ViewTextParser(HTMLParser):
 
     @override
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        name = tag.lower().split(":")[-1]
-        if name in ("br", "p", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "li"):
+        name = _tag_name(tag)
+        if name in _BLOCK_TAGS:
             self._chunks.append("\n")
         if name == "tr":
             self._row = []
-        elif name in ("td", "th"):
+        elif name in _CELL_TAGS:
             self._cell = []
-        elif name == "table":
-            self._chunks.append("\n")
+
+    def _close_cell(self) -> None:
+        if self._cell is not None and self._row is not None:
+            self._row.append(_WS_RE.sub(" ", "".join(self._cell)).strip())
+            self._cell = None
+
+    def _close_row(self) -> None:
+        cells = [c for c in (self._row or []) if c]
+        if cells:
+            self._chunks.append(" | ".join(cells) + "\n")
+        self._row = None
 
     @override
     def handle_endtag(self, tag: str) -> None:
-        name = tag.lower().split(":")[-1]
-        if name in ("td", "th") and self._cell is not None and self._row is not None:
-            self._row.append(_WS_RE.sub(" ", "".join(self._cell)).strip())
-            self._cell = None
-        elif name == "tr" and self._row is not None:
-            cells = [c for c in self._row if c]
-            if cells:
-                self._chunks.append(" | ".join(cells) + "\n")
-            self._row = None
-        elif name == "table":
-            self._chunks.append("\n")
-        elif name in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"):
+        name = _tag_name(tag)
+        if name in _CELL_TAGS:
+            self._close_cell()
+        elif name == "tr":
+            self._close_row()
+        elif name in _END_BLOCK_TAGS:
             self._chunks.append("\n")
 
     @override
@@ -81,12 +92,12 @@ def _strip_noise(source: str) -> str:
     return _IXBLR_NOISE_RE.sub("", text)
 
 
-def _render_text(source: str) -> str:
-    """Model-readable text: tables as pipes, headings/paragraphs preserved."""
-    cleaned = _strip_noise(source)
-    if "<" not in cleaned or ">" not in cleaned:
-        lines = [_WS_RE.sub(" ", ln).strip() for ln in cleaned.splitlines()]
-        return "\n".join(ln for ln in lines if ln)
+def _normalize_plain(cleaned: str) -> str:
+    lines = [_WS_RE.sub(" ", ln).strip() for ln in cleaned.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _parse_view(cleaned: str) -> str:
     parser = _ViewTextParser()
     try:
         parser.feed(cleaned)
@@ -95,6 +106,18 @@ def _render_text(source: str) -> str:
         return _WS_RE.sub(" ", _TAG_RE.sub(" ", cleaned)).strip()
     lines = [_WS_RE.sub(" ", ln).strip(" |") for ln in parser.text().splitlines()]
     return "\n".join(ln for ln in lines if ln)
+
+
+def _section_names(view: str) -> list[str]:
+    return [name for name, _ in _split_sections(view) if name][: _VIEW_MAX_SECTIONS]
+
+
+def _render_text(source: str) -> str:
+    """Model-readable text: tables as pipes, headings/paragraphs preserved."""
+    cleaned = _strip_noise(source)
+    if "<" not in cleaned or ">" not in cleaned:
+        return _normalize_plain(cleaned)
+    return _parse_view(cleaned)
 
 
 def _split_sections(view: str) -> list[tuple[str | None, int]]:
@@ -115,24 +138,30 @@ def _split_sections(view: str) -> list[tuple[str | None, int]]:
     return sections[: _VIEW_MAX_SECTIONS + 1]
 
 
-def _section_names(view: str) -> list[str]:
-    return [name for name, _ in _split_sections(view) if name][: _VIEW_MAX_SECTIONS]
+def _section_spans(view: str) -> list[tuple[str, int, int]]:
+    """Named (heading, start, end) spans over the rendered view."""
+    spans = _split_sections(view)
+    ends = [start for _, start in spans[1:]] + [len(view)]
+    return [(name, start, end) for (name, start), end in zip(spans, ends) if name is not None]
+
+
+def _resolve_section(view: str, bounds: list[tuple[str, int, int]], section: str) -> tuple[str, str, int] | None:
+    want = section.strip().lower()
+    for name, start, end in bounds:
+        lowered = name.lower()
+        if want in lowered or lowered in want:
+            return view[start:end], name, start
+    return None
 
 
 def _select_section(view: str, section: str | None) -> tuple[str, str | None, int]:
     """Narrow a rendered view to one heading; returns (text, resolved, base_offset)."""
     if section is None or not section.strip():
         return view, None, 0
-    want = section.strip().lower()
-    spans = _split_sections(view)
-    bounds: list[tuple[str, int, int]] = []
-    for i, (name, start) in enumerate(spans):
-        end = spans[i + 1][1] if i + 1 < len(spans) else len(view)
-        if name is not None:
-            bounds.append((name, start, end))
-    for name, start, end in bounds:
-        if want in name.lower() or name.lower() in want:
-            return view[start:end], name, start
+    bounds = _section_spans(view)
+    hit = _resolve_section(view, bounds, section)
+    if hit is not None:
+        return hit
     available = "; ".join(name for name, _, _ in bounds[:12]) or "none"
     raise ValueError(f"section not found: {section!r}; available sections: {available}")
 
@@ -368,35 +397,50 @@ def _bounded_response(*, accession_no: str, document_name: object,
     }
     if warnings:
         out["warnings"] = list(warnings)
-    if view_text is not None:
-        uri = _source_uri_for(accession_no, document_name)
-        out["view"] = "raw" if raw_view else "rendered"
-        out["section"] = resolved_section
-        out["available_sections"] = list(available_sections) if available_sections is not None else _section_names(view_text)
-        out["metadata"] = {
-            "accession_no": accession_no,
-            "document_name": document_name,
-            "section": resolved_section,
-            "source_uri": uri,
-            "source_url": source_url,
-            "filed_at": filed_at,
-            "known_at": known_at,
-            "content_hash": content_hash,
-            "source_content_hash": source_content_hash,
-        }
-        out["source_uri"] = uri
-        out["source_refs"] = [{
-            "accession": accession_no,
-            "document": document_name if isinstance(document_name, str) else None,
-            "offset": view_base + offset,
-            "source_uri": uri,
-        }]
-        out["cursor"] = offset
-        out["next_cursor"] = end if end < len(view_text) else None
-    else:
+    _attach_view(out, accession_no=accession_no, document_name=document_name,
+                 view_text=view_text, view_base=view_base, resolved_section=resolved_section,
+                 raw_view=raw_view, available_sections=available_sections,
+                 source_url=source_url, filed_at=filed_at, known_at=known_at,
+                 content_hash=content_hash, source_content_hash=source_content_hash,
+                 offset=offset, end=end, total=total)
+    return out
+
+
+def _attach_view(out: dict[str, object], *, accession_no: str, document_name: object,
+                 view_text: str | None, view_base: int, resolved_section: str | None,
+                 raw_view: bool, available_sections: list[str] | None,
+                 source_url: object, filed_at: object, known_at: object,
+                 content_hash: object, source_content_hash: object,
+                 offset: int, end: int, total: int) -> None:
+    """Raw-addressable cursor + span pointers for the derived view (raw stays in the archive)."""
+    if view_text is None:
         out["cursor"] = offset
         out["next_cursor"] = end if end < total else None
-    return out
+        return
+    uri = _source_uri_for(accession_no, document_name)
+    out["view"] = "raw" if raw_view else "rendered"
+    out["section"] = resolved_section
+    out["available_sections"] = list(available_sections) if available_sections is not None else _section_names(view_text)
+    out["metadata"] = {
+        "accession_no": accession_no,
+        "document_name": document_name,
+        "section": resolved_section,
+        "source_uri": uri,
+        "source_url": source_url,
+        "filed_at": filed_at,
+        "known_at": known_at,
+        "content_hash": content_hash,
+        "source_content_hash": source_content_hash,
+    }
+    out["source_uri"] = uri
+    out["source_refs"] = [{
+        "accession": accession_no,
+        "document": document_name if isinstance(document_name, str) else None,
+        "offset": view_base + offset,
+        "source_uri": uri,
+    }]
+    out["cursor"] = offset
+    out["next_cursor"] = end if end < len(view_text) else None
 
 
 def _build_view(full: str, *, section: str | None, query: str | None, raw: bool) -> tuple[str, str | None, int, bool, list[str]]:

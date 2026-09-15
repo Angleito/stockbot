@@ -4261,3 +4261,154 @@ def test_checked_rule_type_routing(tmp_path: Path) -> None:
         tools_mod._checked_rule_type({"rule_type": "  "}, SUPPORTED_HANDLERS)
     with pytest.raises(ValueError, match=r"unsupported rule_type 'nope'; supported: \["):
         tools_mod._checked_rule_type({"rule_type": "nope"}, SUPPORTED_HANDLERS)
+
+# -- CrapService: provenance / dossier / freeze / ladder / policy arms --
+
+def _neg_eid(sid: str, n: int) -> str:
+    return f"{sid}:ev:neg:{n}"
+
+
+def _neg_item(eid: str, **kw: object) -> dict[str, object]:
+    d: dict[str, object] = {"evidence_id": eid, "wave_id": 1, "content": "c-" + eid,
+         "claim_text": "no 10-K filing found", "subject": "NVDA", "source_name": "SEC",
+         "source_uri": "https://sec.gov/x", "known_at": KNOWN,
+         "search_id": "sr:1", "query": "NVDA 10-K",
+         "coverage": {"forms": [], "dates": [], "partitions": [], "docs": [], "gaps": [], "complete": True}}
+    d.update(kw)
+    return d
+
+
+def test_positive_search_hit_without_passage_rejects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    with pytest.raises(ValueError, match="search hit without passage"):
+        svc.record_evidence(sid, src, _item(f"{sid}:ev:1", search_id="sr:1", query="NVDA 10-K"), repo=repo)
+
+
+def test_positive_missing_accession_rejects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    item = _item(f"{sid}:ev:1", matching_passage="revenue grew")
+    item.pop("source_record_id", None)
+    with pytest.raises(ValueError, match="positive claim needs accession"):
+        svc.record_evidence(sid, src, item, repo=repo)
+
+
+def test_negative_search_run_and_filing_and_coverage_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    base = _neg_item(_neg_eid(sid, 1))
+    no_sid = dict(base)
+    no_sid.pop("search_id", None)
+    with pytest.raises(ValueError, match="needs search_id"):
+        svc.record_evidence(sid, src, no_sid, repo=repo)
+    no_q = dict(base)
+    no_q["query"] = "  "
+    with pytest.raises(ValueError, match="needs query"):
+        svc.record_evidence(sid, src, no_q, repo=repo)
+    with pytest.raises(ValueError, match="SearchRun ID only"):
+        svc.record_evidence(sid, src, {**base, "accession_no": "0001"}, repo=repo)
+    with pytest.raises(ValueError, match="SearchRun ID only"):
+        svc.record_evidence(sid, src, {**base, "accession": "0002"}, repo=repo)
+    scoped = dict(base)
+    scoped["claim_text"] = "no 10-K in the 2024 window"
+    cov_raw = scoped["coverage"]
+    assert isinstance(cov_raw, dict)
+    scoped_cov = dict(cov_raw)
+    scoped_cov["complete"] = False
+    scoped["coverage"] = scoped_cov
+    with pytest.raises(ValueError, match="universal negative|complete:true|scope the claim"):
+        svc.record_evidence(sid, src, scoped, repo=repo)
+    out = svc.record_evidence(sid, src, base, repo=repo)
+    assert out["evidence_id"] == _neg_eid(sid, 1)
+
+
+def test_negative_coverage_envelope_arms() -> None:
+    with pytest.raises(ValueError, match="needs coverage"):
+        svc._negative_coverage({"claim_text": "no x"})
+    with pytest.raises(ValueError, match="missing"):
+        svc._negative_coverage({"coverage": {"forms": []}})
+    bad_lists: dict[str, object] = {"forms": "x", "dates": [], "partitions": [], "docs": [], "gaps": [], "complete": True}
+    with pytest.raises(ValueError, match="must be a list"):
+        svc._negative_coverage({"coverage": bad_lists})
+    bad_flag: dict[str, object] = {"forms": [], "dates": [], "partitions": [], "docs": [], "gaps": [], "complete": "yes"}
+    with pytest.raises(ValueError, match="must be a bool"):
+        svc._negative_coverage({"coverage": bad_flag})
+
+
+def test_positive_provenance_non_filing_and_negative_passthrough() -> None:
+    svc._require_positive_provenance("search_coverage", {})
+    svc._require_positive_provenance("filing_observation", {"claim_text": "no 10-K found"})
+    svc._require_negative_provenance("search_coverage", {})
+    svc._require_negative_provenance("filing_observation", {"claim_text": "revenue grew"})
+
+
+def test_submit_dossier_passthrough_lists_and_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    eid = f"{sid}:ev:1"
+    svc.record_evidence(sid, src, _item(eid), repo=repo)
+    out = svc.submit_source_result(src, coverage={"useful_for_question": "sufficient", "resolved": ["q1"],
+        "dates": ["2024"], "gaps": 42, "docs": ["d1"]}, evidence_ids=[eid], repo=repo)
+    assert out["dossier_id"] == f"{sid}:1:sec"
+    stored = repo.list_dossiers(sid)[0]
+    cov = stored["coverage"]
+    assert isinstance(cov, dict)
+    res = cov["resolved"]
+    assert isinstance(res, list)
+    assert res == ["q1"]
+    job = repo.get_job(src)
+    found = repo.get_session(sid)
+    again, _ = svc._submit_dossier(repo, job, found, "sufficient", [eid], None, {"useful_for_question": "sufficient"})
+    assert again == f"{sid}:1:sec"
+
+
+def test_freeze_skips_discovery_and_keeps_substantive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    svc.record_evidence(sid, src, _item(f"{sid}:ev:disc", type="search_coverage", search_id="s1",
+        query="NVDA filings", subject="NVDA"), repo=repo)
+    svc.record_evidence(sid, src, _item(f"{sid}:ev:1", source_record_id="r-1"), repo=repo)
+    svc.complete_job(src, {}, repo=repo)
+    recs = svc._freeze_wave_records(repo, sid, 1)
+    assert [e.evidence_id for e in recs] == [f"{sid}:ev:1"]
+
+
+def test_ladder_distinct_loop_and_policy_arms() -> None:
+    from app.research.models import FailureCategory
+    from app.research.runner import _LiveRun
+    assert _LiveRun._ladder_category("research_loop_detected x") == FailureCategory.RESEARCH_LOOP_DETECTED
+    assert _LiveRun._ladder_category("research_loop x") == FailureCategory.RESEARCH_LOOP_DETECTED
+    assert _LiveRun._ladder_category("duplicate_research_action x") == FailureCategory.DUPLICATE_RESEARCH_ACTION
+    assert _LiveRun._ladder_category("policy_rejection x") == FailureCategory.POLICY_REJECTION
+    assert _LiveRun._ladder_category("all quiet") is None
+
+
+def test_denied_reason_mapping_mode_and_lists() -> None:
+    from app.security.action_policy import source_denied_reason
+    assert source_denied_reason("search_web", None) is None
+    assert source_denied_reason("search_web", "nope") == "session source_policy must be a mapping"
+    assert "unknown source_policy mode" in str(source_denied_reason("x", {"mode": "nope"}))
+    assert "denied by session" in str(source_denied_reason("search_web", {"mode": "all", "denied": ["web"]}))
+    assert source_denied_reason("search_web", {"mode": "all", "denied": []}) is None
+    assert "outside session source allowlist" in str(source_denied_reason("x", {"mode": "allowlist", "allowed": "SEC"}))
+    assert source_denied_reason("search_sec_filings", {"mode": "allowlist", "allowed": ["SEC"], "denied": []}) is None
+    assert source_denied_reason("custom_tool", {"mode": "allowlist", "allowed": ["custom"], "denied": []}) is None
+
+
+def test_temporal_doc_stored_and_fallback_arms() -> None:
+    from app.research.repository import _session_temporal_doc
+    _con = sqlite3.connect(":memory:")
+    _con.row_factory = sqlite3.Row
+    fetched = _con.execute("SELECT 1 AS x").fetchone()
+    assert isinstance(fetched, sqlite3.Row)
+    out_asof = _session_temporal_doc(set(), fetched, "2025-01-01", lambda: {"as_of": None, "mode": "x"})
+    assert isinstance(out_asof, dict)
+    assert out_asof["mode"] == "as_of"
+    out_bad = _session_temporal_doc(set(), fetched, None, lambda: "bad")
+    assert isinstance(out_bad, dict)
+    assert out_bad["mode"] == "latest-available"
+    out_none = _session_temporal_doc(set(), fetched, None, None)
+    assert isinstance(out_none, dict)
+    assert out_none["mode"] == "latest-available"
+    _con.close()

@@ -214,7 +214,32 @@ def validate_source_policy(value: object, where: str = "<dict>") -> dict[str, JS
     }
 
 
-def resolve_source_policy(policy: Mapping[str, object] | None, where: str = "<session>") -> dict[str, JSONValue]:
+def _source_container(policy: Mapping[str, object]) -> object:
+    """research_sources container: nested key wins, else the bare mapping itself."""
+    nested = policy.get("research_sources", None)
+    return nested if nested is not None else (policy if "mode" in policy else None)
+
+
+def _source_norm_mode(raw: Mapping[str, object], where: str) -> str:
+    """Validate research_sources.mode; the fail-closed kernel vocabulary."""
+    mode = raw.get("mode", "all")
+    if not isinstance(mode, str) or mode.strip().lower() not in SOURCE_POLICY_MODES:
+        raise ValueError(f"{where}: 'research_sources.mode' must be one of {sorted(SOURCE_POLICY_MODES)}, got {mode!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return mode.strip().lower()
+
+
+def _source_cleaned_sources(raw: Mapping[str, object], norm: str, where: str) -> list[str]:
+    """Validate + strip research_sources.sources (allowlist mode requires non-empty)."""
+    sources = raw.get("sources", [])
+    if not isinstance(sources, list) or any(not isinstance(s, str) or not s.strip() for s in sources):
+        raise ValueError(f"{where}: 'research_sources.sources' must be a list of non-empty strings")
+    cleaned = [s.strip() for s in sources]
+    if norm == "allowlist" and not cleaned:
+        raise ValueError(f"{where}: 'research_sources.sources' must be non-empty for allowlist mode")
+    return cleaned
+
+
+def resolve_source_policy(policy: object, where: str = "<session>") -> dict[str, JSONValue]:
     """Build source_policy from a full policy or a bare research_sources mapping.
 
     Accepts policy['research_sources'] ({mode: all|allowlist, sources}) or the
@@ -224,27 +249,23 @@ def resolve_source_policy(policy: Mapping[str, object] | None, where: str = "<se
         return default_source_policy()
     if not isinstance(policy, Mapping):
         raise ValueError(f"{where}: 'policy' must be a mapping, got {type(policy).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-    raw: object = policy.get("research_sources", None)
-    if raw is None and "mode" in policy:
-        raw = policy
+    raw = _source_container(policy)
     if raw is None:
         return default_source_policy()
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: 'research_sources' must be a mapping, got {type(raw).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-    mode = raw.get("mode", "all")
-    if not isinstance(mode, str) or mode.strip().lower() not in SOURCE_POLICY_MODES:
-        raise ValueError(f"{where}: 'research_sources.mode' must be one of {sorted(SOURCE_POLICY_MODES)}, got {raw.get('mode')!r}")
-    norm = mode.strip().lower()
-    sources = raw.get("sources", [])
-    if not isinstance(sources, list) or any(not isinstance(s, str) or not s.strip() for s in sources):
-        raise ValueError(f"{where}: 'research_sources.sources' must be a list of non-empty strings")
-    cleaned = [s.strip() for s in sources]
-    if norm == "allowlist" and not cleaned:
-        raise ValueError(f"{where}: 'research_sources.sources' must be non-empty for allowlist mode")
+    norm = _source_norm_mode(raw, where)
+    cleaned = _source_cleaned_sources(raw, norm, where)
     allowed_out: list[JSONValue] = list(cleaned)
-    denied_out: list[JSONValue] = []
-    return {"allowed": allowed_out, "denied": denied_out, "mode": norm}
+    return {"allowed": allowed_out, "denied": [], "mode": norm}
 
+
+def _policy_domain_set(checked: Mapping[str, object], key: str) -> set[str]:
+    """Lowercased domain set for an allow/deny list (validated policy always holds lists)."""
+    raw = checked.get(key, [])
+    if not isinstance(raw, list):
+        return set()
+    return {s.strip().lower() for s in raw if isinstance(s, str)}
 
 def source_domain_allowed(
     source_policy: Mapping[str, object] | None,
@@ -258,19 +279,11 @@ def source_domain_allowed(
         raise ValueError(f"{where}: 'source_domain' must be a non-empty string or null, got {source_domain!r}")
     checked = validate_source_policy(source_policy if source_policy is not None else default_source_policy(), where)
     want = source_domain.strip().lower()
-    raw_denied = checked.get("denied", [])
-    denied: set[str] = set()
-    if isinstance(raw_denied, list):
-        denied = {s.strip().lower() for s in raw_denied if isinstance(s, str)}
-    if want in denied:
+    if want in _policy_domain_set(checked, "denied"):
         return False
     if checked.get("mode") == "all":
         return True
-    raw_allowed = checked.get("allowed", [])
-    allowed: set[str] = set()
-    if isinstance(raw_allowed, list):
-        allowed = {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
-    return want in allowed
+    return want in _policy_domain_set(checked, "allowed")
 
 
 _TEMPORAL_UNBOUNDED_RE = re.compile(
@@ -305,6 +318,76 @@ def _shift_years(moment: datetime, years: int) -> datetime:
         return moment.replace(year=moment.year - years, day=28)
 
 
+def _temporal_text(temporal: str | None, query: str, where: str) -> tuple[str | None, str]:
+    """Validated (raw, text) pair: explicit temporal wins, else the query string."""
+    if temporal is not None and (not isinstance(temporal, str) or not temporal.strip()):
+        raise ValueError(f"{where}: 'temporal' must be a non-empty string or null, got {temporal!r}")
+    raw = temporal.strip() if isinstance(temporal, str) else None
+    text = raw if raw is not None else (query if isinstance(query, str) else "")
+    return raw, text
+
+def _temporal_last_year_range(moment: datetime, raw: str | None) -> dict[str, JSONValue]:
+    """Range over the prior calendar year."""
+    prev = moment.year - 1
+    return {"as_of": f"{prev}-12-31", "start": f"{prev}-01-01", "end": f"{prev}-12-31", "mode": "range", "raw": raw}
+
+
+def _temporal_quarter_range(moment: datetime, raw: str | None) -> dict[str, JSONValue]:
+    """Range from the current quarter start through now."""
+    q0 = date(moment.year, 3 * ((moment.month - 1) // 3) + 1, 1).isoformat()
+    return {"as_of": moment.isoformat(), "start": q0, "end": moment.isoformat(), "mode": "range", "raw": raw}
+
+
+def _temporal_moment_asof(moment: datetime, raw: str | None, mode: str) -> dict[str, JSONValue]:
+    """Cutoff pinned at now for pre-earnings/today/latest wording (no range)."""
+    return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": mode, "raw": raw}
+
+
+_TEMPORAL_SIMPLE_TABLE = (
+    ("last_n", _TEMPORAL_LAST_N_RE),
+    ("last_year", _TEMPORAL_LAST_YEAR_RE),
+    ("quarter", _TEMPORAL_QUARTER_RE),
+    ("earnings", _TEMPORAL_EARNINGS_RE),
+    ("latest", _TEMPORAL_LATEST_RE),
+    ("now", _TEMPORAL_NOW_RE),
+)
+
+
+def _temporal_simple_hit(name: str, hit: re.Match[str], moment: datetime, raw: str | None) -> dict[str, JSONValue]:
+    """Build the scope for a simple (non between/as-of) pattern hit by table name."""
+    if name == "last_n":
+        start_dt = _shift_years(moment, max(int(hit.group(1)), 1))
+        return {"as_of": moment.isoformat(), "start": start_dt.isoformat(), "end": moment.isoformat(), "mode": "range", "raw": raw}
+    if name == "last_year":
+        return _temporal_last_year_range(moment, raw)
+    if name == "quarter":
+        return _temporal_quarter_range(moment, raw)
+    if name == "latest":
+        return _temporal_moment_asof(moment, raw, "latest-available")
+    return _temporal_moment_asof(moment, raw, "as_of")
+
+
+def _temporal_match(text: str, moment: datetime, raw: str | None, where: str) -> dict[str, JSONValue] | None:
+    """First temporal-pattern hit in kernel precedence order (None when no wording matches)."""
+    if _TEMPORAL_UNBOUNDED_RE.search(text):
+        return {"as_of": None, "start": None, "end": None, "mode": "unbounded", "raw": raw}
+    between = _TEMPORAL_BETWEEN_RE.search(text)
+    if between is not None:
+        start = _temporal_day(between.group(1), where)
+        end = _temporal_day(between.group(2), where)
+        if start > end:
+            raise ValueError(f"{where}: temporal range start {start!r} is after end {end!r}")
+        return {"as_of": end, "start": start, "end": end, "mode": "range", "raw": raw}
+    asof_hit = _TEMPORAL_AS_OF_RE.search(text)
+    if asof_hit is not None:
+        day = _temporal_day(asof_hit.group(1), where)
+        return {"as_of": day, "start": None, "end": None, "mode": "as_of", "raw": raw}
+    for name, regex in _TEMPORAL_SIMPLE_TABLE:
+        hit = regex.search(text)
+        if hit is not None:
+            return _temporal_simple_hit(name, hit, moment, raw)
+    return None
+
 def resolve_temporal_scope(
     *,
     as_of: datetime | str | None = None,
@@ -320,41 +403,12 @@ def resolve_temporal_scope(
     Raw wording is always kept.
     """
     moment = normalize_time(now) if isinstance(now, datetime) else utcnow()
-    if temporal is not None and (not isinstance(temporal, str) or not temporal.strip()):
-        raise ValueError(f"{where}: 'temporal' must be a non-empty string or null, got {temporal!r}")
-    raw = temporal.strip() if isinstance(temporal, str) else None
-    text = raw if raw is not None else (query if isinstance(query, str) else "")
+    raw, text = _temporal_text(temporal, query, where)
     cut = _coerce_time(as_of, "as_of", where)
-    if text and _TEMPORAL_UNBOUNDED_RE.search(text):
-        return {"as_of": None, "start": None, "end": None, "mode": "unbounded", "raw": raw}
     if text:
-        between = _TEMPORAL_BETWEEN_RE.search(text)
-        if between is not None:
-            start = _temporal_day(between.group(1), where)
-            end = _temporal_day(between.group(2), where)
-            if start > end:
-                raise ValueError(f"{where}: temporal range start {start!r} is after end {end!r}")
-            return {"as_of": end, "start": start, "end": end, "mode": "range", "raw": raw}
-        asof_hit = _TEMPORAL_AS_OF_RE.search(text)
-        if asof_hit is not None:
-            day = _temporal_day(asof_hit.group(1), where)
-            return {"as_of": day, "start": None, "end": None, "mode": "as_of", "raw": raw}
-        last_n = _TEMPORAL_LAST_N_RE.search(text)
-        if last_n is not None:
-            start_dt = _shift_years(moment, max(int(last_n.group(1)), 1))
-            return {"as_of": moment.isoformat(), "start": start_dt.isoformat(), "end": moment.isoformat(), "mode": "range", "raw": raw}
-        if _TEMPORAL_LAST_YEAR_RE.search(text):
-            prev = moment.year - 1
-            return {"as_of": f"{prev}-12-31", "start": f"{prev}-01-01", "end": f"{prev}-12-31", "mode": "range", "raw": raw}
-        if _TEMPORAL_QUARTER_RE.search(text):
-            q0 = date(moment.year, 3 * ((moment.month - 1) // 3) + 1, 1).isoformat()
-            return {"as_of": moment.isoformat(), "start": q0, "end": moment.isoformat(), "mode": "range", "raw": raw}
-        if _TEMPORAL_EARNINGS_RE.search(text):
-            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
-        if _TEMPORAL_LATEST_RE.search(text):
-            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "latest-available", "raw": raw}
-        if _TEMPORAL_NOW_RE.search(text):
-            return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
+        hit_scope = _temporal_match(text, moment, raw, where)
+        if hit_scope is not None:
+            return hit_scope
     if cut is not None:
         return {"as_of": cut.isoformat(), "start": None, "end": None, "mode": "as_of", "raw": raw}
     return {"as_of": moment.isoformat(), "start": None, "end": None, "mode": "latest-available", "raw": raw}
@@ -432,9 +486,67 @@ def _baseline_superseded_by(filing: object) -> str | None:
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
 
-def _baseline_skipped(annual: object, day: str, annual_day: str) -> bool:
-    """True when the candidate loses to the current annual pick (older day, or tie kept first)."""
-    return annual is not None and day <= annual_day
+def _baseline_skipped(best: object, day: str, best_day: str) -> bool:
+    """True when the candidate loses to the current pick (older day, or tie kept first)."""
+    return best is not None and day <= best_day
+
+
+def _baseline_eligible_day(filing: object, bound_day: str | None) -> str | None:
+    """PIT day for one filing (None when missing PIT or past the bound)."""
+    value, _basis = _baseline_pit(filing)
+    if value is None:
+        return None
+    day = value[:10]
+    if bound_day is not None and day > bound_day:
+        return None
+    return day
+
+
+def _baseline_eligible(filings: list[object], bound_day: str | None) -> list[tuple[str, object]]:
+    """Filings with PIT proof on/before the bound, as (day, filing) pairs."""
+    out: list[tuple[str, object]] = []
+    for filing in filings:
+        day = _baseline_eligible_day(filing, bound_day)
+        if day is None:
+            continue
+        out.append((day, filing))
+    return out
+
+
+def _baseline_accession_index(eligible: list[tuple[str, object]]) -> dict[str, object]:
+    """Eligible filings keyed by accession (latest write wins on duplicates)."""
+    index: dict[str, object] = {}
+    for _, filing in eligible:
+        acc = _baseline_accession(filing)
+        if acc is None:
+            continue
+        index[acc] = filing
+    return index
+
+
+def _baseline_replacement_eligible(filing: object, by_accession: Mapping[str, object]) -> bool:
+    """True when the filing names a PIT-eligible replacement (never wins)."""
+    nxt = _baseline_superseded_by(filing)
+    return nxt is not None and nxt in by_accession
+
+
+def _baseline_pick_latest(
+    eligible: list[tuple[str, object]],
+    forms: frozenset[str],
+    by_accession: Mapping[str, object],
+) -> object:
+    """Latest non-superseded filing among forms (ties keep the first seen)."""
+    best: object = None
+    best_day = ""
+    for day, filing in eligible:
+        if _baseline_form(filing) not in forms:
+            continue
+        if _baseline_replacement_eligible(filing, by_accession):
+            continue
+        if _baseline_skipped(best, day, best_day):
+            continue
+        best, best_day = filing, day
+    return best
 
 
 def select_latest_baseline(
@@ -454,41 +566,11 @@ def select_latest_baseline(
     """
     bound = _coerce_time(as_of, "as_of", "<baseline>")
     bound_day = bound.date().isoformat() if bound is not None else None
-    eligible: list[tuple[str, object]] = []
-    for filing in filings:
-        value, _basis = _baseline_pit(filing)
-        if value is None:
-            continue
-        day = value[:10]
-        if bound_day is not None and day > bound_day:
-            continue
-        eligible.append((day, filing))
-    by_accession = {acc: filing for _, filing in eligible for acc in [_baseline_accession(filing)] if acc is not None}
-
-    def _replacement_eligible(filing: object) -> bool:
-        nxt = _baseline_superseded_by(filing)
-        return nxt is not None and nxt in by_accession
-
-    annual: object = None
-    annual_day = ""
-    quarterly: object = None
-    quarterly_day = ""
-    currents: list[tuple[str, object]] = []
-    for day, filing in eligible:
-        form = _baseline_form(filing)
-        if form in _BASELINE_ANNUAL:
-            if _replacement_eligible(filing):
-                continue
-            if _baseline_skipped(annual, day, annual_day):
-                continue
-            annual, annual_day = filing, day
-        elif form in _BASELINE_QUARTERLY:
-            if _replacement_eligible(filing):
-                continue
-            if quarterly is None or day > quarterly_day:
-                quarterly, quarterly_day = filing, day
-        elif form in _BASELINE_CURRENT:
-            currents.append((day, filing))
+    eligible = _baseline_eligible(filings, bound_day)
+    by_accession = _baseline_accession_index(eligible)
+    annual = _baseline_pick_latest(eligible, _BASELINE_ANNUAL, by_accession)
+    quarterly = _baseline_pick_latest(eligible, _BASELINE_QUARTERLY, by_accession)
+    currents = [(day, filing) for day, filing in eligible if _baseline_form(filing) in _BASELINE_CURRENT]
     currents.sort(key=_baseline_day, reverse=True)
     return {
         "annual_10k": annual,
@@ -496,6 +578,12 @@ def select_latest_baseline(
         "material_8k": [filing for _, filing in currents],
         "as_of": bound.isoformat() if bound is not None else None,
     }
+
+
+def _cited_accessions(cited: object) -> list[str]:
+    """Normalize cited accession(s) to stripped strings (non-strings dropped)."""
+    raw: list[object] = [cited] if isinstance(cited, str) else (list(cited) if isinstance(cited, (list, tuple)) else [])
+    return [c.strip() for c in raw if isinstance(c, str) and c.strip()]
 
 
 def superseded_current_violation(
@@ -516,8 +604,7 @@ def superseded_current_violation(
     latest_acc = _baseline_accession(latest) if latest is not None else None
     if latest_acc is None:
         return None
-    raw_cited: list[object] = [cited] if isinstance(cited, str) else (list(cited) if isinstance(cited, (list, tuple)) else [])
-    cited_accs = [c.strip() for c in raw_cited if isinstance(c, str) and c.strip()]
+    cited_accs = _cited_accessions(cited)
     if not cited_accs or latest_acc in cited_accs:
         return None
     return f"current-position claim cites superseded annual {cited_accs[0]!r} while latest 10-K {latest_acc!r} is PIT-eligible"

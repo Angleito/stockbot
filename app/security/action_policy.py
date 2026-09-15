@@ -126,35 +126,69 @@ class EgressDecision:
     allowed: bool
     reason: str | None
 
+def _source_policy_mode(source_policy: dict[str, object]) -> str | None:
+    """Allowlist/all mode; None when the mode is unknown (caller reports it)."""
+    raw_mode = source_policy.get("mode", "all")
+    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else "all"
+    return mode if mode in ("all", "allowlist") else None
+
+
+def _denied_set(raw_denied: object) -> set[str]:
+    """Denied entries as lowercase strings; non-lists and non-strings ignored."""
+    if not isinstance(raw_denied, list):
+        return set()
+    return {s.strip().lower() for s in raw_denied if isinstance(s, str)}
+
+
+def _source_denied_hit(name: str, raw_denied: object) -> str | None:
+    """Denied-list hit reason; None when no denied entry matches."""
+    lowered = name.strip().lower()
+    if any(d and d in lowered for d in _denied_set(raw_denied)):
+        return f"POLICY_DENIED: tool {name!r} denied by session source_policy"
+    return None
+
+
+def _allowlist_set(raw_allowed: object) -> set[str] | None:
+    """Allowlist entries as lowercase strings; None when not a list."""
+    if not isinstance(raw_allowed, list):
+        return None
+    return {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
+
+
+def _allowlist_match(name: str, allowed: set[str]) -> bool:
+    """True when the allowlist covers this tool (SEC tools via SEC_TOOLS only)."""
+    # ponytail: "sec" matches the SEC_TOOLS allowlist only; substring would also
+    # match "securities" (a FINRA tool) so it never falls through to substring.
+    if "sec" in allowed and is_sec_tool_name(name):
+        return True
+    return any(a and a in name.strip().lower() for a in allowed - {"sec"})
+
+
+def _allowlist_verdict(name: str, raw_allowed: object) -> str | None:
+    """Allowlist verdict: None when allowed, else the outside-allowlist reason."""
+    allowed = _allowlist_set(raw_allowed)
+    if allowed is None:
+        return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+    if _allowlist_match(name, allowed):
+        return None
+    return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+
+
 def source_denied_reason(name: str, source_policy: object) -> str | None:
     """Deny reason when a session source_policy excludes this tool; None when allowed."""
     if source_policy is None:
         return None
     if not isinstance(source_policy, dict):
         return "session source_policy must be a mapping"
-    raw_mode = source_policy.get("mode", "all")
-    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else "all"
-    if mode not in ("all", "allowlist"):
-        return f"unknown source_policy mode {raw_mode!r}"
-    raw_denied = source_policy.get("denied", [])
-    denied = {s.strip().lower() for s in raw_denied} if isinstance(raw_denied, list) else set()
-    lowered = name.strip().lower()
-    if any(d and d in lowered for d in denied if isinstance(d, str)):
-        return f"POLICY_DENIED: tool {name!r} denied by session source_policy"
+    mode = _source_policy_mode(source_policy)
+    if mode is None:
+        return f"unknown source_policy mode {source_policy.get('mode')!r}"
+    hit = _source_denied_hit(name, source_policy.get("denied", []))
+    if hit is not None:
+        return hit
     if mode == "all":
         return None
-    raw_allowed = source_policy.get("allowed", [])
-    if not isinstance(raw_allowed, list):
-        return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
-    allowed = {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
-    # ponytail: "sec" matches the SEC_TOOLS allowlist only; substring would also
-    # match "securities" (a FINRA tool) so it never falls through to substring.
-    if "sec" in allowed and is_sec_tool_name(name):
-        return None
-    others = allowed - {"sec"}
-    if any(a and a in lowered for a in others):
-        return None
-    return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+    return _allowlist_verdict(name, source_policy.get("allowed", []))
 
 
 def is_sec_tool_name(name: str) -> bool:

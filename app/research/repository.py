@@ -148,19 +148,39 @@ def _session_policy_doc(names: set[str], row: sqlite3.Row) -> object:
     parsed: object = json.loads(text)
     return parsed
 
+def _temporal_stored(names: set[str], row: sqlite3.Row) -> object:
+    """Stored temporal_scope JSON; None when the column is absent or blank."""
+    if "temporal_scope" not in names:
+        return None
+    raw = row["temporal_scope"]
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    stored: object = json.loads(str(raw))
+    return stored
+
+
+def _temporal_defaults(dts: object) -> dict[str, object]:
+    """Default scope envelope; malformed factories fall back to latest-available."""
+    defaults = dts() if callable(dts) else {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+    if isinstance(defaults, dict):
+        return dict(defaults)
+    return {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+
+
+def _temporal_cutoff(as_of: object) -> tuple[object, str]:
+    """Session as_of cutoff + mode; blank as_of means latest-available."""
+    if isinstance(as_of, str) and as_of.strip():
+        return as_of, "as_of"
+    return None, "latest-available"
+
+
 def _session_temporal_doc(names: set[str], row: sqlite3.Row, as_of: object, dts: object) -> object:
     """Stored temporal_scope JSON; pre-policy rows inherit the session as_of cutoff."""
-    if "temporal_scope" in names:
-        raw = row["temporal_scope"]
-        if raw is not None and (not isinstance(raw, str) or raw.strip()):
-            stored: object = json.loads(str(raw))
-            return stored
-    defaults = dts() if callable(dts) else {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
-    if not isinstance(defaults, dict):
-        return {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
-    cut = as_of if isinstance(as_of, str) and as_of.strip() else None
-    mode = "as_of" if cut is not None else "latest-available"
-    return {**defaults, "as_of": cut, "mode": mode}
+    stored = _temporal_stored(names, row)
+    if stored is not None:
+        return stored
+    cut, mode = _temporal_cutoff(as_of)
+    return {**_temporal_defaults(dts), "as_of": cut, "mode": mode}
 
 
 def _default_max_tool_calls() -> int | None:

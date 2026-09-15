@@ -987,3 +987,39 @@ def test_reg_tool_discovery_text() -> None:
         assert getattr(entry, "choose_when", ()), f"{name}: discovery names when to choose it"
         assert getattr(entry, "reject_when", ()) or getattr(entry, "related_tools", ()), (
             f"{name}: discovery names reject/related guidance")
+
+def test_agents_coerce_relationships_dedupes_and_rejects() -> None:
+    from app.research.agents.source_agent import _coerce_relationships
+    good = {"subject": " NVDA ", "relation": "supplies", "object": "hyperscalers"}
+    out = _coerce_relationships([good, {"subject": "nvda", "relation": "SUPPLIES", "object": " hyperscalers "},
+                                 {"subject": "NVDA"}, "nope", 42, None])
+    assert out == [{"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"}]
+    assert _coerce_relationships("not-a-list") == []
+    assert _coerce_relationships([{"subject": " ", "relation": "r", "object": "o"}]) == []
+
+
+def test_agents_context_prompt_names_scope_tickers() -> None:
+    from app.research.agents.source_agent import _context_prompt
+    assert "none provided" in _context_prompt("NVDA demand?", [])
+    ticked = _context_prompt("NVDA demand?", ["NVDA", "  "])
+    assert "NVDA" in ticked and "Scope tickers: NVDA" in ticked
+
+
+def test_agents_finding_terms_skips_queried_and_caps_at_three() -> None:
+    from app.research.agents.scout import ScoutAssignment, _finding_terms, _ScoutStore
+    store = _ScoutStore(assignment=ScoutAssignment(assignment_id="a", session_id="s", as_of="2025-06-30",
+                                                   role="filings", question="Q?"))
+    store.acquired = ["EV-1 :: hyperscaler concentration filings demand growth",
+                      "EV-2 :: no separator line", "EV-3"]
+    store.seen_queries = {"hyperscaler"}
+    terms = _finding_terms(store)
+    assert terms == ["concentration", "filings", "demand"]
+    assert "hyperscaler" not in terms
+
+def test_agents_rel_line_renders_triple_and_rejects_partials() -> None:
+    from app.research.agents.scout import _rel_line
+    assert _rel_line({"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"}) == "NVDA supplies hyperscalers"
+    assert _rel_line({"subject": "NVDA", "relation": "supplies"}) is None
+    assert _rel_line({"subject": " ", "relation": "r", "object": "o"}) is None
+    assert _rel_line("nope") is None
+    assert _rel_line(None) is None

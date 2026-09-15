@@ -39,17 +39,19 @@ class ModelOutputFailure(ValueError):
 CLAIM_CLASSES = ("DIRECTLY_SUPPORTED", "INFERENCE", "UNKNOWN", "CONTRADICTED")
 
 _MANAGEABLE_RE = re.compile(r"\b(manageab\w*|immaterial\w*|absorb\w*|contained|digestible|modest|limited\s+impact)\b", re.IGNORECASE)
+_CLAIM_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("CONTRADICT",), "CONTRADICTED"),
+    (("UNKNOWN", "UNCERTAIN", "UNCLEAR"), "UNKNOWN"),
+    (("INFERENCE", "INFER", "MAY ", "LIKELY", "SUGGEST"), "INFERENCE"),
+)
 
 
 def classify_claim(text: str, *, cited: bool) -> str:
     """Deterministic claim label: uncited manageable/immaterial reads are never DIRECTLY_SUPPORTED."""
-    upper = (text or "").upper()
-    if "CONTRADICT" in upper:
-        return "CONTRADICTED"
-    if "UNKNOWN" in upper or "UNCERTAIN" in upper or "UNCLEAR" in upper:
-        return "UNKNOWN"
-    if "INFERENCE" in upper or "INFER" in upper or "MAY " in f" {upper} " or "LIKELY" in upper or "SUGGEST" in upper:
-        return "INFERENCE"
+    hay = f" {(text or '').upper()} "
+    for markers, label in _CLAIM_RULES:
+        if any(m in hay for m in markers):
+            return label
     if not cited:
         return "INFERENCE" if _MANAGEABLE_RE.search(text or "") else "UNKNOWN"
     return "DIRECTLY_SUPPORTED"

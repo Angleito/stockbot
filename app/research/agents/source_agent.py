@@ -144,44 +144,39 @@ def _strip_possessive(text: str) -> str:
     return text
 
 
+def _keep_phrase(cleaned: str) -> bool:
+    """Entity-mention rule: multi-word phrase or 2+ letter name, never all stopwords."""
+    words = [w.strip(".,") for w in cleaned.split()]
+    return (len(cleaned) >= 2 and any(ch.isalpha() for ch in cleaned)
+            and not (words and all(w.lower() in _STOPWORDS for w in words))
+            and not (len(words) == 1 and len(words[0]) < 2))
+
+
 def _capitalized_phrases(question: str) -> list[str]:
     """Generic entity mentions: multi-word phrases or 2+ letter names."""
-    phrases: list[str] = []
-    for match in _CAP_PHRASE_RE.findall(question or ""):
-        cleaned = " ".join(_strip_possessive(match).split())
-        if len(cleaned) < 2 or not any(ch.isalpha() for ch in cleaned):
-            continue
-        words = [w.strip(".,") for w in cleaned.split()]
-        if words and all(w.lower() in _STOPWORDS for w in words):
-            continue
-        if len(words) == 1 and len(words[0]) < 2:
-            continue
-        phrases.append(cleaned)
-    return _dedupe_keep(phrases)
+    return _dedupe_keep([cleaned for match in _CAP_PHRASE_RE.findall(question or "")
+                         if _keep_phrase(cleaned := " ".join(_strip_possessive(match).split()))])
+
+
+def _keyword_kept(word: str, excluded: set[str]) -> bool:
+    """Distinctive term: 3+ chars, not stopword/digit, outside ticker scope."""
+    return len(word) >= 3 and word not in _STOPWORDS and not word.isdigit() and normalize_query(word) not in excluded
 
 
 def _keywords(question: str, exclude: Sequence[str]) -> list[str]:
     """Distinctive lowercase terms outside ticker scope (concepts/catalysts)."""
     excluded = {normalize_query(e) for e in exclude if isinstance(e, str)}
-    words: list[str] = []
-    for match in _WORD_RE.findall((question or "").lower()):
-        word = match.strip()
-        if len(word) < 3 or word in _STOPWORDS or word.isdigit():
-            continue
-        if normalize_query(word) in excluded:
-            continue
-        words.append(word)
-    return _dedupe_keep(words)
+    return _dedupe_keep([word for match in _WORD_RE.findall((question or "").lower())
+                         if _keyword_kept(word := match.strip(), excluded)])
 
 
 def _deterministic_context(question: str, tickers: Sequence[str]) -> dict[str, object]:
     """Base context without a model: tickers + phrases + keyword concepts."""
     scoped = _dedupe_keep([t.upper() for t in (tickers or []) if isinstance(t, str) and t.strip()])
     scoped_set = {s.upper() for s in scoped}
-    phrases = [p for p in _capitalized_phrases(question or "") if p.upper() not in scoped_set]
     return {
         "primary_entities": list(scoped),
-        "related_entities": phrases[:8],
+        "related_entities": [p for p in _capitalized_phrases(question or "") if p.upper() not in scoped_set][:8],
         "industries": [],
         "products": [],
         "technologies": [],
@@ -214,27 +209,59 @@ def _coerce_str_list(value: object) -> list[str]:
     return _dedupe_keep(value) if isinstance(value, list) else []
 
 
+def _rel_key(rel: Mapping[str, object]) -> tuple[str, str, str]:
+    """Normalized relationship triple key for dedupe."""
+    return (
+        normalize_query(str(rel.get("subject", ""))),
+        normalize_query(str(rel.get("relation", ""))),
+        normalize_query(str(rel.get("object", ""))),
+    )
+
+
+def _rel_triple(item: object) -> dict[str, str] | None:
+    """One stripped {subject, relation, object} triple, or None when malformed."""
+    if not isinstance(item, dict):
+        return None
+    if not all(isinstance(item.get(k), str) and item[k].strip() for k in _RELATION_KEYS):
+        return None
+    return {k: item[k].strip() for k in _RELATION_KEYS}
+
+
 def _coerce_relationships(value: object) -> list[dict[str, str]]:
     """{subject, relation, object} triples from model output, deduped."""
-    out: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
     if not isinstance(value, list):
-        return out
+        return []
+    seen: set[tuple[str, str, str]] = set()
+    out: list[dict[str, str]] = []
     for item in value:
-        if not isinstance(item, dict):
+        triple = _rel_triple(item)
+        if triple is None:
             continue
-        triple = {k: item.get(k) for k in _RELATION_KEYS}
-        if not all(isinstance(v, str) and v.strip() for v in triple.values()):
-            continue
-        subj = normalize_query(str(triple["subject"]))
-        rel = normalize_query(str(triple["relation"]))
-        obj = normalize_query(str(triple["object"]))
-        key: tuple[str, str, str] = (subj, rel, obj)
+        key = _rel_key(triple)
         if key in seen:
             continue
         seen.add(key)
-        out.append({k: str(triple[k]).strip() for k in _RELATION_KEYS})
+        out.append(triple)
     return out[:12]
+
+def _merge_relationships(current_raw: object, decoded_val: object) -> list[dict[str, str]]:
+    """Union decoded relationship triples into the base list, normalized-key deduped."""
+    extra = _coerce_relationships(decoded_val)
+    existing: list[dict[str, str]] = [r for r in current_raw if isinstance(r, dict)] if isinstance(current_raw, list) else []
+    seen = {_rel_key(r) for r in existing}
+    for rel in extra:
+        key = _rel_key(rel)
+        if key not in seen:
+            seen.add(key)
+            existing.append(rel)
+    return existing
+
+
+def _merge_str_key(current_raw: object, decoded_val: object) -> list[str]:
+    """Union one decoded string-list key into the base list, deduped and capped."""
+    current = current_raw if isinstance(current_raw, list) else []
+    return _dedupe_keep([*current, *_coerce_str_list(decoded_val)])[:12]
+
 
 def _merge_context(base: dict[str, object], decoded: object) -> dict[str, object]:
     """Union model output into the deterministic base, normalized."""
@@ -243,21 +270,9 @@ def _merge_context(base: dict[str, object], decoded: object) -> dict[str, object
     merged: dict[str, object] = {k: (list(v) if isinstance(v, list) else v) for k, v in base.items()}
     for key in _CONTEXT_KEYS:
         if key == "relationships":
-            extra = _coerce_relationships(decoded.get(key))
-            existing_raw = merged.get("relationships", [])
-            existing: list[dict[str, str]] = [r for r in existing_raw if isinstance(r, dict)] if isinstance(existing_raw, list) else []
-            seen_rels: set[tuple[str, str, str]] = {
-                (normalize_query(str(r.get("subject", ""))), normalize_query(str(r.get("relation", ""))), normalize_query(str(r.get("object", "")))) for r in existing}
-            for rel in extra:
-                rel_key: tuple[str, str, str] = (normalize_query(rel["subject"]), normalize_query(rel["relation"]), normalize_query(rel["object"]))
-                if rel_key not in seen_rels:
-                    seen_rels.add(rel_key)
-                    existing.append(rel)
-            merged["relationships"] = existing
+            merged[key] = _merge_relationships(merged.get(key, []), decoded.get(key))
         else:
-            current = merged.get(key, [])
-            current_list = current if isinstance(current, list) else []
-            merged[key] = _dedupe_keep([*current_list, *_coerce_str_list(decoded.get(key))])[:12]
+            merged[key] = _merge_str_key(merged.get(key, []), decoded.get(key))
     return merged
 
 
@@ -285,58 +300,52 @@ def build_research_context(
         return base
 
 
-def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
-    """Family-grouped SEC queries with global normalized dedup."""
-    source: Mapping[str, object] = context if isinstance(context, Mapping) else {}
-    primaries = _coerce_str_list(source.get("primary_entities"))
-    related = _coerce_str_list(source.get("related_entities"))
-    industries = _coerce_str_list(source.get("industries"))
-    products = _coerce_str_list(source.get("products"))
-    technologies = _coerce_str_list(source.get("technologies"))
-    concepts = _coerce_str_list(source.get("concepts"))
-    risks = _coerce_str_list(source.get("risks"))
-    catalysts = _coerce_str_list(source.get("catalysts"))
-    relationships = _coerce_relationships(source.get("relationships"))
-    groups: dict[str, list[str]] = {"a": [], "b": [], "c": [], "d": [], "e": [],
-                                    "f": [], "related": [], "supp_bare": [],
-                                    "supp_filing": [], "supp_risk": []}
-    for entity in [*primaries, *related]:
-        groups["a"].append(entity)
-    for a in primaries:
-        for b in related:
-            if normalize_query(a) != normalize_query(b):
-                groups["b"].append(f"{a} {b}")
+_RELATED_ROLES = ("customer", "supplier", "competitor", "peer", "fund")
+_SUPP_FILING_SUFFIXES = ("8-K", "proxy", "N-PX", "agreement")
+
+
+def _entity_pairs(primaries: list[str], related: list[str]) -> list[tuple[str, str]]:
+    """Distinct (primary, related) pairs by normalized key."""
+    return [(a, b) for a in primaries for b in related if normalize_query(a) != normalize_query(b)]
+
+
+def _add_entity_groups(groups: dict[str, list[str]], primaries: list[str], related: list[str], relationships: list[dict[str, str]]) -> None:
+    """Families A/B/E: named entities, pairs, and triple exposures."""
+    groups["a"].extend([*primaries, *related])
+    pairs = _entity_pairs(primaries, related)
+    groups["b"].extend(f"{a} {b}" for a, b in pairs)
+    groups["e"].extend(f"{r['subject']} {r['relation']} {r['object']}" for r in relationships)
+    groups["e"].extend(f"{a} exposure {b}" for a, b in pairs)
+
+
+def _add_topic_groups(groups: dict[str, list[str]], industries: list[str], products: list[str], technologies: list[str], risks: list[str], primaries: list[str]) -> None:
+    """Families C/D/F: industry, demand, and risk queries."""
     for industry in industries[:6]:
-        groups["c"].append(industry)
-        groups["c"].append(f"{industry} risk factors")
+        groups["c"].extend([industry, f"{industry} risk factors"])
     for term in [*products[:6], *technologies[:6]]:
         groups["d"].append(term if "demand" in term.lower() else f"{term} demand")
-    for rel in relationships:
-        groups["e"].append(f"{rel['subject']} {rel['relation']} {rel['object']}")
-    for a in primaries:
-        for b in related:
-            if normalize_query(a) != normalize_query(b):
-                groups["e"].append(f"{a} exposure {b}")
-    for risk in risks[:6]:
-        groups["f"].append(risk)
+    groups["f"].extend(risks[:6])
     for a in primaries:
         groups["f"].append(f"{a} risk factors")
-        for risk in risks[:4]:
-            groups["f"].append(f"{a} {risk}")
+        groups["f"].extend(f"{a} {risk}" for risk in risks[:4])
+
+
+def _add_related_groups(groups: dict[str, list[str]], related: list[str]) -> None:
+    """Related-issuer role anchors for non-scope candidates."""
     for entity in related[:6]:
-        groups["related"].append(f"{entity} customer")
-        groups["related"].append(f"{entity} supplier")
-        groups["related"].append(f"{entity} competitor")
-        groups["related"].append(f"{entity} peer")
-        groups["related"].append(f"{entity} fund")
-    supp_terms = _dedupe_keep([*concepts, *products, *technologies, *catalysts])[:5]
-    for term in supp_terms:
+        groups["related"].extend(f"{entity} {role}" for role in _RELATED_ROLES)
+
+
+def _add_supplement_groups(groups: dict[str, list[str]], concepts: list[str], products: list[str], technologies: list[str], catalysts: list[str]) -> None:
+    """Conceptual supplements: bare terms plus filing/risk-factor mentions."""
+    for term in _dedupe_keep([*concepts, *products, *technologies, *catalysts])[:5]:
         groups["supp_bare"].append(term)
-        groups["supp_filing"].append(f"{term} 8-K")
-        groups["supp_filing"].append(f"{term} proxy")
-        groups["supp_filing"].append(f"{term} N-PX")
-        groups["supp_filing"].append(f"{term} agreement")
+        groups["supp_filing"].extend(f"{term} {suffix}" for suffix in _SUPP_FILING_SUFFIXES)
         groups["supp_risk"].append(f"{term} risk factor")
+
+
+def _dedupe_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Global normalized dedupe across families, first family wins."""
     seen: set[str] = set()
     deduped: dict[str, list[str]] = {}
     for key in groups:
@@ -350,6 +359,23 @@ def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
     return deduped
 
 
+def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
+    """Family-grouped SEC queries with global normalized dedup."""
+    source: Mapping[str, object] = context if isinstance(context, Mapping) else {}
+    lists = {k: _coerce_str_list(source.get(k)) for k in
+             ("primary_entities", "related_entities", "industries", "products",
+              "technologies", "concepts", "risks", "catalysts")}
+    groups: dict[str, list[str]] = {"a": [], "b": [], "c": [], "d": [], "e": [],
+                                    "f": [], "related": [], "supp_bare": [],
+                                    "supp_filing": [], "supp_risk": []}
+    _add_entity_groups(groups, lists["primary_entities"], lists["related_entities"],
+                       _coerce_relationships(source.get("relationships")))
+    _add_topic_groups(groups, lists["industries"], lists["products"],
+                      lists["technologies"], lists["risks"], lists["primary_entities"])
+    _add_related_groups(groups, lists["related_entities"])
+    _add_supplement_groups(groups, lists["concepts"], lists["products"],
+                           lists["technologies"], lists["catalysts"])
+    return _dedupe_groups(groups)
 _ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
     "filings": ("a", "b", "related", "supp_filing"),
     "financials": ("c", "d", "supp_bare"),
@@ -379,6 +405,58 @@ def _baseline_queries(tickers: Sequence[str], context: Mapping[str, object]) -> 
     return []
 
 
+def _cap_candidates(text: str, seen: set[str]) -> list[str]:
+    """Capitalized phrases from one finding not already asked."""
+    out: list[str] = []
+    for match in _CAP_PHRASE_RE.findall(text):
+        cleaned = " ".join(match.split())
+        if len(cleaned) >= 3 and normalize_query(cleaned) not in seen:
+            out.append(cleaned)
+    return out
+
+
+def _word_candidates(text: str, seen: set[str]) -> list[str]:
+    """Distinctive lowercase words from one finding not already asked."""
+    return [w for w in _WORD_RE.findall(text.lower())
+            if len(w) > 5 and w.isalpha() and w not in _STOPWORDS and normalize_query(w) not in seen]
+
+
+def _finding_candidates(finding_texts: Sequence[str] | None, seen: set[str]) -> list[str]:
+    """Phrase + word candidates from findings, capped at eight."""
+    candidates: list[str] = []
+    for text in (finding_texts or []):
+        if not isinstance(text, str):
+            continue
+        candidates.extend(_cap_candidates(text, seen))
+        candidates.extend(_word_candidates(text, seen))
+        if len(candidates) >= 8:
+            break
+    return candidates
+
+
+def _context_candidates(context: Mapping[str, object] | None, seen: set[str]) -> list[str]:
+    """Top context terms (related/concepts/products/technologies) not already asked."""
+    if not isinstance(context, Mapping):
+        return []
+    out: list[str] = []
+    for key in ("related_entities", "concepts", "products", "technologies"):
+        out.extend(v for v in _coerce_str_list(context.get(key))[:4] if normalize_query(v) not in seen)
+    return out
+
+
+def _take_new(candidates: Sequence[str], seen: set[str], limit: int = 5) -> list[str]:
+    """First unseen normalized candidates, stripped, up to limit."""
+    out: list[str] = []
+    for candidate in candidates:
+        key = normalize_query(candidate)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(candidate.strip())
+        if len(out) >= limit:
+            break
+    return out
+
+
 def expand_queries(
     queries: Sequence[str],
     finding_texts: Sequence[str],
@@ -387,33 +465,8 @@ def expand_queries(
     """New material queries from filing findings, deduped against prior queries."""
     seen = {normalize_query(q) for q in (queries or []) if isinstance(q, str)}
     seen.discard("")
-    candidates: list[str] = []
-    for text in (finding_texts or []):
-        if not isinstance(text, str):
-            continue
-        for match in _CAP_PHRASE_RE.findall(text):
-            cleaned = " ".join(match.split())
-            if len(cleaned) >= 3 and normalize_query(cleaned) not in seen:
-                candidates.append(cleaned)
-        for word in _WORD_RE.findall(text.lower()):
-            if len(word) > 5 and word.isalpha() and word not in _STOPWORDS and normalize_query(word) not in seen:
-                candidates.append(word)
-        if len(candidates) >= 8:
-            break
-    if isinstance(context, Mapping):
-        for key in ("related_entities", "concepts", "products", "technologies"):
-            for value in _coerce_str_list(context.get(key))[:4]:
-                if normalize_query(value) not in seen:
-                    candidates.append(value)
-    out: list[str] = []
-    for candidate in candidates:
-        key = normalize_query(candidate)
-        if key and key not in seen:
-            seen.add(key)
-            out.append(candidate.strip())
-        if len(out) >= 5:
-            break
-    return out
+    candidates = [*_finding_candidates(finding_texts, seen), *_context_candidates(context, seen)]
+    return _take_new(candidates, seen)
 
 
 def expansion_stop(
@@ -433,6 +486,36 @@ def expansion_stop(
     return False, "continue"
 
 
+def _sec_match(name: object, discovered: list[str]) -> str | None:
+    """SEC tool name from a catalog match, or None when ineligible or repeated."""
+    return name if isinstance(name, str) and is_sec_tool(name) and name not in discovered else None
+
+
+def _discover_sec_tools(dispatch: Callable[[str, dict[str, object]], dict[str, object]]) -> list[str]:
+    """Catalog discovery hint: SEC tools matching the two seed queries."""
+    discovered: list[str] = []
+    for query in ("SEC filings material events", "XBRL financial statements trend"):
+        matches = dispatch("search_tools", {"query": query}).get("matches")
+        for m in matches if isinstance(matches, list) else []:
+            if isinstance(m, dict) and (name := _sec_match(m.get("name"), discovered)) is not None:
+                discovered.append(name)
+    return discovered
+
+
+def _role_assignments(question: str, session_id: str, as_of: str, tickers: Sequence[str], context: dict[str, object], groups: dict[str, list[str]], baseline: list[str]) -> list[ScoutAssignment]:
+    """One assignment per role with its top-two family queries."""
+    scoped = [t for t in (tickers or []) if isinstance(t, str)]
+    roles: tuple[ScoutRole, ScoutRole, ScoutRole] = ("filings", "financials", "risk")
+    assignments: list[ScoutAssignment] = []
+    for role in roles:
+        queries = [q for family in _ROLE_FAMILIES[role] for q in groups.get(family, [])[:2]]
+        context_copy = {k: (list(v) if isinstance(v, list) else v) for k, v in context.items()}
+        assignments.append(ScoutAssignment(assignment_id=f"scout-{role}", session_id=session_id, as_of=as_of,
+                                           role=role, question=question, tickers=list(scoped),
+                                           context=context_copy, queries=list(queries), baseline=list(baseline)))
+    return assignments
+
+
 def decompose_question(
     question: str,
     *,
@@ -443,43 +526,10 @@ def decompose_question(
     model: Callable[[str], str] | None = None,
 ) -> list[ScoutAssignment]:
     """Catalog discovery + generic context into three role assignments with queries."""
-    discovered: list[str] = []
-    for query in ("SEC filings material events", "XBRL financial statements trend"):
-        result = dispatch("search_tools", {"query": query})
-        matches = result.get("matches")
-        if isinstance(matches, list):
-            for match in matches:
-                if not isinstance(match, dict):
-                    continue
-                name_raw = match.get("name")
-                if isinstance(name_raw, str) and is_sec_tool(name_raw) and name_raw not in discovered:
-                    discovered.append(name_raw)
-    _ = discovered  # hint only; assignments below carry context queries.
+    _ = _discover_sec_tools(dispatch)  # hint only; assignments below carry context queries.
     context = build_research_context(question, tickers, model)
-    groups = _grouped_queries(context)
-    baseline = _baseline_queries(tickers, context)
-    scoped = [t for t in (tickers or []) if isinstance(t, str)]
-    roles: tuple[ScoutRole, ScoutRole, ScoutRole] = ("filings", "financials", "risk")
-    assignments: list[ScoutAssignment] = []
-    for role in roles:
-        queries: list[str] = []
-        for family in _ROLE_FAMILIES[role]:
-            queries.extend(groups.get(family, [])[:2])
-        context_copy = {k: (list(v) if isinstance(v, list) else v) for k, v in context.items()}
-        assignments.append(
-            ScoutAssignment(
-                assignment_id=f"scout-{role}",
-                session_id=session_id,
-                as_of=as_of,
-                role=role,
-                question=question,
-                tickers=list(scoped),
-                context=context_copy,
-                queries=list(queries),
-                baseline=list(baseline),
-            )
-        )
-    return assignments
+    return _role_assignments(question, session_id, as_of, tickers, context,
+                             _grouped_queries(context), _baseline_queries(tickers, context))
 
 
 def _check_claim_refs(claim: GroundedClaim, known_set: set[str], session_id: str, journal: Callable[[str, dict[str, object]], None] | None) -> None:

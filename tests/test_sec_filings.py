@@ -9,7 +9,7 @@ import pytest
 
 import app.sec.documents as documents
 import app.sec.filings as filings
-from app.sec.models import EntityCandidate
+from app.sec.models import EntityCandidate, Filing
 
 
 class _FakeAttachment:
@@ -631,3 +631,91 @@ def test_filing_date_objects_normalize_to_str(monkeypatch: pytest.MonkeyPatch) -
         (filing,) = filings.list_sec_filings("AAPL")
         assert filing.filed_at == str(filed)
         assert filing.known_at == str(filed)
+
+
+# --- Derived-view rendering + latest-filing selection (CRAP remediation) ---
+
+_VIEW_HTML = (
+    "<html><head><style>.x{color:red}</style><script>var x = 1;</script></head>"
+    "<body><!-- comment -->"
+    "<ix:nonNumeric name='x'>XBRL-NOISE-9</ix:nonNumeric>"
+    "<h1>ITEM 1. Business</h1><p>alpha body</p>"
+    "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    "<h1>ITEM 7. MD&amp;A</h1><p>beta body<a href='#f1'>1</a></p>"
+    "<p id='f1'>footnote text</p>"
+    "</body></html>"
+)
+
+
+def _view_filing(form: str, filed: str, accession: str, known: str | None = None) -> Filing:
+    day = known or filed
+    return Filing(accession_no=accession, form=form, filer_cik=1, filer_name="n",
+                  filed_at=filed, accepted_at=None, known_at=day, report_period=None,
+                  primary_document=None, is_amendment=form.upper().endswith("/A"),
+                  amendment_of=None, source="s")
+
+
+def _bounded(offset: int, max_chars: int | None, view: str | None = None) -> dict[str, object]:
+    return documents._bounded_response(
+        accession_no="0001", document_name="d.htm", description=None, url="u",
+        full_text="0123456789", content_hash="c", source_content_hash="s",
+        source_representation="r", raw_archive_path=None, source_url="su",
+        filed_at="2024-01-01", known_at="2024-01-02", retrieved_at="rt",
+        offset=offset, max_chars=max_chars, cache_hit=False, cache_type="t",
+        view_text=view, view_base=7, resolved_section=None, raw_view=False,
+        available_sections=["ITEM 1. Business"])
+
+
+def test_sec_view_strips_noise_keeps_tables_and_footnotes() -> None:
+    view = documents._render_text(_VIEW_HTML)
+    assert "A | B" in view and "1 | 2" in view
+    assert "alpha body" in view and "footnote text" in view
+    assert "XBRL-NOISE-9" not in view
+    assert "color:red" not in view and "var x = 1;" not in view
+    assert "comment" not in view
+
+
+def test_sec_view_section_select_offsets_stable() -> None:
+    view = documents._render_text(_VIEW_HTML)
+    names = documents._section_names(view)
+    assert any("ITEM 1" in n for n in names) and any("ITEM 7" in n for n in names)
+    text, resolved, base = documents._select_section(view, "item 7")
+    assert resolved is not None and "beta body" in text
+    assert view[base:base + len(text)] == text
+    with pytest.raises(ValueError, match="available sections"):
+        documents._select_section(view, "no such section")
+
+
+def test_sec_bounded_cursor_round_trip_and_span_refs() -> None:
+    view = documents._render_text(_VIEW_HTML)
+    first = _bounded(0, 10, view)
+    second = _bounded(10, 10, view)
+    assert first["next_cursor"] == second["cursor"] == 10
+    assert str(first["text"]) + str(second["text"]) == view[:20]
+    assert first["source_refs"] == [{
+        "accession": "0001", "document": "d.htm", "offset": 7,
+        "source_uri": "source://sec/0001/d.htm"}]
+    assert first["view"] == "rendered"
+    raw = _bounded(0, None)
+    assert "view" not in raw and raw["next_cursor"] is None
+    with pytest.raises(ValueError, match="beyond document length"):
+        _bounded(len(view) + 1, 1, view)
+
+
+def _latest_acc(fs: list[Filing], form: str, as_of: str | None = None) -> str:
+    got = filings.resolve_latest_filing(fs, form) if as_of is None else filings.resolve_latest_filing(fs, form, as_of=as_of)
+    assert got is not None
+    return got.accession_no
+
+
+def test_resolve_latest_filing_picks_newest_in_family() -> None:
+    fs = [_view_filing("10-K", "2023-01-01", "old"),
+          _view_filing("10-K", "2024-01-01", "new"),
+          _view_filing("10-K/A", "2024-06-01", "amd"),
+          _view_filing("10-Q", "2024-03-01", "q")]
+    assert _latest_acc(fs, "10-K") == "amd"
+    assert _latest_acc(fs, "10-K/A") == "amd"
+    assert _latest_acc(fs, "10-q") == "q"
+    assert filings.resolve_latest_filing(fs, "8-K") is None
+    assert filings.resolve_latest_filing([], "10-K") is None
+    assert _latest_acc(fs, "10-K", as_of="2023-06-01") == "old"

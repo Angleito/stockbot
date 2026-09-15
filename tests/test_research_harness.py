@@ -1766,3 +1766,96 @@ def test_reg_evidence_claim_labels() -> None:
     assert GroundedClaim(text="GS revenue grew", evidence_ids=["EV-1"]).label == "DIRECTLY_SUPPORTED"
 
 
+def test_crap_source_policy_modes_and_errors() -> None:
+    from app.research.models import resolve_source_policy, source_domain_allowed
+    # Bare research_sources mapping (no outer key) resolves identically.
+    bare = resolve_source_policy({"mode": "all", "sources": []})
+    assert bare["mode"] == "all" and bare["allowed"] == []
+    # Mode "all" admits any domain not denied; allowlist pins SEC.
+    assert source_domain_allowed(bare, "anything.example") is True
+    assert source_domain_allowed(None, None) is True
+    sec = resolve_source_policy({"research_sources": {"mode": "allowlist", "sources": [" SEC "]}})
+    assert sec["allowed"] == ["SEC"]
+    assert source_domain_allowed(sec, "SEC") is True
+    assert source_domain_allowed(sec, "web") is False
+    denied = {"allowed": ["SEC"], "denied": ["SEC"], "mode": "allowlist"}
+    assert source_domain_allowed(denied, "SEC") is False
+    with pytest.raises(ValueError, match="policy"):
+        resolve_source_policy("nope")
+    with pytest.raises(ValueError, match="research_sources"):
+        resolve_source_policy({"research_sources": "nope"})
+    with pytest.raises(ValueError, match="sources"):
+        resolve_source_policy({"research_sources": {"mode": "allowlist", "sources": []}})
+    with pytest.raises(ValueError, match="sources"):
+        resolve_source_policy({"research_sources": {"mode": "all", "sources": [""]}})
+    with pytest.raises(ValueError, match="source_domain"):
+        source_domain_allowed(sec, "  ")
+
+
+def test_crap_temporal_patterns() -> None:
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    from app.research.models import resolve_temporal_scope
+    now = _dt(2025, 6, 30, tzinfo=_tz.utc)
+    assert resolve_temporal_scope(temporal="show all history please", now=now)["mode"] == "unbounded"
+    assert resolve_temporal_scope(temporal="as of 2024-03-31", now=now)["as_of"] == "2024-03-31"
+    last2 = resolve_temporal_scope(temporal="last 2 years", now=now)
+    assert last2["mode"] == "range" and str(last2["start"])[:4] == "2023"
+    lastyr = resolve_temporal_scope(temporal="last year", now=now)
+    assert (lastyr["start"], lastyr["end"]) == ("2024-01-01", "2024-12-31")
+    assert resolve_temporal_scope(temporal="before earnings", now=now)["mode"] == "as_of"
+    assert resolve_temporal_scope(temporal="latest available data", now=now)["mode"] == "latest-available"
+    assert resolve_temporal_scope(temporal="most recent filing", now=now)["mode"] == "as_of"
+    with pytest.raises(ValueError, match="after end"):
+        resolve_temporal_scope(temporal="between 2025-06-30 and 2025-01-01", now=now)
+    with pytest.raises(ValueError, match="temporal"):
+        resolve_temporal_scope(temporal="  ", now=now)
+    with pytest.raises(ValueError, match="invalid calendar"):
+        resolve_temporal_scope(temporal="as of 2025-02-30", now=now)
+
+
+def test_crap_baseline_current_and_quarterly_picks() -> None:
+    from app.research.models import select_latest_baseline
+    filings: list[object] = [
+        {"form": "10-Q", "known_at": "2025-03-31", "accession_no": "Q1"},
+        {"form": "10-Q", "known_at": "2025-06-20", "accession_no": "Q2"},
+        {"form": "8-K", "known_at": "2025-06-10", "accession_no": "K1"},
+        {"form": "8-K", "known_at": "2025-06-25", "accession_no": "K2"},
+        {"form": "10-K", "known_at": "2030-01-01", "accession_no": "FUTURE"},
+        {"form": "DEF-14A", "known_at": "2025-01-01", "accession_no": "PROXY"},
+        {"form": "10-K"},
+    ]
+    base = select_latest_baseline(filings, as_of="2025-06-30")
+    q = base["quarterly_10q"]
+    assert isinstance(q, dict) and q.get("accession_no") == "Q2"
+    mats = base["material_8k"]
+    assert isinstance(mats, list)
+    first = mats[0]
+    assert isinstance(first, dict) and first.get("accession_no") == "K2"
+    assert all(isinstance(f, dict) and f.get("accession_no") != "FUTURE" for f in mats)
+
+
+def test_crap_superseded_violation_edges() -> None:
+    from app.research.models import superseded_current_violation
+    assert superseded_current_violation([{"form": "8-K", "known_at": "2025-01-01"}], "X") is None
+    filings: list[object] = [
+        {"form": "10-K", "known_at": "2024-02-10", "accession_no": "OLD", "superseded_by": "NEW"},
+        {"form": "10-K", "known_at": "2025-02-14", "accession_no": "NEW"},
+    ]
+    assert superseded_current_violation(filings, [], as_of="2025-06-30") is None
+    assert superseded_current_violation(filings, ["NEW", 42, " "], as_of="2025-06-30") is None
+    assert superseded_current_violation(filings, 42, as_of="2025-06-30") is None
+    hit = superseded_current_violation(filings, " OLD ", as_of="2025-06-30")
+    assert hit is not None and "NEW" in hit
+
+
+def test_crap_discovery_only_edges() -> None:
+    from app.research.evidence import DiscoveryRecord, discovery_only, substantive_records
+    assert discovery_only([]) is False
+    assert discovery_only("nope") is False
+    assert discovery_only([{"record_kind": "discovery"}, {"record_kind": "evidence"}]) is False
+    assert discovery_only([{"metadata": {"record_kind": "discovery"}}]) is True
+    assert discovery_only([DiscoveryRecord(record_id="d", session_id="s", tool="t", query="q")]) is False
+    assert discovery_only([{"record_kind": "discovery", "metadata": {}}]) is True
+    assert substantive_records([{"record_kind": "discovery"}, {}]) == [{}]
+

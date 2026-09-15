@@ -123,19 +123,35 @@ class ScoutResult:
     limitations: list[str] = field(default_factory=list)
     follow_up_requests: list[ResearchRequest] = field(default_factory=list)
 
+_LIST_CONTEXT_KEYS = ("primary_entities", "related_entities", "industries", "products",
+                      "technologies", "concepts", "risks", "catalysts")
+
+
+def _clean_strs(vals: object, limit: int = 12) -> list[str]:
+    """Stripped non-empty strings from a raw context list, capped."""
+    return [v.strip() for v in vals if isinstance(v, str) and v.strip()][:limit] if isinstance(vals, list) else []
+
+
+def _rel_line(rel: object) -> str | None:
+    """One rendered relationship line, or None when any triple part is missing."""
+    if not isinstance(rel, dict):
+        return None
+    parts = [rel.get(k) for k in ("subject", "relation", "object")]
+    if not all(isinstance(p, str) and p.strip() for p in parts):
+        return None
+    assert all(isinstance(p, str) for p in parts)
+    return f"{parts[0]} {parts[1]} {parts[2]}"
+
+
+def _relationship_lines(rels: object, limit: int = 12) -> list[str]:
+    """Rendered subject/relation/object lines from raw relationship records."""
+    return [line for r in rels if (line := _rel_line(r)) is not None][:limit] if isinstance(rels, list) else []
+
+
 def _context_lines(context: Mapping[str, object]) -> list[str]:
-    out: list[str] = []
-    for key in ("primary_entities", "related_entities", "industries", "products",
-                "technologies", "concepts", "risks", "catalysts"):
-        vals = context.get(key)
-        items: list[str] = [v.strip() for v in vals if isinstance(v, str) and v.strip()] if isinstance(vals, list) else []
-        if items:
-            out.append(f"{key}: {', '.join(items[:12])}")
-    rels = context.get("relationships")
-    rendered: list[str] = [f"{r['subject']} {r['relation']} {r['object']}" for r in rels
-                if isinstance(r, dict) and all(isinstance(r.get(k), str) and str(r[k]).strip() for k in ("subject", "relation", "object"))] if isinstance(rels, list) else []
-    if rendered:
-        out.append(f"relationships: {'; '.join(rendered[:12])}")
+    out = [f"{key}: {', '.join(items)}" for key in _LIST_CONTEXT_KEYS if (items := _clean_strs(context.get(key)))]
+    if rendered := _relationship_lines(context.get("relationships")):
+        out.append(f"relationships: {'; '.join(rendered)}")
     return out
 
 
@@ -279,17 +295,28 @@ def _fan_out(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]]
     if not store.evidence_ids:
         store.collect(guarded_call("call_tool", {"name": "get_sec_search_coverage", "arguments": {}}))
 
+def _snippet_text(line: str) -> str:
+    """Snippet payload after the `id :: text` separator, else empty."""
+    return line.split("::", 1)[1] if "::" in line else ""
+
+
+def _fresh_term(word: str, terms: list[str], seen_queries: set[str]) -> str | None:
+    """Lowercased alpha term >4 chars not already kept or queried."""
+    cleaned = word.strip("()[]\"'.:").lower()
+    if len(cleaned) > 4 and cleaned.isalpha() and cleaned not in terms and normalize_query(cleaned) not in seen_queries:
+        return cleaned
+    return None
+
+
 def _finding_terms(store: _ScoutStore) -> list[str]:
     """New material terms from acquired snippet text not covered by prior queries."""
     terms: list[str] = []
-    for line in store.acquired:
-        text = line.split("::", 1)[1] if "::" in line else ""
-        for word in text.replace(";", " ").replace(",", " ").split():
-            cleaned = word.strip("()[]\"'.:").lower()
-            if len(cleaned) > 4 and cleaned.isalpha() and cleaned not in terms and normalize_query(cleaned) not in store.seen_queries:
-                terms.append(cleaned)
-                if len(terms) >= 3:
-                    return terms
+    words = [w for line in store.acquired for w in _snippet_text(line).replace(";", " ").replace(",", " ").split()]
+    for word in words:
+        if (term := _fresh_term(word, terms, store.seen_queries)) is not None:
+            terms.append(term)
+            if len(terms) >= 3:
+                break
     return terms
 
 

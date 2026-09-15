@@ -912,19 +912,40 @@ class _LiveRun:
 
 
     @staticmethod
-    def _ladder_category(low: str) -> FailureCategory | None:
-        """Shared keyword ladder: timeout, policy, and distinct loop arms; None falls through."""
-        if "timeout" in low or "expired" in low or "timed_out" in low:
-            return FailureCategory.TIMEOUT
+    def _is_timeout_text(low: str) -> bool:
+        """Timeout arm: timeout/expired/timed_out."""
+        return "timeout" in low or "expired" in low or "timed_out" in low
+
+
+    @staticmethod
+    def _loop_category(low: str) -> FailureCategory | None:
+        """Loop arms: research_loop_detected > research_loop > duplicate action."""
         if "research_loop_detected" in low or "research_loop" in low:
             return FailureCategory.RESEARCH_LOOP_DETECTED
         if "duplicate_research_action" in low:
             return FailureCategory.DUPLICATE_RESEARCH_ACTION
+        return None
+
+
+    @staticmethod
+    def _policy_category(low: str) -> FailureCategory | None:
+        """Policy arms: explicit rejection > generic policy/denied."""
         if "policy_rejection" in low:
             return FailureCategory.POLICY_REJECTION
         if "policy" in low or "denied" in low:
             return FailureCategory.POLICY_DENIED
         return None
+
+
+    @staticmethod
+    def _ladder_category(low: str) -> FailureCategory | None:
+        """Shared keyword ladder: timeout, loop, policy; None falls through."""
+        if _LiveRun._is_timeout_text(low):
+            return FailureCategory.TIMEOUT
+        hit = _LiveRun._loop_category(low)
+        if hit is not None:
+            return hit
+        return _LiveRun._policy_category(low)
 
 
     @staticmethod

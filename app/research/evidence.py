@@ -181,32 +181,30 @@ class EvidenceLedger:
     def __len__(self) -> int:
         return len(self._records)
 
+def _record_kind_of(item: object) -> str:
+    """Kind tag for one record: attr wins, then mapping keys, absent means evidence."""
+    kind = getattr(item, "record_kind", None)
+    if kind is None and isinstance(item, Mapping):
+        meta = item.get("metadata")
+        meta_kind = meta.get("record_kind") if isinstance(meta, dict) else None
+        kind = item.get("record_kind", meta_kind)
+    return str(kind) if kind is not None else "evidence"
+
+
+def _record_items(records: object) -> list[object]:
+    """Coerce list/tuple input to a list (anything else means no records)."""
+    return list(records) if isinstance(records, (list, tuple)) else []
+
+
 def discovery_only(records: object) -> bool:
     """True when every record is discovery-kind (no substantive evidence)."""
-    items: list[object] = list(records) if isinstance(records, (list, tuple)) else []
-    if not items:
-        return False
-    kinds: list[str] = []
-    for item in items:
-        kind = getattr(item, "record_kind", None)
-        if kind is None and isinstance(item, Mapping):
-            kind = item.get("record_kind", item.get("metadata", {}).get("record_kind") if isinstance(item.get("metadata"), dict) else None)
-        kinds.append(str(kind) if kind is not None else "evidence")
-    return bool(kinds) and all(k == "discovery" for k in kinds)
+    items = _record_items(records)
+    return bool(items) and all(_record_kind_of(item) == "discovery" for item in items)
 
 
 def substantive_records(records: object) -> list[object]:
     """Filter to evidence-kind records (discovery never satisfies coverage alone)."""
-    items: list[object] = list(records) if isinstance(records, (list, tuple)) else []
-    out: list[object] = []
-    for item in items:
-        kind = getattr(item, "record_kind", None)
-        if kind is None and isinstance(item, Mapping):
-            meta = item.get("metadata")
-            kind = item.get("record_kind", meta.get("record_kind") if isinstance(meta, dict) else None)
-        if kind is None or str(kind) == "evidence":
-            out.append(item)
-    return out
+    return [item for item in _record_items(records) if _record_kind_of(item) == "evidence"]
 
 
 def _iso(value: datetime | str | None) -> str | None:
