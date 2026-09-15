@@ -1366,6 +1366,7 @@ def test_run_agent_loop_main_writes_summary(tmp_path: Path, monkeypatch: pytest.
 def _metrics_db(path: Path, *, expected: str = "get_fundamentals", discovered: list[str] | None, extra_clean: str | None = None, dispatch_expected: bool = True, expected_error: str | None = None, unparseable: bool = False, rejected_expected: bool = False, args_json: str | None = None) -> Path:
     """Minimal trace for classify tests with explicit routing_metrics surfaced list."""
     import sqlite3 as _sq
+
     from app.storage.runs import _SCHEMA as _SC
     conn = _sq.connect(str(path))
     conn.executescript(_SC)

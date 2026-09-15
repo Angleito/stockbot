@@ -156,12 +156,12 @@ def _position(
         security_id=security_id,
         entity_id=entity_id,
         ticker=ticker,
-        quantity=Decimal("10"),
-        average_cost=Decimal("100"),
-        market_price=Decimal("110"),
-        market_value=Decimal("1100"),
-        unrealized_gain=Decimal("100"),
-        unrealized_gain_pct=Decimal("10"),
+        quantity=Decimal(10),
+        average_cost=Decimal(100),
+        market_price=Decimal(110),
+        market_value=Decimal(1100),
+        unrealized_gain=Decimal(100),
+        unrealized_gain_pct=Decimal(10),
         portfolio_weight=Decimal("0.05"),
         source="test",
         retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
@@ -174,7 +174,7 @@ def _snapshot(positions: list[Position]) -> PortfolioSnapshot:
         created_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
         broker="test",
         account_ids=("acc-1",),
-        cash=Decimal("0"),
+        cash=Decimal(0),
         invested_value=None,
         total_value=None,
         positions=tuple(positions),
@@ -222,7 +222,7 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
     sec = research.latest_sec_metrics
     assert set(sec) == set(SEC_CONCEPTS)
     assert sec["Revenue"] == {
-        "value": Decimal("5890000000"),
+        "value": Decimal(5890000000),
         "period_end": "2026-06-30",
         "filed_at": "2026-08-20",
         "accession": "accn-rev-2",
@@ -230,26 +230,26 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
     }
     net_income = sec["NetIncomeLoss"]
     assert isinstance(net_income, dict)
-    assert net_income["value"] == Decimal("265000000")
+    assert net_income["value"] == Decimal(265000000)
     cash = sec["CashAndCashEquivalents"]
     assert isinstance(cash, dict)
-    assert cash["value"] == Decimal("4100000000")
+    assert cash["value"] == Decimal(4100000000)
     debt = sec["LongTermDebt"]
     assert isinstance(debt, dict)
-    assert debt["value"] == Decimal("2300000000")
+    assert debt["value"] == Decimal(2300000000)
     shares = sec["EntityCommonStockSharesOutstanding"]
     assert isinstance(shares, dict)
-    assert shares["value"] == Decimal("1610000000")
+    assert shares["value"] == Decimal(1610000000)
 
     finra = research.latest_finra_metrics
     assert finra == {
-        "short_position": Decimal("1150000"),
-        "prev_position": Decimal("1000000"),
-        "short_interest_change": Decimal("150000"),
-        "short_interest_change_pct": Decimal("15"),
+        "short_position": Decimal(1150000),
+        "prev_position": Decimal(1000000),
+        "short_interest_change": Decimal(150000),
+        "short_interest_change_pct": Decimal(15),
         "days_to_cover": Decimal("2.3"),
         "settlement_date": "2026-08-14",
-        "avg_daily_volume": Decimal("38000000"),
+        "avg_daily_volume": Decimal(38000000),
         "known_at": "2026-08-14",
         "retrieved_at": "2026-08-20T12:00:00Z",
     }
@@ -283,7 +283,7 @@ def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(data_root: Pa
     assert [r.position.position_id for r in results] == ["pos-1", "pos-2"]
     assert set(results[0].latest_sec_metrics) == {"Revenue"}
     assert results[1].latest_sec_metrics == {}
-    assert results[1].latest_finra_metrics["short_position"] == Decimal("1150000")
+    assert results[1].latest_finra_metrics["short_position"] == Decimal(1150000)
     assert results[1].research_data_freshness["sec_latest_filed_at"] is None
     assert results[1].research_data_freshness["finra_settlement_date"] == date(2026, 8, 14)
     assert results[1].research_data_freshness["finra_retrieved_at"] == "2026-08-20T12:00:00Z"
@@ -303,7 +303,7 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
     position = _position()
     early = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 14), data_root=data_root)[0]
     assert early.latest_sec_metrics["Revenue"] == {
-        "value": Decimal("5860000000"),
+        "value": Decimal(5860000000),
         "period_end": "2026-06-30",
         "filed_at": "2026-08-05",
         "accession": "accn-rev-1",
@@ -320,7 +320,7 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
     later = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 25), data_root=data_root)[0]
     later_revenue = later.latest_sec_metrics["Revenue"]
     assert isinstance(later_revenue, dict)
-    assert later_revenue["value"] == Decimal("5890000000")
+    assert later_revenue["value"] == Decimal(5890000000)
     assert later_revenue["accession"] == "accn-rev-2"
     assert "LongTermDebt" not in later.latest_sec_metrics
     assert later.research_data_freshness["sec_latest_filed_at"] == date(2026, 8, 20)
@@ -328,7 +328,7 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
     future = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 9, 5), data_root=data_root)[0]
     future_debt = future.latest_sec_metrics["LongTermDebt"]
     assert isinstance(future_debt, dict)
-    assert future_debt["value"] == Decimal("2300000000")
+    assert future_debt["value"] == Decimal(2300000000)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +347,7 @@ def test_finra_newest_version_wins_per_symbol(data_root: Path) -> None:
     )
 
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
-    assert research.latest_finra_metrics["short_position"] == Decimal("1150000")
+    assert research.latest_finra_metrics["short_position"] == Decimal(1150000)
     assert research.latest_finra_metrics["settlement_date"] == "2026-08-14"
     assert research.latest_finra_metrics["known_at"] == "2026-08-14"
     assert research.latest_finra_metrics["retrieved_at"] == "2026-08-20T12:00:00Z"
@@ -366,7 +366,7 @@ def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root: Path) -> N
 
     # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
     # older than 12:30Z — the 12:30Z (v2) values must win.
-    assert research.latest_finra_metrics["short_position"] == Decimal("1150000")
+    assert research.latest_finra_metrics["short_position"] == Decimal(1150000)
     assert research.latest_finra_metrics["known_at"] == "2026-08-14"
     assert research.latest_finra_metrics["retrieved_at"] == "2026-08-17T12:30:00Z"
 
@@ -403,7 +403,7 @@ def test_finra_older_settlement_correction_does_not_beat_newer_settlement(data_r
         _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
     )[0]
     assert research.latest_finra_metrics["settlement_date"] == "2026-08-29"
-    assert research.latest_finra_metrics["short_position"] == Decimal("900000")
+    assert research.latest_finra_metrics["short_position"] == Decimal(900000)
     assert research.latest_finra_metrics["known_at"] == "2026-08-29"
 
 
@@ -422,7 +422,7 @@ def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_ro
     # Same instant, two different settlements: NOT a conflict — the newer
     # settlement wins with real metrics.
     assert research.latest_finra_metrics["settlement_date"] == "2026-08-29"
-    assert research.latest_finra_metrics["short_position"] == Decimal("900000")
+    assert research.latest_finra_metrics["short_position"] == Decimal(900000)
 
 
 
@@ -450,7 +450,7 @@ def test_missing_values_are_none_never_zero(data_root: Path) -> None:
 
     finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0].latest_finra_metrics
 
-    assert finra["short_position"] == Decimal("1150000")
+    assert finra["short_position"] == Decimal(1150000)
     assert finra["prev_position"] is None
     assert finra["avg_daily_volume"] is None
     assert finra["days_to_cover"] is None
@@ -466,5 +466,5 @@ def test_change_pct_is_none_when_prev_is_zero(data_root: Path) -> None:
 
     finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0].latest_finra_metrics
 
-    assert finra["short_interest_change"] == Decimal("100")
+    assert finra["short_interest_change"] == Decimal(100)
     assert finra["short_interest_change_pct"] is None

@@ -1,7 +1,5 @@
 """Permission + dynamic discovery over the canonical registry (no network)."""
 
-import os
-
 from pathlib import Path
 
 import pytest

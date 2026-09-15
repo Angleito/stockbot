@@ -11,9 +11,9 @@ from app.security.context import (
     SourceType,
 )
 from app.security.context_gateway import (
+    TOOL_ENVELOPES,
     QuarantinedContext,
     SafeContext,
-    TOOL_ENVELOPES,
     envelope_for_tool,
     prepare_context,
 )
@@ -67,7 +67,7 @@ def test_envelope_is_frozen():
     try:
         setattr(envelope, "security_status", SecurityStatus.ALLOWED)
         raise AssertionError("frozen dataclass must reject mutation")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
     assert envelope.security_status is SecurityStatus.PENDING
 

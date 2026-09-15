@@ -6,6 +6,8 @@ import pytest
 
 import app.sec.lineage as lineage
 from app.storage import parquet
+
+
 def _as_dict(value: object) -> dict[str, object]:
     assert isinstance(value, dict)
     return value

@@ -2,11 +2,13 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import override
 
 import pytest
 
 import app.sec.insider as insider
 from app.sec.models import InsiderTransaction, ProposedInsiderSale
+
 
 class _Activity:
     def __init__(self, code: str | None = None, shares: str | int | None = None,
@@ -202,3 +204,45 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path: Path) -> Non
                               retrieved_at=now, root=tmp_path)
     store_13f_holding(rec3.to_dict(), root=tmp_path)
     assert query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path) == []
+
+
+def test_values_by_column_getitem_fast_path() -> None:
+    class _Frame:
+        columns = ["shares"]
+
+        def __getitem__(self, key: object) -> object:
+            assert key == "shares"
+            return [100, 200]
+
+    assert insider._values_by_column(_Frame(), "shares") == [100, 200]
+
+def test_values_by_column_row_scan_fallbacks() -> None:
+    dict_rows: list[object] = [{"shares": "1,000"}, {"shares": None}, {"price": 5}]
+    assert insider._values_by_column(dict_rows, "shares") == ["1,000"]
+    tuple_rows: list[object] = [("a", "b"), ("c",)]
+    assert insider._values_by_column(tuple_rows, 1) == ["b"]
+    assert insider._values_by_column([{"shares": 1}], True) is None
+    assert insider._values_by_column([{"shares": 1}], None) is None
+    assert insider._values_by_column(42, "shares") is None
+
+def test_values_by_column_row_errors_skip() -> None:
+    class _BadDict(dict[str, object]):
+        @override
+        def get(self, key: str, default: object = None) -> object:
+            raise RuntimeError("boom")
+
+    assert insider._values_by_column([_BadDict({"shares": 1})], "shares") == []
+    assert insider._values_by_column([object()], "shares") == []
+
+
+def test_values_by_column_row_coercion_failure_returns_none() -> None:
+    class _BadIter:
+        columns = ["shares"]
+
+        def __getitem__(self, key: object) -> object:
+            raise RuntimeError("boom")
+
+        def __iter__(self) -> object:
+            raise RuntimeError("boom")
+
+    assert insider._values_by_column(_BadIter(), "shares") is None

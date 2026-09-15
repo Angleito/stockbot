@@ -115,9 +115,9 @@ def test_archive_document_revisions_retained(tmp_path: Path) -> None:
 
 def test_search_ledger_round_trip(tmp_path: Path) -> None:
     from app.sec.models import (
+        SearchAttempt,
         SECSearchRequest,
         SECTextHit,
-        SearchAttempt,
     )
     from app.sec.store import (
         persist_search_ledger,

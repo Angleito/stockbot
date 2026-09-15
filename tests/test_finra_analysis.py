@@ -11,12 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app import finra_analysis
-from app import finra_client
+from app import finra_analysis, finra_client
 from app import tools as tools_module
-from app.tools import execute_tool
 from app.policy import LOCAL_CONTEXT
-
+from app.tools import execute_tool
 from tests.test_finra import (
     FakeCache,
     _as_dict,

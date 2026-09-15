@@ -3,9 +3,9 @@
 from pathlib import Path
 
 from app.security.action_policy import (
+    CREDENTIAL_REASON,
     EGRESS_AFTER_PRIVATE_REASON,
     EGRESS_INTENT_REASON,
-    CREDENTIAL_REASON,
     EgressDecision,
     authorize_egress,
     private_pattern_hit,

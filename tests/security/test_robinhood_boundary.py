@@ -1,8 +1,11 @@
 """Robinhood read-only boundary tests at the tool-registry level."""
 
+import pytest
+
 from app.robinhood.capabilities import (
     BLOCKED_KEYWORDS,
     BLOCKED_TOOLS,
+    allowed_read_tools,
     is_blocked,
     tool_capability,
 )
@@ -14,9 +17,10 @@ from app.tools import TOOLS
 
 def test_no_trading_tool_schemas_in_registry():
     # Allowlist: local research-session lifecycle, not a brokerage action.
-    # research_cancel closes a research session (Capability.RESEARCH, no broker
+    # research_cancel closes a research session, research_submit_source_result
+    # submits a source result to a session (both Capability.RESEARCH, no broker
     # access); no order-cancellation tool exists.
-    non_trading = {"research_cancel"}
+    non_trading = {"research_cancel", "research_submit_source_result"}
     names: list[str] = []
     for tool in TOOLS:
         function = tool.get("function")
@@ -50,6 +54,21 @@ def test_is_blocked_denies_trading_tools():
     assert is_blocked("withdraw")
     assert not is_blocked("get_market_snapshot")
     assert not is_blocked("get_portfolio_snapshot")
+
+
+def test_is_blocked_is_case_insensitive_and_capability_denies_variants():
+    for name in ("PLACE_EQUITY_ORDER", "Place_Equity_Order", "WITHDRAW", "Cancel_Equity_Order"):
+        assert is_blocked(name) is True
+        assert tool_capability(name) is None
+
+
+def test_allowed_read_tools_can_only_reduce():
+    assert allowed_read_tools(market=frozenset({"get_equity_quotes"})) == frozenset({"get_equity_quotes"})
+    assert allowed_read_tools(market=frozenset()) == frozenset()
+    with pytest.raises(ValueError):
+        allowed_read_tools(market=frozenset({"place_equity_order"}))
+    with pytest.raises(ValueError):
+        allowed_read_tools(account=frozenset({"get_equity_quotes"}))
 
 
 def test_unknown_tools_have_no_capability():

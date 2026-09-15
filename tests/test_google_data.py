@@ -13,12 +13,9 @@ import json
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
-
-from app.thesis.models import Thesis
 
 from app.google_data import bigquery_client as bq
 from app.google_data import (
@@ -31,6 +28,7 @@ from app.google_data import (
     youtube,
 )
 from app.storage import parquet as parquet_backend
+from app.thesis.models import Thesis
 
 GOOGLE_ENV = (
     "GOOGLE_DATA_ENABLED", "GOOGLE_CLOUD_PROJECT",
@@ -116,8 +114,8 @@ def _enable(monkeypatch: pytest.MonkeyPatch, project: str = "test-proj") -> None
 class FakeBQ:
     """Boundary fake: dry_run(params)->bytes, submit(params, max_bytes, job_id)."""
 
-    def __init__(self, total_bytes: int = 10, rows: Optional[list[_Row]] = None, state: str = "DONE",
-                 billed: Optional[int] = None, billing_enabled: Optional[bool] = False) -> None:
+    def __init__(self, total_bytes: int = 10, rows: list[_Row] | None = None, state: str = "DONE",
+                 billed: int | None = None, billing_enabled: bool | None = False) -> None:
         self.total_bytes = total_bytes
         self._rows = rows if rows is not None else [{"n": 1}]
         self.state = state
@@ -583,13 +581,13 @@ def test_national_sentinel_fires_post_aggregation(monkeypatch: pytest.MonkeyPatc
     try:
         observations: list[_Row] = parquet_backend.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         observations = []
     assert observations == []
     try:
         stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         stored = []
     assert [r for r in stored if r.get("status") == "complete"] == []
 
@@ -718,7 +716,7 @@ def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_
 
     orig_write = parquet_backend.write_rows
 
-    def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: object) -> int:
+    def _drop_one(name: str, rows: list[_Row], root: Path | None = None, **kwargs: object) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
@@ -734,7 +732,7 @@ def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_
     try:
         stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         stored = []
     complete = {row.get("key") for row in stored if row.get("status") == "complete"}
     scoped = {trends._checkpoint_key(template, str(params["start_date"]), params)
@@ -803,7 +801,7 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch: pyt
 
     orig_write = parquet_backend.write_rows
 
-    def _drop_one(name: str, rows: list[_Row], root: Optional[Path] = None, **kwargs: object) -> int:
+    def _drop_one(name: str, rows: list[_Row], root: Path | None = None, **kwargs: object) -> int:
         if name == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
         return orig_write(name, rows, root=root, **kwargs)
@@ -824,7 +822,7 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(monkeypatch: pyt
     try:
         stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         stored = []
     complete = {row.get("key") for row in stored if row.get("status") == "complete"}
     scoped = {trends._checkpoint_key(template, str(params["start_date"]), params)
@@ -872,13 +870,13 @@ def test_query_scope_over_1000_never_checkpoints(monkeypatch: pytest.MonkeyPatch
     try:
         observations: list[_Row] = parquet_backend.read_table(
             "google_observations", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         observations = []
     assert observations == []
     try:
         stored: list[_Row] = parquet_backend.read_table(
             "ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         stored = []
     assert [r for r in stored if r.get("status") == "complete"] == []
 
@@ -1285,7 +1283,7 @@ def _yt_thesis(tmp_path: Path) -> Thesis:
 class _YtPipe:
     """Streaming HTTP fake: status_code + iter_content + close."""
 
-    def __init__(self, payload: Optional[dict[str, object]] = None, status: int = 200, raw: Optional[bytes] = None) -> None:
+    def __init__(self, payload: dict[str, object] | None = None, status: int = 200, raw: bytes | None = None) -> None:
         self.status_code = status
         self._raw = raw if raw is not None else json.dumps(
             payload if payload is not None else {}).encode()
@@ -1774,10 +1772,10 @@ def test_render_filters_to_referenced_params_with_sdk_types() -> None:
                            "week_start", "week_end"}
     typed: dict[str, object] = {}
     for p in bq._query_parameters(bq_sdk, params):
-        typed[str(getattr(p, "name"))] = p
-    assert getattr(typed["dmas"], "array_type") == "STRING"
-    assert getattr(typed["start_date"], "type_") == "STRING"
-    assert getattr(typed["all_dmas"], "type_") == "BOOL"
+        typed[str(getattr(p, "name"))] = p  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    assert getattr(typed["dmas"], "array_type") == "STRING"  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    assert getattr(typed["start_date"], "type_") == "STRING"  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    assert getattr(typed["all_dmas"], "type_") == "BOOL"  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
 
 
 def test_youtube_default_search_ceiling_is_80(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1830,7 +1828,7 @@ def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch: pytest.Mon
                for r in feat_rows}
     assert len({json.dumps(v, sort_keys=True) for v in by_hash.values()}) == 2
 
-    def _by_period(as_of: Optional[str]) -> dict[str, _Row]:
+    def _by_period(as_of: str | None) -> dict[str, _Row]:
         return {str(s["period"]): s for s in signals.query_signals(
             data_root=tmp_path, as_of=as_of)
             if s.get("term") == "alpha" and s.get("geo") == "New York"}
@@ -1916,7 +1914,7 @@ def test_inputs_hash_includes_shared_period_coverage(monkeypatch: pytest.MonkeyP
     assert narrow[0]["persistence"] == 1 / 3
     assert expanded[0]["persistence"] == 1 / 4
 
-    def _alpha(as_of: Optional[str]) -> _Row:
+    def _alpha(as_of: str | None) -> _Row:
         rows = [s for s in signals.query_signals(data_root=tmp_path, as_of=as_of)
                 if s.get("term") == "alpha" and s.get("geo") == "New York" and s.get("period") == w4]
         assert len(rows) == 1

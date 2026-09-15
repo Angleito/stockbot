@@ -11,22 +11,20 @@ The acceptance criteria under test:
 """
 
 import json
-from datetime import tzinfo
+from datetime import date, datetime, timezone, tzinfo
 from pathlib import Path
 
-import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from app.analytics import screens
 from app.normalization import (
-    normalize_sec_tickers,
-    normalize_sec_company_facts,
     normalize_finra_short_interest,
+    normalize_sec_company_facts,
+    normalize_sec_tickers,
 )
 from app.storage import duckdb, parquet
-
-from datetime import date, datetime, timezone
 
 SETTLEMENT = "2026-08-14"
 

@@ -1,5 +1,5 @@
-from collections.abc import Callable
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -8,11 +8,10 @@ import pytest
 
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
-from app.policy import Capability, LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT, RequestContext
+from app.policy import LOCAL_BROKER_CONTEXT, Capability, RequestContext
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_research import PortfolioResearchPosition
 from app.tool_render import render_tool_result
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
@@ -124,7 +123,7 @@ def test_no_trading_tool_names() -> None:
     # Allowlist: local session lifecycle, not a brokerage action. research_cancel
     # closes a research session (Capability.RESEARCH, no broker access); no
     # order-cancellation tool exists.
-    non_trading = {"research_cancel"}
+    non_trading = {"research_cancel", "research_submit_source_result"}
     names = [_tool_name(entry) for entry in tools.TOOLS]
     assert len(names) >= 24
     for name in names:
@@ -198,7 +197,7 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         security_id="sec:equity:0000320193",
         entity_id="sec:cik:0000320193",
         ticker="WING",
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         average_cost=Decimal("95.50"),
         market_price=Decimal("116.84"),
         market_value=Decimal("1168.40"),
@@ -216,7 +215,7 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         security_id=None,
         entity_id=None,
         ticker="ZZZZ",
-        quantity=Decimal("5"),
+        quantity=Decimal(5),
         average_cost=Decimal("10.00"),
         market_price=Decimal("12.00"),
         market_value=Decimal("60.00"),
@@ -247,20 +246,20 @@ def _hand_built_research(snapshot: PortfolioSnapshot) -> list[PortfolioResearchP
         PortfolioResearchPosition(
             position=resolved,
             latest_sec_metrics={
-                "Revenue": {"value": Decimal("1000000"), "period_end": "2026-06-30"},
-                "NetIncomeLoss": {"value": Decimal("200000"), "period_end": "2026-06-30"},
-                "CashAndCashEquivalents": {"value": Decimal("300000"), "period_end": "2026-06-30"},
-                "LongTermDebt": {"value": Decimal("400000"), "period_end": "2026-06-30"},
-                "EntityCommonStockSharesOutstanding": {"value": Decimal("500000"), "period_end": "2026-07-01"},
+                "Revenue": {"value": Decimal(1000000), "period_end": "2026-06-30"},
+                "NetIncomeLoss": {"value": Decimal(200000), "period_end": "2026-06-30"},
+                "CashAndCashEquivalents": {"value": Decimal(300000), "period_end": "2026-06-30"},
+                "LongTermDebt": {"value": Decimal(400000), "period_end": "2026-06-30"},
+                "EntityCommonStockSharesOutstanding": {"value": Decimal(500000), "period_end": "2026-07-01"},
             },
             latest_finra_metrics={
-                "short_position": Decimal("100"),
-                "prev_position": Decimal("90"),
-                "short_interest_change": Decimal("10"),
+                "short_position": Decimal(100),
+                "prev_position": Decimal(90),
+                "short_interest_change": Decimal(10),
                 "short_interest_change_pct": Decimal("0.1111111111111111111111111111"),
                 "days_to_cover": Decimal("1.5"),
                 "settlement_date": "2026-08-14",
-                "avg_daily_volume": Decimal("10000"),
+                "avg_daily_volume": Decimal(10000),
                 "known_at": "2026-08-17T12:00:00Z",
             },
             research_data_freshness={

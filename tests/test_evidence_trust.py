@@ -3,11 +3,10 @@ import inspect
 from datetime import datetime
 from pathlib import Path
 
-from app.domain.evidence.models import ResolutionStatus
+from app.domain.evidence.models import ResolutionStatus, SourceTier
 from app.domain.evidence.source_quality import classify_source
 from app.domain.market.securities import SecurityResolution
 from app.security.context import Integrity
-from app.domain.evidence.models import SourceTier
 from app.services.evidence_claims import build_evidence_claims, claim_to_enriched_dict
 from app.storage import parquet
 from app.tools import plan_public_search_queries, suggest_public_search_queries

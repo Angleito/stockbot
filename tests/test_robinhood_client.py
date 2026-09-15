@@ -1,13 +1,17 @@
 import asyncio
-import json
-from pathlib import Path
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 import pytest
 from mcp.server import MCPServer
 
-from app.robinhood.auth import LoopbackCallback, load_tokens, parse_callback_url, save_tokens
+from app.robinhood.auth import (
+    LoopbackCallback,
+    load_tokens,
+    parse_callback_url,
+    save_tokens,
+)
 from app.robinhood.client import (
     RobinhoodClient,
     RobinhoodToolError,
@@ -100,7 +104,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
     seen: dict[str, object] = {}
 
     class FakeHttpClient:
-        async def __aenter__(self) -> FakeHttpClient:
+        async def __aenter__(self) -> "FakeHttpClient":
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -113,7 +117,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
             return FakeHttpClient()
 
     class FakeTransport:
-        async def __aenter__(self) -> FakeTransport:
+        async def __aenter__(self) -> "FakeTransport":
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -123,7 +127,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
         def __init__(self, transport: object) -> None:
             self.transport = transport
 
-        async def __aenter__(self) -> FakeClient:
+        async def __aenter__(self) -> "FakeClient":
             return self
 
         async def __aexit__(self, *args: object) -> None:

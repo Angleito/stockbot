@@ -5,7 +5,6 @@ from mcp.server import MCPServer
 
 from app.robinhood.client import RobinhoodClient, RobinhoodToolError
 
-
 TRADING_TOOLS = [
     "place_order",
     "submit_order",

@@ -176,3 +176,22 @@ def test_thesis_tool_create_preserves_belief_and_watch_rejects_unsupported(tmp_p
     denied_error = denied.get("error", "")
     assert isinstance(denied_error, str)
     assert "unsupported" in denied_error
+
+
+def test_question_parts_model_and_dict_shapes() -> None:
+    from app.thesis.intake import IntakeQuestion, _question_parts
+
+    model = IntakeQuestion(question_id="q:1", question="Why NVDA?")
+    assert _question_parts(model) == ("q:1", "Why NVDA?")
+    qid, text = _question_parts({"question_id": "", "question": "  What if demand drops?  "})
+    assert isinstance(qid, str) and qid.startswith("q:") and text == "  What if demand drops?  "
+    assert _question_parts({"text": "fallback text"})[1] == "fallback text"
+    assert _question_parts({})[1] == ""
+
+
+def test_question_row_drops_blank_text() -> None:
+    from app.thesis.intake import _question_row
+
+    row = _question_row({"question_id": "q:keep", "question": "  Which ticker?  "})
+    assert row == {"question_id": "q:keep", "text": "Which ticker?", "status": "open"}
+    assert _question_row({"question_id": "q:blank", "question": "   "}) is None

@@ -474,7 +474,10 @@ def test_refresh_repairs_settlement_stamped_row_on_same_snapshot(
     import hashlib
 
     from app.normalization import normalize_finra_short_interest
-    from app.services.research_data import backfill_finra_known_at, refresh_finra_short_interest
+    from app.services.research_data import (
+        backfill_finra_known_at,
+        refresh_finra_short_interest,
+    )
 
     settlement = "2026-08-14"
     payload: list[dict[str, object]] = [{"symbolCode": "AAA", "issueName": "Alpha",

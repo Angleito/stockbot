@@ -17,7 +17,7 @@ def _prerequisite() -> bool:
         from app.config import get_sec_edgar_identity
 
         get_sec_edgar_identity()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return False
     try:
         socket.create_connection(("www.sec.gov", 443), timeout=5).close()

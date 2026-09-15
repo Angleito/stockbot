@@ -8,6 +8,7 @@ import pytest
 import app.sec.ownership as ownership
 from app.sec.models import BeneficialOwnership
 
+
 class _Person:
     def __init__(self, cik: str, name: str, sole_v: int = 0, shared_v: int = 0,
                  sole_d: int = 0, shared_d: int = 0, agg: int = 0,
@@ -149,7 +150,11 @@ def test_store_queries_13f_both_directions(tmp_path: Path) -> None:
 
 
 def test_13f_former_name_validity_and_as_of(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings_for_issuer, query_13f_issuer_candidates, store_13f_holding
+    from app.sec.store import (
+        query_13f_holdings_for_issuer,
+        query_13f_issuer_candidates,
+        store_13f_holding,
+    )
     from app.storage import parquet as _pq
     now = "2024-06-01T00:00:00Z"
     _pq.write_rows("entities", [{"entity_id": "sec:cik:0000000009", "name": "New Co",

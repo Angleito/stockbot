@@ -17,8 +17,9 @@ import requests
 from app import finra_client
 from app import tools as tools_module
 from app.config import FINRA_API_BASE, FINRA_TOKEN_URL
-from app.tools import execute_tool
 from app.policy import LOCAL_CONTEXT
+from app.tools import execute_tool
+
 
 def _as_seq(value: object):
     """list/tuple from a FINRA tool-result envelope (app/tools.py boundary)."""

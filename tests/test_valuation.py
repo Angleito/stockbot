@@ -4,7 +4,6 @@ Deterministic and offline: price, consensus, EPS, and obligations inputs
 are injected via monkeypatch; nothing touches the network or cache.db.
 """
 
-from unittest.mock import MagicMock
 
 import pytest
 

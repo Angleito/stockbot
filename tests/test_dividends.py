@@ -25,8 +25,8 @@ from app.normalization import (
 from app.policy import LOCAL_CONTEXT
 from app.services import sec_facts
 from app.storage import parquet
-from app.tools import TOOLS, execute_tool
 from app.tool_render import render_tool_result
+from app.tools import TOOLS, execute_tool
 
 KO_CIK = 21344
 RETRIEVED_AT = "2026-08-01T00:00:00Z"

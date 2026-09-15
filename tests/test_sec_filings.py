@@ -2,13 +2,14 @@
 
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
+
 import pytest
 
 import app.sec.documents as documents
 import app.sec.filings as filings
 from app.sec.models import EntityCandidate
-from types import SimpleNamespace
 
 
 class _FakeAttachment:
@@ -170,11 +171,12 @@ def test_missing_document_names_available(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_find_sec_company_normalizes_and_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    import pandas as pd
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.entity.search as company_search
+    import pandas as pd
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -199,8 +201,9 @@ def test_find_sec_company_normalizes_and_preserves_order(monkeypatch: pytest.Mon
 def test_search_sec_filings_normalizes_cik_accession(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.search.efts as efts
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -251,8 +254,9 @@ def test_discovery_adapters_reject_blank_and_bad_limit():
 def test_efts_page_two_failure_is_partial_with_page_one(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.search.efts as efts
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -295,8 +299,9 @@ def test_efts_page_two_failure_is_partial_with_page_one(monkeypatch: pytest.Monk
 def test_efts_preserves_matched_document_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.search.efts as efts
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -331,8 +336,9 @@ def test_efts_preserves_matched_document_metadata(monkeypatch: pytest.MonkeyPatc
 def test_efts_dedups_repeated_accession_document(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.search.efts as efts
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -364,8 +370,9 @@ def test_efts_dedups_repeated_accession_document(monkeypatch: pytest.MonkeyPatch
 def test_efts_as_of_excludes_future_filed_at(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    import app.sec.client as client
     import edgar.search.efts as efts
+
+    import app.sec.client as client
 
     def _ensure() -> None:
         return None
@@ -390,9 +397,9 @@ def test_efts_as_of_excludes_future_filed_at(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_discovery_current_feed_page_is_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.client as client
     from app.sec.discovery.service import SECDiscoveryService
     from app.sec.models import Filing, SECSearchRequest
-    import app.sec.client as client
 
     seen: dict[str, int] = {}
 
@@ -424,9 +431,9 @@ def test_discovery_current_feed_page_is_partial(tmp_path: Path, monkeypatch: pyt
 
 
 def test_discovery_filer_submissions_probe_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.filings as _filings
     from app.sec.discovery.service import SECDiscoveryService
     from app.sec.models import Filing, SECSearchRequest
-    import app.sec.filings as _filings
 
     seen: dict[str, int | None] = {}
 
@@ -510,10 +517,10 @@ def test_entity_writes_land_only_in_explicit_root(tmp_path: Path, monkeypatch: p
 
 
 def test_exhaustive_filer_and_current_pass_none_and_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.sec.client as client
+    import app.sec.filings as _filings
     from app.sec.discovery.service import SECDiscoveryService
     from app.sec.models import Filing, SECSearchRequest
-    import app.sec.filings as _filings
-    import app.sec.client as client
     seen: dict[str, int | None] = {}
     def _fake_list(cik: int | str, forms: list[str] | None = None, start_date: str | None = None, end_date: str | None = None, as_of: str | None = None, limit: int | None = 50) -> list[Filing]:
         seen["limit"] = limit

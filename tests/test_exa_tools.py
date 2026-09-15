@@ -527,7 +527,7 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
         if rec is not None:
             try:
                 rec.__exit__(None, None, None)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
                 pass
         pi_bridge._sessions.pop(run_r, None)
         with pi_bridge._state_lock:

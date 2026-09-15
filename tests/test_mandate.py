@@ -1,7 +1,6 @@
 """Tests for the risk/mandate domain, storage glue, CLI command, and tool."""
 
 import json
-import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -9,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from cli import _cmd_evaluate_mandate
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
 from app.domain.risk.evaluation import UNKNOWN_SECTOR, EvaluationIssue, evaluate_mandate
@@ -18,6 +16,7 @@ from app.services import risk as risk_service
 from app.services.mandate import load_mandate_file
 from app.services.portfolio_sync import persist_snapshot
 from app.storage import parquet
+from cli import _cmd_evaluate_mandate
 
 
 @pytest.fixture
@@ -39,7 +38,7 @@ def _position(
         security_id="sec:equity:0000320193" if entity_id else None,
         entity_id=entity_id,
         ticker=ticker,
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         average_cost=Decimal("95.50"),
         market_price=Decimal("116.84"),
         market_value=Decimal("1168.40"),
@@ -237,7 +236,7 @@ def test_minimum_cash_dollars_unit():
     evaluation = evaluate_mandate(_hand_built_snapshot(), mandate)
     breach = evaluation.breaches[0]
     assert breach.actual == Decimal("1234.56")
-    assert breach.excess == Decimal("5000") - Decimal("1234.56")
+    assert breach.excess == Decimal(5000) - Decimal("1234.56")
     assert breach.unit == "dollars"
 
 
@@ -312,9 +311,9 @@ def test_minimum_cash_zero_total_value_not_evaluable():
         created_at=snapshot.created_at,
         broker=snapshot.broker,
         account_ids=snapshot.account_ids,
-        cash=Decimal("0"),
-        invested_value=Decimal("0"),
-        total_value=Decimal("0"),
+        cash=Decimal(0),
+        invested_value=Decimal(0),
+        total_value=Decimal(0),
         positions=snapshot.positions,
     )
     mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])

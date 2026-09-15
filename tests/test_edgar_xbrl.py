@@ -72,3 +72,25 @@ def test_ambiguous_concepts_return_no_data_without_mixing(monkeypatch: pytest.Mo
     assert "error" in result
     assert "ambiguous" in str(result["error"])
     assert "matching_concepts" not in result
+
+
+def test_ownership_limit_clamps_and_rejects() -> None:
+    assert edgar_client._ownership_limit(None) == 10
+    assert edgar_client._ownership_limit(5) == 5
+    assert edgar_client._ownership_limit(0) == 1
+    assert edgar_client._ownership_limit(99) == 25
+    assert edgar_client._ownership_limit(" 7 ") == 7
+    assert edgar_client._ownership_limit("12.9") == 12
+    assert edgar_client._ownership_limit(4.0) == 4
+    assert edgar_client._ownership_limit(True) is None
+    assert edgar_client._ownership_limit(2.5) is None
+    assert edgar_client._ownership_limit("  ") is None
+    assert edgar_client._ownership_limit("n/a") is None
+    assert edgar_client._ownership_limit(object()) is None
+
+
+def test_ownership_limit_rejects_at_feed_boundary() -> None:
+    out = edgar_client._fetch_recent_ownership_filings("both", True)
+    assert out.get("error") == "Invalid limit 'True': use 1-25"
+    out = edgar_client._fetch_recent_ownership_filings("both", "n/a")
+    assert out.get("error") == "Invalid limit 'n/a': use 1-25"

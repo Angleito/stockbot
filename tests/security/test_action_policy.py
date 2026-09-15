@@ -1,10 +1,12 @@
 """Tests for intent classification and the action firewall."""
 
-import pytest
 
-from app.policy import Capability
 from app.security.action_policy import TOOL_DOMAINS, authorize_tool_call
-from app.security.context import RunSecurityContext, SessionAuthorization, classify_intent
+from app.security.context import (
+    RunSecurityContext,
+    SessionAuthorization,
+    classify_intent,
+)
 from app.tools import PORTFOLIO_AUTHORIZED_TOOLS, TOOL_CAPABILITIES
 
 

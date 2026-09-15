@@ -14,7 +14,6 @@ from app.robinhood.account import (
     to_json_dict,
 )
 
-
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
 
@@ -28,7 +27,7 @@ def test_decimal_parsing_from_string_and_numeric_payloads() -> None:
     assert from_string.cash == Decimal("1234.56")
     assert from_number.cash == Decimal("1234.56")
     position = normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": 10})
-    assert position.quantity == Decimal("10")
+    assert position.quantity == Decimal(10)
 
 
 def test_missing_cost_basis_is_none() -> None:
@@ -44,7 +43,7 @@ def test_fractional_shares() -> None:
 
 def test_zero_quantity_is_valid() -> None:
     position = normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "0"})
-    assert position.quantity == Decimal("0")
+    assert position.quantity == Decimal(0)
 
 
 @pytest.mark.parametrize("quantity", ["abc", None, ""])
@@ -95,7 +94,7 @@ def test_balances_fixture_matches_real_get_portfolio_shape() -> None:
     payload = _fixture("balances.json")["structured_content"]["data"]
     balance = normalize_cash_balance(payload, account_id="100000001")
     assert balance.account_id == "100000001"
-    assert balance.cash == Decimal("0")
+    assert balance.cash == Decimal(0)
     assert balance.buying_power == Decimal("0.0000")
     assert balance.withdrawable_cash is None
 
@@ -104,14 +103,14 @@ def test_positions_fixture_normalizes_rows() -> None:
     payload = _fixture("positions.json")["structured_content"]["data"]
     wing, aapl, tsla = (normalize_position(item, account_id="acc-123") for item in payload["positions"][:3])
     assert wing.ticker == "WING"
-    assert wing.quantity == Decimal("10")
+    assert wing.quantity == Decimal(10)
     assert wing.average_cost == Decimal("95.50")
     assert wing.provider_instrument_id == "instr-wing"
     assert aapl.ticker == "AAPL"
     assert aapl.quantity == Decimal("0.5")
     assert aapl.average_cost == Decimal("150.25")
     assert aapl.provider_instrument_id == "instr-aapl"
-    assert tsla.quantity == Decimal("0")
+    assert tsla.quantity == Decimal(0)
     assert tsla.average_cost == Decimal("200.00")
 
 
@@ -177,7 +176,7 @@ def test_malformed_monetary_values_are_none_never_zero() -> None:
     assert balance.buying_power is None
     assert balance.withdrawable_cash is None
     valid_zero = normalize_cash_balance({"account_id": "a", "cash": 0})
-    assert valid_zero.cash == Decimal("0")
+    assert valid_zero.cash == Decimal(0)
 
 
 def test_non_string_instrument_id_is_none() -> None:
@@ -223,7 +222,7 @@ def test_domain_models_are_frozen_and_hold_values() -> None:
     assert snapshot.cash == Decimal("1234.56")
     assert snapshot.positions[0] is position
     with pytest.raises(FrozenInstanceError):
-        setattr(snapshot, "cash", Decimal("0"))
+        setattr(snapshot, "cash", Decimal(0))
 
 
 def test_to_json_dict_serializes_decimals_and_datetimes() -> None:

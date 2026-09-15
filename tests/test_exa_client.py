@@ -6,14 +6,13 @@ per-test via env vars.
 """
 
 import json
-import requests
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
-from app import exa_client
-from app import tools
+from app import exa_client, tools
 from app.policy import Capability, RequestContext
 
 EXA_FIXTURES = Path(__file__).parent / "fixtures" / "exa"

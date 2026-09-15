@@ -6,9 +6,9 @@ from typing import NoReturn
 
 import pytest
 
+import app.sec.documents as documents
 from app import tools
 from app.policy import Capability, RequestContext
-import app.sec.documents as documents
 
 ACC = "0000000000-26-000001"
 DOC = "primary.htm"
@@ -161,3 +161,32 @@ def test_byte_attachment_archives_source_bytes(tmp_path: Path) -> None:
         payload.decode("utf-8", "replace").encode("utf-8")).hexdigest()
     assert out["source_content_hash"] != out["content_hash"]
     assert out["text"] == payload.decode("utf-8", "replace")
+
+
+def test_archived_bounded_uses_row_name_and_slice() -> None:
+    row: dict[str, object] = {
+        "document_name": "row-doc.htm",
+        "text": "x" * 100,
+        "source_url": "https://sec/row",
+        "content_hash": "ch",
+        "source_content_hash": "sch",
+        "source_representation": "normalized_text",
+        "raw_archive_path": "/tmp/raw",
+        "filed_at": "2024-01-01",
+        "known_at": "2024-01-02",
+        "retrieved_at": "2024-01-03",
+    }
+    out = documents._archived_bounded(
+        "0000000000-24-000001", "arg-doc.htm", row, "0123456789", "https://sec/row",
+        2, 4, ["w1"])
+    assert out["document_name"] == "row-doc.htm"
+    assert out["text"] == "2345"
+    assert out["cache_hit"] is True and out["cache_type"] == "stockbot_archive"
+    assert out["warnings"] == ["w1"]
+
+
+def test_archived_bounded_falls_back_to_arg_name() -> None:
+    out = documents._archived_bounded(
+        "0000000000-24-000002", "arg-doc.htm", {}, "", None, 0, None, None)
+    assert out["document_name"] == "arg-doc.htm"
+    assert "warnings" not in out

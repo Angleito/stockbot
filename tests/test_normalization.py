@@ -7,13 +7,13 @@ no network access.
 from pathlib import Path
 
 from app.normalization import (
-    COMPANY_TICKERS_PARSER_VERSION,
     COMPANY_FACTS_PARSER_VERSION,
+    COMPANY_TICKERS_PARSER_VERSION,
     SHARES_OUTSTANDING_CONCEPT,
     SHORT_INTEREST_PARSER_VERSION,
-    normalize_sec_tickers,
-    normalize_sec_company_facts,
     normalize_finra_short_interest,
+    normalize_sec_company_facts,
+    normalize_sec_tickers,
 )
 from app.storage import parquet
 

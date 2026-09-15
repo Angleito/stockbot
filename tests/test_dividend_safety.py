@@ -1,16 +1,15 @@
 """Dividend safety tests (Phase 5): FCF-based coverage on SEC inputs only."""
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
+import app.valuation as valuation
 from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.services import sec_facts
 from app.services.sec_facts import _assemble_dividend_safety
-from collections.abc import Mapping
-
 from app.storage import parquet
-import app.valuation as valuation
 
 KO_CIK = 21344
 RETRIEVED_AT = "2026-08-01T00:00:00Z"

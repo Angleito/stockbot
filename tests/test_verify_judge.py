@@ -1,7 +1,15 @@
 """Synthetic-trace unit tests for scripts/verify_judge (no Pi, no network)."""
 import pytest
-from scripts.verify_judge import EVALUATORS, SCENARIOS, ResearchCall, Scenario
-from scripts.verify_judge import Telemetry, Trace, _evidence_known_at
+
+from scripts.verify_judge import (
+    EVALUATORS,
+    SCENARIOS,
+    ResearchCall,
+    Scenario,
+    Telemetry,
+    Trace,
+    _evidence_known_at,
+)
 
 S: dict[str, Scenario] = {s["id"]: s for s in SCENARIOS}
 TEL: dict[str, int] = {"search_count": 1, "browse_count": 0, "candidate_count": 3,
@@ -507,6 +515,7 @@ def test_get_judge_concurrency_override(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_get_judge_concurrency_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     import pytest
+
     from scripts.verify_judge import get_judge_concurrency
     monkeypatch.setenv("STOCKBOT_VERIFY_CONCURRENCY", "0")
     with pytest.raises(ValueError):

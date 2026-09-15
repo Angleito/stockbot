@@ -9,6 +9,7 @@ from app.sec import filings as filings_mod
 from app.sec.material import EIGHT_K_ITEM_EVENTS
 from app.sec.models import EVENT_TYPES, CurrentReportEvent, RegulatoryEvent
 
+
 def test_event_vocabulary_covers_mapped_items() -> None:
     assert len(EVENT_TYPES) > 0
     assert set(EIGHT_K_ITEM_EVENTS.values()) <= set(EVENT_TYPES)

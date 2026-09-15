@@ -7,8 +7,8 @@ from typing import NoReturn
 
 import pytest
 
-from app.domain.evidence import relationships as R
 from app.domain.evidence import relationship_evaluation as EV
+from app.domain.evidence import relationships as R
 from app.sec import store as sec_store
 from app.sec.discovery import service as disc
 from app.sec.discovery.service import search_sec_relationships
@@ -685,8 +685,8 @@ def test_relationship_ambiguous_stops_with_no_rows(tmp_path: Path, monkeypatch: 
 
 
 def test_inverse_returns_manager_with_issuer_entity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.storage import parquet as _pq
     import app.sec.store as _smod
+    from app.storage import parquet as _pq
     monkeypatch.setattr(_smod, "query_beneficial_ownership", _empty_rows)
     monkeypatch.setattr(_smod, "query_insider_transactions", _empty_rows)
     monkeypatch.setattr(_smod, "query_13f_holdings", _empty_rows)

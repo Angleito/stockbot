@@ -1,17 +1,20 @@
 """Unit tests for scripts/verify_tool_health.check_handler (no network)."""
 from __future__ import annotations
 
+import multiprocessing
 import os
 from pathlib import Path
 
+import pytest
+
 from app import tools as tools_mod
 from app.policy import Capability, RequestContext
-from scripts.verify_tool_health import check_handler
-import multiprocessing
-
-import pytest
 from scripts import verify_tool_health as vth
-from scripts.verify_tool_health import _evaluate_envelope, _handler_worker
+from scripts.verify_tool_health import (
+    _evaluate_envelope,
+    _handler_worker,
+    check_handler,
+)
 
 
 def _ctx(tmp_path: Path) -> RequestContext:

@@ -1,11 +1,12 @@
 """Global static registry gate: every schema has handler/capability/domain/envelope."""
 
-import pytest
 from collections.abc import Mapping
 
+import pytest
+
+from app import tools
 from app.security.action_policy import TOOL_DOMAINS
 from app.security.context_gateway import TOOL_ENVELOPES
-from app import tools
 
 
 def _schema_functions() -> dict[str, Mapping[str, object]]:
@@ -67,7 +68,7 @@ def test_discovery_coordinates_complete():
     import re
     kebab = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
     snake = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
-    assert len(tools.TOOL_DISCOVERY_REGISTRY) == 56
+    assert len(tools.TOOL_DISCOVERY_REGISTRY) == 57
     for name, meta in tools.TOOL_DISCOVERY_REGISTRY.items():
         assert meta.domain and kebab.match(meta.domain), name
         assert meta.family and kebab.match(meta.family), name
@@ -96,6 +97,7 @@ def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None
             assert peer in " ".join(meta.reject_when), (name, peer)
     # one-way probe must fail validation
     import copy
+
     import app.tools as mod
     probe: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
     victim = probe["get_fundamentals"]
@@ -136,6 +138,7 @@ def test_registry_version_covers_routing_metadata():
     assert isinstance(v1, str) and len(v1) == 12
     # changing routing metadata must change the version (schemas alone are not enough)
     import copy
+
     import app.tools as mod
     probe = {k: copy.deepcopy(v) for k, v in mod.TOOL_DISCOVERY_REGISTRY.items()}
     object.__setattr__(probe["get_short_interest"], "intent", "mutated_intent")

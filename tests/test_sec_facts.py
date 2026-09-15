@@ -6,8 +6,8 @@ get_fundamentals/get_xbrl_facts envelopes, the NVDA store/live parity
 dispatch behavior.  Live paths are monkeypatched at the edgar_client seam.
 """
 
-from datetime import date
 from collections.abc import Iterable, Mapping
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -16,8 +16,8 @@ from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.policy import LOCAL_CONTEXT
 from app.services import sec_facts
 from app.storage import parquet
-from app.tools import TOOLS, execute_tool
 from app.tool_render import render_tool_result
+from app.tools import TOOLS, execute_tool
 
 NVDA_CIK = 1045810
 RETRIEVED_AT = "2026-08-01T00:00:00Z"

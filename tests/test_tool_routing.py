@@ -5,8 +5,8 @@ import pytest
 from app import tools as tools_mod
 from app.policy import Capability, RequestContext
 from app.tools import (
-    TOOLS,
     TOOL_DISCOVERY_REGISTRY,
+    TOOLS,
     _tool_function,
     execute_tool,
 )

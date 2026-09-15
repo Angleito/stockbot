@@ -197,8 +197,17 @@ async function settledKilled(child: ChildProcessWithoutNullStreams): Promise<boo
 	}
 	return child.killed || child.exitCode !== null || child.signalCode !== null;
 }
+function withMutedBridgeErrors(): { bridgeErrors: string[]; restoreBridgeErrors: () => void } {
+	const bridgeErrors: string[] = [];
+	const origError = console.error;
+	console.error = (...a: unknown[]) => {
+		bridgeErrors.push(a.map(String).join(" "));
+	};
+	return { bridgeErrors, restoreBridgeErrors: () => { console.error = origError; } };
+}
 
 test("blocked stdin write still recycles child and releases permits", async () => {
+	const { bridgeErrors, restoreBridgeErrors } = withMutedBridgeErrors();
 	const kids: ChildProcessWithoutNullStreams[] = [];
 	let spawns = 0;
 	const { callBridge } = createBridgeClient(() => {
@@ -216,6 +225,7 @@ test("blocked stdin write still recycles child and releases permits", async () =
 			deadline(1000),
 		]);
 		for (const res of stuck) expect(res).toEqual({ error: "bridge_unavailable" });
+		expect(bridgeErrors.filter((l) => l.includes("[stockbot] bridge tool_call failed")).length).toBe(4);
 		expect(await settledKilled(kids[0])).toBe(true);
 		const healthy = await Promise.race([
 			Promise.all([0, 1, 2, 3].map(() => callBridge({ op: "tool_call", tool: "probe" }, 500, true))),
@@ -224,6 +234,7 @@ test("blocked stdin write still recycles child and releases permits", async () =
 		for (const res of healthy) expect(res.ok).toBe(true);
 		expect(spawns).toBe(2);
 	} finally {
+		restoreBridgeErrors();
 		for (const kid of kids) {
 			try {
 				kid.kill("SIGKILL");
@@ -310,6 +321,7 @@ function healthyLogScript(logFile: string): string {
 }
 
 test("fatal tool timeout terminates run and recycles", async () => {
+	const { bridgeErrors, restoreBridgeErrors } = withMutedBridgeErrors();
 	const dir = mkdtempSync(join(tmpdir(), "stockbot-"));
 	const hangLog = join(dir, "hang.log");
 	const nextLog = join(dir, "next.log");
@@ -354,6 +366,7 @@ test("fatal tool timeout terminates run and recycles", async () => {
 		const results = await Promise.race([resultsP, deadline(5000)]);
 		for (const res of results.slice(0, 4)) expect(res).toEqual({ error: "bridge_unavailable" });
 		expect(results[4]).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
+		expect(bridgeErrors.filter((l) => l.includes("[stockbot] bridge tool_call failed: no response in 50ms")).length).toBe(4);
 		expect(await settledKilled(kids[0])).toBe(true);
 		const logged = readFileSync(hangLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 		expect(logged.filter((o) => o.op === "tool_call").length).toBe(4);
@@ -406,6 +419,7 @@ test("fatal tool timeout terminates run and recycles", async () => {
 		expect(nextAborts.length).toBe(1);
 		expect(nextAborts[0].error_type).toBe("tool_timeout");
 	} finally {
+		restoreBridgeErrors();
 		for (const kid of kids) {
 			try {
 				kid.kill("SIGKILL");
@@ -415,8 +429,8 @@ test("fatal tool timeout terminates run and recycles", async () => {
 		}
 	}
 });
-
 test("finalized abort ack skips replacement retry", async () => {
+	const { bridgeErrors, restoreBridgeErrors } = withMutedBridgeErrors();
 	const dir = mkdtempSync(join(tmpdir(), "stockbot-"));
 	const hangLog = join(dir, "hang.log");
 	const kids: ChildProcessWithoutNullStreams[] = [];
@@ -438,6 +452,7 @@ test("finalized abort ack skips replacement retry", async () => {
 			deadline(5000),
 		]);
 		expect(res).toEqual({ error: "bridge_unavailable" });
+		expect(bridgeErrors.filter((l) => l.includes("[stockbot] bridge tool_call failed: no response in 50ms")).length).toBe(1);
 		expect(await settledKilled(kids[0])).toBe(true);
 		const logged = readFileSync(hangLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 		expect(logged.filter((o) => o.op === "abort_run").length).toBe(1);
@@ -453,6 +468,7 @@ test("finalized abort ack skips replacement retry", async () => {
 		expect(late).toEqual({ error: "run_terminated", error_type: "tool_timeout" });
 		expect(spawns).toBe(1);
 	} finally {
+		restoreBridgeErrors();
 		for (const kid of kids) {
 			try {
 				kid.kill("SIGKILL");
@@ -1408,7 +1424,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 						latest_freeze: freezes.length > 0 ? (freezeRecords[freezes[freezes.length - 1]] ?? null) : null,
 					},
 				};
-			case "research.job.complete":
+			case "research.source.submit":
 				if (String(req.job_id) === "job:src") srcStatus = "completed";
 				return { result: { job_id: String(req.job_id), status: "completed" } };
 			case "research.freeze.create":
@@ -1452,9 +1468,19 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_add_evidence");
 	expect(transitions()).toEqual(["research.session.create"]);
-	// Evidence arrives: the running source job completes, wave 1 freezes, then
-	// the driver seeds the first committee job on the freeze.
+	// Evidence arrives but the source is still running: the driver waits for
+	// the model to end source work via research_submit_source_result, no freeze.
 	evidence = [EV1];
+	adv = await advanceOnAgentEnd(runId, "");
+	expect(adv?.done).toBe(false);
+	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("research_submit_source_result");
+		expect(adv.prompt).toContain("job:src");
+	}
+	expect(transitions()).toEqual(["research.session.create"]);
+	// Source ends via research.source.submit (submit-completed), then wave 1
+	// freezes and the driver seeds the first committee job on the freeze.
+	await bridgeFn({ op: "research.source.submit", job_id: "job:src" });
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
@@ -1465,7 +1491,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.job.complete", "research.freeze.create", "research.job.start"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start"]);
 	// Running committee work is reused, never re-seeded: each recorded role lets
 	// the driver start exactly the next missing one.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1"] }];
@@ -1486,7 +1512,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.job.complete", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start"]);
 	// Full trio recorded: the gate decides wave-2 (declined here), then the
 	// driver prompts canonical finalization on the freeze.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2", "job:auto-3"] }];
@@ -1498,13 +1524,13 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.job.complete", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
 	// Declined wave-2 finalizes without further RPC; Pi finalizes through the
 	// canonical tool while the dotted bridge op keeps its kernel claims guard.
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_finalize");
-	expect(transitions()).toEqual(["research.session.create", "research.job.complete", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
 	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
 	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
 	expect(rejected.error).toBe("claims_required");
@@ -1556,7 +1582,7 @@ function resumeBridge(state: ResumeState, ops: ResumeOp[]): (req: Json) => Promi
 				const last = fids[fids.length - 1];
 				return { result: { session: state.session, jobs: state.jobs, pending_next_action: null, latest_freeze: (last && state.freezes[last]) ?? null } };
 			}
-			case "research.job.complete": {
+			case "research.source.submit": {
 				const hit = state.jobs.find((j) => j.job_id === String(req.job_id));
 				if (hit) hit.status = "completed";
 				return { result: { job_id: String(req.job_id), status: "completed" } };
@@ -1603,11 +1629,19 @@ test("research director restart: evidence before E1 freezes wave-1 source and se
 		jobs: [{ job_id: "job:src", job_type: "source_agent", wave_id: 1, status: "running" }],
 		freezes: {},
 	};
+	// Running source gates the freeze: resume prompts continue-submit, no RPC.
+	const probing: ResumeOp[] = [];
+	setResearchBridge(resumeBridge(state, probing));
+	const probingResumed = await resumeResearch(SID, "run-resume-e1-probe");
+	expect(resumeTransitions(probing)).toEqual([]);
+	expect(probingResumed.prompt).toContain("research_submit_source_result");
+	expect(probingResumed.prompt).toContain("job:src");
+	// Model ends source work via research.source.submit; resume then freezes.
+	state.jobs.find((j) => j.job_id === "job:src")!.status = "completed";
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e1");
 	expect(resumed.sessionId).toBe(SID);
-	expect(resumeTransitions(ops)).toEqual(["research.job.complete", "research.freeze.create", "research.job.start"]);
-	expect(ops.find((o) => o.op === "research.job.complete")?.job_id).toBe("job:src");
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.job.start"]);
 	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "stockbot", wave_id: 1 });
 	expect(resumed.prompt).toContain("research_add_analysis");
 	expect(resumed.prompt).toContain('"role": "stockbot"');
@@ -1766,11 +1800,11 @@ test("research director restart: authorized wave-2 reuses running source until n
 	expect(resumeTransitions(ops)).toEqual([]);
 	expect(resumedA.prompt).toContain("research_add_evidence");
 	expect(resumedA.prompt).toContain("job:w2src");
-	// One added id past the freeze: complete the source, freeze F2, seed stockbot.
+	// One added id past the freeze with a submit-completed source: F2 freezes, stockbot seeds.
 	state.session = { ...state.session, evidence_ids: [E1, E2] };
+	state.jobs.find((j) => j.job_id === "job:w2src")!.status = "completed";
 	const resumedB = await resumeResearch(SID, "run-resume-w2b");
-	expect(resumeTransitions(ops)).toEqual(["research.job.complete", "research.freeze.create", "research.job.start"]);
-	expect(ops.find((o) => o.op === "research.job.complete")?.job_id).toBe("job:w2src");
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.job.start"]);
 	expect(ops.find((o) => o.op === "research.freeze.create")).toMatchObject({ wave_id: 2 });
 	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "stockbot", wave_id: 2 });
 	expect(resumedB.prompt).toContain("research_add_analysis");
@@ -1867,11 +1901,13 @@ test("research director restart: queued scout is never auto-completed at freeze"
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-queued-scout");
 	const completes = ops.filter((o) => o.op === "research.job.complete");
-	expect(completes.length).toBe(1);
-	expect(completes[0].job_id).toBe("job:src");
-	expect(completes.map((o) => o.job_id)).not.toContain("job:scout-q");
+	const submits = ops.filter((o) => o.op === "research.source.submit");
+	expect(completes.length).toBe(0);
+	expect(submits.length).toBe(0);
 	expect(state.jobs.find((j) => j.job_id === "job:scout-q")?.status).toBe("queued");
-	expect(resumed.prompt).toContain("research_add_analysis");
+	expect(state.jobs.find((j) => j.job_id === "job:src")?.status).toBe("running");
+	expect(resumed.prompt).toContain("research_submit_source_result");
+	expect(resumed.prompt).toContain("job:src");
 });
 
 test("research director restart: fresh context reloads freeze and evidence before trio analysis", async () => {
@@ -2049,7 +2085,7 @@ test("research director provisions wave-2 source job on authorization", async ()
 				}
 				trio2 = [...trio2, `job:trio2-${trio2.length + 1}`];
 				return { result: { job_id: trio2[trio2.length - 1], session_id: SID, status: "running", wave_id: 2, job_type: String((req as Json).type) } };
-			case "research.job.complete":
+			case "research.source.submit":
 				if (String((req as Json).job_id) === w2job) w2status = "completed";
 				return { result: { job_id: String((req as Json).job_id), status: "completed" } };
 			case "research.freeze.create":
@@ -2085,14 +2121,14 @@ test("research director provisions wave-2 source job on authorization", async ()
 		expect(adv.prompt).toContain("research_add_evidence");
 	}
 	expect(ops.filter((o) => o.op === "research.freeze.create").length).toBe(0);
-	// One new evidence id past E1: the wave-2 source completes, F2 freezes,
-	// and the wave-2 trio seeds from the E2 record.
+	// One new evidence id past E1 with a submit-completed wave-2 source: F2
+	// freezes and the wave-2 trio seeds from the E2 record.
 	evidence = [ev1, ev2];
+	w2status = "completed";
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
-	const completed = ops.filter((o) => o.op === "research.job.complete");
-	expect(completed.length).toBe(1);
-	expect(completed[0].job_id).toBe("job:w2");
+	const completed = ops.filter((o) => o.op === "research.source.submit");
+	expect(completed.length).toBe(0);
 	const frozen = ops.filter((o) => o.op === "research.freeze.create");
 	expect(frozen.length).toBe(1);
 	expect(frozen[0].wave_id).toBe(2);

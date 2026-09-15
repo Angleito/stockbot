@@ -1,8 +1,9 @@
 """Historical replay T0-T5: PIT isolation, separate changes, idempotent resume."""
 
 from collections.abc import Mapping
-import pytest
 from pathlib import Path
+
+import pytest
 
 import app.thesis.runner as runner_mod
 from app.thesis.context import build_context

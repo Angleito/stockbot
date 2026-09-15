@@ -28,7 +28,7 @@ from app.research.evidence import (
 )
 from app.research.freeze import FreezeIntegrityError, create_freeze, verify_freeze
 from app.research.journal import append_event
-from app.research.models import JSONValue, Job, SessionStatus
+from app.research.models import Job, JSONValue, SessionStatus
 from app.research.repository import ResearchRepository
 from app.research.runner import run_live
 
@@ -450,6 +450,7 @@ def test_resume_dossier_resource_resolves(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_resume_failed_session_reports_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
+
     from app.research.runner import LiveModelError, resume_live
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
@@ -497,7 +498,14 @@ def test_scouts_run_serially_with_ordered_results() -> None:
 
 def test_pit_unverified_historical_rejected_current_accepted() -> None:
     from datetime import datetime, timezone
-    from app.research.evidence import Evidence, EvidenceLedger, EvidenceRejectedError, evidence_content_hash, ingest_evidence
+
+    from app.research.evidence import (
+        Evidence,
+        EvidenceLedger,
+        EvidenceRejectedError,
+        evidence_content_hash,
+        ingest_evidence,
+    )
     hist = datetime(2025, 6, 30, tzinfo=timezone.utc)
     def _mk(eid: str, known: datetime | None) -> Evidence:
         content = "content"
@@ -545,7 +553,7 @@ def test_two_wave_e2_tree_and_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyP
         base = _grounded(prompt)
         try:
             decoded: object = _json.loads(base)
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             return base
         if isinstance(decoded, dict):
             decoded["follow_ups"] = ["What drove Q2 delta?"]
@@ -574,6 +582,7 @@ def test_two_wave_e2_tree_and_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_grounded_claims_reject_unknown_and_empty() -> None:
     import json as _json
+
     from app.research.agents import ModelOutputFailure, parse_grounded_claims
     claims = parse_grounded_claims(_json.dumps([{"text": "revenue grew", "evidence_ids": ["EV-1"]}]), frozen=["EV-1", "EV-2"])
     assert [c.text for c in claims] and claims[0].evidence_ids == ["EV-1"]
@@ -585,6 +594,7 @@ def test_grounded_claims_reject_unknown_and_empty() -> None:
 
 def test_committee_refs_derive_from_claims_not_whole_freeze() -> None:
     import json as _json
+
     from app.research.agents import claims_refs
     from app.research.agents.stockbot import run_stockbot
     analysis = run_stockbot(
@@ -599,6 +609,7 @@ def test_committee_refs_derive_from_claims_not_whole_freeze() -> None:
 
 def test_committee_unknown_id_fails_model_output() -> None:
     import json as _json
+
     from app.research.agents import ModelOutputFailure
     from app.research.agents.bearbot import run_bearbot
     from app.research.agents.bullbot import run_bullbot
@@ -666,6 +677,7 @@ def test_dossier_preserves_per_claim_mapping(tmp_path: Path, monkeypatch: pytest
 
 def test_resume_partial_source_reuses_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import sqlite3
+
     from app.research.repository import get_research_db_path
     from app.research.runner import resume_live
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
@@ -865,8 +877,8 @@ def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.Monke
     assert _svc.freeze_session(sid, 1, repo=repo)["freeze_id"] == f"{sid}:1:freeze"
 
 def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
     import app.pi_gateway as _gw
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _svc_sid(repo)

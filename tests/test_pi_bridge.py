@@ -455,7 +455,7 @@ def test_abort_run_reports_unconfirmed_finalization(monkeypatch: pytest.MonkeyPa
 
 
 def test_describe_direct_tool_names_parity():
-    from app.tools import TOOL_DISCOVERY_REGISTRY, dynamically_activatable_tool_names
+    from app.tools import TOOL_DISCOVERY_REGISTRY
     describe = pi_bridge._describe()
     direct = describe["direct_tool_names"]
     assert isinstance(direct, list)
@@ -466,7 +466,7 @@ def test_describe_direct_tool_names_parity():
     assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
         "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status",
         "research_start", "research_resume", "research_status", "research_cancel", "research_read",
-        "research_add_evidence", "research_add_analysis", "research_finalize",
+        "research_add_evidence", "research_submit_source_result", "research_add_analysis", "research_finalize",
     }
 
 
@@ -637,6 +637,7 @@ def test_tool_call_dispatch_consumes_data_root_db(tmp_path: Path, monkeypatch: p
     """Gateway bills <data_root>/research.sqlite; the directory is never opened as SQLite."""
     import dataclasses
     import json
+
     import app.pi_gateway as _gw
     from app.research import service as _svc
     from app.research.repository import ResearchRepository

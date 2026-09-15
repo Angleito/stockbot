@@ -1,7 +1,6 @@
 """PIT snapshot isolation for thesis history (no network)."""
 
 import shutil
-
 from pathlib import Path
 
 import pytest

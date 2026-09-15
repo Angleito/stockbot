@@ -6,7 +6,6 @@ sanitized fixture markdown (tests/fixtures/obligations/), HTTP is mocked.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -130,19 +129,13 @@ class FakeDoc:
         return _FS()
 
 class FakeFiling:
-    _doc: FakeDoc
-    obj: Callable[[], FakeDoc]
-
     def __init__(self, date: str = "2026-02-25") -> None:
         self.filing_date: str = date
         self.accession_no: str = "0001"
+        self._doc: FakeDoc | None = None
 
-
-def _bind_doc(doc: FakeDoc) -> Callable[[], FakeDoc]:
-    def _get() -> FakeDoc:
-        return doc
-
-    return _get
+    def obj(self) -> object:
+        return self._doc
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, notes_md: dict[str, str], bs_md: str = "") -> FakeFiling:
@@ -167,7 +160,6 @@ def _install(monkeypatch: pytest.MonkeyPatch, notes_md: dict[str, str], bs_md: s
     monkeypatch.setattr(obligations.edgar_client, "get_company", FakeCompany)
     monkeypatch.setattr(obligations, "cache", FakeCache())
     filing._doc = doc
-    filing.obj = lambda: doc
     return filing
 
 
@@ -534,7 +526,7 @@ def _install_layered(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, t
                         doc = FakeDoc(notes, "")
                         filing = FakeFiling(date=date)
                         filing.accession_no = f"acc-{name}"
-                        filing.obj = _bind_doc(doc)
+                        filing._doc = doc
                         out.append(filing)
                 return out
 
@@ -715,7 +707,7 @@ def _install_with_8k(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, t
                         doc = FakeDoc(notes, "")
                         filing = FakeFiling(date=date)
                         filing.accession_no = f"acc-{name}"
-                        filing.obj = _bind_doc(doc)
+                        filing._doc = doc
                         out.append(filing)
                 return out
 

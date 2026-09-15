@@ -4,11 +4,11 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 import pyarrow as pa
+import pytest
 
-from app.storage import duckdb, parquet, raw_archive
 from app.domain.market import ids
+from app.storage import duckdb, parquet, raw_archive
 
 
 @pytest.fixture

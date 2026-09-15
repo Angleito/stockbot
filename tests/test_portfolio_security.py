@@ -12,8 +12,7 @@ The resolution rules under test:
 """
 
 from collections.abc import Callable
-from datetime import date, datetime, timezone, timedelta
-
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest

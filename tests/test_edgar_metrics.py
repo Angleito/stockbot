@@ -5,9 +5,10 @@ shares outstanding, not public float. The old name remains a deprecated alias
 that returns the same value with an explicit note.
 """
 
+from typing import override
+
 import pandas as pd
 import pytest
-from typing import override
 
 from app import edgar_client
 from app.sec.events8k import KNOWN_8K_ITEMS, parse_8k_events
@@ -129,7 +130,7 @@ def _eps_facts() -> pd.DataFrame:
 
 class _EpsFakeCompany(_FakeCompany):
     @override
-    def get_facts(self) -> _EpsFakeFacts:
+    def get_facts(self) -> "_EpsFakeFacts":
         return _EpsFakeFacts(df=_eps_facts())
 
 

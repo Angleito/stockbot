@@ -11,13 +11,11 @@ from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
-import requests
 
 from app import finra_client
+from app.policy import LOCAL_CONTEXT
 from app.tool_render import render_tool_result
 from app.tools import execute_tool
-from app.policy import LOCAL_CONTEXT
-
 from tests.test_finra import (
     FakeCache,
     _as_seq,

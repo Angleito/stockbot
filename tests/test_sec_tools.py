@@ -14,11 +14,11 @@ from app import tools
 from app.policy import Capability, RequestContext
 from app.sec.models import (
     EntityCandidate,
+    SearchAttempt,
+    SearchCoverage,
     SECSearchRequest,
     SECSearchResult,
     SECTextHit,
-    SearchAttempt,
-    SearchCoverage,
 )
 
 SEC_SUITE = [

@@ -12,10 +12,9 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from app import analyst_client
-from app import tool_render
-from app.tools import execute_tool
+from app import analyst_client, tool_render
 from app.policy import LOCAL_CONTEXT
+from app.tools import execute_tool
 
 YAHOO_FIXTURES = Path(__file__).parent / "fixtures" / "yahoo"
 SLICK_FIXTURES = Path(__file__).parent / "fixtures" / "slickcharts"

@@ -25,7 +25,6 @@ from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Posi
 from app.domain.portfolio.snapshot import build_portfolio_snapshot
 from app.domain.portfolio.valuation import build_position
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
-
 from app.services.account_identity import local_account_id
 from app.services.portfolio_sync import (
     persist_snapshot,
@@ -218,7 +217,7 @@ def test_sync_builds_valued_snapshot_with_two_accounts(data_root: Path) -> None:
     wing = by_id[f"{SNAPSHOT_ID}:{local_account_id('100000001')}:WING"]
     assert wing.market_value == Decimal("1168.40")
     assert wing.market_price == Decimal("116.84")
-    assert wing.quantity == Decimal("10")
+    assert wing.quantity == Decimal(10)
     assert wing.unrealized_gain == Decimal("213.40")
     assert wing.price_type == "last"
     assert wing.quote_retrieved_at == QUOTE_TIME
@@ -257,9 +256,9 @@ def test_sync_raises_on_malformed_quantity(data_root: Path) -> None:
 def test_zero_quantity_position_is_valued_at_zero(data_root: Path) -> None:
     _, _, snapshot = _run_sync(data_root)
     tsla = next(position for position in snapshot.positions if position.ticker == "TSLA")
-    assert tsla.quantity == Decimal("0")
-    assert tsla.market_value == Decimal("0")
-    assert tsla.portfolio_weight == Decimal("0")
+    assert tsla.quantity == Decimal(0)
+    assert tsla.market_value == Decimal(0)
+    assert tsla.portfolio_weight == Decimal(0)
 
 
 def test_snapshot_and_positions_are_persisted_once(data_root: Path) -> None:
@@ -338,8 +337,8 @@ def test_cash_only_account_survives_round_trip(data_root: Path) -> None:
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
         cash_balances={
-            local_account_id("100000001"): Decimal("1000"),
-            local_account_id("100000002"): Decimal("2000"),
+            local_account_id("100000001"): Decimal(1000),
+            local_account_id("100000002"): Decimal(2000),
         },
         created_at=NOW,
     )
@@ -357,7 +356,7 @@ def test_empty_portfolio_with_cash_round_trips_account_ids(data_root: Path) -> N
         broker="robinhood",
         account_ids=[local_account_id("100000001")],
         positions=[],
-        cash_balances={local_account_id("100000001"): Decimal("5000")},
+        cash_balances={local_account_id("100000001"): Decimal(5000)},
         created_at=NOW,
     )
     persist_snapshot(snapshot, data_root=data_root)
@@ -374,7 +373,7 @@ def test_account_ids_round_trip_preserves_order(data_root: Path) -> None:
         broker="robinhood",
         account_ids=[account_a, account_b],
         positions=[_position(account_id=account_a), _position(account_id=account_b)],
-        cash_balances={account_a: Decimal("1000"), account_b: Decimal("2000")},
+        cash_balances={account_a: Decimal(1000), account_b: Decimal(2000)},
         created_at=NOW,
     )
     persist_snapshot(snapshot, data_root=data_root)
@@ -508,8 +507,8 @@ def test_zero_quantity_unpriced_does_not_block_completeness(data_root: Path) -> 
     aapl = next(position for position in snapshot.positions if position.ticker == "AAPL")
     wing = next(position for position in snapshot.positions if position.ticker == "WING")
     assert aapl.portfolio_weight is not None
-    assert wing.market_value == Decimal("0")
-    assert wing.portfolio_weight == Decimal("0")
+    assert wing.market_value == Decimal(0)
+    assert wing.portfolio_weight == Decimal(0)
 
 
 def test_empty_accounts_still_persists_empty_snapshot(data_root: Path) -> None:
@@ -580,13 +579,13 @@ def test_sync_without_explicit_now_uses_utc_now(data_root: Path, monkeypatch: py
 
         @classmethod
         @override
-        def now(cls, tz: tzinfo | None = None) -> FrozenClock:
+        def now(cls, tz: tzinfo | None = None) -> "FrozenClock":
             FrozenClock.calls += 1
             return FrozenClock(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
 
         @classmethod
         @override
-        def fromisoformat(cls, date_string: str, /) -> FrozenClock:
+        def fromisoformat(cls, date_string: str, /) -> "FrozenClock":
             parsed = datetime.fromisoformat(date_string)
             return cls(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute,
                        parsed.second, parsed.microsecond, tzinfo=parsed.tzinfo)
@@ -675,7 +674,7 @@ def test_build_position_passes_asset_type() -> None:
         position_id="pos-1",
         account_id="acc-1",
         ticker="WING",
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         average_cost=Decimal("95.50"),
         retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
         source="robinhood_mcp",
@@ -690,7 +689,7 @@ def test_build_position_passes_asset_type() -> None:
 
 
 def _position(
-    market_value: Decimal | None = Decimal("500"),
+    market_value: Decimal | None = Decimal(500),
     *,
     account_id: str = local_account_id("100000001"),
 ) -> Position:
@@ -700,11 +699,11 @@ def _position(
         security_id="sec:equity:0000320193",
         entity_id="sec:cik:0000320193",
         ticker="AMD",
-        quantity=Decimal("1"),
-        average_cost=Decimal("400"),
+        quantity=Decimal(1),
+        average_cost=Decimal(400),
         market_price=market_value,
         market_value=market_value,
-        unrealized_gain=Decimal("100") if market_value is not None else None,
+        unrealized_gain=Decimal(100) if market_value is not None else None,
         unrealized_gain_pct=Decimal("0.25") if market_value is not None else None,
         portfolio_weight=None,
         source="robinhood_mcp",
@@ -717,12 +716,12 @@ def test_cash_complete_multi_account_sums() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000002"): Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal(1000), local_account_id("100000002"): Decimal(2000)},
         created_at=NOW,
     )
-    assert snapshot.cash == Decimal("3000")
-    assert snapshot.invested_value == Decimal("500")
-    assert snapshot.total_value == Decimal("3500")
+    assert snapshot.cash == Decimal(3000)
+    assert snapshot.invested_value == Decimal(500)
+    assert snapshot.total_value == Decimal(3500)
 
 
 def test_partial_cash_nils_total_and_weights() -> None:
@@ -730,7 +729,7 @@ def test_partial_cash_nils_total_and_weights() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000002"): None},
+        cash_balances={local_account_id("100000001"): Decimal(1000), local_account_id("100000002"): None},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -743,7 +742,7 @@ def test_missing_balance_nils_total() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={local_account_id("100000001"): Decimal("1000")},
+        cash_balances={local_account_id("100000001"): Decimal(1000)},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -758,7 +757,7 @@ def test_duplicate_balance_for_one_account_incomplete() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000001"): Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal(1000), local_account_id("100000001"): Decimal(2000)},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -770,7 +769,7 @@ def test_mismatched_balance_account_ids_incomplete() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001"), local_account_id("100000002")],
         positions=[_position()],
-        cash_balances={local_account_id("100000001"): Decimal("1000"), local_account_id("100000003"): Decimal("2000")},
+        cash_balances={local_account_id("100000001"): Decimal(1000), local_account_id("100000003"): Decimal(2000)},
         created_at=NOW,
     )
     assert snapshot.cash is None
@@ -782,12 +781,12 @@ def test_cash_only_portfolio_has_valid_totals() -> None:
         broker="robinhood",
         account_ids=[local_account_id("100000001")],
         positions=[],
-        cash_balances={local_account_id("100000001"): Decimal("5000")},
+        cash_balances={local_account_id("100000001"): Decimal(5000)},
         created_at=NOW,
     )
-    assert snapshot.invested_value == Decimal("0")
-    assert snapshot.cash == Decimal("5000")
-    assert snapshot.total_value == Decimal("5000")
+    assert snapshot.invested_value == Decimal(0)
+    assert snapshot.cash == Decimal(5000)
+    assert snapshot.total_value == Decimal(5000)
     assert snapshot.positions == ()
 
 
@@ -796,7 +795,7 @@ def test_snapshot_builder_is_provider_neutral() -> None:
         broker="testbroker",
         account_ids=["acct"],
         positions=[],
-        cash_balances={"acct": Decimal("100")},
+        cash_balances={"acct": Decimal(100)},
         created_at=NOW,
     )
     assert snapshot.broker == "testbroker"
