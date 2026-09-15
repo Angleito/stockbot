@@ -7,6 +7,12 @@
     "typecheck": "venv/bin/pyrefly check",
     "typecheck-ts": "tsc --noEmit -p tsconfig.json",
     "test-collect": "venv/bin/pytest --collect-only -q",
+    "coverage:py": "venv/bin/coverage run -m pytest; venv/bin/coverage lcov -o coverage-python.lcov",
+    "coverage:ts": "bun test tests/pi_extension.test.ts --coverage --coverage-reporter=lcov --coverage-dir=coverage-ts",
+    "coverage:rs": "[ -f Cargo.toml ] || exit 0; cargo llvm-cov --lcov --output-path coverage-rust.lcov",
+    "coverage": "bun run coverage:py && bun run coverage:ts && bun run coverage:rs",
+    "crap": "poly-crap --coverage coverage-python.lcov --coverage coverage-ts/lcov.info $([ -f coverage-rust.lcov ] && echo \"--coverage coverage-rust.lcov\")",
+    "crap:changed": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.mnemonicprefix GIT_CONFIG_VALUE_0=false poly-crap --diff-base main --fail-above --coverage coverage-python.lcov --coverage coverage-ts/lcov.info $([ -f coverage-rust.lcov ] && echo \"--coverage coverage-rust.lcov\")",
     "smoke-mock": "RUN_FINRA_SMOKE=1 venv/bin/pytest -m finra_smoke -q",
     "smoke-prod": "RUN_FINRA_PRODUCTION_SMOKE=1 venv/bin/pytest -m finra_production_smoke -q",
     "smoke-robinhood": "RUN_ROBINHOOD_SMOKE=1 venv/bin/pytest -m robinhood_smoke -q",
@@ -44,7 +50,11 @@
     "@earendil-works/pi-coding-agent": "0.85.1"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/typescript-checker": "^10.0.0",
     "bun-types": "^1.4.2",
+    "fast-check": "^4.10.0",
+    "knip": "^6.35.1",
     "typescript": "^7.0.2"
   }
 }

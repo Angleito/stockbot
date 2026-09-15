@@ -1,4 +1,4 @@
-/** Staged ResearchDirector driver: fetch -> freeze -> trio -> gate -> [wave-2] -> finalize.
+/** Staged ResearchDirector driver: fetch -> freeze -> trio -> gate -> [waves 2..N, director-set] -> finalize.
  *
  * Pi owns the model loop; this module owns stage order only. Every transition is
  * kernel-gated fail-closed: predicates read research.session.inspect results, at most
@@ -11,7 +11,7 @@
  * kernel inspect via deriveState, so /research-resume re-attaches a fresh run.
  */
 
-export type Json = Record<string, unknown>;
+type Json = Record<string, unknown>;
 export type BridgeCall = (req: Json) => Promise<Json>;
 
 let bridge: BridgeCall = async () => ({ error: "bridge_unavailable" });
@@ -20,7 +20,7 @@ export function setResearchBridge(fn: BridgeCall): void {
 }
 
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
-export type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
+type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
 
 // ponytail: Mem is session pointer plus a local fetch backstop; stage still derives
 // from kernel inspect, but the attempt count itself is in-memory. Ceiling: restart or
@@ -36,12 +36,9 @@ const runs = new Map<string, Mem>();
 export function clearResearchRun(runId: string): void {
  runs.delete(runId);
 }
-export function sessionIdForRun(runId: string): string | undefined {
- return runs.get(runId)?.sessionId;
-}
 // Last inspect snapshot per session, for the UX-only stage gate in stockbot.ts
 // (kernel remains authoritative). Fail open when nothing was seen yet.
-export interface InspectSnapshot { session: Json; jobs: Json[]; latestFreeze: Json | null }
+interface InspectSnapshot { session: Json; jobs: Json[]; latestFreeze: Json | null }
 const lastSeen = new Map<string, InspectSnapshot>();
 
 const ROLES = ["stockbot", "bullbot", "bearbot"] as const;
@@ -79,7 +76,7 @@ async function rpc(op: string, args: Json, dataRoot?: string, asOf?: string): Pr
 }
 // Stage predicates read inspect results only: latest freeze, its committee jobs,
 // plus running committee jobs not yet recorded for it (sorted for stable prompts).
-export interface TrioState { fid: string; wave: number; have: number; done: boolean; eligible: Json[]; covered: Set<string> }
+interface TrioState { fid: string; wave: number; have: number; done: boolean; eligible: Json[]; covered: Set<string> }
 function trioState(session: Json, jobs: Json[]): TrioState {
  const freezes = strs(session.freeze_ids);
  const fid = freezes[freezes.length - 1] ?? "";
@@ -121,11 +118,11 @@ function journalTypes(session: Json): Set<string> {
  return out;
 }
 
-export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): {
+function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): {
  stage: Stage; jobId: string; decided: boolean; authorized: boolean;
- baseline: number; wave2Frozen: boolean; targeted: string;
- wave2JobId: string; freezeEvidenceIds: string[]; unfrozenEvidenceIds: string[];
- trio: TrioState;
+ baseline: number; activeWave: number; waveFrozen: boolean; targeted: string;
+ activeWaveJobId: string; freezeEvidenceIds: string[]; unfrozenEvidenceIds: string[];
+ wave2Frozen: boolean; wave2JobId: string; trio: TrioState;
 } {
  const sid = str(session.session_id);
  const status = str(session.status);
@@ -136,19 +133,24 @@ export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | n
  const td = str(session.targeted_domain);
  const targeted = tq && td ? ` on ${td}: ${tq}` : tq || td;
  const currentWave = typeof session.current_wave === "number" && Number.isInteger(session.current_wave) ? session.current_wave : 0;
+ // Active wave N: director drives N>=1 from kernel state; wave 1 auto-fetches SEC, waves 2..N are director-directed.
+ const activeWave = Math.max(currentWave, freezes.length + 1, 1);
  const authorized =
-  status === "targeted_research" || currentWave === 2 || targeted.length > 0 ||
+  status === "targeted_research" || currentWave >= 2 || targeted.length > 0 ||
   journal.has("wave.authorized");
  // ponytail: "analyzing" is pre-decide (the trio runs there), so it must NOT imply
  // decided — otherwise trio-complete sessions could never reach decide/finalize.
  const decided =
   journal.has("wave.authorized") || journal.has("wave.stopped") ||
   status === "targeted_research" || status === "synthesizing" ||
-  status === "completed" || currentWave === 2 || targeted.length > 0;
- // ponytail: wave-2 frozen derives from the freeze record's wave_id, never the
+  status === "completed" || currentWave >= 2 || targeted.length > 0;
+ // ponytail: wave frozen derives from the freeze record's wave_id, never the
  // freeze-id shape, so non-synthesized ids still resume to finalize. Absent
  // record (older stubs) falls back to the synthesized id check.
  const freezeWaveId = latestFreeze && typeof latestFreeze.wave_id === "number" && Number.isInteger(latestFreeze.wave_id) ? latestFreeze.wave_id : null;
+ const maxFrozenWave = freezeWaveId !== null && freezeWaveId !== undefined ? freezeWaveId : freezes.length;
+ // ponytail: active-wave frozen = latest freeze covers N; trio-complete N+1 probe finalizes via the N>2 cap, open trio stays COMMITTEE. Ceiling: none, any N.
+ const waveFrozen = maxFrozenWave >= activeWave && freezes.length > 0;
  const wave2Frozen = freezeWaveId !== null && freezeWaveId !== undefined ? freezeWaveId >= 2 : freezes.includes(`${sid}:2:freeze`);
  // Committee/final prompts use the freeze's evidence ids, never the session's
  // broader mutable list; the difference only decides whether the active wave
@@ -157,8 +159,10 @@ export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | n
  const frozenSet = new Set(freezeEvidenceIds);
  const unfrozenEvidenceIds = latestFreeze ? evidence.filter((id) => !frozenSet.has(id)) : [];
  const src1 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 1);
+ const activeSrc = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === activeWave);
  const src2 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 2);
  const jobId = str(src1?.job_id ?? jobs[0]?.job_id);
+ const activeWaveJobId = str(activeSrc?.job_id);
  const wave2JobId = str(src2?.job_id);
  // ponytail: the true E1 evidence count lives in the freeze store, which TS cannot
  // read via inspect; best-effort current count (freeze decisions key off wave-2
@@ -175,20 +179,20 @@ export function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | n
   stage = "COMMITTEE";
  }
  if (status === "synthesizing" || status === "completed") stage = "FINAL";
- return { stage, jobId, decided, authorized, baseline, wave2Frozen, targeted, wave2JobId, freezeEvidenceIds, unfrozenEvidenceIds, trio };
+ return { stage, jobId, decided, authorized, baseline, activeWave, waveFrozen, targeted, activeWaveJobId, freezeEvidenceIds, unfrozenEvidenceIds, wave2Frozen, wave2JobId, trio };
 }
 
 // UX-only mirror of the kernel stage gate (kernel stays authoritative):
 // positive canonical control allowlists plus discovery, same reason string,
 // fail open otherwise. COMMITTEE/FINAL therefore block every unlisted data tool.
 const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_tools: true, describe_tool: true, list_tool_domains: true, call_tool: true };
-const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_evidence: true };
+const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_evidence: true, research_submit_source_result: true };
 const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_analysis: true };
 const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_finalize: true };
 // Local controls, thesis actions, and dotted bridge ops are never staged data
 // dispatches; SOURCE blocks them while unlisted data tools pass.
-const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_add_evidence: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
-export function stageBlockReason(stage: Stage, toolName: string): string | undefined {
+const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_add_evidence: true, research_submit_source_result: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
+function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_DISCOVERY[toolName]) return undefined;
  if (stage === "COMMITTEE") return STAGE_GATE_COMMITTEE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
  if (stage === "FINAL") return STAGE_GATE_FINAL_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
@@ -226,18 +230,25 @@ function fetchPrompt(sessionId: string, jobId: string, question: string, asOf?: 
   `Call call_tool with name="search_sec_filings" (or list_sec_filings / get_sec_document), then record each finding with ` +
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ${cutoff}` +
-  `Out-of-order calls fail closed; up to 3 SEC dispatches, then the driver closes the run as no_questions:empty-wave1 when SEC has no coverage.`
+  `Out-of-order calls fail closed; up to 3 SEC dispatches, then the driver closes the run as no_questions:empty-wave1 when SEC has no coverage. ` +
+  `When source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. Do not attempt to freeze. Do not keep adding evidence to fill the cap.`
  );
 }
 
-function wave2Prompt(sessionId: string, jobId: string, targeted: string, asOf?: string): string {
+function wavePrompt(wave: number, sessionId: string, jobId: string, targeted: string, asOf?: string): string {
+ const label = wave <= 1 ? "Wave-1" : `Wave-${wave}`;
  return (
-  `Wave-2 authorized for research session ${sessionId}${targeted}. Fetch targeted evidence with ` +
+  `${label} authorized for research session ${sessionId}${targeted}. Fetch targeted evidence with ` +
   `Call call_tool with name="search_sec_filings" (or get_material_events / get_sec_document), then record each finding with ` +
   `Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
   `Provenance is kernel-validated: one of source_uri/source_record_id is required and content or claim_text is required; ` +
-  `known_at is required as ISO-8601 on or before the session cutoff ${asOf || "unbounded"}.`
+  `known_at is required as ISO-8601 on or before the session cutoff ${asOf || "unbounded"}. ` +
+  `When source investigation is complete, you MUST call research_submit_source_result exactly once with coverage runs {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, unresolved_questions, then stop. Do not attempt to freeze. Do not keep adding evidence to fill the cap. ` +
+  `If evidence is insufficient or you need more direction, include it in unresolved_questions; the director decides the next wave or asks NEED-USER.`
  );
+}
+function wave2Prompt(sessionId: string, jobId: string, targeted: string, asOf?: string): string {
+ return wavePrompt(2, sessionId, jobId, targeted, asOf);
 }
 
 function trioJobIdsForFreeze(session: Json, fid: string): string[] {
@@ -281,23 +292,10 @@ function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string,
  );
 }
 
-// Best-effort: complete the wave's running source jobs so the kernel
-// terminal-before-freeze guard passes; queued work never ran, is left untouched,
-// and the kernel freeze_session open-jobs guard exposes it. Failures (already
-// terminal, stub without the op) are ignored; freeze.create stays fail-closed below.
-async function freezeWave(sessionId: string, wave: number, jobs: Json[], dataRoot?: string, asOf?: string): Promise<void> {
- for (const j of jobs) {
-  const t = str(j.job_type);
-  const s = str(j.status);
-  if ((t === "source_agent" || t === "scout") && j.wave_id === wave && (s === "running")) {
-   try {
-    await rpc("research.job.complete", { job_id: str(j.job_id), outcome: { status: "done" } }, dataRoot, asOf);
-   } catch {
-    // already terminal: proceed to the authoritative freeze call.
-   }
-  }
- }
- await rpc("research.freeze.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
+// Fail-closed freeze: the kernel rejects open source jobs, so the model must
+// end source work via research_submit_source_result first. No force-complete here.
+async function freezeWave(sessionId: string, wave: number, dataRoot?: string, asOf?: string): Promise<Json> {
+ return rpc("research.freeze.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
 }
 
 async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string): Promise<Advance> {
@@ -390,11 +388,21 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  }
  const freezes = strs(session.freeze_ids);
  if (freezes.length === 0) {
+  const src1 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 1);
+  const src1Status = str(src1?.status);
+  if (src1 && (src1Status === "running" || src1Status === "queued"))
+   return { done: false, prompt: `Source still running for research session ${sid}: finish fetching with Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sid}", "job_id": "${str(src1.job_id)}", ${ITEM_SHAPE}}, then end source work exactly once with Call call_tool with name="research_submit_source_result" and arguments={"session_id": "${sid}", "job_id": "${str(src1.job_id)}", "coverage": {"useful_for_question": "sufficient"}, "evidence_ids": [<ids>], "unresolved_questions": []}. Do not attempt to freeze.` };
+  let frozen: Json;
   try {
-   await freezeWave(sid, 1, jobs, dataRoot, asOf);
+   frozen = await freezeWave(sid, 1, dataRoot, asOf);
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
+  const verb = str((frozen.pending_next_action as Json | undefined)?.verb ?? (latestFreeze?.pending_next_action as Json | undefined)?.verb ?? "");
+  const reason = str((frozen.pending_next_action as Json | undefined)?.reason ?? (latestFreeze?.pending_next_action as Json | undefined)?.reason ?? "");
+  // ponytail: director owns next-wave choice; insufficient ends the run with an explicit NEED-USER ask (no committee on thin evidence, no auto-loop). Ceiling: policy max_waves + job budgets backstop runaway waves; auto-start caps at wave 2, N>2 finalizes until reply-parsing lands.
+  if (verb === "FINALIZE_INSUFFICIENT")
+   return { done: true, answer: `SEC insufficient: ${reason || "no sufficient source coverage"}. NEED-USER: reply with the follow-up question or domain for wave 2, or confirm stop.` };
   return seedTrio(sid, 1, dataRoot, asOf);
  }
  if (!d.trio.done) {
@@ -426,10 +434,14 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
    return { done: false, prompt: `Wave-2 gate for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
   }
  }
- if (authorized && !d.wave2Frozen) {
-  if (!d.wave2JobId) {
+ if (authorized && !d.waveFrozen) {
+  const N = d.activeWave >= 2 ? d.activeWave : 2;
+  if (N > 2)
+   return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Waves complete for research session ${sid}. `, trioJobIdsForFreeze(session, d.trio.fid)) };
+  const activeSrc = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === N);
+  if (!str(activeSrc?.job_id)) {
    try {
-    const started = await rpc("research.job.start", { session_id: sid, type: "source_agent", wave_id: 2 }, dataRoot, asOf);
+    const started = await rpc("research.job.start", { session_id: sid, type: "source_agent", wave_id: N }, dataRoot, asOf);
     const nid = str(started.job_id);
     if (!nid) throw new Error("research.job.start failed: missing job_id");
     try {
@@ -437,23 +449,28 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
     } catch {
      // inspect refresh is best-effort; the explicit nid still drives the prompt
     }
-    return { done: false, prompt: wave2Prompt(sid, nid, targeted, asOf) };
+    return { done: false, prompt: wavePrompt(N, sid, nid, targeted, asOf) };
    } catch (err) {
-    return { done: false, prompt: `Wave-2 source job for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
+    return { done: false, prompt: `Wave-${N} source job for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
    }
   }
-  // Wave-2 source work is underway: without evidence past the latest freeze the
-  // driver keeps fetching; the wave-2 freeze fires only once new evidence lands.
-  if (d.unfrozenEvidenceIds.length === 0) {
-   const runningW2 = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === 2 && str(j.status) === "running");
-   return { done: false, prompt: wave2Prompt(sid, str(runningW2?.job_id) || d.wave2JobId, targeted, asOf) };
+  // Wave-N source work is underway: without evidence past the latest freeze the
+  // driver keeps fetching; the wave-N freeze fires only once new evidence lands.
+  const activeStatus = str(activeSrc?.status);
+  if (activeSrc && (activeStatus === "running" || activeStatus === "queued") && d.unfrozenEvidenceIds.length === 0) {
+   return { done: false, prompt: wavePrompt(N, sid, str(activeSrc.job_id), targeted, asOf) };
   }
+  let frozenN: Json;
   try {
-   await freezeWave(sid, 2, jobs, dataRoot, asOf);
+   frozenN = await freezeWave(sid, N, dataRoot, asOf);
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
-  return seedTrio(sid, 2, dataRoot, asOf);
+  const verbN = str((frozenN.pending_next_action as Json | undefined)?.verb ?? "");
+  const reasonN = str((frozenN.pending_next_action as Json | undefined)?.reason ?? "");
+  if (verbN === "FINALIZE_INSUFFICIENT")
+   return { done: true, answer: `SEC insufficient: ${reasonN || "no sufficient source coverage"}. NEED-USER: reply with the follow-up question or domain for wave ${N + 1}, or confirm stop.` };
+  return seedTrio(sid, N, dataRoot, asOf);
  }
- return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Wave-2 complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `, trioJobIdsForFreeze(session, d.trio.fid)) };
+ return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), authorized ? `Waves complete for research session ${sid}. ` : `Wave-2 declined for research session ${sid}. `, trioJobIdsForFreeze(session, d.trio.fid)) };
 }

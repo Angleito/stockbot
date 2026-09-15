@@ -571,6 +571,18 @@ tools:
     summary: "Read a research session with its jobs and pending next action."
     version: 2
     keywords: [action, checking, current, inspect, job, next, pending, read, research, session, state, statu]
+  - name: research_submit_source_result
+    domain: research
+    family: session
+    path: "/research/session/research_submit_source_result"
+    intent: submit_source_result
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Complete one running source job with validated coverage; evidence stays mutation-only."
+    version: 2
+    keywords: [complete, completing, coverage, evidence, investigation, job, mutation, one, only, research, result, running, source, stay, submit, validated]
   - name: find_sec_entities
     domain: sec
     family: entity-discovery

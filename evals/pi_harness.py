@@ -62,12 +62,14 @@ class Bridge:
         self._seq += 1
         return f"{prefix}-{self._seq}-{uuid.uuid4().hex[:8]}"
 
-    def _roundtrip(self, payload, expect_id=True):
+    def _send(self, payload):
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
+
+    def _roundtrip(self, payload, expect_id=True):
+        self._send(payload)
         while True:
-            line = self.proc.stdout.readline()
-            response = json.loads(line)
+            response = json.loads(self.proc.stdout.readline())
             if not expect_id or response.get("id") == payload["id"]:
                 return response
 
@@ -85,8 +87,7 @@ class Bridge:
             "id": self._next_id("ev"),
             "op": "pi_event", "run_id": run_id, "event": event, **extra,
         }
-        self.proc.stdin.write(json.dumps(payload) + "\n")
-        self.proc.stdin.flush()
+        self._send(payload)
         return json.loads(self.proc.stdout.readline())
 
     def close(self):
@@ -94,31 +95,58 @@ class Bridge:
         self.proc.terminate()
 
 
-def check_case(case, detailed, response):
-    expected = case.get("expected_behavior", {})
-    trace = [t["name"] for t in detailed]
-    resp = response.lower()
-    must = [s.lower() for s in expected.get("must_contain", [])]
-    must_not = [s.lower() for s in expected.get("must_not_contain", [])]
-    checks = {
+def _tool_checks(expected, trace):
+    return {
         "expected_tools": all(t in trace for t in expected.get("expected_tools", [])),
         "required_tools": all(t in trace for t in expected.get("required_tools", [])),
-        "sequence": _is_ordered_subsequence(
-            expected.get("required_tool_sequence", []), trace),
-        "forbidden_args": all(
-            arg not in (call.get("arguments") or {})
-            for tool, args in expected.get("forbidden_tool_args", {}).items()
-            for arg in args for call in detailed if call["name"] == tool),
-        "forbidden_tools": not any(
-            t in trace for t in expected.get("forbidden_tools", [])),
+        "sequence": _is_ordered_subsequence(expected.get("required_tool_sequence", []), trace),
+        "forbidden_tools": not any(t in trace for t in expected.get("forbidden_tools", [])),
+    }
+
+
+def _forbidden_args_ok(expected, detailed):
+    return all(
+        arg not in (call.get("arguments") or {})
+        for tool, args in expected.get("forbidden_tool_args", {}).items()
+        for arg in args for call in detailed if call["name"] == tool)
+
+
+def _text_checks(expected, resp):
+    must = [s.lower() for s in expected.get("must_contain", [])]
+    must_not = [s.lower() for s in expected.get("must_not_contain", [])]
+    return must, {
         "must_contain": all(s in resp for s in must),
         "must_not_contain": not any(s in resp for s in must_not),
     }
+
+
+def check_case(case, detailed, response):
+    expected = case.get("expected_behavior", {})
+    trace = [t["name"] for t in detailed]
+    checks = _tool_checks(expected, trace)
+    checks["forbidden_args"] = _forbidden_args_ok(expected, detailed)
+    must, text = _text_checks(expected, response.lower())
+    checks.update(text)
     failed = [k for k, ok in checks.items() if not ok]
     if not (expected.get("expected_tools") or expected.get("required_tools")
             or expected.get("required_tool_sequence") or must):
         failed.append("empty_assertions")
     return not failed, f"tools called={trace}" + (f" (failed: {failed})" if failed else "")
+
+
+def _run_one(bridge, cases, cid, calls):
+    case = cases[cid]
+    run_id = f"eval-{cid}"
+    bridge.event(run_id, "agent_start", question=case.get("question", ""))
+    detailed, results = [], []
+    for name, args in calls:
+        results.append(bridge.call(name, args, run_id))
+        detailed.append({"name": name, "arguments": args})
+    bridge.event(run_id, "agent_end")
+    ok, details = check_case(case, detailed, json.dumps(results))
+    print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {case['question']}")
+    print(f"       Details: {details}")
+    return ok
 
 
 def main():
@@ -128,18 +156,7 @@ def main():
     passed = 0
     try:
         for cid, calls in PLAN.items():
-            case = cases[cid]
-            run_id = f"eval-{cid}"
-            bridge.event(run_id, "agent_start", question=case.get("question", ""))
-            detailed, results = [], []
-            for name, args in calls:
-                results.append(bridge.call(name, args, run_id))
-                detailed.append({"name": name, "arguments": args})
-            bridge.event(run_id, "agent_end")
-            ok, details = check_case(case, detailed, json.dumps(results))
-            passed += ok
-            print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {case['question']}")
-            print(f"       Details: {details}")
+            passed += _run_one(bridge, cases, cid, calls)
     finally:
         bridge.close()
     print(f"\nPI-HARNESS EVALS: {passed}/{len(PLAN)} passed")
