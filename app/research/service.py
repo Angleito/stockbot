@@ -16,13 +16,13 @@ from typing import TYPE_CHECKING
 
 from . import jobs as _jobs
 from . import session as _session
-from .freeze import EvidenceFreeze
 from .evidence import (
     Evidence,
     evidence_content_hash,
     evidence_to_dict,
     ingest_evidence,
 )
+from .freeze import EvidenceFreeze
 from .models import (
     JSONValue,
     ResearchSession,
@@ -41,30 +41,31 @@ if TYPE_CHECKING:
     from .director import Wave1Result, WaveDecision
     from .models import Job
     from .synthesis.committee import CommitteeDisagreement
+    from .synthesis.final import FinalSynthesis
 
 __all__ = [
     "ResearchNotFound",
     "authorize_and_consume_dispatch",
     "cancel_research",
     "complete_job",
+    "create_committee_jobs",
     "create_research",
     "decide_wave2",
     "finalize_session",
     "freeze_session",
+    "heartbeat_job",
     "inspect_research",
+    "job_diagnostics",
     "list_research",
     "record_committee_analysis",
     "record_evidence",
-    "submit_source_result",
-    "create_committee_jobs",
-    "transition_job_completed",
     "research_events",
-    "heartbeat_job",
-    "job_diagnostics",
     "resume_research",
     "retry_job",
     "run_research",
     "start_job",
+    "submit_source_result",
+    "transition_job_completed",
 ]
 
 
@@ -168,8 +169,18 @@ def heartbeat_job(job_id: str, *, repo: ResearchRepository | Path | str | None =
     return beat.to_dict()
 
 
+def _jobs_by_status(job_list: list[Job]) -> dict[str, list[dict[str, JSONValue]]]:
+    """Jobs split by terminal state; successful completions never render under failure."""
+    out: dict[str, list[dict[str, JSONValue]]] = {"completed": [], "failed": [], "cancelled": [], "timed_out": []}
+    for job in job_list:
+        dumped = job.to_dict()
+        if job.status in out:
+            out[job.status].append(dumped)
+    return out
+
+
 def job_diagnostics(session_id: str, job_id: str, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, JSONValue]:
-    """Non-empty diagnostics: staleness, deadline remaining, evidence count."""
+    """Non-empty diagnostics: staleness, deadline remaining, per-status counts, evidence count."""
     from .models import HEARTBEAT_STALE_S
     store = _repo(repo)
     job = _require_job(store, job_id)
@@ -178,8 +189,10 @@ def job_diagnostics(session_id: str, job_id: str, *, repo: ResearchRepository | 
     staleness = max(0.0, (now - hb).total_seconds()) if hb is not None else 0.0
     remaining = (job.deadline - now).total_seconds() if job.deadline is not None else None
     count = sum(1 for r in store.list_evidence(session_id) if r.get("job_id") == job_id)
-    return {"job_id": job_id, "stale": staleness > HEARTBEAT_STALE_S, "staleness_s": staleness,
+    by_status = _jobs_by_status(store.list_jobs(session_id))
+    return {"job_id": job_id, "job_status": job.status, "stale": staleness > HEARTBEAT_STALE_S, "staleness_s": staleness,
             "deadline_remaining_s": remaining, "evidence_count": count,
+            "jobs_by_status": {k: [j.get("job_id") for j in v if isinstance(j, dict)] for k, v in by_status.items()},
             "last_event": job.status}
 
 
@@ -258,7 +271,7 @@ def inspect_research(
     *,
     repo: ResearchRepository | Path | str | None = None,
 ) -> dict[str, object]:
-    """Session + jobs + deterministic next action (read-only)."""
+    """Session + jobs (split completed vs failed vs cancelled vs timed_out) + deterministic next action (read-only)."""
     store = _repo(repo)
     found = _require_session(store, session_id)
     job_list = store.list_jobs(session_id)
@@ -272,6 +285,7 @@ def inspect_research(
     return {
         "session": found.to_dict(),
         "jobs": [j.to_dict() for j in job_list],
+        "jobs_by_status": _jobs_by_status(job_list),
         "pending_next_action": pending_next_action(found, job_list),
         "latest_freeze": latest_freeze,
     }
@@ -757,10 +771,72 @@ def record_evidence(
                                     identity_key=identity_key, ev_type=ev_type)
     return _persist_evidence_record(store, session_id, job_id, found, record, metadata)
 
+def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool = False) -> list[str]:
+    """Validated string list for one coverage key (missing optional key means [])."""
+    raw = cov.get(key)
+    if raw is None:
+        if required:
+            raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (coverage[{key!r}] required)")
+        return []
+    if not isinstance(raw, list) or any(not isinstance(v, str) for v in raw):
+        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (coverage[{key!r}] must be a list of strings)")
+    return list(raw)
+
+_SUFFICIENCY_REQUIRED_KEYS: tuple[str, ...] = ("major_entities_investigated", "relationship_types_checked", "forms_examined", "exhibits_examined", "material_open_questions")
+_SUFFICIENCY_RESIDUAL_KEYS: tuple[str, ...] = ("material_open_questions", "major_entities_missing", "remaining_branches", "routes_unsearched")
+
+
+def _sufficient_remaining(cov: dict[str, object]) -> list[str]:
+    """Non-blank residual questions/branches/routes across the sufficiency keys."""
+    remaining: list[str] = []
+    for key in _SUFFICIENCY_RESIDUAL_KEYS:
+        remaining.extend(q for q in _submit_str_list_field(cov, key) if q.strip())
+    return remaining
+
+
+def _sufficient_required(cov: dict[str, object]) -> None:
+    """Require non-empty investigated entities/relationships/forms/exhibits for the new contract."""
+    filled = {key: _submit_str_list_field(cov, key, required=True) for key in _SUFFICIENCY_REQUIRED_KEYS}
+    missing = [key for key in _SUFFICIENCY_REQUIRED_KEYS[:4] if not filled[key]]
+    if missing:
+        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty {missing})")
+    remaining = _sufficient_remaining(cov)
+    if remaining:
+        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient with remaining branches/questions: {remaining[:5]})")
+
+
+def _submit_sufficient_gate(cov: dict[str, object], ids: list[str]) -> None:
+    """sufficient claims major material channels + counterparties or they fail closed.
+
+    A sufficient result needs investigated major entities, checked relationship
+    types, examined forms + exhibits, and no material open questions left —
+    never just N evidence rows. Residuals must be unlikely to change the SEC
+    answer (no remaining major branches, unsearched routes, or material opens).
+
+    Backward compat: legacy callers that send none of the new sufficiency keys
+    keep the old envelope-only behavior so existing lifecycle/freeze/committee
+    tests stay green without test edits. Once a caller opts into the new
+    contract (any sufficiency key present), the full gate applies. Director
+    coverage challenge remains the second layer for incomplete dossiers.
+    """
+    if cov.get("useful_for_question") != "sufficient":
+        return
+    if not any(k in cov for k in _SUFFICIENCY_REQUIRED_KEYS):
+        if not ids:
+            raise ValueError("submit_source_result: ERR_EMPTY_RESULT (no evidence with sufficient coverage)")
+        return
+    _sufficient_required(cov)
+    if not ids:
+        raise ValueError("submit_source_result: ERR_EMPTY_RESULT (no evidence with sufficient coverage)")
+
 
 def _submit_coverage_ids(coverage: dict[str, object] | None,
                          evidence_ids: list[str] | None) -> tuple[dict[str, object], object, list[str]]:
-    """Validate the coverage envelope + evidence list; return (cov, useful, ids)."""
+    """Validate the coverage envelope + evidence list; return (cov, useful, ids).
+
+    Envelope only; the sufficiency gate runs in submit_source_result after the
+    dangling-ref check so citing unknown ids still reports ERR_EVIDENCE_NOT_FOUND.
+    """
     cov = dict(coverage or {})
     if "useful_for_question" not in cov:
         raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (coverage.useful_for_question required: sufficient|insufficient)")
@@ -787,7 +863,10 @@ def _submit_live_job(store: ResearchRepository, job_id: str):
 
 
 _SUBMIT_COVERAGE_KEYS = ("resolved", "partially_resolved", "unresolved", "source_limitations",
-                         "dates", "partitions", "docs", "gaps")
+                         "dates", "partitions", "docs", "gaps",
+                         "major_entities_investigated", "major_entities_missing",
+                         "relationship_types_checked", "forms_examined", "exhibits_examined",
+                         "material_open_questions", "remaining_branches", "routes_unsearched")
 
 
 def _submit_ledger_ids(store: ResearchRepository, job: Job) -> set[str]:
@@ -810,13 +889,36 @@ def _submit_coverage_merge(coverage: dict[str, object], cov: dict[str, object] |
 
 
 def _submit_coverage_dict(cov: dict[str, object] | None, useful: object) -> dict[str, object]:
-    """Coverage envelope: default coverage plus caller-supplied string lists."""
+    """Coverage envelope: default coverage plus caller-supplied string lists.
+
+    New sufficiency keys (major_entities_investigated, relationship_types_checked,
+    forms_examined, exhibits_examined, material_open_questions + remaining-branch
+    lists) ride alongside the existing resolution/negative-scope keys. The
+    useful_for_question verdict persists so the director challenge + freeze
+    telemetry can read it back from the stored dossier.
+    """
     from .dossiers import default_coverage
 
-    coverage = {**default_coverage(), "complete": useful == "sufficient"}
+    coverage = {**default_coverage(), "complete": useful == "sufficient",
+                "useful_for_question": useful}
     for key in _SUBMIT_COVERAGE_KEYS:
         _submit_coverage_merge(coverage, cov, key)
     return coverage
+
+
+def _evidence_field_values(rows: list[dict[str, JSONValue]], key: str) -> list[str]:
+    """Sorted non-blank evidence field values for one key."""
+    return sorted({str(r.get(key)) for r in rows if isinstance(r.get(key), str) and str(r.get(key)).strip()})
+
+
+def _submit_telemetry(store: ResearchRepository, job: Job, cov: dict[str, object] | None,
+                      ids: list[str], unresolved: list[str] | None) -> dict[str, JSONValue]:
+    """Coverage/job telemetry merged into the completed job result (deterministic, persisted)."""
+    rows = store.list_evidence(job.session_id)
+    caller = dict(cov or {})
+    coverage = _submit_coverage_dict(cov, caller.get("useful_for_question"))
+    raw_q = coverage.get("sources_examined")
+    return validate_json_mapping({"searches_count": len(rows), "queries_attempted": [q for q in raw_q if isinstance(q, str)] if isinstance(raw_q, list) else [], "forms_searched": _evidence_field_values(rows, "form") or _submit_str_list_field(caller, "forms_examined"), "entities_investigated": _evidence_field_values(rows, "subject") or _submit_str_list_field(caller, "major_entities_investigated"), "exhibits_inspected": _submit_str_list_field(caller, "exhibits_examined"), "material_relationships_found": len(ids), "material_relationships_skipped": len(_submit_str_list_field(caller, "remaining_branches")), "coverage_state": caller.get("useful_for_question"), "remaining_questions": list(unresolved or [])}, "<submit:telemetry>")
 
 
 def _submit_persist_dossier(store: ResearchRepository, job: Job, found: ResearchSession,
@@ -860,21 +962,28 @@ def submit_source_result(
 ) -> dict[str, JSONValue]:
     """Complete one running source job with validated coverage; evidence stays mutation-only.
 
-    Validates job open + deadline live, every evidence id exists in this session,
-    then completes the job with a coverage/result payload. Returns
-    {job_status: completed, dossier-ish refs}. Terminal reuse fails closed.
+    sufficient requires major material EDGAR-visible channels + counterparties
+    investigated and residuals unlikely to change the SEC answer — never just N
+    evidence rows. Validates job open + deadline live, every evidence id exists
+    in this session, then completes the job with a coverage/result payload.
+    Returns {job_status: completed, dossier-ish refs, telemetry}. Terminal
+    reuse fails closed.
     """
     store = _repo(repo)
     job, found = _submit_live_job(store, job_id)
     cov, _, ids = _submit_coverage_ids(coverage, evidence_ids)
+    _submit_require_refs(_submit_ledger_ids(store, job), ids)
+    _submit_sufficient_gate(cov, ids)
     dossier_id, _ = _submit_dossier(store, job, found,
                                     cov.get("useful_for_question"), ids, unresolved_questions, cov)
-    done = _jobs.complete_job(job, result={"coverage": cov, "evidence_ids": ids})
+    telemetry = _submit_telemetry(store, job, cov, ids, unresolved_questions)
+    done = _jobs.complete_job(job, result={"coverage": cov, "evidence_ids": ids, "telemetry": telemetry})
     store.save_job(done)
-    _emit(store, job.session_id, "job.completed", {"job_id": job.job_id})
+    _emit(store, job.session_id, "job.completed", {"job_id": job.job_id, "telemetry": dict(telemetry)})
     transition_job_completed(job.session_id, job.job_id, repo=store)
     out: dict[str, JSONValue] = {"job_status": done.status, "job_id": done.job_id, "dossier_id": dossier_id,
-            "evidence_ids": validate_json_value(ids, "<submit>")}
+            "evidence_ids": validate_json_value(ids, "<submit>"),
+            "telemetry": telemetry}
     return out
 
 
@@ -971,41 +1080,70 @@ def _committee_results_by_role(store: ResearchRepository, found: ResearchSession
 def _build_stock(role_res: dict[str, JSONValue], *, sid: str, wave: int,
                  fid: str, ids: list[str], as_of: str, question: str) -> StockbotAnalysis:
     """Parse the stockbot envelope into its typed analysis."""
-    from .agents import parse_committee_output
+    from .agents import parse_committee_envelope
     from .agents.stockbot import StockbotAnalysis
 
-    claims, follow_ups = parse_committee_output(json.dumps(dict(role_res)), frozen=ids, agent="stockbot")
-    prose = "\n".join(c.text for c in claims).strip() or "No grounded claims in freeze."
-    return StockbotAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, answer=prose, base_case=prose, unknowns=_str_list(role_res.get("unknowns")), what_would_change=_str_list(role_res.get("what_would_change")), claims=claims, research_requests=follow_ups)
+    env = parse_committee_envelope(json.dumps(dict(role_res)), frozen=ids, agent="stockbot")
+    prose = "\n".join(c.text for c in env.claims).strip() or "No grounded claims in freeze."
+    view = env.executive_view or prose
+    unknowns = list(env.uncertainties) or _str_list(role_res.get("uncertainties", role_res.get("unknowns")))
+    return StockbotAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, answer=view, base_case=view, unknowns=unknowns, what_would_change=_str_list(role_res.get("what_would_change")), claims=env.claims, research_requests=env.follow_ups, executive_view=view, impact_channels=list(env.impact_channels), materiality=env.materiality, uncertainties=list(unknowns))
 
 
 def _build_bull(role_res: dict[str, JSONValue], *, sid: str, wave: int,
                 fid: str, ids: list[str], as_of: str, question: str) -> BullAnalysis:
     """Parse the bullbot envelope into its typed analysis."""
-    from .agents import parse_committee_output
+    from .agents import parse_committee_envelope
     from .agents.bullbot import BullAnalysis
 
-    claims, follow_ups = parse_committee_output(json.dumps(dict(role_res)), frozen=ids, agent="bullbot")
-    prose = "\n".join(c.text for c in claims).strip() or "No grounded claims in freeze."
-    return BullAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, stance="bullish", bull_case=prose, unknowns=_str_list(role_res.get("unknowns")), what_would_change=_str_list(role_res.get("what_would_change")), claims=claims, research_requests=follow_ups)
+    env = parse_committee_envelope(json.dumps(dict(role_res)), frozen=ids, agent="bullbot")
+    prose = "\n".join(c.text for c in env.claims).strip() or "No grounded claims in freeze."
+    view = env.executive_view or prose
+    unknowns = list(env.uncertainties) or _str_list(role_res.get("uncertainties", role_res.get("unknowns")))
+    return BullAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, stance="bullish", bull_case=view, unknowns=unknowns, what_would_change=_str_list(role_res.get("what_would_change")), claims=env.claims, research_requests=env.follow_ups, executive_view=view, impact_channels=list(env.impact_channels), materiality=env.materiality, uncertainties=list(unknowns))
 
 
 def _build_bear(role_res: dict[str, JSONValue], *, sid: str, wave: int,
                 fid: str, ids: list[str], as_of: str, question: str) -> BearAnalysis:
     """Parse the bearbot envelope into its typed analysis."""
-    from .agents import parse_committee_output
+    from .agents import parse_committee_envelope
     from .agents.bearbot import BearAnalysis
 
-    claims, follow_ups = parse_committee_output(json.dumps(dict(role_res)), frozen=ids, agent="bearbot")
-    prose = "\n".join(c.text for c in claims).strip() or "No grounded claims in freeze."
-    return BearAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, stance="bearish", bear_case=prose, unknowns=_str_list(role_res.get("unknowns")), what_would_change=_str_list(role_res.get("what_would_change")), claims=claims, research_requests=follow_ups)
+    env = parse_committee_envelope(json.dumps(dict(role_res)), frozen=ids, agent="bearbot")
+    prose = "\n".join(c.text for c in env.claims).strip() or "No grounded claims in freeze."
+    view = env.executive_view or prose
+    unknowns = list(env.uncertainties) or _str_list(role_res.get("uncertainties", role_res.get("unknowns")))
+    return BearAnalysis(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), as_of=as_of, question=question, stance="bearish", bear_case=view, unknowns=unknowns, what_would_change=_str_list(role_res.get("what_would_change")), claims=env.claims, research_requests=env.follow_ups, executive_view=view, impact_channels=list(env.impact_channels), materiality=env.materiality, uncertainties=list(unknowns))
+
+
+def _latest_dossier(store: ResearchRepository, session_id: str) -> dict[str, object]:
+    """Latest SEC dossier mapping ({} when none stored)."""
+    dossiers = store.list_dossiers(session_id)
+    latest = dossiers[-1] if dossiers else None
+    return dict(latest) if isinstance(latest, dict) else {}
+
+
+def _wave1_coverage(store: ResearchRepository, session_id: str) -> tuple[dict[str, object] | None, list[dict[str, object]], list[str]]:
+    """Latest SEC dossier coverage + relationships + open questions for the director challenge."""
+    latest = _latest_dossier(store, session_id)
+    if not latest:
+        return None, [], []
+    coverage = latest.get("coverage")
+    rels = latest.get("relationships")
+    open_q = latest.get("open_questions")
+    return (dict(coverage) if isinstance(coverage, dict) else None, [dict(r) for r in rels if isinstance(r, dict)] if isinstance(rels, list) else [], [q for q in open_q if isinstance(q, str)] if isinstance(open_q, list) else [])
 
 
 def _wave1_state(
     store: ResearchRepository,
     found: ResearchSession,
 ) -> tuple[Wave1Result, dict[str, object]]:
-    """Rebuild the trio Wave1Result from the latest freeze's committee-run jobs."""
+    """Rebuild the trio Wave1Result from the latest freeze's committee-run jobs.
+
+    Carries the original question + latest dossier coverage/relationships/open
+    questions so the director coverage challenge can route incomplete dossiers
+    to targeted follow-up without redefining the objective.
+    """
     from .director import Wave1Result
     from .synthesis.committee import compute_disagreement
 
@@ -1016,12 +1154,14 @@ def _wave1_state(
     bull = _build_bull(by_role["bullbot"], **kw) if "bullbot" in by_role else None
     bear = _build_bear(by_role["bearbot"], **kw) if "bearbot" in by_role else None
     disagreement = compute_disagreement(stock, bull, bear) if stock is not None and bull is not None and bear is not None else None
-    wave1 = Wave1Result(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), stock=stock, bull=bull, bear=bear, disagreement=disagreement)
+    coverage, relationships, open_questions = _wave1_coverage(store, sid)
+    wave1 = Wave1Result(session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=list(ids), stock=stock, bull=bull, bear=bear, disagreement=disagreement,
+                        coverage=coverage, relationships=relationships, open_questions=open_questions, question=found.query)
     return wave1, {"freeze_id": fid, "evidence_ids": ids, "wave_id": wave, "as_of": as_of}
 
 
 def _freeze_wave_cap(found: ResearchSession, session_id: str, wave_id: int) -> None:
-    """Enforce the int>=1 wave id and the policy max_waves cap."""
+    """Enforce the int>=1 wave id and the policy max_waves runaway-test budget guard (never completeness proof)."""
     if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
         raise ValueError(f"freeze_session: 'wave_id' must be an int >= 1, got {wave_id!r}")
     raw_section: object = found.policy.get("research", {})
@@ -1092,6 +1232,41 @@ def _freeze_coverage_note(store: ResearchRepository, session_id: str) -> str:
     return ""
 
 
+_FREEZE_EXHIBIT_KEYS: tuple[str, ...] = ("exhibits_examined",)
+_FREEZE_REMAINING_KEYS: tuple[str, ...] = ("material_open_questions", "major_entities_missing", "remaining_branches", "routes_unsearched", "unresolved")
+
+
+def _freeze_coverage_lists(raw_cov: dict[str, object], keys: tuple[str, ...], *, strip: bool) -> list[str]:
+    """String values across coverage lists for the given keys (in key order)."""
+    out: list[str] = []
+    for key in keys:
+        raw = raw_cov.get(key)
+        if isinstance(raw, list):
+            out.extend(v for v in raw if isinstance(v, str) and (v.strip() if strip else True))
+    return out
+
+
+def _freeze_coverage_select(store: ResearchRepository, session_id: str) -> tuple[dict[str, object] | None, dict[str, object], object]:
+    """Latest freeze coverage triple: (copied coverage or None, raw mapping, relationships)."""
+    latest = _latest_dossier(store, session_id)
+    raw_cov = latest.get("coverage")
+    coverage = dict(raw_cov) if isinstance(raw_cov, dict) else None
+    return coverage, raw_cov if isinstance(raw_cov, dict) else {}, latest.get("relationships")
+
+
+def _freeze_wave_telemetry(store: ResearchRepository, session_id: str, wave_id: int, found: ResearchSession) -> dict[str, object]:
+    """Persisted wave telemetry: searches/queries/forms/entities/exhibits/relationships/coverage/remaining.
+
+    Coverage state + remaining questions persist here (freeze payload) and on
+    the submit job telemetry; the stop reason persists via the wave.stopped /
+    wave.authorized journal events. Nothing here is invented.
+    """
+    rows = store.list_evidence(session_id)
+    coverage, cov, rels = _freeze_coverage_select(store, session_id)
+    raw_q = cov.get("sources_examined")
+    return {"searches_count": len(rows), "queries_attempted": [q for q in raw_q if isinstance(q, str)] if isinstance(raw_q, list) else [], "forms_searched": _evidence_field_values(rows, "form"), "entities_investigated": _evidence_field_values(rows, "subject"), "exhibits_inspected": _freeze_coverage_lists(cov, _FREEZE_EXHIBIT_KEYS, strip=False), "material_relationships_found": len([r for r in rels if isinstance(r, dict)]) if isinstance(rels, list) else 0, "coverage_state": coverage.get("useful_for_question") if coverage is not None else None, "remaining_questions": list(dict.fromkeys(_freeze_coverage_lists(cov, _FREEZE_REMAINING_KEYS, strip=True)))}
+
+
 def _freeze_save_idempotent(store: ResearchRepository, frozen: EvidenceFreeze) -> None:
     """Persist the freeze; a duplicate save is a no-op (idempotent retry)."""
     from . import freeze as _freeze
@@ -1130,8 +1305,8 @@ def _freeze_committee_jobs(store: ResearchRepository, session_id: str, wave_id: 
     return [j.job_id for j in jobs if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot")]
 
 
-def _freeze_result_payload(frozen: EvidenceFreeze, committee: list[str], wave_id: int, fid: str, note: str) -> dict[str, object]:
-    """Freeze payload: freeze dict plus the caller-driven committee verb."""
+def _freeze_result_payload(frozen: EvidenceFreeze, committee: list[str], wave_id: int, fid: str, note: str, telemetry: dict[str, object] | None = None) -> dict[str, object]:
+    """Freeze payload: freeze dict plus the caller-driven committee verb (+ wave telemetry)."""
     from . import freeze as _freeze
 
     if not isinstance(frozen, EvidenceFreeze):
@@ -1139,6 +1314,8 @@ def _freeze_result_payload(frozen: EvidenceFreeze, committee: list[str], wave_id
     out_dict = _freeze.freeze_to_dict(frozen)
     out_dict["pending_next_action"] = {"verb": "EXECUTE_COMMITTEE",
         "jobs": committee or ["stockbot", "bullbot", "bearbot"], "wave_id": wave_id, "freeze_id": fid}
+    if telemetry is not None:
+        out_dict["telemetry"] = telemetry
     if not note:
         return out_dict
     out_dict["coverage_gate"] = "insufficient"
@@ -1164,9 +1341,12 @@ def freeze_session(
     _freeze_track_session(store, found, fid, wave_id)
     _emit(store, session_id, "freeze.created", {"freeze_id": fid, "wave_id": wave_id})
     note = _freeze_empty_note(wave_recs, _freeze_coverage_note(store, session_id))
+    telemetry = _freeze_wave_telemetry(store, session_id, wave_id, found)
+    _emit(store, session_id, "wave.telemetry", {"freeze_id": fid, **telemetry})
     # Committee creation stays caller-driven: freeze returns the verb + roles and
     # reuses pre-existing committee job ids when present, never auto-creating.
-    return _freeze_result_payload(frozen, _freeze_committee_jobs(store, session_id, wave_id), wave_id, fid, note)
+    return _freeze_result_payload(frozen, _freeze_committee_jobs(store, session_id, wave_id), wave_id, fid, note, telemetry)
+
 
 
 def create_committee_jobs(session_id: str, wave_id: int = 1, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, object]:
@@ -1210,7 +1390,7 @@ def _committee_live_job(store: ResearchRepository, session_id: str, job_id: str,
     if job.session_id != found.session_id:
         raise ValueError(f"record_committee_analysis: job {job_id!r} belongs to {job.session_id!r}")
     if job.status != "running":
-        raise ValueError(f"record_committee_analysis: job {job_id!r} status is {job.status!r} (running required)")
+        raise ValueError(f"record_committee_analysis: ERR_JOB_CLOSED job {job_id!r} status is {job.status!r} (running required)")
     if job.job_type != role:
         raise ValueError(f"record_committee_analysis: job {job_id!r} job_type {job.job_type!r} != role {role!r}")
     return found, job
@@ -1231,16 +1411,29 @@ def _committee_freeze_ids(store: ResearchRepository, session_id: str, found: Res
     return fid, freeze_ids
 
 
+def _committee_verify_write(store: ResearchRepository, session_id: str, fid: str) -> None:
+    """Recompute the freeze hash from stored evidence; raise on drift (fail-closed write)."""
+    from . import freeze as _freeze
+    from .evidence import evidence_from_dict
+
+    frozen = _freeze.freeze_from_dict(store.get_freeze(fid))
+    recs = [evidence_from_dict(r) for r in store.list_evidence(session_id) if isinstance(r.get("evidence_id"), str) and r.get("evidence_id") in set(frozen.evidence_ids)]
+    _freeze.verify_freeze(frozen, recs)
+
+
 def _committee_envelope(analysis: Mapping[str, object], role: str, freeze_ids: list[str]) -> dict[str, object]:
     """JSON-shape the analysis and ground it against the freeze; return the dict form."""
-    from .agents import parse_committee_output
+    from .agents import parse_committee_envelope
 
     try:
         envelope = json.dumps(dict(analysis))
     except TypeError as exc:
         raise ValueError(f"record_committee_analysis: 'analysis' must be JSON-able: {exc}") from exc
-    parse_committee_output(envelope, frozen=freeze_ids, agent=role)
-    return dict(analysis)
+    env = parse_committee_envelope(envelope, frozen=freeze_ids, agent=role)
+    out = dict(analysis)
+    out.setdefault("role", role)
+    out.setdefault("executive_view", env.executive_view)
+    return out
 
 
 def _committee_track_run(cur: ResearchSession, fid: str, job_id: str, job_wave: int):
@@ -1285,6 +1478,7 @@ def record_committee_analysis(
     store = _repo(repo)
     found, job = _committee_live_job(store, session_id, job_id, role, analysis)
     fid, freeze_ids = _committee_freeze_ids(store, session_id, found, job.wave_id)
+    _committee_verify_write(store, session_id, fid)
     result = _committee_envelope(analysis, role, freeze_ids)
     done = _jobs.complete_job(job, result=result)
     store.save_job(done)
@@ -1381,7 +1575,14 @@ def decide_wave2(
     *,
     repo: ResearchRepository | Path | str | None = None,
 ) -> dict[str, object]:
-    """Gate one targeted wave; persists the stop reason either way."""
+    """Gate one targeted wave (coverage challenge first); persists the stop reason either way.
+
+    Targeted follow-up resolves one uncertainty then a new freeze + rerun
+    analysis; it never redefines the objective (original question + covered vs
+    remaining branches ride the decision detail). Coverage state + remaining
+    questions persist via the wave.stopped/wave.authorized journal events and
+    the job telemetry, not the return shape (stable contract).
+    """
     from .director import decide_wave2 as _decide
 
     store = _repo(repo)
@@ -1441,31 +1642,100 @@ def _finalize_answer(answer: object) -> str:
     return answer
 
 
-def _finalize_persist(store: ResearchRepository, session_id: str, fid: str,
-                      answer: str, grounded: list[GroundedClaim]) -> dict[str, object]:
-    """Persist the synthesis result and walk ANALYZING->SYNTHESIZING->COMPLETED."""
-    from .models import SessionStatus, validate_json_value
+def _append_unique(lims: list[str], value: object) -> None:
+    """Append one stripped limitation once (ignores blanks/mistyped)."""
+    text = value.strip() if isinstance(value, str) else ""
+    if text and text not in lims:
+        lims.append(text)
 
-    claims_json: list[JSONValue] = []
-    for claim in grounded:
-        row: dict[str, JSONValue] = {"text": claim.text, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
-        claims_json.append(row)
-    final: dict[str, JSONValue] = {"answer": answer, "freeze_id": fid, "claims": claims_json}
+
+def _dossier_limitations(lims: list[str], dossier: Mapping[str, object]) -> None:
+    """Fold one dossier coverage (limitations/gaps + incomplete flag) into lims."""
+    coverage = dossier.get("coverage")
+    if not isinstance(coverage, dict):
+        return
+    for key in ("source_limitations", "gaps"):
+        raw = coverage.get(key)
+        if isinstance(raw, list):
+            for item in raw:
+                _append_unique(lims, item)
+    if coverage.get("complete") is False:
+        _append_unique(lims, "SEC coverage incomplete for this session")
+
+
+def _finalize_limitations(store: ResearchRepository, session_id: str) -> list[str]:
+    """SEC-only evidence limitations from dossier coverage + unresolved questions."""
+    lims: list[str] = []
+    dossiers: list[Mapping[str, object]]
+    try:
+        dossiers = [d for d in store.list_dossiers(session_id) if isinstance(d, dict)]
+    except Exception:  # noqa: BLE001 - best-effort read; synthesis never fails on limitations
+        dossiers = []
+    for dossier in dossiers:
+        _dossier_limitations(lims, dossier)
+    try:
+        found = store.get_session(session_id)
+    except KeyError:
+        return lims
+    for item in found.unresolved_questions:
+        _append_unique(lims, item)
+    return lims
+
+
+def _finalize_scope(found: ResearchSession) -> dict[str, object]:
+    """Research scope from the session source policy (SEC-only by default)."""
+    policy = getattr(found, "source_policy", {}) or {}
+    raw = policy.get("allowed", ["SEC"]) if isinstance(policy, dict) else ["SEC"]
+    allowed: list[str] = [s.strip() for s in raw if isinstance(s, str) and s.strip()] if isinstance(raw, list) else []
+    return {"allowed_sources": allowed or ["SEC"]}
+
+
+def _finalize_content(synth: FinalSynthesis, answer: str) -> str:
+    """Substantive rendered answer from the rich result (never a bare status line)."""
+    from app.tool_render import render_final_result
+
+    text = render_final_result(synth.to_dict())
+    return text.strip() or answer.strip()
+
+
+def _finalize_persist(store: ResearchRepository, session_id: str, fid: str,
+                      answer: str, grounded: list[GroundedClaim], synth: FinalSynthesis) -> dict[str, object]:
+    """Persist the synthesis result and walk ANALYZING->SYNTHESIZING->COMPLETED."""
+    from .models import SessionStatus
+
+    final = dict(synth.to_dict())
+    final.setdefault("answer", answer)
+    final.setdefault("freeze_id", fid)
+    raw_claims = final.get("claims")
+    claims_json: list[object] = list(raw_claims) if isinstance(raw_claims, list) else []
+    if not claims_json:
+        from .models import validate_json_value
+
+        for claim in grounded:
+            row: dict[str, object] = {"text": claim.text, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
+            claims_json.append(row)
+        final["claims"] = claims_json
+        final["grounded_claims"] = list(claims_json)
+    content = _finalize_content(synth, answer)
+    final["content"] = content
+    from .models import validate_json_mapping
+
+    validated = validate_json_mapping(final, "<service>: 'final_result'")
     cur = store.get_session(session_id)
     if cur.status == SessionStatus.ANALYZING.value:
         cur = _session.transition_session(cur, SessionStatus.SYNTHESIZING)
         store.save_session(cur)
-    cur = replace(store.get_session(session_id), final_result=final, updated_at=utcnow())
+    cur = replace(store.get_session(session_id), final_result=validated, updated_at=utcnow())
     store.save_session(cur)
     if cur.status == SessionStatus.SYNTHESIZING.value:
         cur = _session.transition_session(cur, SessionStatus.COMPLETED)
         store.save_session(cur)
-    return {"session_id": session_id, "freeze_id": fid, "status": cur.status}
+    return {"session_id": session_id, "freeze_id": fid, "status": cur.status, "content": content, "final_result": dict(validated)}
 
 
 def _finalize_synth(found: ResearchSession, wave1: Wave1Result, meta: dict[str, object], fid: str, disagreement: CommitteeDisagreement,
-                    model: str, claims: list[object], session_id: str):
-    """Ground claims + run the trio synthesis; return (answer, grounded)."""
+                    model: str, claims: list[object], session_id: str, store: ResearchRepository):
+    """Ground claims + run the trio synthesis; return (synth, grounded)."""
     from .synthesis.final import synthesize_final
 
     ids_raw = meta["evidence_ids"]
@@ -1475,10 +1745,10 @@ def _finalize_synth(found: ResearchSession, wave1: Wave1Result, meta: dict[str, 
     wave_raw = meta["wave_id"]
     as_of_raw = meta["as_of"]
     assert isinstance(wave_raw, int) and isinstance(as_of_raw, str)
-    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=model)
+    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=model, extra_claims=[{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in grounded], evidence_limitations=_finalize_limitations(store, session_id), research_scope=_finalize_scope(found))
     if not synth.answer.strip():
         raise ValueError("finalize_session: synthesis produced an empty answer")
-    return synth.answer, grounded
+    return synth, grounded
 
 
 def finalize_session(
@@ -1498,8 +1768,8 @@ def finalize_session(
     open_all = [j.job_id for j in store.list_jobs(session_id) if j.status in ("queued", "running")]
     if open_all:
         raise ValueError(f"finalize_session: {len(open_all)} jobs still open: {open_all}")
-    synth_answer, grounded = _finalize_synth(found, wave1, meta, fid, disagreement, model, claims, session_id)
-    return _finalize_persist(store, session_id, fid, synth_answer, grounded)
+    synth, grounded = _finalize_synth(found, wave1, meta, fid, disagreement, model, claims, session_id, store)
+    return _finalize_persist(store, session_id, fid, synth.answer, grounded, synth)
 
 
 def _dispatch_live_job(store: ResearchRepository, session_id: str, job_id: str):

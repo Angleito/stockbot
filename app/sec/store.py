@@ -759,6 +759,14 @@ def _hit_identity(
     }
 
 
+def _relevance_reasons(value: object) -> list[str]:
+    """String relevance reasons; None/blank pass as []."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [r for r in value if isinstance(r, str)]
+    return []
+
 def _hit_document(d: dict[str, object]) -> dict[str, object]:
     """Text-hit document match (form, filed, document, type, items, geo)."""
     return {
@@ -772,6 +780,11 @@ def _hit_document(d: dict[str, object]) -> dict[str, object]:
         "location": d.get("location"),
         "state": d.get("state"),
         "inc_state": d.get("inc_state"),
+        "issuer_cik": (str(d.get("issuer_cik"))
+                       if d.get("issuer_cik") is not None else None),
+        "relevance_reason_json": _json(_relevance_reasons(d.get("relevance_reason"))),
+        "snippet": d.get("snippet"),
+        "resource_uri": d.get("resource_uri"),
     }
 
 

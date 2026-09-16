@@ -5,11 +5,16 @@ Pipeline (models decide content; infra owns everything else)::
     create-session > SEC job > verify artifacts > freeze E1
       > launch stockbot/bullbot/bearbot on the same freeze (parallel)
       > collect > compute disagreement
-      > decide_wave2: iff material + wave-budget + actionable, authorize one
-        targeted SEC wave (E2), else synthesize final.
+      > decide_wave2: coverage challenge first (sufficient claim with missing
+        branches / material open / unsearched routes -> targeted SEC follow-up),
+        then material + actionable committee follow-up within budget,
+        else synthesize final. Targeted wave resolves one uncertainty, then a
+        new freeze + rerun analysis; it never redefines the objective (original
+        question + covered vs remaining branches ride Wave1Result across waves).
 
 Stopping reasons (persisted via ``record_stop``): ``complete``,
-``max_waves``, ``runtime_exceeded``, ``jobs_exceeded``,
+``max_waves`` (runaway-test budget guard, never completeness proof),
+``runtime_exceeded``, ``jobs_exceeded``,
 ``no_questions``, ``not_actionable``, ``low_gain``.
 
 Fake-model sketch (no live calls): inject ``DirectorDeps`` with lambdas
@@ -20,7 +25,7 @@ when a material actionable SEC request exists within budget.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Literal
@@ -53,6 +58,7 @@ WAVE2_ID = 2
 
 @dataclass
 class DirectorBudgets:
+    """Runaway-test budget guard (max_waves=2 caps waves, never proves completeness)."""
     max_waves: int = 2
     max_jobs: int = 20
     max_tool_calls: int | None = None
@@ -81,6 +87,10 @@ class Wave1Result:
     bull: BullAnalysis | None = None
     bear: BearAnalysis | None = None
     disagreement: CommitteeDisagreement | None = None
+    coverage: dict[str, object] | None = None
+    relationships: list[dict[str, object]] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    question: str = ""
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave_id(self.wave_id)
@@ -144,12 +154,12 @@ def run_wave1(
     evidence_ids = deps.fetch_wave_evidence(session_id)
     if interrupt_after == "source":
         deps.record_stop(session_id, "interrupted:source")
-        return Wave1Result(session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=list(evidence_ids))
+        return Wave1Result(session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=list(evidence_ids), question=question)
     freeze_id = deps.create_freeze(session_id)
     if interrupt_after == "freeze":
         deps.record_stop(session_id, "interrupted:freeze")
         return Wave1Result(
-            session_id=session_id, wave_id=wid, freeze_id=freeze_id, evidence_ids=list(evidence_ids)
+            session_id=session_id, wave_id=wid, freeze_id=freeze_id, evidence_ids=list(evidence_ids), question=question
         )
     stock, bull, bear = deps.run_committee(session_id)
     disagreement = compute_disagreement(stock, bull, bear)
@@ -162,6 +172,7 @@ def run_wave1(
         bull=bull,
         bear=bear,
         disagreement=disagreement,
+        question=question,
     )
 
 
@@ -185,8 +196,9 @@ def _is_actionable(request: ResearchRequest) -> bool:
 def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float) -> WaveDecision | None:
     """First exhausted budget wins; None when all budgets hold.
 
-    Tool calls are unlimited by default (max_tool_calls=None); the director
-    gate no longer stops on tool volume. Explicit int limits, when configured,
+    max_waves is a runaway-test budget guard only; hitting it never proves
+    coverage complete (settle carries limitations). Tool calls are unlimited
+    by default (max_tool_calls=None); explicit int limits, when configured,
     are enforced at dispatch (repository/runner), not here.
     """
     _ = tool_calls_used
@@ -199,8 +211,62 @@ def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool
     return None
 
 
+def _coverage_str_list(coverage: Mapping[str, object] | None, key: str) -> list[str]:
+    """String list from a coverage mapping (non-strings dropped); empty when absent."""
+    if not isinstance(coverage, Mapping):
+        return []
+    raw = coverage.get(key)
+    return [v for v in raw if isinstance(v, str) and v.strip()] if isinstance(raw, list) else []
+
+
+def _coverage_questions(coverage: Mapping[str, object] | None, extra: Sequence[str] = ()) -> list[str]:
+    """Material open questions: explicit material list + unresolved + dossier opens."""
+    if not isinstance(coverage, Mapping):
+        return [q for q in extra if isinstance(q, str) and q.strip()]
+    out: list[str] = []
+    for key in ("material_open_questions", "unresolved", "open_questions"):
+        out.extend(_coverage_str_list(coverage, key))
+    out.extend(q for q in extra if isinstance(q, str) and q.strip())
+    return list(dict.fromkeys(out))
+
+
+def _coverage_branches(coverage: Mapping[str, object] | None) -> tuple[list[str], list[str]]:
+    """(covered branches, remaining branches) from the coverage envelope."""
+    covered = _coverage_str_list(coverage, "major_entities_investigated")
+    remaining: list[str] = []
+    for key in ("major_entities_missing", "remaining_branches"):
+        remaining.extend(_coverage_str_list(coverage, key))
+    routes = _coverage_str_list(coverage, "routes_unsearched")
+    for route in routes:
+        if route not in covered:
+            remaining.append(route)
+    return covered, list(dict.fromkeys(remaining))
+
+
+def _coverage_challenge(wave1: Wave1Result) -> WaveDecision | None:
+    """Reject a sufficient claim with missing branches / material open questions / unsearched routes.
+
+    Targeted wave resolves one uncertainty (first remaining/material item);
+    the original question + covered-vs-remaining branches (+ relationship
+    count as impact-channel proxy) ride the decision detail so the next wave
+    keeps its objective and never redefines it.
+    """
+    coverage = wave1.coverage if isinstance(wave1.coverage, Mapping) and wave1.coverage.get("useful_for_question") == "sufficient" else None
+    if coverage is None:
+        return None
+    covered, remaining = _coverage_branches(coverage)
+    open_q = _coverage_questions(coverage, wave1.open_questions)
+    missing = [r for r in remaining if r not in covered]
+    target = (missing + open_q)[:1]
+    if not target:
+        return None
+    question = wave1.question.strip() or target[0]
+    detail = (f"coverage challenge: {len(missing)} branch(es) remaining, {len(open_q)} material open question(s), {len(wave1.relationships)} relationship(s); targeted follow-up on {target[0]!r} (original question: {question[:160]!r}; covered: {covered[:5]}; remaining: {missing[:5]})")
+    return WaveDecision(True, "continue", detail, targeted_question=f"{question} :: targeted follow-up: {target[0]}", targeted_domain="SEC")
+
+
 def _research_stop(wave1: Wave1Result) -> WaveDecision:
-    """Material + actionable follow-up selection (authorized decision on success)."""
+    """Material + actionable follow-up selection (committee gate; runs after the coverage challenge)."""
     if wave1.disagreement is None or not wave1.disagreement.requested_research:
         return WaveDecision(False, "no_questions", "committee requested no follow-up research")
     material = [r for r in wave1.disagreement.requested_research if _is_material(r)]
@@ -225,8 +291,10 @@ def decide_wave2(
     tool_calls_used: int = 0,
     elapsed_s: float = 0.0,
 ) -> WaveDecision:
-    """Gate exactly one targeted SEC wave; persist the reason either way."""
+    """Gate exactly one targeted SEC wave (coverage challenge first); persist the reason either way."""
     decision = _budget_stop(budgets, waves_used, jobs_used, tool_calls_used, elapsed_s)
+    if decision is None:
+        decision = _coverage_challenge(wave1)
     if decision is None:
         decision = _research_stop(wave1)
     deps.record_stop(wave1.session_id, f"{decision.stop_reason}:{decision.reason_detail}")

@@ -2931,35 +2931,71 @@ def ensure_backfill_worker(data_root: Path | str | None = None) -> threading.Thr
         return _WORKER_THREAD
 
 
+def _hit_recency(hit: SECTextHit) -> tuple[str, float]:
+    return (_hit_filed(hit), _hit_score(hit))
+
+
 def _hit_recency_key(hit: SECTextHit) -> tuple[str, float]:
     return _hit_recency(hit)
 
 
 def rank_hits(hits: Iterable[SECTextHit], *, verified_ciks: Iterable[int | None] = (),
               verified_names: Iterable[str] = (),
-              relevant_forms: Iterable[str] = ()) -> tuple[SECTextHit, ...]:
-    """Rank after retrieval: identity > phrase > form relevance > recency > score.
+              relevant_forms: Iterable[str] = (),
+              query: str | None = None,
+              person_name: str | None = None) -> tuple[SECTextHit, ...]:
+    """Rank after retrieval: issuer > exact query > topic > form > section > money > terms.
 
-    Returns the hits tuple in rank order; nothing is discarded (low-ranked
-    structured results stay queryable, the packet alone is bounded).
+    Stable and total: the pre-sort makes filed_at/score the tiebreak, so
+    recency never outranks substance. Nothing is discarded (low-ranked
+    structured results stay queryable, the packet alone is bounded); each hit
+    carries why it ranked in ``relevance_reason``.
     """
     ciks, names, forms = _rank_sets(verified_ciks, verified_names,
                                     relevant_forms)
-    by_recency = sorted(
-        hits or (), key=_hit_recency_key, reverse=True)
-    return tuple(sorted(
-        by_recency, key=_RankKey(ciks, names, forms)))
+    key = _RankKey(ciks, names, forms, _rank_query_terms(query),
+                   isinstance(person_name, str) and bool(person_name.strip()),
+                   _norm_query(query))
+    by_recency = sorted(hits or (), key=_hit_recency_key, reverse=True)
+    return tuple(key.tag(hit) for hit in sorted(by_recency, key=key))
 
 
 class _RankKey:
     def __init__(self, ciks: set[int], names: set[str],
-                 forms: set[str]) -> None:
+                 forms: set[str], wants: tuple[str, ...],
+                 person: bool, query: str | None) -> None:
         self.ciks = ciks
         self.names = names
         self.forms = forms
+        self.wants = wants
+        self.person = person
+        self.query = query
 
-    def __call__(self, hit: SECTextHit) -> tuple[int, int, int]:
-        return _hit_rank(hit, self.ciks, self.names, self.forms)
+    def __call__(self, hit: SECTextHit) -> tuple[int, ...]:
+        return _hit_rank(hit, self.ciks, self.names, self.forms,
+                         self.wants, self.person, self.query)
+
+    def reasons(self, hit: SECTextHit) -> tuple[str, ...]:
+        """Why this hit ranked: one token per firing signal, rank order."""
+        section = _hit_section(hit, self.wants)
+        flags = (
+            ("issuer-match", _hit_identity(hit, self.ciks, self.names) == 0),
+            ("exact-query-match", self.query is not None and _hit_exact(hit, self.query) == 0),
+            ("query-topic-match", bool(self.wants) and _hit_topic(hit, self.wants) == 0),
+            ("requested-form", _hit_relevance(hit, self.forms) == 0),
+            ("priority-form", _hit_form_weight(hit, self.person) <= 2),
+            ("query-section-match", section == 0),
+            ("disclosure-section", section == 1),
+            ("quantified-exposure", _hit_money(hit) == 0),
+            ("exposure-terminology", _hit_terms(hit) == 0),
+        )
+        return tuple(label for label, fired in flags if fired)
+
+    def tag(self, hit: SECTextHit) -> SECTextHit:
+        """Hit with its rank reasons attached; already-reasoned hits pass through."""
+        if hit.relevance_reason:
+            return hit
+        return replace(hit, relevance_reason=self.reasons(hit))
 
 
 def _hit_filed(hit: SECTextHit) -> str:
@@ -2975,21 +3011,104 @@ def _hit_score(hit: SECTextHit) -> float:
 
 def _hit_identity(hit: SECTextHit, ciks: set[int],
                   names: set[str]) -> int:
-    filer_name = hit.filer_name or ""
+    if hit.issuer_cik is not None and hit.filer_cik == hit.issuer_cik:
+        return 0
     if hit.filer_cik in ciks:
         return 0
+    filer_name = hit.filer_name or ""
     if filer_name and normalize_name(filer_name) in names:
         return 0
     return 1
 
 
-def _hit_phrase(hit: SECTextHit) -> int:
-    query = hit.query or ""
-    filer_name = hit.filer_name or ""
-    if (query and filer_name
-            and normalize_name(query) == normalize_name(filer_name)):
+def _norm_query(query: str | None) -> str | None:
+    """Casefolded request query for exact-variant matching; None when blank."""
+    text = query.strip().casefold() if isinstance(query, str) else ""
+    return text or None
+
+
+def _hit_exact(hit: SECTextHit, query: str) -> int:
+    """0 when the hit came from the exact request query, not an expanded variant."""
+    return 0 if (hit.query or "").strip().casefold() == query else 1
+
+
+def _rank_query_terms(query: str | None) -> tuple[str, ...]:
+    """Lowercased query tokens (length>=3) for topic/section matching."""
+    if not isinstance(query, str) or not query.strip():
+        return ()
+    return tuple(dict.fromkeys(
+        token.casefold() for token in re.split(r"[^0-9a-z]+", query.casefold())
+        if len(token) >= 3))
+
+
+def _hit_topic(hit: SECTextHit, wants: tuple[str, ...]) -> int:
+    """0 when a query token names the filer/file; 1 when none of them do."""
+    if not wants:
         return 0
-    return 1
+    haystack = " ".join(part for part in (
+        hit.filer_name or "", hit.form or "", hit.file_description or "",
+        hit.matched_document or "") if part).casefold()
+    return 0 if any(token in haystack for token in wants) else 1
+
+
+# 10-K/10-Q/8-K/S-1 lead; 3/4/5/144 trail unless this is a person-name query.
+_FORM_WEIGHT = {"10-K": 0, "10-K/A": 0, "10-Q": 1, "10-Q/A": 1, "8-K": 2,
+                "8-K/A": 2, "S-1": 3, "S-1/A": 3, "3": 8, "4": 8, "5": 8,
+                "144": 8, "3/A": 8, "4/A": 8, "5/A": 8, "144/A": 8}
+
+
+def _hit_form_weight(hit: SECTextHit, person: bool) -> int:
+    form = (hit.form or "").strip().upper()
+    if person and form in _FORM_WEIGHT and _FORM_WEIGHT[form] >= 8:
+        return 1
+    return _FORM_WEIGHT.get(form, 4)
+
+
+# EFTS item/file_type/file_description carry the filing section when the index has one.
+_SECTION_TERMS = ("risk factor", "mda", "md&a", "management's discussion",
+                  "business", "financial statement", "note")
+
+
+def _hit_section_haystack(hit: SECTextHit) -> str:
+    """Casefolded section text (single join site for the section signal)."""
+    return " ".join(part for part in (
+        hit.file_type or "", hit.file_description or "",
+        " ".join(hit.items or ())) if part).casefold()
+
+
+_SECTION_RANK = {(True, True): 0, (True, False): 0, (False, True): 1, (False, False): 2}
+"""Section rank as data: query-token hit outranks disclosure-section hit."""
+
+
+def _hit_section(hit: SECTextHit, wants: tuple[str, ...]) -> int:
+    haystack = _hit_section_haystack(hit)
+    return _SECTION_RANK[(bool(wants) and any(token in haystack for token in wants), any(term in haystack for term in _SECTION_TERMS))]
+
+
+_MONEY_RE = re.compile(r"\$[\d,]+(\.\d+)?|\b\d+(\.\d+)?\s*(million|billion|usd|\$)")
+
+
+def _hit_money(hit: SECTextHit) -> int:
+    """0 when the hit names exposure terms + a dollar amount (EFTS metadata)."""
+    haystack = " ".join(part for part in (
+        hit.file_description or "", " ".join(hit.items or ())) if part).casefold()
+    terms = _TERM_RE.findall(haystack)
+    if terms and _MONEY_RE.search(haystack):
+        return 0
+    if terms:
+        return 1
+    return 2
+
+
+_TERM_RE = re.compile(
+    r"contract|concentration|investments?|commitments?|counterpart\w*")
+
+
+def _hit_terms(hit: SECTextHit) -> int:
+    """0 when the hit names contract/concentration/investment/commitment/counterparty terms."""
+    haystack = " ".join(part for part in (
+        hit.file_description or "", " ".join(hit.items or ())) if part).casefold()
+    return 0 if _TERM_RE.search(haystack) else 1
 
 
 def _hit_relevance(hit: SECTextHit, forms: set[str]) -> int:
@@ -3022,14 +3141,17 @@ def _rank_sets(verified_ciks: Iterable[int | None],
     )
 
 
-def _hit_recency(hit: SECTextHit) -> tuple[str, float]:
-    return (_hit_filed(hit), _hit_score(hit))
-
-
 def _hit_rank(hit: SECTextHit, ciks: set[int], names: set[str],
-              forms: set[str]) -> tuple[int, int, int]:
-    return (_hit_identity(hit, ciks, names), _hit_phrase(hit),
-            _hit_relevance(hit, forms))
+              forms: set[str], wants: tuple[str, ...] = (),
+              person: bool = False, query: str | None = None) -> tuple[int, ...]:
+    return (_hit_identity(hit, ciks, names),
+            _hit_exact(hit, query) if query is not None else 1,
+            _hit_topic(hit, wants),
+            _hit_relevance(hit, forms),
+            _hit_form_weight(hit, person),
+            _hit_section(hit, wants),
+            _hit_money(hit),
+            _hit_terms(hit))
 
 
 def build_evidence_packet(search_id: str, *, entities: Iterable[EntityCandidate] = (),
@@ -3129,6 +3251,10 @@ class _SearchState:
     rel_pages: list[int]
     rel_open: list[int]
     adopt_idmap: dict[str, str]
+    issuer_cik: int | None
+    full_hits: int
+    full_filings: int
+    full_entities: int
 
     def __init__(self, search_id: str, as_of: str | None, now: str) -> None:
         self.search_id = search_id
@@ -3155,6 +3281,10 @@ class _SearchState:
         self.rel_pages = [0]
         self.rel_open = [0]
         self.adopt_idmap: dict[str, str] = {}
+        self.issuer_cik: int | None = None
+        self.full_hits = 0
+        self.full_filings = 0
+        self.full_entities = 0
 
     def record(self, backend: str, query: str, status: _AttemptStatus, *,
                reported: int = 0, retrieved: int = 0, pages: int = 0,
@@ -3461,12 +3591,29 @@ def _search_accession_and_entities(state: _SearchState,
 
 
 def _search_efts_params(request: SECSearchRequest
-                        ) -> tuple[list[str] | None, int]:
+                        ) -> tuple[list[str] | None, int | None]:
     forms = list(request.forms) if request.forms else None
-    per_variant = (10_000 if (request.exhaustive
-                              and request.max_results is None)
-                   else (request.max_results or 20))
-    return forms, per_variant
+    # Exhaustive drains to route exhaustion or the documented EFTS source cap;
+    # max_results only bounds the returned packet (display), never retrieval.
+    if request.exhaustive:
+        return forms, 10_000
+    return forms, (request.max_results if request.max_results is not None
+                   else 50)
+
+
+def _explicit_request_cik(request: SECSearchRequest) -> int | None:
+    """Explicit request CIK as int; None when absent or unparsable (single coerce site)."""
+    return _parse_cik(request.cik) if request.cik is not None else None
+
+
+def _search_issuer_cik(request: SECSearchRequest,
+                       verified: list[EntityCandidate]) -> int | None:
+    """Single verified filer corpus: explicit CIK wins, else sole verified CIK."""
+    explicit = _explicit_request_cik(request)
+    if request.cik is not None:
+        return explicit
+    ciks = {e.cik for e in verified or () if e.cik is not None}
+    return next(iter(ciks)) if len(ciks) == 1 else None
 
 
 def _search_efts_drive(state: _SearchState, request: SECSearchRequest,
@@ -3578,6 +3725,7 @@ def _search_text_variants(state: _SearchState, request: SECSearchRequest,
                           entity_query: str | None,
                           verified: list[EntityCandidate],
                           as_of: str | None) -> None:
+    _search_issuer_variant(state, request, verified)
     if entity_query is not None:
         state.add_variants(
             _expand_entity_queries(verified, as_of) if verified else [],
@@ -3586,6 +3734,17 @@ def _search_text_variants(state: _SearchState, request: SECSearchRequest,
     _search_person_variant(state, request, entity_query)
     _search_domain_variant(state, request, entity_query)
     _search_security_variant(state, request, entity_query)
+
+
+def _search_issuer_variant(state: _SearchState, request: SECSearchRequest,
+                           verified: list[EntityCandidate]) -> None:
+    """Ticker->CIK corpus marker: every EFTS variant searches the issuer's filings."""
+    cik = _search_issuer_cik(request, verified)
+    if cik is None:
+        return
+    state.issuer_cik = cik
+    state.record("issuer-scope", f"CIK {cik}", "complete",
+            filters={"cik": str(cik)})
 
 
 def _search_efts_disabled(state: _SearchState,
@@ -3602,28 +3761,46 @@ def _search_efts_disabled(state: _SearchState,
 
 def _search_efts_variant(state: _SearchState, request: SECSearchRequest,
                          variant: str, route: str, forms: list[str] | None,
-                         per_variant: int, as_of: str | None,
+                         per_variant: int | None, as_of: str | None,
                          result_limit: int | None) -> None:
 
     sub = _fetch_efts_variant(state, request, variant, route, forms,
                                 per_variant, as_of)
     if sub is None:
         return
+    _warn_variant_scope(state, sub, route, variant)
     _adopt_efts_variant(state, sub, route, result_limit)
+
+
+_VARIANT_SCOPE_TERMS = ("as_of", "outside filer scope")
+"""Warning substrings worth surfacing per variant (PIT/scope exclusions only)."""
+
+
+def _warn_variant_scope(state: _SearchState, sub: SECSearchResult,
+                        route: str, variant: str) -> None:
+    """Surface PIT/scope exclusions per variant; silence means fully in-corpus."""
+    seen = set(state.warnings)
+    scoped = [f"{route} {variant!r}: {w}" for w in sub.warnings
+              if any(term in w for term in _VARIANT_SCOPE_TERMS)]
+    state.warnings.extend(tagged for tagged in dict.fromkeys(scoped) if tagged not in seen)
 
 
 def _fetch_efts_variant(state: _SearchState, request: SECSearchRequest,
                           variant: str, route: str, forms: list[str] | None,
-                          per_variant: int,
+                          per_variant: int | None,
                           as_of: str | None) -> SECSearchResult | None:
     from ..client import search_sec_filings
 
     try:
+        # EFTS resolves ticker->CIK internally; pass it only when the single
+        # verified corpus matches the request ticker (else cik alone scopes).
+        ticker = (request.ticker.strip().upper()
+                  if request.ticker and state.issuer_cik is not None else None)
         return search_sec_filings(
             variant, forms=forms,
             start_date=request.start_date,
-            end_date=request.end_date, limit=per_variant,
-            as_of=as_of)
+            end_date=request.end_date, limit=per_variant or 10_000,
+            as_of=as_of, cik=state.issuer_cik, ticker=ticker)
     except Exception as exc:  # noqa: BLE001 - route failure records an attempt and degrades to no results
         state.record("efts", variant, "failed",
                 error=exc, filters={"route": route})
@@ -4639,6 +4816,7 @@ def _search_local_route(state: _SearchState, request: SECSearchRequest,
 
 
 def _search_rank(state: _SearchState,
+                   request: SECSearchRequest,
                    verified: list[EntityCandidate],
                    global_forms: list[str]) -> tuple[SECTextHit, ...]:
     if state.pit_gaps > 0:
@@ -4648,7 +4826,9 @@ def _search_rank(state: _SearchState,
         tuple(state.hits.values()),
         verified_ciks=[e.cik for e in verified],
         verified_names=[e.name for e in verified],
-        relevant_forms=global_forms)
+        relevant_forms=global_forms,
+        query=request.query,
+        person_name=request.person_name)
 
 
 def _search_warn_pit_gaps(state: _SearchState, as_of: str | None) -> None:
@@ -4659,18 +4839,30 @@ def _search_warn_pit_gaps(state: _SearchState, as_of: str | None) -> None:
 
 def _search_cap_results(state: _SearchState,
                         ranked: tuple[SECTextHit, ...],
-                        result_limit: int | None
+                        request: SECSearchRequest,
+                        display_limit: int | None
                         ) -> tuple[tuple[SECTextHit, ...], bool]:
+    # Retrieval already drained every route; only the hit packet is
+    # display-bound. Filings/entities stay whole (undrained exhaustive keeps
+    # all 75; the model packet bounds hits via top_hits/additional_hits).
+    state.full_hits = len(ranked)
+    state.full_filings = len(state.filings)
+    state.full_entities = len(state.entities)
     capped = False
-    if result_limit is None:
+    if display_limit is None:
         return ranked, capped
-    capped = _cap_mapping(state.entities, result_limit) or capped
-    capped = _cap_mapping(state.filings, result_limit) or capped
-    if len(ranked) > result_limit:
-        ranked = ranked[:result_limit]
+    if len(ranked) > display_limit:
+        ranked = ranked[:display_limit]
         capped = True
-    _warn_capped(state, result_limit, capped)
+    _warn_display_capped(state, display_limit, capped, request)
     return ranked, capped
+def _warn_display_capped(state: _SearchState, display: int,
+                         capped: bool, request: SECSearchRequest) -> None:
+    _warn_capped(state, display, capped)
+    if request.exhaustive and request.max_results is not None and capped:
+        state.warnings.append(
+            f"exhaustive retrieval kept {state.full_hits} hit(s); "
+            f"packet shows the top {display} (see resource_uri for the rest)")
 
 
 def _warn_capped(state: _SearchState, result_limit: int,
@@ -4881,14 +5073,14 @@ def _search_runs(state: _SearchState, request: SECSearchRequest, ranked: tuple[S
     return tuple(runs)
 
 def _search_finalize(state: _SearchState, request: SECSearchRequest,
-                     global_forms: list[str], result_limit: int | None,
+                     global_forms: list[str], display_limit: int | None,
                      evidence_max_items: int, evidence_max_chars: int
                      ) -> SECSearchResult:
     as_of: str | None = _check_as_of(request.as_of)
     search_id = state.search_id
     _search_warn_pit_gaps(state, as_of)
-    ranked = _search_rank(state, _search_final_verified(state), global_forms)
-    ranked, capped = _search_cap_results(state, ranked, result_limit)
+    ranked_full = _search_rank(state, request, _search_final_verified(state), global_forms)
+    ranked, capped = _search_cap_results(state, ranked_full, request, display_limit)
     packet = build_evidence_packet(
         search_id, entities=tuple(state.entities.values()),
         filings=tuple(state.filings.values()), text_hits=ranked,
@@ -4897,11 +5089,24 @@ def _search_finalize(state: _SearchState, request: SECSearchRequest,
     completed, failed = _search_attempt_sets(state)
     limits = _search_coverage_limits(state, active)
     status = _search_coverage_status(state, active, capped, limits)
-    forms_seen = _search_forms_seen(state, ranked, global_forms)
+    forms_seen = _search_forms_seen(state, ranked_full, global_forms)
     date_coverage = _search_date_coverage(request)
     _search_persist_ledger(state, request, search_id, ranked, active,
                            completed, failed, limits, status, forms_seen,
                            date_coverage)
+    return _search_result_packet(
+        state, request, search_id, ranked, active, completed, failed,
+        limits, status, forms_seen, date_coverage, packet, as_of)
+
+
+def _search_result_packet(state: _SearchState, request: SECSearchRequest,
+                          search_id: str, ranked: tuple[SECTextHit, ...],
+                          active: list[SearchAttempt],
+                          completed: tuple[str, ...], failed: tuple[str, ...],
+                          limits: tuple[str, ...], status: _CoverageStatus,
+                          forms_seen: set[str], date_coverage: str | None,
+                          packet: tuple[str, ...], as_of: str | None) -> SECSearchResult:
+    """Final SECSearchResult: ranked display packet over fully drained routes."""
     return SECSearchResult(
         search_id=search_id,
         request=request,
@@ -4972,29 +5177,46 @@ class SECDiscoveryService:
                evidence_max_chars: int = _EVIDENCE_MAX_CHARS) -> SECSearchResult:
         """Run every applicable route; dedup, rank after retrieval, bound packet."""
         data_root = self._data_root
-        if not isinstance(request, SECSearchRequest):
-            raise TypeError(
-                f"request must be SECSearchRequest, got {type(request).__name__}")
+        request = _checked_search_request(request)
         as_of: str | None = _check_as_of(request.as_of)
-        search_id = uuid.uuid4().hex[:12]
-        now = _utcnow()
+        search_id, now = uuid.uuid4().hex[:12], _utcnow()
         # Interactive bound for global/current-feed reads and backfill batches.
         batch_size = max(request.max_results or 50, 1)
-        result_limit = (request.max_results if request.max_results is not None
-                        else (None if request.exhaustive else 50))
+        # Exhaustive drains every route (None = undrained); max_results only
+        # bounds the returned packet (display), never retrieval.
+        result_limit = (None if request.exhaustive and request.max_results is None
+                        else request.max_results)
         state = _SearchState(search_id, as_of, now)
-        entity_query, verified = _search_accession_and_entities(
-            state, request, as_of, data_root)
-        _search_efts_route(state, request, entity_query, verified, as_of,
-                               result_limit)
-        _search_filer_route(state, request, verified, as_of, result_limit)
-        global_forms = _search_global_route(
+        global_forms = _search_run_routes(
             state, request, as_of, data_root, batch_size, result_limit)
-        _search_local_route(
-            state, request, verified, as_of, data_root, result_limit)
         return _search_finalize(
-            state, request, global_forms, result_limit,
+            state, request, global_forms,
+            50 if result_limit is None else result_limit,
             evidence_max_items, evidence_max_chars)
+
+
+def _checked_search_request(request: SECSearchRequest) -> SECSearchRequest:
+    """Type-checked search request; raises on non-request input."""
+    if not isinstance(request, SECSearchRequest):
+        raise TypeError(
+            f"request must be SECSearchRequest, got {type(request).__name__}")
+    return request
+
+
+def _search_run_routes(state: _SearchState, request: SECSearchRequest,
+                       as_of: str | None, data_root: Path | str | None,
+                       batch_size: int, result_limit: int | None) -> list[str]:
+    """Run accession/entity/EFTS/filer/global/local routes; return global forms."""
+    entity_query, verified = _search_accession_and_entities(
+        state, request, as_of, data_root)
+    _search_efts_route(state, request, entity_query, verified, as_of,
+                           result_limit)
+    _search_filer_route(state, request, verified, as_of, result_limit)
+    global_forms = _search_global_route(
+        state, request, as_of, data_root, batch_size, result_limit)
+    _search_local_route(
+        state, request, verified, as_of, data_root, result_limit)
+    return global_forms
 
 # --- Phase 8: open-vocabulary relationship search over typed indexes,
 # verified/candidate workflow rows, mentions, and EFTS. Results group by

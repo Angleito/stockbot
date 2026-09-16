@@ -13,6 +13,7 @@ Persist the trio-joined synthesis and complete a research session with frozen-ev
 ## Choose when
 
 - Finalizing a trio-complete research session with grounded claims.
+- Delivering the substantive structured answer in the same turn — Bottom line through filing refs plus the SEC-only scope line; a bare finalized-status note is not a completion.
 
 ## Reject when
 

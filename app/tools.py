@@ -1272,7 +1272,7 @@ TOOLS: list[dict[str, object]] = [
                 "properties": {
                     "session_id": {"type": "string", "description": "Research session ID."},
                     "job_id": {"type": "string", "description": "Running source job ID to complete."},
-                    "coverage": {"type": "object", "description": "Coverage with useful_for_question sufficient|insufficient (required)."},
+                    "coverage": {"type": "object", "description": "Coverage with useful_for_question sufficient|insufficient (required). New sufficiency keys (major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, major_entities_missing, remaining_branches, routes_unsearched) ride alongside existing resolved/partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps; when any sufficiency key is present, sufficient requires non-empty investigated entities/relationships/forms/exhibits and empty material opens/missing entities/remaining branches/routes, else the legacy envelope applies."},
                     "evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Evidence IDs grounding a sufficient result (empty only with insufficient)."},
                     "unresolved_questions": {"type": "array", "items": {"type": "string"}, "description": "Open questions left by the source run."},
                 },
@@ -3391,7 +3391,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_session",
         time_mode="current",
         summary="Complete one running source job with validated coverage; evidence stays mutation-only.",
-        choose_when=("Completing a source investigation with validated coverage.",),
+        choose_when=(
+            "Completing a source investigation with validated coverage.",
+            "Sufficient coverage means major EDGAR-visible channels and counterparties investigated with no material open questions or branches — never just N evidence rows.",
+        ),
         reject_when=("Not for session state overviews (research_status).",),
         conflicts_with=(),
         related_tools=("research_status",),
@@ -3423,7 +3426,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_session",
         time_mode="current",
         summary="Persist the trio-joined synthesis and complete a research session with frozen-evidence claims.",
-        choose_when=("Finalizing a trio-complete research session with grounded claims.",),
+        choose_when=(
+            "Finalizing a trio-complete research session with grounded claims.",
+            "Delivering the substantive structured answer in the same turn — Bottom line through filing refs plus the SEC-only scope line; a bare finalized-status note is not a completion.",
+        ),
         reject_when=("Not for session state overviews (research_status).",),
         conflicts_with=(),
         related_tools=("research_status",),
@@ -4012,13 +4018,28 @@ def _mention_hit(hit: dict[str, object]) -> dict[str, object]:
 
 
 def _passage_row(hit: dict[str, object]) -> dict[str, object]:
-    """One matching passage: document + query + score only."""
+    """One matching passage: document + query + score + section + terms."""
     score = hit.get("score")
     return {
         "document": hit.get("matched_document"),
         "query": hit.get("query"),
         "score": float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else 0.0,
+        "section": hit.get("file_description") or hit.get("file_type"),
+        "term": _passage_term(hit),
     }
+
+
+def _passage_term(hit: dict[str, object]) -> str | None:
+    """First exposure term in the hit description, else the query topic."""
+    import re as _re
+    text = str(hit.get("file_description") or "")
+    match = _re.search(
+        r"contract|concentration|investments?|commitments?|counterpart\w*|openai",
+        text, _re.IGNORECASE)
+    if match:
+        return match.group(0).lower()
+    query = str(hit.get("query") or "").strip()
+    return query or None
 
 
 def _document_matches(hits: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -4029,6 +4050,34 @@ def _document_matches(hits: list[dict[str, object]]) -> list[dict[str, object]]:
         accession = key if isinstance(key, str) and key else ""
         grouped.setdefault(accession, []).append(_passage_row(hit))
     return [{"accession": accession, "matching_passages": passages} for accession, passages in grouped.items()]
+
+
+def _hit_window(hit: dict[str, object]) -> dict[str, object]:
+    """One compact top hit: identity, document, relevance, and remainder pointer."""
+    return {
+        "accession": hit.get("accession_no"),
+        "form": hit.get("form"),
+        "filed_at": hit.get("filed_at"),
+        "document": hit.get("matched_document"),
+        "section": hit.get("file_description") or hit.get("file_type"),
+        "term": _passage_term(hit),
+        "window": hit.get("snippet") or hit.get("file_description"),
+        "relevance_reason": list(hit.get("relevance_reason") or [])
+        if isinstance(hit.get("relevance_reason"), (list, tuple)) else [],
+        "snippet": hit.get("snippet") or hit.get("file_description"),
+        "resource_uri": hit.get("resource_uri"),
+    }
+
+
+def _discovery_packet(hits: list[dict[str, object]], search_id: object,
+                      limit: int | None) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Compact discovery packet: bounded top_hits + remainder pointer (display only)."""
+    top = [_hit_window(hit) for hit in hits] if limit is None else [_hit_window(hit) for hit in hits[:limit]]
+    rest = 0 if limit is None else max(len(hits) - len(top), 0)
+    remainder: dict[str, object] = {"count": rest}
+    if rest and isinstance(search_id, str) and search_id:
+        remainder["resource_uri"] = f"source://sec/search/{search_id}/hits?offset={len(top)}"
+    return top, remainder
 
 
 def _mention_hits(raw: object) -> list[dict[str, object]]:
@@ -4070,7 +4119,7 @@ def _envelope_backfill(cov: dict[str, object]) -> list[object]:
     return list(cov["pending_backfill_jobs"]) if isinstance(cov.get("pending_backfill_jobs"), (list, tuple)) else []
 
 
-def _search_envelope(result: SECSearchResult) -> dict[str, object]:
+def _search_envelope(result: SECSearchResult, *, limit: int | None = 20) -> dict[str, object]:
     """SECSearchResult -> model packet: roles, ledger, PIT, jobs, evidence."""
     data = result.to_dict()
     cov = _envelope_dict(data.get("coverage"))
@@ -4079,12 +4128,16 @@ def _search_envelope(result: SECSearchResult) -> dict[str, object]:
     request = _envelope_dict(data.get("request"))
     runs = _search_runs(data.get("search_runs"))
     documents = _document_matches(hits)
+    top_hits, additional_hits = _discovery_packet(hits, data.get("search_id"), limit)
     return {
         "subject": request.get("query") or request.get("company_name"),
         "query": request.get("query"),
         "search_id": data.get("search_id"),
         "request": request,
+        "scope": _envelope_scope(request),
         "count": len(hits),
+        "top_hits": top_hits,
+        "additional_hits": additional_hits,
         "entities": data.get("entities"),
         "entity_matches": data.get("entities"),
         "filings": data.get("filings"),
@@ -4106,6 +4159,14 @@ def _search_envelope(result: SECSearchResult) -> dict[str, object]:
         "evidence_packet_ids": data.get("evidence_packet_ids"),
         "source": "SEC EDGAR",
     }
+
+
+def _envelope_scope(request: dict[str, object]) -> dict[str, object]:
+    """Issuer scope echo: ticker only (identity resolves server-side to CIK)."""
+    scope: dict[str, object] = {}
+    if isinstance(request.get("ticker"), str) and request.get("ticker"):
+        scope["ticker"] = request.get("ticker")
+    return scope
 
 
 def _find_sec_entities(args: dict[str, object]) -> dict[str, object]:
@@ -4156,7 +4217,8 @@ def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
         max_results=max_results,
     )
     return _search_envelope(
-        sec.SECDiscoveryService(data_root=get_data_root()).search(request))
+        sec.SECDiscoveryService(data_root=get_data_root()).search(request),
+        limit=max_results if not exhaustive else 20)
 
 
 class _DocView(TypedDict, total=False):

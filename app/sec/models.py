@@ -153,6 +153,10 @@ class SECTextHit:
     filer_cik: int | None = None
     filer_name: str | None = None
     matched_document: str | None = None
+    issuer_cik: int | None = None
+    relevance_reason: tuple[str, ...] = field(default_factory=tuple)
+    snippet: str | None = None
+    resource_uri: str | None = None
     file_type: str | None = None
     file_description: str | None = None
     items: tuple[str, ...] = field(default_factory=tuple)

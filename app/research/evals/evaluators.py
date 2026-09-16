@@ -115,6 +115,28 @@ class EvalInput:
     has_fabricated_id: bool = False
     has_fabricated_source: bool = False
     scenario_crashed: bool = False
+    coverage_claim: str = ""
+    high_rank_unexplored: bool = False
+    answered: bool = True
+    material_channels: tuple[str, ...] = ()
+    branches_covered: tuple[str, ...] = ()
+    finalized_claim_count: int = 0
+    job_ids: tuple[str, ...] = ()
+    job_created_before_run: bool = True
+    jobs_concurrent: bool = True
+    cross_role_write_rejected: bool = True
+    roles_mutate_freeze: bool = False
+    claims_resolve_to_freeze: bool = True
+    requests_separate_from_evidence: bool = True
+    searches: int = 0
+    queries: tuple[str, ...] = ()
+    forms: tuple[str, ...] = ()
+    entities: tuple[str, ...] = ()
+    exhibits: int = 0
+    relationships_found: int = 0
+    relationships_skipped: int = 0
+    unresolved: tuple[str, ...] = ()
+    stop_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +253,74 @@ def _v_no_evidence(inp: EvalInput) -> str | None:
     return None
 
 
+# OpenAI-bankruptcy MSFT regression gate (fixture cutoff 2026-08-10): the run fails when no material
+# Microsoft exposure is present (channels: investment/ownership, commercial/revenue, receivable/credit,
+# Azure/purchase commitment) or when no non-MSFT branch (AMZN/CoreWeave/AMD/Cerebras/ORCL per as_of) is covered.
+_MSFT_CHANNELS: tuple[str, ...] = (
+    "investment",
+    "ownership",
+    "commercial",
+    "revenue",
+    "receivable",
+    "credit",
+    "azure",
+    "purchase commitment",
+)
+
+_MSFT_BRANCHES: tuple[str, ...] = ("amzn", "amazon", "coreweave", "amd", "cerebras", "orcl", "oracle")
+
+
+def _msft_lower(inp: EvalInput) -> str:
+    return " ".join((*inp.material_channels, inp.answer_text)).lower()
+
+
+def _msft_branches(inp: EvalInput) -> str:
+    return " ".join((*inp.branches_covered, inp.answer_text)).lower()
+
+
+def _v_msft_exposure(inp: EvalInput) -> str | None:
+    if inp.scenario_name != "msft-openai-bankruptcy-sec-only":
+        return None
+    if not any(channel in _msft_lower(inp) for channel in _MSFT_CHANNELS):
+        return "msft-openai-no-material-msft-exposure"
+    if not any(branch in _msft_branches(inp) for branch in _MSFT_BRANCHES):
+        return "msft-openai-no-branch"
+    return None
+
+
+def _v_coverage_quality(inp: EvalInput) -> str | None:
+    if inp.coverage_claim == "sufficient" and inp.high_rank_unexplored:
+        return "coverage-overclaim"
+    return None
+
+
+_COMMITTEE_JOB_CHECKS: tuple[tuple[str, str], ...] = (
+    ("job_created_before_run", "committee-jobs-not-preregistered"),
+    ("jobs_concurrent", "committee-jobs-not-concurrent"),
+    ("cross_role_write_rejected", "committee-cross-role-write-allowed"),
+)
+
+
+def _v_committee_invariants(inp: EvalInput) -> str | None:
+    if len(set(inp.committee_freeze_ids)) > 1:
+        return "committee-different-freeze"
+    if inp.job_ids:
+        if len(set(inp.job_ids)) < 3:
+            return "committee-job-count"
+        failed = next((code for attr, code in _COMMITTEE_JOB_CHECKS if not getattr(inp, attr)), None)
+        if failed is not None:
+            return failed
+    return next((code for flag, code in ((inp.roles_mutate_freeze, "committee-mutates-freeze"), (not inp.claims_resolve_to_freeze, "committee-claims-unresolved"), (not inp.requests_separate_from_evidence, "committee-requests-as-evidence")) if flag), None)
+
+
+def _v_finalize_answer(inp: EvalInput) -> str | None:
+    if inp.scenario_name != "msft-openai-bankruptcy-sec-only" and inp.finalized_claim_count <= 0:
+        return None
+    if inp.finalized_claim_count > 0 and (not inp.answered or not inp.answer_text.strip()):
+        return "finalized-without-answer"
+    return None
+
+
 _CHECKS: tuple[Callable[[EvalInput], str | None], ...] = (
     _v_scenario_crashed,
     _v_unrecovered_failure,
@@ -244,6 +334,10 @@ _CHECKS: tuple[Callable[[EvalInput], str | None], ...] = (
     _v_untraced,
     _v_committee,
     _v_no_evidence,
+    _v_msft_exposure,
+    _v_coverage_quality,
+    _v_committee_invariants,
+    _v_finalize_answer,
 )
 
 _PIT_PROVENANCE: frozenset[str] = frozenset(
@@ -296,24 +390,24 @@ def _fixture_evidence(fixture: AgentFixture) -> tuple[tuple[str, ...], float, in
     return evidence, coverage, untraced
 
 
+def _telemetry_int(telemetry: object, key: str) -> int:
+    """Validated telemetry int (bools and mistyped values coerce to 0)."""
+    value = telemetry.get(key) if isinstance(telemetry, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _telemetry_strs(telemetry: object, key: str) -> tuple[str, ...]:
+    """Validated telemetry string tuple (mistyped lists coerce to ())."""
+    value = telemetry.get(key) if isinstance(telemetry, dict) else None
+    return tuple(value) if isinstance(value, list) and all(isinstance(v, str) for v in value) else ()
+
+
 def eval_input_from_fixture(fixture: AgentFixture) -> EvalInput:
     """Convert a promoted fixture into an evaluable outcome."""
     evidence, coverage, untraced = _fixture_evidence(fixture)
-    return EvalInput(
-        scenario_name=fixture["scenario_name"],
-        answer_text=fixture["answer_excerpt"],
-        tool_calls=tuple(fixture["tool_calls"]),
-        evidence_ids=evidence,
-        evidence_coverage=coverage,
-        as_of=fixture["as_of"],
-        known_ats=tuple(fixture["known_ats"]),
-        budget_used=fixture["budget_used"] or 0,
-        budget_cap=fixture["budget_cap"] or 0,
-        freeze_before=fixture["freeze_before"],
-        freeze_after=fixture["freeze_after"],
-        claims_untraced=untraced,
-        requires_evidence=fixture["validator"]["requires_evidence"],
-    )
+    telemetry = fixture.get("telemetry") or {}
+    stop_reason = telemetry.get("stop_reason") if isinstance(telemetry, dict) else None
+    return EvalInput(scenario_name=fixture["scenario_name"], answer_text=fixture["answer_excerpt"], tool_calls=tuple(fixture["tool_calls"]), evidence_ids=evidence, evidence_coverage=coverage, as_of=fixture["as_of"], known_ats=tuple(fixture["known_ats"]), budget_used=fixture["budget_used"] or 0, budget_cap=fixture["budget_cap"] or 0, freeze_before=fixture["freeze_before"], freeze_after=fixture["freeze_after"], claims_untraced=untraced, requires_evidence=fixture["validator"]["requires_evidence"], searches=_telemetry_int(telemetry, "searches"), queries=_telemetry_strs(telemetry, "queries"), forms=_telemetry_strs(telemetry, "forms"), entities=_telemetry_strs(telemetry, "entities"), exhibits=_telemetry_int(telemetry, "exhibits"), relationships_found=_telemetry_int(telemetry, "relationships_found"), relationships_skipped=_telemetry_int(telemetry, "relationships_skipped"), unresolved=_telemetry_strs(telemetry, "unresolved"), stop_reason=stop_reason if isinstance(stop_reason, str) else "")
 
 
 def _static_outcome(name: str) -> EvalInput:

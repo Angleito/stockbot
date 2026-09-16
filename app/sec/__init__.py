@@ -36,6 +36,7 @@ from .discovery import (
     verify_sec_entity,
 )
 from .documents import (
+    classify_document,
     get_filing_exhibit,
     get_filing_exhibits,
     get_sec_document,
@@ -150,6 +151,7 @@ __all__ = [
     "RegulatoryEvent",
     "SEVERITY",
     "TRANSACTION_KINDS",
+    "classify_document",
     "classify_transaction",
     "compare_144_to_form4",
     "diff_ownership",

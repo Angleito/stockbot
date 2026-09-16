@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app.research.evals.scenarios import get_scenario
 
@@ -44,6 +44,21 @@ _TIMEOUT_CLOSURE_MARKERS: tuple[str, ...] = (
 )
 
 
+class ResearchTelemetry(TypedDict, total=False):
+    """Research-quality telemetry: cheap counters recorded alongside a fixture."""
+
+    searches: int
+    queries: list[str]
+    forms: list[str]
+    entities: list[str]
+    exhibits: int
+    relationships_found: int
+    relationships_skipped: int
+    coverage: str
+    unresolved: list[str]
+    stop_reason: str
+
+
 class FixtureValidator(TypedDict):
     pit_as_of: str | None
     expected_tools: list[str]
@@ -67,6 +82,37 @@ class AgentFixture(TypedDict):
     freeze_before: str | None
     freeze_after: str | None
     validator: FixtureValidator
+    telemetry: NotRequired[ResearchTelemetry]
+
+
+# OpenAI-bankruptcy MSFT regression gate (fixture cutoff 2026-08-10): a run
+# counts as covering Microsoft material exposure only when the excerpt names
+# at least one exposure channel and at least one non-MSFT branch, so a
+# Microsoft-only answer still fails. No facts past the cutoff are asserted.
+_MSFT_CHANNELS: tuple[str, ...] = (
+    "investment",
+    "ownership",
+    "commercial",
+    "revenue",
+    "receivable",
+    "credit",
+    "azure",
+    "purchase commitment",
+)
+
+_MSFT_NON_MSFT_BRANCHES: tuple[str, ...] = ("amzn", "amazon", "coreweave", "amd", "cerebras", "orcl", "oracle")
+
+
+def _v_fixture_msft_openai(fixture: AgentFixture) -> str | None:
+    """MSFT OpenAI-bankruptcy gate: material MSFT channel + one non-MSFT branch."""
+    if fixture["scenario_name"] != "msft-openai-bankruptcy-sec-only":
+        return None
+    lowered = fixture["answer_excerpt"].lower()
+    if not any(channel in lowered for channel in _MSFT_CHANNELS):
+        return "msft-openai-no-material-msft-exposure"
+    if not any(branch in lowered for branch in _MSFT_NON_MSFT_BRANCHES):
+        return "msft-openai-no-branch"
+    return None
 
 
 def _repo_root() -> Path:
@@ -92,12 +138,13 @@ def build_fixture(
     budget_cap: int | None = None,
     freeze_before: str | None = None,
     freeze_after: str | None = None,
+    telemetry: ResearchTelemetry | None = None,
 ) -> AgentFixture:
     """Assemble a fixture; question/as_of default to the scenario definition."""
     scenario = get_scenario(scenario_name)
     resolved_q = question if question is not None else scenario.question
     resolved_as_of = as_of if as_of is not None else scenario.as_of
-    return {
+    fixture: AgentFixture = {
         "format": FIXTURE_FORMAT,
         "scenario_name": scenario.name,
         "family": scenario.family.value,
@@ -119,6 +166,9 @@ def build_fixture(
             "validators": list(VALIDATORS),
         },
     }
+    if telemetry is not None:
+        fixture["telemetry"] = telemetry
+    return fixture
 
 
 def save_fixture(fixture: AgentFixture, fixtures_dir: Path | None = None) -> Path:
@@ -188,6 +238,67 @@ def _req_str_list(raw: dict[str, object], key: str) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+_TelemetryIntKey = Literal["searches", "exhibits", "relationships_found", "relationships_skipped"]
+_TelemetryListKey = Literal["queries", "forms", "entities", "unresolved"]
+_TelemetryStrKey = Literal["coverage", "stop_reason"]
+_TELEMETRY_INT_KEYS: tuple[_TelemetryIntKey, ...] = ("searches", "exhibits", "relationships_found", "relationships_skipped")
+_TELEMETRY_LIST_KEYS: tuple[_TelemetryListKey, ...] = ("queries", "forms", "entities", "unresolved")
+_TELEMETRY_STR_KEYS: tuple[_TelemetryStrKey, ...] = ("coverage", "stop_reason")
+
+
+def _valid_telemetry_int(value: object, key: _TelemetryIntKey) -> int:
+    """Validated telemetry int (ValueError on bool/mistyped)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"fixture: 'telemetry.{key}' must be an int")
+    return value
+
+
+def _valid_telemetry_strs(value: object, key: _TelemetryListKey) -> list[str]:
+    """Validated telemetry string list (ValueError on mistyped entries)."""
+    if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
+        raise ValueError(f"fixture: 'telemetry.{key}' must be a list of strings")
+    return list(value)
+
+
+def _copy_telemetry_int(out: ResearchTelemetry, value: dict[str, object], key: _TelemetryIntKey) -> None:
+    """Copy one validated telemetry int (ValueError on bool/mistyped)."""
+    item = value.get(key)
+    if item is not None:
+        out[key] = _valid_telemetry_int(item, key)
+
+
+def _copy_telemetry_strs(out: ResearchTelemetry, value: dict[str, object], key: _TelemetryListKey) -> None:
+    """Copy one validated telemetry string list (ValueError on mistyped entries)."""
+    item = value.get(key)
+    if item is not None:
+        out[key] = _valid_telemetry_strs(item, key)
+
+
+def _copy_telemetry_str(out: ResearchTelemetry, value: dict[str, object], key: _TelemetryStrKey) -> None:
+    """Copy one validated telemetry string field (ValueError on mistyped)."""
+    item = value.get(key)
+    if item is not None:
+        if not isinstance(item, str):
+            raise ValueError(f"fixture: 'telemetry.{key}' must be a string")
+        out[key] = item
+
+
+def _opt_telemetry(raw: dict[str, object]) -> ResearchTelemetry | None:
+    value = raw.get("telemetry")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("fixture: 'telemetry' must be an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    out: ResearchTelemetry = {}
+    for key in _TELEMETRY_INT_KEYS:
+        _copy_telemetry_int(out, value, key)
+    for key in _TELEMETRY_LIST_KEYS:
+        _copy_telemetry_strs(out, value, key)
+    for key in _TELEMETRY_STR_KEYS:
+        _copy_telemetry_str(out, value, key)
+    return out
+
+
 def _fixture_raw(path: Path) -> tuple[dict[str, object], dict[str, object], bool]:
     decoded: object = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(decoded, dict):
@@ -204,7 +315,7 @@ def _fixture_raw(path: Path) -> tuple[dict[str, object], dict[str, object], bool
 
 
 def _fixture_body(raw: dict[str, object], vraw: dict[str, object], flag: bool) -> AgentFixture:
-    return {
+    fixture: AgentFixture = {
         "format": _req_str(raw, "format"),
         "scenario_name": _req_str(raw, "scenario_name"),
         "family": _req_str(raw, "family"),
@@ -226,6 +337,10 @@ def _fixture_body(raw: dict[str, object], vraw: dict[str, object], flag: bool) -
             "validators": _req_str_list(vraw, "validators"),
         },
     }
+    telemetry = _opt_telemetry(raw)
+    if telemetry is not None:
+        fixture["telemetry"] = telemetry
+    return fixture
 
 
 def load_fixture(scenario_name: str, fixtures_dir: Path | None = None) -> AgentFixture:
@@ -304,6 +419,7 @@ _FIXTURE_CHECKS = (
     _v_fixture_capability,
     _v_fixture_freeze,
     _v_fixture_timeout,
+    _v_fixture_msft_openai,
 )
 
 

@@ -270,26 +270,42 @@ def _primary_attachment_of(filing: EdgarFiling, accession_no: str) -> object:
     return attachment
 
 
+def _attachment_document_name(attachment: object) -> str | None:
+    """Best-effort document filename; None when unreadable or blank (one shared probe)."""
+    try:
+        name = getattr(attachment, "document")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    return name if isinstance(name, str) and name else None
+
+
+def _missing_document_error(accession_no: str, document_name: str, names: list[str]) -> ValueError:
+    """Not-found error with the 12-name sample (single message construction site)."""
+    sample = ", ".join(names[:12])
+    return ValueError(
+        f"document not found: {document_name!r} for accession {accession_no!r}; "
+        f"available documents: {sample or 'none'}. Call list_sec_documents "
+        f"for the full list, or omit the document name for the primary document.")
+
+
 def _named_attachment_of(filing: EdgarFiling, accession_no: str, document_name: str) -> object:
     try:
         attachments = filing.attachments
     except Exception as exc:
         raise ValueError(f"no documents for accession: {accession_no!r}") from exc
     names: list[str] = []
+    want_exhibit = _normalize_exhibit(document_name)
     for attachment in attachments:
-        try:
-            name = getattr(attachment, "document")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-            continue
-        if isinstance(name, str) and name:
+        name = _attachment_document_name(attachment)
+        if name is not None:
             names.append(name)
         if name == document_name:
             return attachment
-    sample = ", ".join(names[:12])
-    raise ValueError(
-        f"document not found: {document_name!r} for accession {accession_no!r}; "
-        f"available documents: {sample or 'none'}. Call list_sec_documents "
-        f"for the full list, or omit the document name for the primary document.")
+    if want_exhibit is not None:
+        for attachment in attachments:
+            if _attachment_exhibit_of(attachment) == want_exhibit:
+                return attachment
+    raise _missing_document_error(accession_no, document_name, names)
 
 
 def _resolve_in(filing: EdgarFiling, accession_no: str, document_name: str | None = None) -> object:
@@ -836,6 +852,116 @@ def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_
 
 
 
+_EXHIBIT_NORM_RE = re.compile(r"^EX-\d{1,3}(?:\.\d{1,3}[A-Z]?)?$")
+_BARE_EXHIBIT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}[A-Z]?)?)$")
+_FILENAME_EXHIBIT_RE = re.compile(r"ex[\s_\-]*(\d{1,3})(?:[\s_\-.]+(\d{1,3}[a-z]?))?", re.IGNORECASE)
+_WARRANT_RE = re.compile(r"\bwarrants?\b")
+_SOW_RE = re.compile(r"\bsow\b")
+_MSA_RE = re.compile(r"\bmsa\b")
+
+_ORDER_FORM_PHRASES = ("order form", "order schedule", "work order", "statement of work")
+_PRESENTATION_PHRASES = ("investor presentation", "corporate presentation", "investor deck",
+                         "earnings presentation", "analyst presentation", "investor day")
+_CREDIT_PHRASES = ("credit agreement", "credit facility", "loan agreement", "loan and security",
+                   "term loan", "revolving credit", "credit and guarant")
+_SERVICE_PHRASES = ("service agreement", "services agreement", "master service",
+                    "professional service", "managed service")
+
+_DOCUMENT_KEYWORD_RULES = (
+    ("amendment", ("amend",), ()),
+    ("order_form", _ORDER_FORM_PHRASES, (_SOW_RE,)),
+    ("investor_presentation", _PRESENTATION_PHRASES, ()),
+    ("warrant", (), (_WARRANT_RE,)),
+    ("credit_agreement", _CREDIT_PHRASES, ()),
+    ("service_agreement", _SERVICE_PHRASES, (_MSA_RE,)),
+)
+"""Keyword label, phrase hits, regex hits: one table in priority order."""
+
+
+def _normalize_exhibit(value: object) -> str | None:
+    """Canonical exhibit number (``EX-10.1``) from ``EX 10.1``/``EX10.1``/bare ``10.1``; None otherwise."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().upper()
+    if text.startswith("EXHIBIT"):
+        text = text[len("EXHIBIT"):].strip()
+    text = text.replace(" ", "").replace("_", "")
+    if text.startswith("EX") and not text.startswith("EX-"):
+        text = "EX-" + text[2:]
+    if _EXHIBIT_NORM_RE.match(text):
+        return text
+    bare = _BARE_EXHIBIT_RE.match(text)
+    return f"EX-{bare.group(1)}" if bare else None
+
+
+def _exhibit_from_filename(value: object) -> str | None:
+    """Exhibit number encoded in a filing filename (``ex991.htm`` -> ``EX-99.1``); None when absent."""
+    if not isinstance(value, str):
+        return None
+    match = _FILENAME_EXHIBIT_RE.search(value)
+    if match is None:
+        return None
+    base, sub = match.group(1), match.group(2)
+    if sub is None and len(base) == 3:
+        base, sub = base[:2], base[2:]  # run-together EX-10.x/EX-99.x convention
+    number = (f"EX-{base}" if sub is None else f"EX-{base}.{sub}").upper()
+    return number if _EXHIBIT_NORM_RE.match(number) else None
+
+
+def _attachment_exhibit_of(attachment: object) -> str | None:
+    """Canonical exhibit number for one live attachment (document_type wins, filename backstops)."""
+    doc_type = attachment.document_type if hasattr(attachment, "document_type") else None
+    number = _normalize_exhibit(doc_type)
+    if number is not None:
+        return number
+    doc_name = attachment.document if hasattr(attachment, "document") else None
+    return _exhibit_from_filename(doc_name)
+
+
+def _document_haystack(document_name: object, description: object) -> str | None:
+    """Lowercased filename+description text; None when untrusted input will not coerce."""
+    try:
+        return f"{document_name or ''} {description or ''}".lower()
+    except Exception:  # noqa: BLE001 - untrusted display strings coerce to other, never raise
+        return None
+
+
+def _keyword_document_kind(hay: str) -> str | None:
+    """First keyword-table hit in priority order; None when only exhibit rules can fire."""
+    for label, phrases, patterns in _DOCUMENT_KEYWORD_RULES:
+        if any(p in hay for p in phrases) or any(rx.search(hay) for rx in patterns):
+            return label
+    return None
+
+
+def _exhibit_document_kind(hay: str, number: str | None) -> str:
+    """Exhibit-number defaults after keywords (EX-99.1 press release, EX-10.* contract)."""
+    press = "press release" in hay or "pressrelease" in hay or number == "EX-99.1"
+    material = (number is not None and number.startswith("EX-10")) or "material contract" in hay or "definitive agreement" in hay
+    return "press_release" if press else ("material_contract" if material else "other")
+
+
+def classify_document(exhibit: object = None, document_name: object = None, description: object = None) -> str:
+    """Deterministic document kind from exhibit number, filename, and description title.
+
+    Labels: ``amendment`` | ``order_form`` | ``investor_presentation`` | ``warrant``
+    | ``credit_agreement`` | ``service_agreement`` | ``press_release`` | ``material_contract``
+    | ``other``. Keyword hits precede the exhibit-number defaults (bare ``EX-99.1`` reads as a
+    press release, bare ``EX-10.*`` as a material contract); filenames like ``ex991.htm``
+    backstop a missing exhibit number. Never raises: unparsable input reads as ``other``.
+
+    Chain: ``list_sec_documents`` -> ``classify_document(d.document_type, d.document_name,
+    d.description)`` -> ``get_sec_document`` for the exhibit text.
+    """
+    hay = _document_haystack(document_name, description)
+    if hay is None:
+        return "other"
+    kind = _keyword_document_kind(hay)
+    if kind is not None:
+        return kind
+    return _exhibit_document_kind(hay, _normalize_exhibit(exhibit) or _exhibit_from_filename(document_name))
+
+
 def _exhibit_dict(accession_no: str, attachment: object) -> dict[str, object]:
     def _get(name: str) -> object:
         try:
@@ -863,8 +989,8 @@ def get_filing_exhibits(accession_no: str) -> list[dict[str, object]]:
 
 
 def get_filing_exhibit(accession_no: str, exhibit: str) -> dict[str, object]:
-    want = exhibit.upper()
+    want = _normalize_exhibit(exhibit) or exhibit.upper()
     for row in get_filing_exhibits(accession_no):
-        if str(row.get("exhibit") or "").upper() == want:
+        if _normalize_exhibit(row.get("exhibit")) == want or str(row.get("exhibit") or "").upper() == want:
             return row
     raise ValueError(f"exhibit not found: {exhibit!r}")

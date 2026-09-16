@@ -42,9 +42,81 @@ const strs = (v: unknown): string[] =>
  Array.isArray(v) ? v.filter((e): e is string => typeof e === "string") : [];
 const objs = (v: unknown): Json[] =>
  Array.isArray(v) ? v.filter((e): e is Json => !!e && typeof e === "object") : [];
+// Same-turn delivery renderer: the persisted rich final_result resolves to the
+// substantive structured answer (Bottom line through filing refs + SEC scope
+// line). Concise when simple — empty sections drop out — but never a bare
+// "finalized" status line. Mirrors the kernel render_final_result shape.
+function hasFinalSections(fr: Json): boolean {
+ if (!fr || typeof fr !== "object") return false;
+ return ["executive_summary", "consensus", "impact_channels", "first_order_effects", "second_order_effects", "bull_case", "bear_case", "critical_disagreements", "uncertainties", "evidence_limitations", "grounded_claims", "claims"].some((key) => {
+  const value = (fr as Json)[key];
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === "object") return Object.keys(value).length > 0;
+  return typeof value === "string" && value.trim().length > 0 && key !== "answer";
+ });
+}
+function renderFinalAnswer(fr: Json): string {
+ const idSuffix = (row: Json): string => {
+  const raw = row.evidence_ids;
+  const ids = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.length > 0).slice(0, 6) : [];
+  return ids.length > 0 ? ` [${ids.join(", ")}]` : "";
+ };
+ const claimLine = (item: unknown): string => {
+  if (!item || typeof item !== "object") return "";
+  const row = item as Json;
+  const text = str(row.text).trim();
+  return text ? `- ${text}${idSuffix(row)}` : "";
+ };
+ const channelLine = (item: unknown): string => {
+  if (!item || typeof item !== "object") return "";
+  const row = item as Json;
+  const name = str(row.name).trim() || "Exposure";
+  const severity = str(row.severity).trim() || "direct";
+  const explanation = str(row.explanation).trim();
+  const detail = explanation && explanation !== name && explanation !== severity ? `: ${explanation}` : "";
+  return `- ${name} (${severity})${detail}${idSuffix(row)}`;
+ };
+ const sideLines = (side: unknown): string[] => {
+  if (!side || typeof side !== "object") return [];
+  const row = side as Json;
+  const summary = str(row.summary).trim();
+  return summary ? [`- ${summary}${idSuffix(row)}`] : [];
+ };
+ const effectLines = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+   if (!item || typeof item !== "object") continue;
+   const row = item as Json;
+   const text = str(row.text).trim() || str(row.summary).trim() || str(row.name).trim();
+   if (text) out.push(`- ${text}${idSuffix(row)}`);
+  }
+  return out;
+ };
+ const bulleted = (value: unknown): string[] => strs(value).map((line) => `- ${line.trim()}`);
+ const section = (header: string, lines: string[]): string[] => (lines.length > 0 ? [`## ${header}`, ...lines] : []);
+ const summary = str(fr.executive_summary).trim() || str(fr.answer).trim() || str(fr.content).trim();
+ const out: string[] = summary ? [`Bottom line: ${summary}`] : [];
+ const consensus = str(fr.consensus).trim();
+ if (consensus && consensus.toLowerCase() !== "none stated") out.push(`Consensus: ${consensus}`);
+ out.push(...section("Major direct exposures", objs(fr.impact_channels).map(channelLine).filter((line) => line.length > 0)));
+ out.push(...section("First-order effects", effectLines(fr.first_order_effects)));
+ out.push(...section("Second-order effects", effectLines(fr.second_order_effects)));
+ out.push(...section("Bull case", sideLines(fr.bull_case)));
+ out.push(...section("Bear case", sideLines(fr.bear_case)));
+ out.push(...section("Critical disagreements", bulleted(fr.critical_disagreements)));
+ out.push(...section("Uncertainties", bulleted(fr.uncertainties)));
+ out.push(...section("SEC-only limitations", bulleted(fr.evidence_limitations)));
+ const rawClaims = Array.isArray(fr.grounded_claims) ? fr.grounded_claims : fr.claims;
+ out.push(...section("Filing refs", objs(rawClaims).map(claimLine).filter((line) => line.length > 0)));
+ const scopeRaw = fr.research_scope && typeof fr.research_scope === "object" ? (fr.research_scope as Json).allowed_sources : undefined;
+ const names = Array.isArray(scopeRaw) ? scopeRaw.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : [];
+ const allowed = names.length > 0 ? names : ["SEC"];
+ out.push(allowed.length === 1 && allowed[0].toUpperCase() === "SEC" ? "Scope: SEC filings only; nothing here draws on non-SEC sources." : `Scope: ${allowed.join(", ")} sources only.`);
+ return out.join("\n\n");
+}
 // Authoritative staged context: Mem stays {sessionId}; the active job derives
 // from the latest inspect cache as the running source_agent for the active
-// wave max(current_wave, freeze_ids.length + 1, 1).
 export function researchContextForRun(runId: string): { sessionId: string; jobId?: string } | undefined {
  const sid = runs.get(runId)?.sessionId;
  if (!sid) return undefined;
@@ -278,10 +350,11 @@ function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string,
    ? `Fresh context? Reload first: ${freezeRead}, ${jobReads} for persisted committee outputs, and kind "evidence" reads as needed. Then `
    : `Fresh context? Reload first: ${freezeRead}, and kind "evidence" reads as needed. Then `;
  return (
-  `${reload}${note}Evidence frozen as ${freezeId}. Finalize now: ` +
-  `Call call_tool with name="research_finalize" and arguments={"session_id": "${sessionId}", "answer": "<final synthesis prose>", ` +
+  `${reload}${note}Evidence frozen as ${freezeId}. Finalize now with a substantive structured synthesis: ` +
+  `Call call_tool with name="research_finalize" and arguments={"session_id": "${sessionId}", "answer": "<Bottom line plus Major direct exposures / Second-order / Bull / Bear / Uncertainties / SEC-only limitations, every factual claim tied to evidence ids>", ` +
   `"claims": [{"text": "<finding>", "evidence_ids": ["<allowed evidence id>"]}]}. ` +
-  `Every claim ref must use these frozen evidence ids: ${allowedIds}. Empty claims are rejected (claims_required); unknown ids fail closed naming them.`
+  `Every claim ref must use these frozen evidence ids: ${allowedIds}. Empty claims are rejected (claims_required); unknown ids fail closed naming them. ` +
+  `The kernel persists the rich final_result and renders the structured answer in the same turn; a bare "finalized" note with no answer is not an acceptable ending — the rendered Bottom line through filing refs IS the answer for this turn.`
  );
 }
 
@@ -362,7 +435,12 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  if ((final && typeof final === "object") || TERMINAL[str(session.status)]) {
   runs.delete(runId);
   const fr = (final && typeof final === "object" ? final : {}) as Json;
-  return { done: true, answer: str(fr.answer) || answer };
+  const rendered = renderFinalAnswer(fr);
+  // Same-turn delivery: a rich final_result resolves to the substantive
+  // structured answer. A thin stub (answer only, no sections) falls back to
+  // the raw kernel answer so stubbed/legacy payloads keep exact text.
+  const rich = hasFinalSections(fr) ? rendered : "";
+  return { done: true, answer: rich || str(fr.answer) || str(fr.content) || answer };
  }
  const d = deriveState(session, jobs, latestFreeze);
  const evidence = strs(session.evidence_ids);

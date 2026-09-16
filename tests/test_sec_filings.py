@@ -719,3 +719,19 @@ def test_resolve_latest_filing_picks_newest_in_family() -> None:
     assert filings.resolve_latest_filing(fs, "8-K") is None
     assert filings.resolve_latest_filing([], "10-K") is None
     assert _latest_acc(fs, "10-K", as_of="2023-06-01") == "old"
+
+
+def test_attachment_exhibit_of_document_type_wins() -> None:
+    assert documents._attachment_exhibit_of(_FakeAttachment("ex991.htm", document_type="EX-10.1")) == "EX-10.1"
+    assert documents._attachment_exhibit_of(_FakeAttachment("primary.htm", document_type="ex 99.1")) == "EX-99.1"
+
+
+def test_attachment_exhibit_of_filename_backstops() -> None:
+    assert documents._attachment_exhibit_of(_FakeAttachment("ex991.htm", document_type="10-K")) == "EX-99.1"
+    assert documents._attachment_exhibit_of(_FakeAttachment("ex101.htm", document_type="10-K")) == "EX-10.1"
+
+
+def test_attachment_exhibit_of_garbage_returns_none() -> None:
+    assert documents._attachment_exhibit_of(SimpleNamespace(document_type=object(), document=object())) is None
+    assert documents._attachment_exhibit_of(SimpleNamespace()) is None
+    assert documents._attachment_exhibit_of(object()) is None

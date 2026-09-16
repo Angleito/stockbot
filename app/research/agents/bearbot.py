@@ -15,7 +15,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from . import GroundedClaim, ResearchRequest, parse_committee_output
+from . import (
+    CommitteeMateriality,
+    GroundedClaim,
+    ImpactChannel,
+    ResearchRequest,
+    parse_committee_envelope,
+)
 from .scout import ModelFn
 
 
@@ -51,6 +57,10 @@ class BearAnalysis:
     what_would_change: list[str] = field(default_factory=list)
     claims: list[GroundedClaim] = field(default_factory=list)
     research_requests: list[ResearchRequest] = field(default_factory=list)
+    executive_view: str = ""
+    impact_channels: list[ImpactChannel] = field(default_factory=list)
+    materiality: CommitteeMateriality = field(default_factory=CommitteeMateriality)
+    uncertainties: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave(self.wave_id)
@@ -88,19 +98,24 @@ def run_bearbot(
     wave = _coerce_wave(wave_id)
     frozen = list(evidence_ids)
     prompt = (
-        f"Bear case only (no forced recommendation). Question: {question}\n"
+        f"Bear case only (strongest defensible downside/contagion read). Question: {question}\n"
         f"Freeze: {freeze_id} as of {as_of} evidence={len(frozen)}\n"
-        'Respond with one JSON object only: {"claims": [{"text": "<finding>", "evidence_ids": ["<freeze-id>", ...]}], "follow_ups": ["<question>?", ...]}. '
-        "Cite only freeze ids for each factual claim; follow_ups are SEC follow-up questions (may be [])."
+        'Respond with one JSON object only: {"role": "bearbot", "executive_view": "<bearish read>", "claims": [{"statement": "<finding>", "evidence_ids": ["<freeze-id>", ...]}], "impact_channels": [{"name": "<channel>", "assessment": "<read>", "evidence_ids": ["<freeze-id>"]}], "materiality": {"overall": "critical|high|medium|low", "reasoning": "<why>"}, "uncertainties": ["<open question>"], "research_requests": [{"question": "<follow-up>?", "why_it_matters": "<why>", "suggested_source": "SEC"}]}. '
+        "Cite only freeze ids for each factual claim; legacy keys claims[].text and follow_ups[] are also accepted."
     )
     if evidence_text.strip():
         prompt += f"\nEvidence (cite ids; do not invent):\n{evidence_text.strip()}"
     text = model(prompt).strip()
     extra = _tag_requests(list(follow_ups or []))
-    claims, envelope_follow = parse_committee_output(text, frozen=frozen, agent="bearbot")
-    unknowns: list[str] = [] if claims or frozen else ["freeze holds no evidence"]
-    text = _prose_or_placeholder(claims, frozen)
-    extra = list(envelope_follow) + list(extra)
+    env = parse_committee_envelope(text, frozen=frozen, agent="bearbot")
+    unknowns: list[str] = (
+        list(env.uncertainties)
+        if env.uncertainties
+        else ([] if env.claims or frozen else ["freeze holds no evidence"])
+    )
+    prose = _prose_or_placeholder(env.claims, frozen)
+    extra = list(env.follow_ups) + list(extra)
+    view = env.executive_view or prose
     return BearAnalysis(
         session_id=session_id,
         wave_id=wave,
@@ -109,11 +124,15 @@ def run_bearbot(
         as_of=as_of,
         question=question,
         stance="bearish",
-        bear_case=text,
+        bear_case=view,
         unknowns=unknowns,
         what_would_change=[],
-        claims=claims,
+        claims=env.claims,
         research_requests=extra,
+        executive_view=view,
+        impact_channels=list(env.impact_channels),
+        materiality=env.materiality,
+        uncertainties=list(unknowns),
     )
 
 

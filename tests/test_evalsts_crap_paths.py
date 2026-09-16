@@ -828,3 +828,53 @@ def test_harness_main_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caps
         _h.main()
     assert exc.value.code == 0
     assert "PI-HARNESS EVALS: 1/1 passed" in capsys.readouterr().out
+
+
+def test_opt_telemetry_rejects_bad_int_type() -> None:
+    with pytest.raises(ValueError, match="telemetry.searches"):
+        _reg._opt_telemetry({"telemetry": {"searches": "3"}})
+    with pytest.raises(ValueError, match="telemetry.searches"):
+        _reg._opt_telemetry({"telemetry": {"searches": True}})
+
+
+def test_opt_telemetry_rejects_bad_str_list() -> None:
+    with pytest.raises(ValueError, match="telemetry.queries"):
+        _reg._opt_telemetry({"telemetry": {"queries": ["ok", 7]}})
+    with pytest.raises(ValueError, match="telemetry.queries"):
+        _reg._opt_telemetry({"telemetry": {"queries": "ok"}})
+
+
+def test_opt_telemetry_none_absent_and_valid_round_trip() -> None:
+    from app.research.evals.regression import ResearchTelemetry
+
+    assert _reg._opt_telemetry({}) is None
+    tel: ResearchTelemetry = {"searches": 2, "queries": ["q1", "q2"], "forms": ["10-K"],
+                              "entities": ["MSFT"], "coverage": "partial", "stop_reason": "complete:wave1"}
+    fixture = _reg.build_fixture(session_id="rs:tel", scenario_name="pit-knowable-by-2025-06-30",
+                                 tool_calls=("search_sec_filings",), evidence_ids=("EV-1",),
+                                 known_ats=("2025-05-01",), answer_excerpt="x",
+                                 telemetry=tel)
+    raw: dict[str, object] = {"telemetry": dict(tel), "format": "f", "scenario_name": "s",
+                              "family": "pit", "session_id": "rs:t", "question": "q",
+                              "tool_calls": [], "evidence_ids": [], "known_ats": [],
+                              "answer_excerpt": "x",
+                              "validator": {"requires_evidence": False}}
+    out = _reg._opt_telemetry(raw)
+    assert out is not None and out["queries"] == ["q1", "q2"] and out["searches"] == 2
+
+
+def test_opt_telemetry_rejects_non_object_and_bad_str_field() -> None:
+    with pytest.raises(ValueError, match="must be an object"):
+        _reg._opt_telemetry({"telemetry": ["searches"]})
+    with pytest.raises(ValueError, match="telemetry.coverage"):
+        _reg._opt_telemetry({"telemetry": {"coverage": 7}})
+    with pytest.raises(ValueError, match="telemetry.stop_reason"):
+        _reg._opt_telemetry({"telemetry": {"stop_reason": ["x"]}})
+
+
+def test_opt_telemetry_absent_key_arms() -> None:
+    only_int = _reg._opt_telemetry({"telemetry": {"searches": 1}})
+    assert only_int == {"searches": 1}
+    only_list = _reg._opt_telemetry({"telemetry": {"queries": ["a"]}})
+    assert only_list == {"queries": ["a"]}
+    assert _reg._opt_telemetry({"telemetry": {}}) == {}

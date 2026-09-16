@@ -1862,3 +1862,150 @@ def test_crap_discovery_only_edges() -> None:
     assert discovery_only([{"record_kind": "discovery", "metadata": {}}]) is True
     assert substantive_records([{"record_kind": "discovery"}, {}]) == [{}]
 
+# ---------------------------------------------------------------------------
+# Evals slice: committee invariants + finalization UX (offline fakes only).
+# Same freeze across the trio; 3 distinct jobs created before the run;
+# concurrent; completed-job cross-role write rejected; roles cannot mutate the
+# freeze; claims resolve to frozen evidence; research_requests stay separate
+# from evidence. Finalize success auto-renders a substantive structured answer
+# in the same turn; a bare "finalized/N claims" with no answer fails.
+# ---------------------------------------------------------------------------
+
+def _eval_sid(repo: ResearchRepository) -> tuple[str, str]:
+    from app.research import service as _svc
+    sid = _svc.create_research("MSFT OpenAI exposure?", "o", as_of="2026-08-10T00:00:00+00:00", repo=repo)
+    return sid, repo.list_jobs(sid)[0].job_id
+
+
+def _eval_item(eid: str, wave: int = 1) -> dict[str, object]:
+    return {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid,
+            "claim_text": "MSFT Azure OpenAI-linked exposure per filing",
+            "subject": "MSFT", "source_name": "SEC",
+            "source_uri": "https://www.sec.gov/Archives/edgar/data/789790/000095017026001234/primary.htm",
+            "source_record_id": "0000950170-26-001234",
+            "known_at": "2026-08-01T00:00:00+00:00"}
+
+
+def _eval_cov() -> dict[str, object]:
+    return {"useful_for_question": "sufficient", "resolved": ["MSFT OpenAI exposure"],
+            "partially_resolved": [], "unresolved": [], "source_limitations": [],
+            "major_entities_investigated": ["MSFT", "OpenAI"],
+            "relationship_types_checked": ["investment", "commercial"],
+            "forms_examined": ["10-K"], "exhibits_examined": ["EX-10.1"],
+            "material_open_questions": []}
+
+
+def _eval_trio_ids(repo: ResearchRepository, sid: str, eid: str) -> tuple[str, str, str, str]:
+    from app.research import service as _svc
+    fid = str(_svc.freeze_session(sid, 1, repo=repo)["freeze_id"])
+    trio = _svc.create_committee_jobs(sid, 1, repo=repo)
+    created = trio.get("jobs")
+    assert isinstance(created, list) and len(created) == 3 and len(set(created)) == 3
+    return fid, str(created[0]), str(created[1]), str(created[2])
+
+
+def test_eval_committee_same_freeze_and_trio_created_before_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _eval_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _eval_item(eid), repo=repo)
+    _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
+    fid, stock_jid, bull_jid, bear_jid = _eval_trio_ids(repo, sid, eid)
+    assert repo.get_session(sid).freeze_ids[-1] == fid
+    assert len({stock_jid, bull_jid, bear_jid}) == 3
+    for jid, role in ((stock_jid, "stockbot"), (bull_jid, "bullbot"), (bear_jid, "bearbot")):
+        job = repo.get_job(jid)
+        assert job.job_type == role and job.status == "running"
+        _svc.record_committee_analysis(sid, jid, role,
+                                       {"claims": [{"text": "finding", "evidence_ids": [eid]}],
+                                        "follow_ups": []}, repo=repo)
+    assert all(repo.get_job(jid).status == "completed" for jid in (stock_jid, bull_jid, bear_jid))
+    assert repo.get_session(sid).freeze_ids[-1] == fid
+
+
+def test_eval_committee_cross_role_write_rejected_and_freeze_immutable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import dataclasses as _dc
+    from app.research import service as _svc
+    from app.research.freeze import EvidenceFreeze
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _eval_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _eval_item(eid), repo=repo)
+    _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
+    fid, stock_jid, _bull_jid, _bear_jid = _eval_trio_ids(repo, sid, eid)
+    with pytest.raises(ValueError, match="!="):
+        _svc.record_committee_analysis(sid, stock_jid, "bearbot",
+                                       {"claims": [{"text": "finding", "evidence_ids": [eid]}],
+                                        "follow_ups": []}, repo=repo)
+    now = _dt(2026, 8, 10, tzinfo=_tz.utc)
+    with pytest.raises(_dc.FrozenInstanceError):
+        frozen_obj = EvidenceFreeze(freeze_id=fid, session_id=sid, wave_id=1, created_at=now,
+                                    as_of=now, evidence_ids=(eid,), content_hash="h")
+        setattr(frozen_obj, "evidence_ids", ("tampered",))
+    _svc.record_committee_analysis(sid, stock_jid, "stockbot",
+                                   {"claims": [{"text": "finding", "evidence_ids": [eid]}],
+                                    "follow_ups": [{"question": "Probe Azure terms?"}]},
+                                   repo=repo)
+    assert repo.get_freeze(fid)["freeze_id"] == fid
+
+
+def test_eval_committee_claims_resolve_and_requests_not_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.research import service as _svc
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _eval_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _eval_item(eid), repo=repo)
+    _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
+    _fid, stock_jid, _bull_jid, _bear_jid = _eval_trio_ids(repo, sid, eid)
+    with pytest.raises(ValueError):
+        _svc.record_committee_analysis(sid, stock_jid, "stockbot",
+                                       {"claims": [{"text": "dangling", "evidence_ids": ["EV-NOPE"]}],
+                                        "follow_ups": []}, repo=repo)
+    n_evidence = len(repo.list_evidence(sid))
+    _svc.record_committee_analysis(sid, stock_jid, "stockbot",
+                                   {"claims": [{"text": "finding", "evidence_ids": [eid]}],
+                                    "follow_ups": ["Probe Azure terms?"]}, repo=repo)
+    assert len(repo.list_evidence(sid)) == n_evidence
+
+
+def test_eval_finalize_renders_answer_same_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.research import service as _svc
+    from app.research.evals.evaluators import EvalInput, evaluate
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, src = _eval_sid(repo)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _eval_item(eid), repo=repo)
+    _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    for role in ("stockbot", "bullbot", "bearbot"):
+        jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
+        _svc.record_committee_analysis(sid, jid, role,
+                                       {"claims": [{"text": "MSFT Azure exposure", "evidence_ids": [eid]}],
+                                        "follow_ups": []}, repo=repo)
+    _svc.decide_wave2(sid, repo=repo)
+    out = _svc.finalize_session(sid, "MSFT Azure exposure is filing-backed.",
+                                [{"text": "MSFT Azure exposure", "evidence_ids": [eid]}], repo=repo)
+    final = repo.get_session(sid).final_result or {}
+    assert isinstance(final, dict) and str(final.get("answer", "")).strip()
+    assert "filing-backed" in str(final.get("answer"))
+    assert out["freeze_id"] == f"{sid}:1:freeze"
+    rendered = _svc.inspect_research(sid, repo=repo)
+    assert str(rendered.get("final", "") or final.get("answer", "")).strip()
+    bare = EvalInput(scenario_name="msft-openai-bankruptcy-sec-only",
+                     answer_text="finalized 1 claims", evidence_ids=(eid,),
+                     requires_evidence=True, finalized_claim_count=1, answered=False)
+    assert "finalized-without-answer" in evaluate(bare).violations
+

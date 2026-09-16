@@ -18,6 +18,16 @@ from app.research.agents.stockbot import StockbotAnalysis
 
 
 @dataclass
+class CriticalDisagreement:
+    """One preserved bull-vs-bear split: question, both reads, frozen evidence links."""
+
+    question: str
+    bull: str
+    bear: str
+    evidence_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CommitteeDisagreement:
     session_id: str
     wave_id: int
@@ -26,6 +36,8 @@ class CommitteeDisagreement:
     disagreement: list[str] = field(default_factory=list)
     critical_uncertainties: list[str] = field(default_factory=list)
     requested_research: list[ResearchRequest] = field(default_factory=list)
+    consensus: list[str] = field(default_factory=list)
+    critical_disagreements: list[CriticalDisagreement] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave_id(self.wave_id)
@@ -100,6 +112,34 @@ def _merge_requests(
     return list(seen.values())
 
 
+def _member_view(analysis: object, keys: tuple[str, ...]) -> str:
+    """First non-blank prose view across candidate attrs; blank when absent."""
+    for key in keys:
+        value = getattr(analysis, key, "")
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:2000]
+    return ""
+
+
+_SPLIT_SIDES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
+    ("bullish", ("executive_view", "bull_case"), "bullish read stands on bull-only evidence", "bearish read disputes the bullish read"),
+    ("bearish", ("executive_view", "bear_case"), "bullish read disputes the bearish read", "bearish read stands on bear-only evidence"),
+)
+
+
+def _critical_split(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, bull_refs: list[str], bear_refs: list[str]) -> list[CriticalDisagreement]:
+    """One preserved split per bull/bear-only evidence branch (empty when stances fully overlap)."""
+    only = {"bullish": [eid for eid in bull_refs if eid not in bear_refs], "bearish": [eid for eid in bear_refs if eid not in bull_refs]}
+    views = {"bullish": _member_view(bull, _SPLIT_SIDES[0][1]), "bearish": _member_view(bear, _SPLIT_SIDES[1][1])}
+    out: list[CriticalDisagreement] = []
+    for stance, keys, bull_fallback, bear_fallback in _SPLIT_SIDES:
+        ids = only[stance]
+        if ids:
+            view = views[stance]
+            out.append(CriticalDisagreement(question=f"How far does the {stance} read of {stock.question} hold?", bull=view or bull_fallback, bear=view or bear_fallback, evidence_ids=ids[:10]))
+    return out
+
+
 def compute_disagreement(
     stock: StockbotAnalysis,
     bull: BullAnalysis,
@@ -119,7 +159,9 @@ def compute_disagreement(
         disagreement=disagreement,
         critical_uncertainties=_dedup([*stock.unknowns, *bull.unknowns, *bear.unknowns]),
         requested_research=_merge_requests(stock, bull, bear),
+        consensus=list(agreement),
+        critical_disagreements=_critical_split(stock, bull, bear, bull_refs, bear_refs),
     )
 
 
-__all__ = ["CommitteeDisagreement", "compute_disagreement"]
+__all__ = ["CommitteeDisagreement", "CriticalDisagreement", "compute_disagreement"]

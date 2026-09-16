@@ -233,6 +233,8 @@ def _merge_disagreement(
         critical_uncertainties=list(dict.fromkeys(
             [*first.critical_uncertainties, *second.critical_uncertainties]))[:20],
         requested_research=list(seen.values()),
+        consensus=list(dict.fromkeys([*getattr(first, "consensus", []), *getattr(second, "consensus", [])]))[:20],
+        critical_disagreements=[*getattr(first, "critical_disagreements", []), *getattr(second, "critical_disagreements", [])][:10],
     )
 
 class BudgetLedger:
@@ -1178,25 +1180,35 @@ class _LiveRun:
             ran.append(started.job_id)
         return prog
 
+    def _committee_verify(self, session_id: str, fid: str) -> None:
+        """Recompute the freeze hash from ledger records; raise on drift (fail-closed write)."""
+        raw_ids = self.store.get_freeze(fid).get("evidence_ids", [])
+        want: set[str] = {e for e in raw_ids if isinstance(e, str)} if isinstance(raw_ids, list) else set()
+        recs = [e for e in self.ledger.list_session(session_id) if e.evidence_id in want]
+        _freeze.verify_freeze(_freeze.freeze_from_dict(self.store.get_freeze(fid)), recs)
+
     def _run_member_stock(self, session_id: str, run_fn: Callable[[], StockbotAnalysis], job_id: str, fid: str) -> StockbotAnalysis:
         """Run the stockbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
-            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid}))
+            self._committee_verify(session_id, fid)
+            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid, "role": "stockbot", "claims": [{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in analysis.claims]}))
         return analysis
 
     def _run_member_bull(self, session_id: str, run_fn: Callable[[], BullAnalysis], job_id: str, fid: str) -> BullAnalysis:
         """Run the bullbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
-            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid}))
+            self._committee_verify(session_id, fid)
+            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid, "role": "bullbot", "claims": [{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in analysis.claims]}))
         return analysis
 
     def _run_member_bear(self, session_id: str, run_fn: Callable[[], BearAnalysis], job_id: str, fid: str) -> BearAnalysis:
         """Run the bearbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
-            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid}))
+            self._committee_verify(session_id, fid)
+            self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result={"freeze_id": fid, "role": "bearbot", "claims": [{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in analysis.claims]}))
         return analysis
 
 

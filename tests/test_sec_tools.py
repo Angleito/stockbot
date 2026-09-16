@@ -1023,3 +1023,202 @@ def test_agents_rel_line_renders_triple_and_rejects_partials() -> None:
     assert _rel_line({"subject": " ", "relation": "r", "object": "o"}) is None
     assert _rel_line("nope") is None
     assert _rel_line(None) is None
+
+# ---------------------------------------------------------------------------
+# EDGAR discovery evals: issuer-scoped exhaustive text search, exhibit
+# traversal (filing->docs->exhibit->text), exhaustion honesty, 10-K-over-Form
+# ranking, validated alias retrieval with provenance. All offline fakes.
+# ---------------------------------------------------------------------------
+
+def _msft_search_packet(
+    text_hits: tuple[SECTextHit, ...] = (),
+    coverage: SearchCoverage | None = None,
+    warnings: tuple[str, ...] = (),
+    errors: tuple[str, ...] = (),
+) -> SECSearchResult:
+    from app.sec.models import SearchAttempt, SearchRun
+    cov = coverage if coverage is not None else SearchCoverage(
+        status="complete", sources_attempted=("entity", "efts"),
+        sources_completed=("entity", "efts"), sources_failed=(),
+        results_reported=2, results_retrieved=2, pages=2,
+    )
+    attempts = (
+        SearchAttempt(attempt_id="s1-entity-1", search_id="s1", backend="entity",
+                      query="MSFT OpenAI", status="complete", results_reported=1,
+                      results_retrieved=1, pages_retrieved=1, pit_basis="known_at"),
+        SearchAttempt(attempt_id="s1-efts-1", search_id="s1", backend="efts",
+                      query="MSFT OpenAI", status="complete", results_reported=1,
+                      results_retrieved=1, pages_retrieved=1, pit_basis="known_at"),
+    )
+    return SECSearchResult(
+        search_id="s1",
+        request=SECSearchRequest(query="MSFT OpenAI", ticker="MSFT",
+                                 exhaustive=True, max_results=None,
+                                 as_of="2026-08-10"),
+        entities=(),
+        text_hits=text_hits,
+        coverage=cov,
+        attempts=attempts,
+        warnings=warnings,
+        errors=errors,
+        retrieval_order=("entity", "efts"),
+        evidence_packet_ids=("entity:789790",),
+        search_runs=(SearchRun(id="s1", source="SEC", query="MSFT OpenAI",
+                               filters={}, executed_at="2026-08-10T00:00:00+00:00",
+                               as_of="2026-08-10", matched_entities=1,
+                               matched_documents=1, matched_passages=1),),
+    )
+
+
+def _msft_hits() -> tuple[SECTextHit, ...]:
+    return (
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="MSFT OpenAI",
+                   accession_no="0000950170-26-001234", form="10-K",
+                   filed_at="2026-02-14", filer_cik=789790,
+                   filer_name="Microsoft Corp", matched_document="primary.htm",
+                   file_type="10-K", score=9.5),
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="OpenAI",
+                   accession_no="0000950170-26-009999", form="4",
+                   filed_at="2026-03-01", filer_cik=789790,
+                   filer_name="Microsoft Corp", matched_document="primary.htm",
+                   file_type="4", score=1.0),
+    )
+
+
+def _patch_discovery(monkeypatch: pytest.MonkeyPatch, result: SECSearchResult) -> dict[str, object]:
+    seen: dict[str, object] = {}
+
+    class _FakeService:
+        def __init__(self, data_root: Path | None = None) -> None:
+            pass
+
+        def search(self, request: SECSearchRequest) -> SECSearchResult:
+            seen["request"] = request
+            return result
+
+    monkeypatch.setattr(tools.sec, "SECDiscoveryService", _FakeService)
+    return seen
+
+
+def test_edgar_issuer_scoped_exhaustive_returns_text_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _patch_discovery(monkeypatch, _msft_search_packet(text_hits=_msft_hits()))
+    result = tools.execute_tool(
+        "search_sec_filings", {"query": "OpenAI", "ticker": "MSFT", "exhaustive": True,
+                               "as_of": "2026-08-10"},
+        "test", context=_research_context(),
+    )
+    request = seen["request"]
+    assert isinstance(request, SECSearchRequest)
+    assert request.exhaustive is True and request.ticker == "MSFT"
+    assert request.max_results is None
+    hits = _as_seq(result["hits"])
+    first = _as_dict(hits[0])
+    assert len(hits) == 2
+    assert first["accession_no"] == "0000950170-26-001234"
+    # Text hits, not recent-filing metadata: each names the exact document.
+    assert all(_as_dict(hit).get("matched_document") for hit in hits)
+
+def test_edgar_exhibit_traversal_filing_to_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec.documents import FilingDocument
+    docs = [FilingDocument(accession_no="0000950170-26-001234", document_name="ex101.htm",
+                           description="Material agreement", size=10,
+                           url="https://sec.gov/x/ex101.htm", document_type="EX-10.1")]
+
+    def _fake_list(accession_no: str, **_: object) -> list[FilingDocument]:
+        assert accession_no == "0000950170-26-001234"
+        return docs
+
+    monkeypatch.setattr(tools.sec, "list_sec_documents", _fake_list)
+
+    def _fake_doc(accession_no: str, document_name: object = None, **_: object) -> dict[str, str]:
+        assert accession_no == "0000950170-26-001234"
+        assert document_name == "ex101.htm"
+        return {"accession_no": accession_no, "document_name": "ex101.htm",
+                "text": "OpenAI Azure purchase commitment terms"}
+
+    monkeypatch.setattr(tools.sec, "get_sec_document", _fake_doc)
+    listed = tools.execute_tool("list_sec_documents",
+                                {"accession_no": "0000950170-26-001234"},
+                                "test", context=_research_context())
+    assert _as_dict(_as_seq(listed["documents"])[0])["document_name"] == "ex101.htm"
+    text = tools.execute_tool("get_sec_document",
+                              {"accession_no": "0000950170-26-001234",
+                               "document_name": "ex101.htm"},
+                              "test", context=_research_context())
+    assert "purchase commitment" in str(text["text"])
+
+
+def test_edgar_exhaustion_honest_on_route_exhausted_or_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    exhausted = _patch_discovery(
+        monkeypatch,
+        _msft_search_packet(
+            text_hits=_msft_hits(),
+            coverage=SearchCoverage(status="complete", sources_attempted=("entity", "efts"),
+                                    sources_completed=("entity", "efts"), sources_failed=(),
+                                    results_reported=2, results_retrieved=2, pages=2),
+        ),
+    )
+    ok = tools.execute_tool("search_sec_filings",
+                            {"query": "OpenAI", "ticker": "MSFT", "exhaustive": True},
+                            "test", context=_research_context())
+    exhausted_request = exhausted["request"]
+    assert isinstance(exhausted_request, SECSearchRequest)
+    assert exhausted_request.exhaustive is True
+    assert _as_dict(ok["coverage"])["status"] in ("complete", "complete_within_source_limits")
+    limited = _patch_discovery(
+        monkeypatch,
+        _msft_search_packet(
+            text_hits=_msft_hits(),
+            coverage=SearchCoverage(status="partial", sources_attempted=("entity", "efts"),
+                                    sources_completed=("entity",), sources_failed=(),
+                                    results_reported=3, results_retrieved=2, pages=2,
+                                    source_limits=("efts capped at limit",)),
+            warnings=("results capped at 2; rerun with a higher limit or exhaustive=true",),
+        ),
+    )
+    capped = tools.execute_tool("search_sec_filings",
+                                {"query": "OpenAI", "ticker": "MSFT", "limit": 2},
+                                "test", context=_research_context())
+    limited_request = limited["request"]
+    assert isinstance(limited_request, SECSearchRequest)
+    assert limited_request.exhaustive is False
+    assert _as_dict(capped["coverage"])["status"] == "partial"
+    assert any("capped" in str(w) for w in _as_seq(capped["warnings"]))
+
+
+def test_edgar_ranking_quantified_10k_outranks_unrelated_form4() -> None:
+    from app.sec.discovery.service import rank_hits
+    ranked = rank_hits(_msft_hits(), verified_ciks=(789790,),
+                       verified_names=("Microsoft Corp",), relevant_forms=("10-K",),
+                       query="Microsoft OpenAI exposure")
+    assert ranked[0].form == "10-K"
+    assert ranked[0].accession_no == "0000950170-26-001234"
+    assert ranked[-1].form == "4"
+
+
+def test_edgar_alias_expansion_validated_keeps_provenance_no_false_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_obj = _result(entities=(EntityCandidate(
+        cik=789790, name="Microsoft Corp", tickers=("MSFT",), exchange=None,
+        match_source="former-name", match_score=0.8, match_type="former_name",
+        verification_status="verified", entity_id="sec:cik:789790",
+    ),))
+
+    def _fake_find(query: str, **kwargs: object) -> SECSearchResult:
+        assert query == "Microsoft"
+        return result_obj
+
+    monkeypatch.setattr(tools.sec, "find_sec_entities", _fake_find)
+    result = tools.execute_tool("find_sec_entities", {"query": "Microsoft"},
+                                "test", context=_research_context())
+    candidate = _as_dict(_as_seq(result["entities"])[0])
+    assert candidate["verification_status"] == "verified"
+    assert candidate["cik"] == 789790
+    assert candidate["match_type"] == "former_name"
+    assert result["search_id"] == "s1"
+    # Provenance kept: attempt backend + PIT basis survive the envelope.
+    assert _as_dict(_as_seq(result["attempts"])[0])["backend"] == "entity"
+    assert result["pit_basis"] == "known_at"
+    # No false identity: the verified MSFT CIK round-trips, never a guess.
+    assert candidate["cik"] == 789790

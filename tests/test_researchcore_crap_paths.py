@@ -4414,3 +4414,15 @@ def test_temporal_doc_stored_and_fallback_arms() -> None:
     assert isinstance(out_none, dict)
     assert out_none["mode"] == "latest-available"
     _con.close()
+
+
+def test_append_unique_dedupes_keeps_order_and_drops_blanks() -> None:
+    lims: list[str] = []
+    svc._append_unique(lims, "  SEC-only  ")
+    svc._append_unique(lims, "SEC-only")
+    svc._append_unique(lims, "   ")
+    svc._append_unique(lims, "")
+    svc._append_unique(lims, None)
+    svc._append_unique(lims, 7)
+    svc._append_unique(lims, "private terms")
+    assert lims == ["SEC-only", "private terms"]

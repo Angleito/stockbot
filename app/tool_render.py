@@ -118,12 +118,133 @@ def _dispatch_shape_render_doc(result: dict[str, object], max_bytes: int) -> str
     return _render_generic(result, max_bytes)
 
 
+def _final_ids(refs: object, cap: int = 6) -> str:
+    """Filing refs suffix from evidence ids (capped, empty when none)."""
+    ids: list[str] = [e for e in refs if isinstance(e, str) and e.strip()] if isinstance(refs, list) else []
+    return f" [{', '.join(ids[:cap])}]" if ids else ""
+
+
+def _final_claims_block(claims: object) -> list[str]:
+    """Grounded-claim lines with filing refs ([] when none)."""
+    items = _as_list(claims)
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = _cell(item.get("text")).strip()
+        if not text:
+            continue
+        lines.append(f"- {text}{_final_ids(item.get('evidence_ids'))}")
+    return lines
+
+
+def _final_channel_line(item: object) -> str:
+    """One impact-channel line with severity + filing refs."""
+    row = _as_dict(item)
+    name = _cell(row.get("name")).strip() or "Exposure"
+    severity = _cell(row.get("severity")).strip() or "direct"
+    explanation = _cell(row.get("explanation")).strip()
+    detail = "" if not explanation or explanation == name or explanation == severity else f": {explanation}"
+    return f"- {name} ({severity}){detail}{_final_ids(row.get('evidence_ids'))}"
+
+
+def _final_side_block(side: object) -> list[str]:
+    """Bull/bear summary line with its evidence refs ([] when no summary)."""
+    row = _as_dict(side) if not isinstance(side, str) else {"summary": side}
+    summary = _cell(row.get("summary")).strip()
+    if not summary:
+        return []
+    return [f"- {summary}{_final_ids(row.get('evidence_ids'))}"]
+
+
+def _final_str_block(items: object) -> list[str]:
+    """Bulleted lines for plain string lists ([] when none)."""
+    out: list[str] = []
+    for item in _as_list(items):
+        text = _cell(item).strip()
+        if text and text not in out:
+            out.append(f"- {text}")
+    return out
+
+
+def _final_effect_line(item: object) -> str:
+    """One first/second-order effect line with filing refs."""
+    row = _as_dict(item)
+    text = _cell(row.get("text", row.get("summary", row.get("name")))).strip()
+    return f"- {text}{_final_ids(row.get('evidence_ids'))}" if text else ""
+
+
+def _final_effect_block(items: object) -> list[str]:
+    """Effect lines for one order ([] when none)."""
+    out: list[str] = []
+    for item in _as_list(items):
+        line = _final_effect_line(item)
+        if line:
+            out.append(line)
+    return out
+
+
+def _final_scope_line(scope: object) -> str:
+    """SEC-only scope boundary line (always present)."""
+    allowed = _as_list(_as_dict(scope).get("allowed_sources"))
+    names = [s for s in (_cell(a).strip() for a in allowed) if s] or ["SEC"]
+    joined = ", ".join(names)
+    if len(names) == 1 and names[0].upper() == "SEC":
+        return "Scope: SEC filings only; nothing here draws on non-SEC sources."
+    return f"Scope: {joined} sources only."
+
+
+def _final_core_lines(result: dict[str, object]) -> list[str]:
+    """Bottom line + consensus head lines."""
+    summary = _cell(result.get("executive_summary", result.get("answer"))).strip()
+    lines = [f"Bottom line: {summary}"] if summary else []
+    consensus = _cell(result.get("consensus")).strip()
+    if consensus and consensus.lower() != "none stated":
+        lines.append(f"Consensus: {consensus}")
+    return lines
+
+
+def _final_section(out: list[str], header: str, lines: list[str]) -> None:
+    """Append one headed section (no-op when empty)."""
+    if lines:
+        out.append(f"## {header}")
+        out.extend(lines)
+
+
+def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MESSAGE_BYTES) -> str:
+    """Substantive structured answer for a rich FinalResearchResult."""
+    out = _final_core_lines(result)
+    _final_section(out, "Major direct exposures", [_final_channel_line(c) for c in _as_list(result.get("impact_channels")) if _final_channel_line(c)])
+    _final_section(out, "First-order effects", _final_effect_block(result.get("first_order_effects")))
+    _final_section(out, "Second-order effects", _final_effect_block(result.get("second_order_effects")))
+    _final_section(out, "Bull case", _final_side_block(result.get("bull_case")))
+    _final_section(out, "Bear case", _final_side_block(result.get("bear_case")))
+    _final_section(out, "Critical disagreements", _final_str_block(result.get("critical_disagreements")))
+    _final_section(out, "Uncertainties", _final_str_block(result.get("uncertainties")))
+    _final_section(out, "SEC-only limitations", _final_str_block(result.get("evidence_limitations")))
+    _final_section(out, "Filing refs", _final_claims_block(result.get("grounded_claims", result.get("claims"))))
+    out.append(_final_scope_line(result.get("research_scope")))
+    text = "\n\n".join(line for line in out if line.strip())
+    return _truncate_bytes(text if text.strip() else _cell(result.get("answer")) or "No grounded SEC findings.", max_bytes)
+
+
 def _dispatch_shape_render_b(result: dict[str, object], max_bytes: int) -> str:
-    """Shape-dispatched renderers for table/briefing/SEC/text envelopes."""
+    """Shape-dispatched renderers for table/briefing/SEC/text/final envelopes."""
+    if "impact_channels" in result or "grounded_claims" in result or "executive_summary" in result:
+        return render_final_result(result, max_bytes)
     text = _dispatch_shape_render_table(result, max_bytes)
     if text is not None:
         return text
     return _dispatch_shape_render_doc(result, max_bytes)
+
+def _dispatch_tool_render(result: dict[str, object], max_bytes: int) -> str:
+    """First matching tool renderer (final table/briefing fallback never misses)."""
+    for render in (_dispatch_result_type_render_a, _dispatch_result_type_render_b, _dispatch_shape_render_a):
+        text = render(result, max_bytes)
+        if text is not None:
+            return text
+    return _dispatch_shape_render_b(result, max_bytes)
+
 
 def render_tool_result(
     result: object, max_bytes: int = MAX_TOOL_MESSAGE_BYTES
@@ -132,20 +253,17 @@ def render_tool_result(
 
     Always returns a non-empty string of at most max_bytes UTF-8 bytes.
     """
-    if not isinstance(result, dict):
-        result = {"result": result}
+    result = result if isinstance(result, dict) else {"result": result}
     if "error" in result:
         return _render_error(result, max_bytes)
-    text = _dispatch_result_type_render_a(result, max_bytes)
-    if text is None:
-        text = _dispatch_result_type_render_b(result, max_bytes)
-    if text is None:
-        text = _dispatch_shape_render_a(result, max_bytes)
-    if text is None:
-        text = _dispatch_shape_render_b(result, max_bytes)
-    if _utf8_size(text) <= max_bytes:
-        return text
-    return _minimal(result, max_bytes)
+    nested = result.get("final_result")
+    if isinstance(nested, dict) and nested:
+        return render_final_result(nested, max_bytes)
+    content = result.get("content")
+    if isinstance(content, str) and content.lstrip().startswith("Bottom line:"):
+        return _truncate_bytes(content.strip(), max_bytes)
+    text = _dispatch_tool_render(result, max_bytes)
+    return text if _utf8_size(text) <= max_bytes else _minimal(result, max_bytes)
 
 
 def _render_market_snapshot(result: dict[str, object], max_bytes: int) -> str:

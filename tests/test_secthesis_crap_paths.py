@@ -20,6 +20,10 @@ import pytest
 import app.sec.client as client
 import app.sec.context as context
 import app.sec.discovery.service as disc
+from app.research.agents import ImpactChannel
+from app.research.agents.bearbot import BearAnalysis
+from app.research.agents.bullbot import BullAnalysis
+from app.research.agents.stockbot import StockbotAnalysis
 from app.research.dossiers.sec import (
     DossierIntegrityError,
     SECDossier,
@@ -3616,3 +3620,315 @@ def test_reap_and_exit_and_trigger_paths(tmp_path: Path) -> None:
         copy_entry_untyped("nope", "p", "rules")
     with pytest.raises(ValueError):
         create_untyped([object()])
+def _srepo_rel(**kw: object) -> dict[str, object]:
+    base: dict[str, object] = {"relationship_id": "rel:1", "source": "SEC", "from_entity": "MSFT",
+             "to_entity": "OpenAI", "relationship_type": "investor_in", "evidence_ids": ["ev:1"]}
+    base.update(kw)
+    return base
+
+
+def test_create_dossier_rejects_bad_materiality() -> None:
+    with pytest.raises(DossierIntegrityError):
+        _srepo_dossier(findings=[{"text": "x", "evidence_ids": ["ev:1"]}],
+                       relationships=[_srepo_rel(materiality="huge")])
+    ok = _srepo_dossier(findings=[{"text": "x", "evidence_ids": ["ev:1"]}],
+                        relationships=[_srepo_rel(materiality="high")])
+    validate_dossier(ok, {"ev:1"})
+
+
+def test_create_dossier_rejects_dangling_relationship_evidence() -> None:
+    with pytest.raises(DossierIntegrityError):
+        validate_dossier(_srepo_dossier(
+            findings=[{"text": "x", "evidence_ids": ["ev:1"]}],
+            relationships=[_srepo_rel(evidence_ids=["ev:nope"])]), {"ev:1", "ev:nope-x"})
+
+
+def test_create_dossier_rejects_ungrounded_alias() -> None:
+    with pytest.raises(DossierIntegrityError):
+        _srepo_dossier(findings=[{"text": "x", "evidence_ids": ["ev:1"]}],
+                       aliases=[{"alias": "MSFT", "entity": "Microsoft", "source": "sec_document"}])
+    ok = _srepo_dossier(findings=[{"text": "x", "evidence_ids": ["ev:1"]}],
+                        aliases=[{"alias": "MSFT", "entity": "Microsoft",
+                                  "source": "sec_document", "evidence_ids": ["ev:1"]}])
+    validate_dossier(ok, {"ev:1"})
+
+
+def test_classify_document_exhibit_defaults() -> None:
+    assert documents.classify_document("EX-99.1", None, "") == "press_release"
+    assert documents.classify_document(None, "ex991.htm", None) == "press_release"
+    assert documents.classify_document("EX-10.1", None, "") == "material_contract"
+    assert documents.classify_document(None, "ex101.htm", "Material agreement") == "material_contract"
+    assert documents.classify_document(None, None, "random memo") == "other"
+
+
+def test_rank_reasons_and_section_match() -> None:
+    hit = SECTextHit(search_id="s", attempt_id="a", query="Microsoft exposure", accession_no="ACC",
+                     form="10-K", filed_at="2024-01-01", filer_cik=789790, filer_name="Microsoft Corp",
+                     matched_document="ex101.htm", issuer_cik=789790, file_type="EX-10.1 Material contract",
+                     file_description="Purchase commitment $5 million counterparty contract",
+                     items=("Item 1.01",))
+    key = disc._RankKey({789790}, {disc.normalize_name("Microsoft Corp")}, {"10-K"},
+                        ("microsoft", "exposure"), False, "microsoft exposure")
+    reasons = key.reasons(hit)
+    assert {"issuer-match", "exact-query-match", "query-topic-match", "requested-form",
+            "priority-form", "quantified-exposure", "exposure-terminology"} <= set(reasons)
+    assert disc._hit_section(hit, ("contract",)) == 0
+    assert disc._hit_section(hit, ("microsoft",)) == 2
+    assert disc._search_issuer_cik(SECSearchRequest(cik="bad!!"), []) is None
+
+
+# ---------------------------------------------------------------------------
+# CrapShapes slice: grounded impact channels + relationship shape + final
+# channel normalization. Observable contracts: malformed channels are skipped
+# (never fail-closed), ungrounded entries are dropped, bad relationship
+# payloads raise DossierIntegrityError at shape time.
+# ---------------------------------------------------------------------------
+
+
+def _shapes_env(channels: object) -> str:
+    import json as _json
+
+    return _json.dumps(
+        {
+            "claims": [{"text": "10-K notes steady demand", "evidence_ids": ["ev:1"]}],
+            "follow_ups": [],
+            "impact_channels": channels,
+        }
+    )
+
+
+def test_committee_envelope_skips_malformed_channel_keeps_grounded() -> None:
+    from app.research.agents import parse_committee_envelope
+
+    env = parse_committee_envelope(
+        _shapes_env(
+            [
+                {"name": "  ", "assessment": "noise", "evidence_ids": ["ev:1"]},
+                42,
+                {
+                    "name": "Azure demand",
+                    "assessment": "raises commercial revenue",
+                    "evidence_ids": ["ev:1", "ev:1"],
+                },
+            ]
+        ),
+        frozen=["ev:1"],
+        agent="stockbot",
+    )
+    assert [c.name for c in env.impact_channels] == ["Azure demand"]
+    assert env.impact_channels[0].evidence_ids == ["ev:1"]
+
+
+def test_committee_envelope_channel_ids_must_be_string_list() -> None:
+    from app.research.agents import parse_committee_envelope
+
+    env = parse_committee_envelope(
+        _shapes_env(
+            [
+                {"name": "Bad shape", "evidence_ids": "ev:1"},
+                {"name": "Azure demand", "evidence_ids": ["ev:1", 7]},
+            ]
+        ),
+        frozen=["ev:1"],
+        agent="stockbot",
+    )
+    assert env.impact_channels == []
+def test_committee_envelope_rejects_channel_citing_unknown_freeze_id() -> None:
+    from app.research.agents import ModelOutputFailure, parse_committee_envelope
+
+    with pytest.raises(ModelOutputFailure):
+        parse_committee_envelope(
+            _shapes_env([{"name": "Azure demand", "evidence_ids": ["ev:nope"]}]),
+            frozen=["ev:1"],
+            agent="stockbot",
+        )
+
+
+def test_committee_envelope_drops_ungrounded_channel() -> None:
+    from app.research.agents import parse_committee_envelope
+
+    env = parse_committee_envelope(
+        _shapes_env([{"name": "Azure demand", "evidence_ids": []}]),
+        frozen=["ev:1"],
+        agent="stockbot",
+    )
+    assert env.impact_channels == []
+
+
+def test_committee_envelope_channel_ids_must_be_string_list() -> None:
+    from app.research.agents import parse_committee_envelope
+
+    env = parse_committee_envelope(
+        _shapes_env([{"name": "Azure demand", "evidence_ids": ["ev:1", 7]}]),
+        frozen=["ev:1"],
+        agent="stockbot",
+    )
+    assert env.impact_channels == []
+
+
+def test_validate_relationship_shape_rejects_non_mapping() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    with pytest.raises(DossierIntegrityError):
+        _validate_relationship_shape({"relationship_id": ["not", "a", "mapping"]}, "SEC-D1")
+
+
+def test_validate_relationship_shape_rejects_blank_relationship_id() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    rel = _srepo_rel(relationship_id="  ")
+    with pytest.raises(DossierIntegrityError):
+        _validate_relationship_shape(rel, "SEC-D1")
+
+
+def test_validate_relationship_shape_rejects_non_sec_source() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    with pytest.raises(DossierIntegrityError):
+        _validate_relationship_shape(_srepo_rel(source="10-K"), "SEC-D1")
+
+
+def test_validate_relationship_shape_rejects_uncited_evidence() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    with pytest.raises(DossierIntegrityError):
+        _validate_relationship_shape(_srepo_rel(evidence_ids=[]), "SEC-D1")
+
+
+def test_validate_relationship_shape_rejects_bad_verification() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    with pytest.raises(DossierIntegrityError):
+        _validate_relationship_shape(
+            _srepo_rel(verification={"status": "inferred"}), "SEC-D1"
+        )
+
+
+def test_validate_relationship_shape_accepts_grounded_record() -> None:
+    from app.research.dossiers.sec import _validate_relationship_shape
+
+    record, uniq = _validate_relationship_shape(_srepo_rel(), "SEC-D1")
+    assert record["relationship_id"] == "rel:1"
+    assert uniq == ["ev:1"]
+
+
+def _shapes_trio(
+    stock_ch: list[dict[str, object]], bull_ch: object, bear_ch: list[dict[str, object]],
+) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
+    stock = StockbotAnalysis(answer="a", base_case="b", claims=[],
+                             session_id="s:1", wave_id=1, freeze_id="F1",
+                             evidence_ids=["ev:1"], as_of="2025-06-30",
+                             question="q", impact_channels=[_shapes_channel(c) for c in stock_ch])
+    bull = BullAnalysis(stance="bullish", bull_case="up", claims=[],
+                        session_id="s:1", wave_id=1, freeze_id="F1",
+                        evidence_ids=["ev:1"], as_of="2025-06-30",
+                        question="q", impact_channels=[])
+    if isinstance(bull_ch, list):
+        bull.impact_channels.extend(_shapes_channel(c) for c in bull_ch)
+    bear = BearAnalysis(stance="bearish", bear_case="down", claims=[],
+                        session_id="s:1", wave_id=1, freeze_id="F1",
+                        evidence_ids=["ev:1"], as_of="2025-06-30",
+                        question="q", impact_channels=[_shapes_channel(c) for c in bear_ch])
+    if isinstance(bull_ch, str):
+        bear.impact_channels.append(ImpactChannel(name=bull_ch, assessment="raw", evidence_ids=["ev:1"]))
+    return stock, bull, bear
+
+
+def _shapes_channel(raw: dict[str, object]) -> ImpactChannel:
+    """Validated test channel (malformed test payloads raise, mirroring parse rules)."""
+    name = raw.get("name")
+    ids = raw.get("evidence_ids")
+    assert isinstance(name, str) and name.strip()
+    assert isinstance(ids, list) and ids and all(isinstance(e, str) for e in ids)
+    detail = raw.get("explanation", raw.get("assessment", ""))
+    return ImpactChannel(name=name.strip()[:200], assessment=str(detail),
+                         evidence_ids=[e for e in ids if isinstance(e, str)])
+
+
+def test_normalize_channel_prefers_name_over_explanation_fallback() -> None:
+    from app.research.synthesis.final import _normalize_channel
+
+    named = _normalize_channel(
+        {"name": "Azure demand", "severity": "high", "explanation": "raises revenue", "evidence_ids": ["ev:1"]}
+    )
+    assert named is not None
+    assert named["name"] == "Azure demand"
+    assert named["severity"] == "high"
+    aliased = _normalize_channel({"title": "Azure demand", "text": "raises revenue", "refs": ["ev:1"]})
+    assert aliased is not None
+    assert aliased["name"] == "Azure demand"
+    assert aliased["explanation"] == "raises revenue"
+    assert _normalize_channel({"severity": "high", "evidence_ids": ["ev:1"]}) is None
+    assert _normalize_channel({"name": "Azure demand", "evidence_ids": []}) is None
+
+
+def test_normalize_channel_reads_object_attribute_paths() -> None:
+    from app.research.synthesis.final import _normalize_channel
+
+    chan = _normalize_channel(
+        SimpleNamespace(name="Azure demand", severity="high", explanation="raises revenue", evidence_ids=["ev:1"])
+    )
+    assert chan is not None
+    assert chan["name"] == "Azure demand"
+    assert chan["severity"] == "high"
+    assert chan["evidence_ids"] == ["ev:1"]
+
+
+def test_channels_from_analyses_dedupes_and_skips_nameless() -> None:
+    from app.research.synthesis.final import _channels_from_analyses
+
+    channel: dict[str, object] = {
+        "name": "Azure demand",
+        "severity": "high",
+        "explanation": "raises revenue",
+        "evidence_ids": ["ev:1"],
+    }
+    stock, bull, bear = _shapes_trio(
+        [dict(channel), dict(channel)],
+        [],
+        [{"name": "Other branch", "evidence_ids": ["ev:1"]}],
+    )
+    out = _channels_from_analyses(stock, bull, bear)
+    assert [(c["name"], c["explanation"]) for c in out] == [
+        ("Azure demand", "raises revenue"),
+        ("Other branch", "Other branch"),
+    ]
+
+
+def test_channels_from_analyses_keeps_sibling_impact_channel_shape() -> None:
+    from app.research.synthesis.final import _channels_from_analyses
+
+    stock, bull, bear = _shapes_trio(
+        [{"name": "Azure demand", "assessment": "raises revenue", "evidence_ids": ["ev:1"]}],
+        [],
+        [],
+    )
+    out = _channels_from_analyses(stock, bull, bear)
+    assert len(out) == 1
+    assert out[0]["name"] == "Azure demand"
+    assert out[0]["evidence_ids"] == ["ev:1"]
+
+
+def test_synthesize_final_falls_back_to_per_claim_channels() -> None:
+    from app.research.agents import GroundedClaim
+    from app.research.synthesis.committee import CommitteeDisagreement
+    from app.research.synthesis.final import synthesize_final
+
+    stock, bull, bear = _shapes_trio([], [], [])
+    stock.claims[:] = [GroundedClaim(text="Azure demand raises revenue", evidence_ids=["ev:1"])]
+    disagreement = CommitteeDisagreement(
+        session_id="s:1", wave_id=1, freeze_id="F1", agreement=["shared read"]
+    )
+    final = synthesize_final(
+        "q",
+        session_id="s:1",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="2025-06-30",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=disagreement,
+    )
+    assert [c["name"] for c in final.impact_channels] == ["Azure demand raises revenue"]
+    assert final.impact_channels[0]["evidence_ids"] == ["ev:1"]

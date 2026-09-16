@@ -167,6 +167,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         requires_evidence=True,
         notes="SEC-only architecture eval: GS direct OpenAI exposure + indirect channels, latest filings pinned, unbounded useful reads, duplicate-no-progress rejected, raw preserved + derived views linked, one submit, freeze, same-freeze committee, unknown stays unknown, facts/inference split, material claims trace to raw.",
     ),
+    Scenario(
+        name="msft-openai-bankruptcy-sec-only",
+        family=ScenarioFamily.MULTI_STEP,
+        question="What happens to Microsoft if OpenAI goes bankrupt?",
+        ticker="MSFT",
+        as_of="2026-08-10",
+        expected_tools=("find_sec_entities", "list_sec_filings", "get_sec_document", "search_sec_filings"),
+        requires_evidence=True,
+        notes="OpenAI-bankruptcy SEC-only regression: pinned as_of fixtures; material Microsoft exposure channels (investment/ownership, commercial/revenue, receivable/credit, Azure/purchase commitment) plus at least one non-MSFT branch (AMZN/CoreWeave/AMD/Cerebras/ORCL per as_of); no facts past the fixture cutoff.",
+    ),
 )
 
 
