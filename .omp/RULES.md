@@ -204,10 +204,15 @@ can false-positive) before removing a dependency.
 
 Before PR/merge, and always after dependency/lockfile changes:
 ```bash
-osv-scanner scan -r .
-gitleaks git .
+bun run verify-deps      # osv-scanner scan source -r . --no-resolve --config osv-scanner.toml
+bun run verify-secrets   # gitleaks git . --config .gitleaks.toml --redact
 cargo deny check --manifest-path operator/Cargo.toml
 ```
+Both are wired into `bun run verify`, so they run on every change, not only before merge.
+`--no-resolve` keeps the dependency gate on what this repo actually pins (requirements.txt
+direct pins + the full bun.lock tree); manifest transitive resolution reports deps.dev floors
+that are not what setup installs. Suppressions stay per-finding with a written reason and an
+`ignoreUntil` date (`osv-scanner.toml`, `.gitleaks.toml`).
 Use repo-owned Semgrep rules for invariants: authz/risk bypass, direct broker execution
 outside the approved boundary, unvalidated model output at action boundaries,
 broad exception swallowing in critical code, dangerous subprocess/shell, new suppression hatches.
