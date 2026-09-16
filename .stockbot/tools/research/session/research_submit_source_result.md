@@ -33,11 +33,11 @@ None
 
 ## Required arguments
 
-- `coverage` (object): Coverage with useful_for_question sufficient|insufficient (required). New sufficiency keys (major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, major_entities_missing, remaining_branches, routes_unsearched) ride alongside existing resolved/partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps; when any sufficiency key is present, sufficient requires non-empty investigated entities/relationships/forms/exhibits and empty material opens/missing entities/remaining branches/routes, else the legacy envelope applies.
+- `coverage` (object): Coverage envelope: what was searched and how far it got.
 - `evidence_ids` (array): Evidence IDs grounding a sufficient result (empty only with insufficient).
 - `job_id` (string): Running source job ID to complete.
 - `session_id` (string): Research session ID.
-- `unresolved_questions` (array): Open questions left by the source run.
+- `unresolved_questions` (array): Open questions left by the source run; must be empty with sufficient.
 
 ## Optional arguments
 

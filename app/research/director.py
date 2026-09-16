@@ -1,26 +1,29 @@
-"""Deterministic director: wave-1 orchestration + wave-2 gate.
+"""Deterministic director: per-wave orchestration + next-wave gate.
 
 Pipeline (models decide content; infra owns everything else)::
 
     create-session > SEC job > verify artifacts > freeze E1
       > launch stockbot/bullbot/bearbot on the same freeze (parallel)
       > collect > compute disagreement
-      > decide_wave2: coverage challenge first (sufficient claim with missing
-        branches / material open / unsearched routes -> targeted SEC follow-up),
-        then material + actionable committee follow-up within budget,
-        else synthesize final. Targeted wave resolves one uncertainty, then a
-        new freeze + rerun analysis; it never redefines the objective (original
+      > decide_next_wave: budgets when explicitly configured, then coverage
+        challenge (sufficient claim with missing branches / material open /
+        unsearched routes -> targeted SEC follow-up), then material +
+        actionable committee follow-up, then the novelty/loop stop
+        (zero-novelty or exact-repeat convergence -> no_novelty/loop_detected).
+        Waves are sequence numbers, not a two-wave architecture: the runner
+        loops 1..N and each wave resolves one uncertainty, then a new freeze +
+        rerun analysis; the loop never redefines the objective (original
         question + covered vs remaining branches ride Wave1Result across waves).
 
 Stopping reasons (persisted via ``record_stop``): ``complete``,
-``max_waves`` (runaway-test budget guard, never completeness proof),
-``runtime_exceeded``, ``jobs_exceeded``,
-``no_questions``, ``not_actionable``, ``low_gain``.
+``max_waves``/``runtime_exceeded``/``jobs_exceeded`` (only when that budget is
+explicitly configured; never a completeness proof), ``no_questions``,
+``not_actionable``, ``low_gain``, ``no_novelty``, ``loop_detected``.
 
 Fake-model sketch (no live calls): inject ``DirectorDeps`` with lambdas
 returning canned ids/evidence/analyses; call ``run_wave1`` then
-``decide_wave2``; assert the stop reason persists and wave-2 fires only
-when a material actionable SEC request exists within budget.
+``decide_next_wave``; assert the stop reason persists and the next wave fires
+only when a material actionable SEC request exists within budget.
 """
 
 from __future__ import annotations
@@ -50,19 +53,25 @@ StopReason = Literal[
     "no_questions",
     "not_actionable",
     "low_gain",
+    "no_novelty",
+    "loop_detected",
 ]
 
 WAVE1_ID = 1
-WAVE2_ID = 2
+
+# Zero-novelty counts that make a wave unproductive (all four zero -> zero-novelty).
+NOVELTY_ZERO_KEYS = ("new_raw_documents", "new_evidence_records", "new_relationships", "resolved_questions")
+# Consecutive zero-novelty waves on the same branch before that branch stops.
+ZERO_NOVELTY_LIMIT = 2
 
 
 @dataclass
 class DirectorBudgets:
-    """Runaway-test budget guard (max_waves=2 caps waves, never proves completeness)."""
-    max_waves: int = 2
-    max_jobs: int = 20
+    """Runaway-test budget guard; None means unlimited (never a completeness proof)."""
+    max_waves: int | None = None
+    max_jobs: int | None = None
     max_tool_calls: int | None = None
-    runtime_budget_s: float = 900.0
+    runtime_budget_s: float | None = None
 
 
 @dataclass
@@ -91,6 +100,7 @@ class Wave1Result:
     relationships: list[dict[str, object]] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     question: str = ""
+    novelty: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave_id(self.wave_id)
@@ -116,6 +126,18 @@ class LoopDetector:
     """Exact-repeat detector: same action + same result + no evidence progress."""
     seen: dict[tuple[str, str, str, str, tuple[str, ...], str, str, str], tuple[str, int]] = field(default_factory=dict)
     telemetry: list[dict[str, object]] = field(default_factory=list)
+    def precheck(self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str]) -> dict[str, object]:
+        """Pre-dispatch gate: an exact repeat of a no-progress action is never re-executed.
+
+        Materially different actions always run; only the same normalized action
+        whose prior run produced no evidence is blocked (telemetry entry appended).
+        """
+        prior = self.seen.get(action)
+        if prior is not None and prior[1] <= 0:
+            entry: dict[str, object] = {"action": list(action), "reason": "research_loop_detected"}
+            self.telemetry.append(entry)
+            return {"duplicate": True, "reason": "research_loop_detected"}
+        return {"duplicate": False, "reason": ""}
     def check(self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str], result_hash: str, evidence_delta: int) -> dict[str, object]:
         """Record one action outcome; reject exact no-progress repeats."""
         prior = self.seen.get(action)
@@ -196,17 +218,18 @@ def _is_actionable(request: ResearchRequest) -> bool:
 def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float) -> WaveDecision | None:
     """First exhausted budget wins; None when all budgets hold.
 
+    Every budget is optional: a field left at None is unlimited and never fires.
     max_waves is a runaway-test budget guard only; hitting it never proves
     coverage complete (settle carries limitations). Tool calls are unlimited
     by default (max_tool_calls=None); explicit int limits, when configured,
     are enforced at dispatch (repository/runner), not here.
     """
     _ = tool_calls_used
-    if waves_used >= budgets.max_waves:
+    if budgets.max_waves is not None and waves_used >= budgets.max_waves:
         return WaveDecision(False, "max_waves", f"waves_used={waves_used} max={budgets.max_waves}")
-    if elapsed_s >= budgets.runtime_budget_s:
+    if budgets.runtime_budget_s is not None and elapsed_s >= budgets.runtime_budget_s:
         return WaveDecision(False, "runtime_exceeded", f"elapsed={elapsed_s}s budget={budgets.runtime_budget_s}s")
-    if jobs_used >= budgets.max_jobs:
+    if budgets.max_jobs is not None and jobs_used >= budgets.max_jobs:
         return WaveDecision(False, "jobs_exceeded", f"jobs_used={jobs_used} max={budgets.max_jobs}")
     return None
 
@@ -277,26 +300,75 @@ def _research_stop(wave1: Wave1Result) -> WaveDecision:
         return WaveDecision(False, "not_actionable", "material requests need non-SEC domains")
     actionable.sort(key=_decision_key, reverse=True)
     top = actionable[0]
-    return WaveDecision(True, "continue", f"wave2 authorized: {top.question}",
+    return WaveDecision(True, "continue", f"wave {wave1.wave_id + 1} authorized: {top.question}",
                         targeted_question=top.question, targeted_domain=top.requested_source_domain)
 
 
-def decide_wave2(
+def _novelty_count(novelty: Mapping[str, object], key: str) -> int:
+    """Non-negative int for one novelty key; malformed or absent values count as 0."""
+    value = novelty.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _novelty_stop(wave1: Wave1Result, novelty: Mapping[str, object] | None) -> WaveDecision | None:
+    """Convergence gate: an unproductive branch, or a blocked exact repeat, stops the run.
+
+    Zero-novelty means the wave produced no new raw document, no new evidence
+    record, no new relationship, and no resolved question. One such wave may
+    retry the branch; ZERO_NOVELTY_LIMIT consecutive ones stop it. A blocked
+    exact repeat inside a zero-novelty wave stops it immediately. Counts never
+    stop research: only the absence of material progress does.
+    """
+    counts: object = novelty if isinstance(novelty, Mapping) and novelty else wave1.novelty
+    if not isinstance(counts, Mapping) or not counts:
+        return None
+    if any(_novelty_count(counts, key) > 0 for key in NOVELTY_ZERO_KEYS):
+        return None
+    blocked = _novelty_count(counts, "duplicate_actions_blocked")
+    streak = _novelty_count(counts, "zero_novelty_waves") or 1
+    if blocked:
+        return WaveDecision(
+            False, "loop_detected",
+            f"wave {wave1.wave_id}: {blocked} exact repeated action(s) with no evidence progress and a zero-novelty wave",
+        )
+    if streak >= ZERO_NOVELTY_LIMIT:
+        return WaveDecision(
+            False, "no_novelty",
+            f"wave {wave1.wave_id}: {streak} consecutive zero-novelty wave(s) on this branch "
+            "(no new raw documents, evidence, relationships, or resolved questions)",
+        )
+    return None
+
+
+def decide_next_wave(
     wave1: Wave1Result,
     *,
     deps: DirectorDeps,
-    budgets: DirectorBudgets = DirectorBudgets(),
+    budgets: DirectorBudgets | None = None,
     waves_used: int = 1,
     jobs_used: int = 4,
     tool_calls_used: int = 0,
     elapsed_s: float = 0.0,
+    novelty: Mapping[str, object] | None = None,
 ) -> WaveDecision:
-    """Gate exactly one targeted SEC wave (coverage challenge first); persist the reason either way."""
+    """Gate the next wave (budgets -> coverage challenge -> committee -> novelty/loop).
+
+    ``waves_used`` is the wave number the caller has completed; waves are
+    sequence numbers, so there is no fixed wave ceiling: every gate is decided
+    by coverage, the committee, and measured progress. Budgets fire only when
+    explicitly configured. The novelty/loop gate runs last and vetoes an
+    otherwise-authorized wave when the branch just finished produced zero
+    novelty (``no_novelty``) or blocked an exact repeated action
+    (``loop_detected``).
+    """
+    budgets = budgets if budgets is not None else DirectorBudgets()
     decision = _budget_stop(budgets, waves_used, jobs_used, tool_calls_used, elapsed_s)
     if decision is None:
         decision = _coverage_challenge(wave1)
     if decision is None:
         decision = _research_stop(wave1)
+    if decision.authorized:
+        decision = _novelty_stop(wave1, novelty) or decision
     deps.record_stop(wave1.session_id, f"{decision.stop_reason}:{decision.reason_detail}")
     return decision
 
@@ -325,15 +397,16 @@ def synthesize_wave1(
 
 
 __all__ = [
+    "NOVELTY_ZERO_KEYS",
     "WAVE1_ID",
-    "WAVE2_ID",
+    "ZERO_NOVELTY_LIMIT",
     "DirectorBudgets",
     "DirectorDeps",
     "LoopDetector",
     "StopReason",
     "Wave1Result",
     "WaveDecision",
-    "decide_wave2",
+    "decide_next_wave",
     "normalize_research_action",
     "run_wave1",
     "synthesize_wave1",

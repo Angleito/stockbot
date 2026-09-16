@@ -320,7 +320,11 @@ DATASETS["sec_searches"] = Dataset(
         ("date_coverage", TEXT), ("forms_covered_json", TEXT),
         ("pending_jobs_json", TEXT), ("warnings_json", TEXT),
         ("errors_json", TEXT), ("evidence_packet_ids_json", TEXT),
-        ("dedup_counts_json", TEXT), ("retrieved_at", TEXT),
+        ("dedup_counts_json", TEXT),
+        # Retrieval truth: paging drained every route; the source itself had
+        # no caps/limits left. Independent of the display packet bound.
+        ("pagination_complete", pa.bool_()), ("source_exhausted", pa.bool_()),
+        ("retrieved_at", TEXT),
         ("known_at", TEXT), ("parser_version", TEXT),
     )),
     unique_keys=("search_id",),
@@ -349,6 +353,7 @@ DATASETS["sec_text_hits"] = Dataset(
         ("matched_document", TEXT), ("file_type", TEXT),
         ("file_description", TEXT), ("items_json", TEXT), ("sic", TEXT),
         ("location", TEXT), ("state", TEXT), ("inc_state", TEXT),
+        ("snippet", TEXT),
         ("score", DOUBLE), ("source_url", TEXT), ("page", INTEGER),
         ("known_at", TEXT), ("retrieved_at", TEXT), ("content_hash", TEXT),
         ("parser_version", TEXT), ("raw_archive_path", TEXT),

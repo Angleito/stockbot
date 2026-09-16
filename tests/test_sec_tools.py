@@ -1222,3 +1222,205 @@ def test_edgar_alias_expansion_validated_keeps_provenance_no_false_identity(
     assert result["pit_basis"] == "known_at"
     # No false identity: the verified MSFT CIK round-trips, never a guess.
     assert candidate["cik"] == 789790
+
+
+# ---- research_read_search: paged reads of one persisted search universe ----
+
+_READ_SEARCH = "s-read-1"
+
+
+def _read_search_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RequestContext:
+    """Data root at tmp_path (SEC ledger + research DB), research permission."""
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    return RequestContext("research", frozenset({Capability.RESEARCH}), data_root=tmp_path)
+
+
+def _seed_research_session(root: Path) -> str:
+    from app.research.repository import ResearchRepository
+    from app.research.service import create_research
+
+    return create_research("Acme Labs exposure?", "risk", as_of="2026-03-02T00:00:00+00:00",
+                           repo=ResearchRepository(data_root=root))
+
+
+def _seed_read_search_ledger(root: Path, *, request: SECSearchRequest | None = None,
+                             hits: tuple[SECTextHit, ...] = ()) -> None:
+    """Persist one search via the store's own ledger writer."""
+    from app.sec import store as sec_store
+
+    sec_store.persist_search_ledger(
+        search_id=_READ_SEARCH,
+        request=request if request is not None else SECSearchRequest(query="Acme Labs"),
+        text_hits=hits,
+        coverage_status="complete",
+        results_reported=len(hits), results_retrieved=len(hits), pages=2,
+        forms_covered=("10-K", "8-K"), pending_backfill_jobs=("backfill-1",),
+        pagination_complete=True, source_exhausted=False,
+        root=root,
+    )
+
+
+def _read_search_hits() -> tuple[SECTextHit, ...]:
+    def _hit(accession: str, form: str, score: float) -> SECTextHit:
+        return SECTextHit(
+            search_id=_READ_SEARCH, attempt_id="s-read-1-efts-1", query="Acme Labs",
+            accession_no=accession, form=form, filed_at="2026-01-01", filer_cik=1234567,
+            filer_name="Acme Labs Inc", matched_document=f"{accession}.htm",
+            file_type=form, score=score, snippet="supply agreement",
+        )
+
+    return (
+        _hit("0000000001-26-000001", "10-K", 9.0),
+        _hit("0000000001-26-000002", "8-K", 5.0),
+        _hit("0000000001-26-000003", "10-K", 1.0),
+    )
+
+
+def _read(context: RequestContext, arguments: dict[str, object]) -> dict[str, object]:
+    return tools.execute_tool("research_read_search", arguments, "test", context=context)
+
+
+def test_research_read_search_pages_persisted_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _read_search_context(tmp_path, monkeypatch)
+    _seed_read_search_ledger(tmp_path, hits=_read_search_hits())
+    session_id = _seed_research_session(tmp_path)
+
+    page = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "limit": 2})
+    assert page["total"] == 3
+    assert (page["offset"], page["limit"]) == (0, 2)
+    assert page["query"] == "Acme Labs"
+    assert page["more"] is True
+    # Retrieval truth travels with the page, independent of the display bound.
+    assert page["pagination_complete"] is True
+    coverage = _as_dict(page["coverage"])
+    assert coverage["status"] == "complete"
+    assert coverage["forms_covered"] == ["10-K", "8-K"]
+    assert coverage["pending_backfill_jobs"] == ["backfill-1"]
+    hits = [_as_dict(hit) for hit in _as_seq(page["hits"])]
+    assert [hit["accession"] for hit in hits] == [
+        "0000000001-26-000001", "0000000001-26-000002"]  # best score first
+    assert hits[0]["document"] == "0000000001-26-000001.htm"
+    assert hits[0]["section"] == "10-K"
+    assert hits[0]["snippet"] == "supply agreement"
+    assert hits[0]["score"] == 9.0
+
+    tail = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "offset": 2, "limit": 2})
+    assert [hit["accession"] for hit in (_as_dict(h) for h in _as_seq(tail["hits"]))] == [
+        "0000000001-26-000003"]
+    assert tail["more"] is False
+
+
+def test_research_read_search_forms_filter_and_limit_clamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _read_search_context(tmp_path, monkeypatch)
+    _seed_read_search_ledger(tmp_path, hits=_read_search_hits())
+    session_id = _seed_research_session(tmp_path)
+
+    filtered = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "forms": ["10-k"]})
+    assert filtered["total"] == 2
+    assert [hit["form"] for hit in (_as_dict(h) for h in _as_seq(filtered["hits"]))] == ["10-K", "10-K"]
+
+    clamped = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "limit": 999})
+    assert clamped["limit"] == 500
+    assert len(_as_seq(clamped["hits"])) == 3
+
+
+def test_research_read_search_unknown_session_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _read_search_context(tmp_path, monkeypatch)
+    _seed_read_search_ledger(tmp_path)
+    session_id = _seed_research_session(tmp_path)
+
+    unknown_session = _read(context, {"session_id": "s-nope", "search_id": _READ_SEARCH})
+    assert unknown_session["error_type"] == "unknown_session"
+    assert "s-nope" in str(unknown_session["error"])
+
+    unknown_search = _read(context, {"session_id": session_id, "search_id": "s-nope"})
+    assert unknown_search["error_type"] == "unknown_search"
+    assert "s-nope" in str(unknown_search["error"])
+
+
+def test_research_read_search_rejects_bad_page_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _read_search_context(tmp_path, monkeypatch)
+    _seed_read_search_ledger(tmp_path)
+    session_id = _seed_research_session(tmp_path)
+    base: dict[str, object] = {"session_id": session_id, "search_id": _READ_SEARCH}
+
+    for arguments, needle in (
+        ({"offset": -1}, "'offset' must be an integer >= 0"),
+        ({"offset": True}, "'offset' must be an integer >= 0"),
+        ({"limit": 0}, "'limit' must be an integer >= 1"),
+        ({"limit": "5"}, "'limit' must be an integer >= 1"),
+        ({"forms": "10-K"}, "'forms' must be a list of strings"),
+        ({"forms": [1]}, "'forms' must be a list of strings"),
+    ):
+        result = _read(context, {**base, **arguments})
+        assert needle in str(result["error"]), arguments
+
+
+def test_research_read_search_reports_company_name_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context = _read_search_context(tmp_path, monkeypatch)
+    _seed_read_search_ledger(tmp_path, request=SECSearchRequest(company_name="Acme Labs"))
+    session_id = _seed_research_session(tmp_path)
+
+    packet = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH})
+    assert packet["query"] == "Acme Labs"
+    assert packet["total"] == 0 and packet["hits"] == [] and packet["more"] is False
+
+
+def test_research_read_search_tolerates_malformed_ledger_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hand-written ledger rows (absent/bad/mistyped JSON) still page instead of failing."""
+    from app.storage import parquet
+
+    context = _read_search_context(tmp_path, monkeypatch)
+    rows: list[dict[str, object]] = [
+        # request_json absent; forms_covered_json is not JSON at all
+        {"search_id": "s-read-raw-null", "coverage_status": "partial",
+         "forms_covered_json": "{not json"},
+        # request_json and pending jobs are not JSON either
+        {"search_id": "s-read-raw-malformed", "request_json": "{not json",
+         "pending_jobs_json": "not json"},
+        # valid JSON of the wrong shape for both columns
+        {"search_id": "s-read-raw-mistyped", "request_json": "[1, 2]",
+         "pending_jobs_json": '{"backfill": 1}'},
+    ]
+    parquet.write_rows("sec_searches", rows, root=tmp_path / "parquet")
+    session_id = _seed_research_session(tmp_path)
+
+    for row in rows:
+        search_id = row["search_id"]
+        packet = _read(context, {"session_id": session_id, "search_id": search_id})
+        assert "error" not in packet, search_id
+        assert packet["query"] is None
+        assert packet["total"] == 0 and packet["hits"] == [] and packet["more"] is False
+        coverage = _as_dict(packet["coverage"])
+        assert coverage["forms_covered"] == [] and coverage["pending_backfill_jobs"] == []
+        assert coverage["pagination_complete"] is None  # never recorded: unknown, not "not complete"
+
+
+def test_search_sec_filings_remainder_names_read_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A display-bounded packet points at research_read_search for the stored remainder."""
+    hits = (
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme Labs",
+                   accession_no="0000000001-26-000001", form="10-K", filed_at="2026-01-01",
+                   filer_cik=1234567, filer_name="Acme Labs Inc", matched_document="primary.htm",
+                   file_type="10-K", score=9.0),
+        SECTextHit(search_id="s1", attempt_id="s1-efts-1", query="Acme Labs",
+                   accession_no="0000000001-26-000002", form="8-K", filed_at="2026-02-01",
+                   filer_cik=1234567, filer_name="Acme Labs Inc", matched_document="primary.htm",
+                   file_type="8-K", score=5.0),
+    )
+    _patch_discovery(monkeypatch, _result(text_hits=hits))
+
+    capped = tools.execute_tool("search_sec_filings", {"query": "Acme Labs", "limit": 1},
+                                "test", context=_research_context())
+    assert capped["count"] == 2
+    assert len(_as_seq(capped["top_hits"])) == 1
+    remainder = _as_dict(capped["additional_hits"])
+    assert remainder["count"] == 1
+    assert remainder["page_with"] == "research_read_search"
+    assert remainder["next_offset"] == 1
+    assert "research_read_search(session_id, search_id)" in str(remainder["note"])
+    assert _as_dict(capped["retrieval"])["page_with"] == "research_read_search"
+
+    uncapped = tools.execute_tool("search_sec_filings", {"query": "Acme Labs"},
+                                  "test", context=_research_context())
+    assert _as_dict(uncapped["additional_hits"]) == {"count": 0}

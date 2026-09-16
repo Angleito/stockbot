@@ -5,6 +5,8 @@ are injected via monkeypatch; nothing touches the network or cache.db.
 """
 
 
+from pathlib import Path
+
 import pytest
 
 from app import valuation
@@ -125,6 +127,24 @@ def _obligation_rows() -> list[dict[str, object]]:
 
 def _obligations() -> dict[str, object]:
     return {"obligations": _obligation_rows()}
+
+
+@pytest.fixture(autouse=True)
+def _isolated_warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every warehouse open inside this test's tmp root.
+
+    The module is offline and injects its own inputs, so it must never take the
+    shared ``data/warehouse.duckdb`` lock: another process holding it (a research
+    run, a parallel suite) turned 12 of these tests into lock failures.
+    """
+    from app.services import sec_facts
+    from app.storage import duckdb as duckdb_layer
+
+    root = tmp_path / "data"
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(root))
+    monkeypatch.setattr(duckdb_layer, "DEFAULT_DATA_ROOT", root)
+    # sec_facts captured the path by value at import; keep its default in the tmp root too.
+    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", root)
 
 
 @pytest.fixture

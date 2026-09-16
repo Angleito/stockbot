@@ -535,6 +535,18 @@ tools:
     summary: "Read one persisted research resource: evidence, freeze, dossier, job, or session record."
     version: 2
     keywords: [dossier, evidence, freeze, job, one, persisted, read, reading, record, research, resource, session, single]
+  - name: research_read_search
+    domain: research
+    family: session
+    path: "/research/session/research_read_search"
+    intent: read_search_hits
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Page the persisted ranked hit universe of one SEC search, with retrieval truth."
+    version: 2
+    keywords: [additional, beyond, compact, exhaustion, filing, higher, hit, instead, large, limit, one, packet, page, paging, persisted, ranked, read, reading, rerunning, research, result, retrieval, search, sec, top, truth, universe]
   - name: research_resume
     domain: research
     family: session

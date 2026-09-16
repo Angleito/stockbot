@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from .models import (
     FAILURE_CATEGORY_VALUES,
     JOB_TYPE_VALUES,
-    SOURCE_RUNTIME_BUDGET_S,
     Failure,
     FailureCategory,
     Job,
@@ -61,19 +60,22 @@ def _section(policy: Mapping[str, object], name: str, where: str) -> Mapping[str
     return section
 
 
-def _limit(section: Mapping[str, object], key: str, where: str) -> int:
+def _limit(section: Mapping[str, object], key: str, where: str) -> int | None:
+    """Configured int ceiling, or None when absent/null (explicitly unlimited)."""
     value = section.get(key)
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{where}: policy {key!r} must be an int, got {value!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return value
 
 
-def _research_limit(policy: Mapping[str, object], key: str) -> int:
+def _research_limit(policy: Mapping[str, object], key: str) -> int | None:
     return _limit(_section(policy, "research", "<job>"), key, "<job>")
 
 
-def children_allowed(policy: Mapping[str, object], job_type: str) -> int:
-    """Max children for a parent of this type (0 when the type spawns nothing)."""
+def children_allowed(policy: Mapping[str, object], job_type: str) -> int | None:
+    """Max children for a parent of this type (0 when the type spawns nothing; None = unbounded)."""
     section_name = _JOBTYPE_SECTION.get(job_type)
     if section_name is None:
         return 0
@@ -84,9 +86,6 @@ def default_tool_budget(policy: Mapping[str, object], job_type: str) -> int | No
     """Default tool budget for a type, or None when unbounded/unbilled."""
     section_name = _JOBTYPE_SECTION.get(job_type)
     if section_name is None:
-        return None
-    raw: object = _section(policy, section_name, "<job>").get("max_tool", None)
-    if raw is None:
         return None
     return _limit(_section(policy, section_name, "<job>"), "max_tool", "<job>")
 
@@ -102,12 +101,17 @@ def job_token_budget(session: ResearchSession) -> int | None:
     return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
 
 
-def job_deadline_seconds(session: ResearchSession) -> int:
-    """Per-job deadline seconds from session budget (deadline_seconds; safety default)."""
+def job_deadline_seconds(session: ResearchSession) -> int | None:
+    """Per-job deadline seconds from session budget (deadline_seconds; None = no deadline).
+
+    deadline_seconds None/absent means the session sets no wall-clock deadline,
+    so source jobs carry none and nothing fails on elapsed time. Heartbeat
+    staleness stays a liveness signal, never a kill condition.
+    """
     raw = session.budget.get("deadline_seconds", None)
     if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
         return int(raw)
-    return SOURCE_RUNTIME_BUDGET_S
+    return None
 
 
 def active_jobs(jobs: list[Job]) -> list[Job]:
@@ -129,26 +133,40 @@ def list_children(jobs: list[Job], parent_job_id: str) -> list[Job]:
 
 
 def _check_committee(mine: list[Job], policy: Mapping[str, object], jtype: str) -> None:
-    """Enforce the committee parallel cap (committee types only)."""
+    """Enforce the committee parallel cap (committee types only; None = no cap)."""
     if jtype not in COMMITTEE_TYPES:
         return
     committee_section = _section(policy, "committee", "<job>")
+    max_parallel = _limit(committee_section, "max_parallel", "<job>")
+    if max_parallel is None:
+        return
     running_committee = sum(1 for j in mine if j.job_type in COMMITTEE_TYPES and j.status in ACTIVE_STATUSES)
-    if running_committee >= _limit(committee_section, "max_parallel", "<job>"):
+    if running_committee >= max_parallel:
         raise ValueError("<job>: parallelism_exceeded: committee max_parallel reached")
 
 
+def _check_ceiling(used: int, limit: int | None, message: str) -> None:
+    """Raise the dimension's typed failure once a configured ceiling is reached (None = unbounded)."""
+    if limit is not None and used >= limit:
+        raise ValueError(message)
+
+
 def _check_capacity(session: ResearchSession, jobs: list[Job], jtype: str, wave_id: int) -> list[Job]:
-    """Enforce wave/total/parallel/committee limits; return session-scoped jobs."""
+    """Enforce wave/total/parallel/committee limits; return session-scoped jobs.
+
+    Waves are sequence numbers: any int >= 1 is valid, and a wave ceiling bites
+    only when policy research.max_waves is a configured int. Absent/None limits
+    mean no ceiling for that dimension.
+    """
     policy = session.policy
     max_waves = _research_limit(policy, "max_waves")
-    if wave_id < 1 or wave_id > max_waves:
-        raise ValueError(f"<job>: wave_limit_exceeded: wave {wave_id} outside 1..{max_waves}")
-    if len(session.job_ids) >= _research_limit(policy, "max_total_jobs"):
-        raise ValueError("<job>: job_limit_exceeded: session max_total_jobs reached")
+    if wave_id < 1 or (max_waves is not None and wave_id > max_waves):
+        raise ValueError(f"<job>: wave_limit_exceeded: wave {wave_id} outside 1..{max_waves if max_waves is not None else 'unbounded'}")
+    _check_ceiling(len(session.job_ids), _research_limit(policy, "max_total_jobs"),
+                   "<job>: job_limit_exceeded: session max_total_jobs reached")
     mine = [j for j in jobs if j.session_id == session.session_id]
-    if len(active_jobs(mine)) >= _research_limit(policy, "max_parallel"):
-        raise ValueError("<job>: parallelism_exceeded: session max_parallel reached")
+    _check_ceiling(len(active_jobs(mine)), _research_limit(policy, "max_parallel"),
+                   "<job>: parallelism_exceeded: session max_parallel reached")
     _check_committee(mine, policy, jtype)
     return mine
 
@@ -164,12 +182,12 @@ def check_source_allowed(session: ResearchSession, source_domain: str | None) ->
 
 
 def _check_parent(mine: list[Job], policy: Mapping[str, object], parent_job_id: str | None) -> None:
-    """Enforce the depth/children limit for one parent."""
+    """Enforce the depth/children limit for one parent (None allowed = unbounded)."""
     if parent_job_id is None:
         return
     parent = inspect_job(mine, parent_job_id)
     allowed = children_allowed(policy, parent.job_type)
-    if len(list_children(mine, parent_job_id)) >= allowed:
+    if allowed is not None and len(list_children(mine, parent_job_id)) >= allowed:
         raise ValueError(f"<job>: depth_exceeded: parent {parent_job_id!r} allows {allowed} children")
 
 
@@ -192,7 +210,9 @@ def _build_job(session: ResearchSession, *, jtype: str, owner: str, wave_id: int
     policy = session.policy
     parsed_deadline = _parse_deadline(deadline)
     if parsed_deadline is None and jtype == JobType.SOURCE_AGENT.value:
-        parsed_deadline = utcnow() + timedelta(seconds=job_deadline_seconds(session))
+        budget_s = job_deadline_seconds(session)
+        if budget_s is not None:
+            parsed_deadline = utcnow() + timedelta(seconds=budget_s)
     job = Job(
         job_id=job_id or new_job_id(),
         session_id=session.session_id,
@@ -207,7 +227,9 @@ def _build_job(session: ResearchSession, *, jtype: str, owner: str, wave_id: int
         model=model,
         token_budget=token_budget if token_budget is not None else job_token_budget(session),
         tool_budget=tool_budget if tool_budget is not None else job_tool_budget(session, jtype),
-        child_budget=child_budget if child_budget is not None else children_allowed(policy, jtype),
+        # Job.child_budget is a NOT NULL int echo; enforcement reads policy
+        # (children_allowed), so an unbounded policy (None) records 0 here.
+        child_budget=child_budget if child_budget is not None else (children_allowed(policy, jtype) or 0),
     )
     job.validate("<job>")
     out = replace(session, job_ids=[*session.job_ids, job.job_id], updated_at=utcnow())

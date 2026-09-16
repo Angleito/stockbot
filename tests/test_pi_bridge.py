@@ -461,11 +461,14 @@ def test_describe_direct_tool_names_parity():
     assert isinstance(direct, list)
     tools = describe["tools"]
     assert isinstance(tools, list)
-    assert set(direct) <= {pi_bridge._tool_name(t) for t in tools if isinstance(t, dict)}
+    described = {pi_bridge._tool_name(t) for t in tools if isinstance(t, dict)}
+    assert set(direct) <= described
     assert "thesis_show" in direct
+    assert "research_read_search" in described and "research_read_search" not in direct
     assert set(TOOL_DISCOVERY_REGISTRY) - set(direct) == {
         "thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status",
         "research_start", "research_resume", "research_status", "research_cancel", "research_read",
+        "research_read_search",
         "research_add_evidence", "research_submit_source_result", "research_add_analysis", "research_finalize",
     }
 
@@ -558,7 +561,9 @@ def test_research_create_inspect_add_evidence_uses_initial_running_job(
                     "job_id": jid, "data_root": root,
                     "item": {"content": "c-ev-1", "claim_text": "c", "subject": "NVDA",
                              "source_name": "SEC", "source_uri": "https://sec.gov/x",
-                             "source_record_id": "r",
+                             "source_record_id": "0000320193-25-000079",
+                             "document_name": "nvda-20250331.htm",
+                             "matching_passage": "Data-center revenue grew on accelerator demand (p.31).",
                              "known_at": "2025-06-29T00:00:00+00:00"}})
     )
     assert added is not None and "result" in added, added
@@ -695,15 +700,24 @@ def test_call_tool_research_finalize_completes_trio_session(
     _svc.record_evidence(sid, src, {
         "evidence_id": eid, "wave_id": 1, "content": "c-" + eid, "claim_text": "c",
         "subject": "NVDA", "source_name": "SEC", "source_uri": "https://sec.gov/x",
-        "source_record_id": "r", "known_at": "2025-06-29T00:00:00+00:00",
+        "source_record_id": "0000320193-25-000079", "document_name": "nvda-20250331.htm",
+        "matching_passage": "Data-center revenue grew on accelerator demand (p.31).",
+        "known_at": "2025-06-29T00:00:00+00:00",
     }, repo=repo)
     _svc.complete_job(src, {}, repo=repo)
     fid = str(_svc.freeze_session(sid, 1, repo=repo)["freeze_id"])
+    analysis: dict[str, object] = {
+        "executive_view": "NVDA demand is supported by the filed evidence.",
+        "claims": [{"text": "finding", "claim_type": "observed_fact", "evidence_ids": [eid]}],
+        "impact_channels": [{"text": "Data-center demand", "direction": "positive", "evidence_ids": [eid]}],
+        "materiality": {"overall": "high", "reasoning": "filing-backed"},
+        "uncertainties": list[str](),
+        "what_would_change": ["a weaker order book"],
+        "follow_ups": list[dict[str, object]](),
+    }
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid, jid, role, {
-            "claims": [{"text": "finding", "evidence_ids": [eid]}], "follow_ups": [],
-        }, repo=repo)
+        _svc.record_committee_analysis(sid, jid, role, analysis, repo=repo)
     assert not [j for j in repo.list_jobs(sid) if j.status in ("queued", "running")]
     bound = PiSessionContext(session_id="pi-finalize", active_research_session_id=sid)
     out = _gw.execute_pi_tool("call_tool", {
@@ -711,7 +725,7 @@ def test_call_tool_research_finalize_completes_trio_session(
         "arguments": {
             "session_id": sid,
             "answer": "NVDA demand is supported by the filed evidence.",
-            "claims": [{"text": "finding", "evidence_ids": [eid]}],
+            "claims": [{"text": "finding", "claim_type": "observed_fact", "evidence_ids": [eid]}],
         },
     }, bound, data_root=str(root))
     meta = out.get("meta")
@@ -730,3 +744,75 @@ def test_call_tool_research_finalize_completes_trio_session(
         assert isinstance(claim, dict)
         refs = claim.get("evidence_ids", [])
         assert isinstance(refs, list) and set(refs) <= frozen
+
+
+def test_analysis_record_reaches_committee_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """research.analysis.record: arg shapes, then one kernel-validated role analysis."""
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+
+    def _dispatch(request: dict[str, object]) -> dict[str, object]:
+        out = pi_bridge._handle(json.dumps(
+            {"id": "a0", "op": "research.analysis.record", **request}))
+        assert isinstance(out, dict)
+        return out
+
+    assert _dispatch({}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch({"session_id": "s"}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch({"session_id": "s", "job_id": "j"}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch({"session_id": "s", "job_id": "j", "role": "scout", "analysis": {}}) == {
+        "id": "a0", "error": "invalid_arg", "detail": "'role' must be stockbot|bullbot|bearbot"}
+    assert _dispatch({"session_id": "s", "job_id": "j", "role": "stockbot", "analysis": []}) == {
+        "id": "a0", "error": "invalid_arg", "detail": "'analysis' must be a mapping"}
+    assert _dispatch({"session_id": "nope", "job_id": "j", "role": "stockbot",
+                      "analysis": {}, "data_root": str(tmp_path)}) == {
+        "id": "a0", "error": "unknown_session", "session_id": "nope"}
+
+    repo = ResearchRepository(data_root=tmp_path)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    src = repo.list_jobs(sid)[0].job_id
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, {
+        "evidence_id": eid, "wave_id": 1, "content": "c-" + eid, "claim_text": "c",
+        "subject": "NVDA", "source_name": "SEC", "source_uri": "https://sec.gov/x",
+        "source_record_id": "0000320193-25-000079", "document_name": "nvda-20250331.htm",
+        "matching_passage": "Data-center revenue grew on accelerator demand (p.31).",
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }, repo=repo)
+    _svc.complete_job(src, {}, repo=repo)
+    fid = str(_svc.freeze_session(sid, 1, repo=repo)["freeze_id"])
+    jid = str(_svc.start_job(sid, "stockbot", repo=repo, wave_id=1)["job_id"])
+    wire: dict[str, object] = {"session_id": sid, "job_id": jid, "role": "stockbot",
+                               "data_root": str(tmp_path)}
+
+    def _envelope(evidence_id: str) -> dict[str, object]:
+        return {
+            "executive_view": "NVDA demand is supported by the filed evidence.",
+            "claims": [{"text": "Data-center revenue grew", "claim_type": "observed_fact",
+                        "evidence_ids": [evidence_id]}],
+            "impact_channels": [{"text": "Accelerator demand", "direction": "positive",
+                                 "evidence_ids": [evidence_id]}],
+            "materiality": {"overall": "high", "reasoning": "filing-backed"},
+            "uncertainties": ["Delivery timing is undisclosed."],
+            "what_would_change": ["A weaker order book would change the view."],
+            "follow_ups": ["Which suppliers carry the remaining commitments?"],
+        }
+
+    # Kernel validation still gates the write: an incomplete envelope and an
+    # unknown evidence id are rejected, and neither closes the role job.
+    assert _dispatch({**wire, "analysis": {"claims": [], "follow_ups": []}})["error"] == "invalid_arg"
+    assert "EV-NOPE" in str(_dispatch({**wire, "analysis": _envelope("EV-NOPE")}).get("detail"))
+    assert repo.get_job(jid).status == "running"
+
+    out = _dispatch({**wire, "analysis": _envelope(eid)})
+    assert "error" not in out
+    recorded = repo.get_job(jid)
+    assert recorded.status == "completed"
+    assert recorded.result is not None
+    assert recorded.result["role"] == "stockbot"
+    assert recorded.result["executive_view"] == "NVDA demand is supported by the filed evidence."
+    assert repo.get_session(sid).committee_runs == [
+        {"freeze_id": fid, "wave_id": 1, "jobs": [jid]}]

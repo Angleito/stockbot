@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,6 +11,9 @@ from hashlib import sha256
 from .models import JSONValue, pit_unverified, pit_violated, validate_json_mapping
 
 __all__ = [
+    "ACCESSION_RE",
+    "CLAIM_KINDS",
+    "PROVENANCE_KINDS",
     "DiscoveryRecord",
     "Evidence",
     "EvidenceIntegrityError",
@@ -23,8 +27,21 @@ __all__ = [
     "evidence_from_dict",
     "evidence_to_dict",
     "ingest_evidence",
+    "normalize_accession",
+    "search_run_ref",
+    "sec_source_ref",
     "substantive_records",
+    "validate_provenance",
 ]
+
+ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
+"""Canonical SEC accession; a bare 18-digit run normalizes into it (``normalize_accession``)."""
+
+CLAIM_KINDS = ("observed_fact", "absence_observation")
+"""Closed claim vocabulary: what the record asserts, stated by the caller, never inferred from wording."""
+
+PROVENANCE_KINDS = ("sec_source", "search_run", "none")
+"""Closed provenance vocabulary: a raw document passage, the executed search, or nothing recorded."""
 
 
 class EvidenceIntegrityError(ValueError):
@@ -54,6 +71,80 @@ def evidence_content_hash(content: str) -> str:
 
 
 RECORD_KINDS = frozenset({"discovery", "evidence"})
+
+
+def normalize_accession(value: object) -> str:
+    """Canonical dashed accession; a bare 18-digit run takes the 10-2-6 dashes. ValueError otherwise."""
+    text = value.strip() if isinstance(value, str) else ""
+    if text.isdigit() and len(text) == 18:
+        text = f"{text[:10]}-{text[10:12]}-{text[12:]}"
+    if not ACCESSION_RE.match(text):
+        raise ValueError(f"invalid accession number: {value!r}")
+    return text
+
+
+def sec_source_ref(
+    *,
+    accession_no: object,
+    document_name: object,
+    passage: object,
+    source_uri: object = None,
+) -> dict[str, JSONValue]:
+    """SECSourceRef: the raw filing document + quoted passage an observed fact is read off."""
+    document = document_name.strip() if isinstance(document_name, str) else ""
+    quoted = passage.strip() if isinstance(passage, str) else ""
+    if not document or not quoted:
+        raise ValueError("sec_source_ref: document_name and passage must be non-empty strings")
+    return {
+        "kind": "sec_source",
+        "accession_no": normalize_accession(accession_no),
+        "document_name": document,
+        "passage": quoted,
+        "source_uri": source_uri.strip() if isinstance(source_uri, str) and source_uri.strip() else None,
+    }
+
+
+def search_run_ref(*, search_id: object, query: object) -> dict[str, JSONValue]:
+    """SearchRunRef: the executed search an absence observation is scoped to."""
+    sid = search_id.strip() if isinstance(search_id, str) else ""
+    text = query.strip() if isinstance(query, str) else ""
+    if not sid or not text:
+        raise ValueError("search_run_ref: search_id and query must be non-empty strings")
+    return {"kind": "search_run", "search_id": sid, "query": text}
+
+
+def _provenance_str(prov: Mapping[str, object], key: str, where: str) -> str:
+    value = prov.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise EvidenceIntegrityError(f"{where}: provenance[{key!r}] must be a non-empty string")
+    return value
+
+
+def validate_provenance(value: object, where: str = "<evidence>: 'provenance'") -> dict[str, JSONValue]:
+    """Validate one persisted provenance mapping; empty means 'not recorded' (legacy rows)."""
+    if not isinstance(value, Mapping):
+        raise EvidenceIntegrityError(f"{where} must be an object")
+    if not value:
+        return {}
+    kind = value.get("kind")
+    if kind not in PROVENANCE_KINDS:
+        raise EvidenceIntegrityError(f"{where}: 'kind' must be one of {list(PROVENANCE_KINDS)}, got {kind!r}")
+    if kind == "none":
+        return {"kind": "none"}
+    if kind == "search_run":
+        return search_run_ref(
+            search_id=_provenance_str(value, "search_id", where),
+            query=_provenance_str(value, "query", where),
+        )
+    try:
+        return sec_source_ref(
+            accession_no=value.get("accession_no"),
+            document_name=_provenance_str(value, "document_name", where),
+            passage=_provenance_str(value, "passage", where),
+            source_uri=value.get("source_uri"),
+        )
+    except ValueError as exc:
+        raise EvidenceIntegrityError(f"{where}: {exc}") from None
 
 
 @dataclass(frozen=True)
@@ -108,10 +199,19 @@ class Evidence:
     superseded_by: str | None = None
     # discovery = catalog hit (never substantive coverage alone); evidence = sourced claim.
     record_kind: str = "evidence"
+    # What the record asserts (never inferred from wording) and what backs it.
+    claim_kind: str = "observed_fact"
+    provenance: dict[str, JSONValue] = field(default_factory=dict)
 
     def _check_record_kind(self) -> None:
         if self.record_kind not in RECORD_KINDS:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'record_kind' must be discovery|evidence, got {self.record_kind!r}")
+
+    def _check_claim_kind(self) -> None:
+        if self.claim_kind not in CLAIM_KINDS:
+            raise EvidenceIntegrityError(
+                f"evidence {self.evidence_id}: 'claim_kind' must be one of {list(CLAIM_KINDS)}, got {self.claim_kind!r}"
+            )
 
     def _check_wave_hash(self) -> None:
         if isinstance(self.wave_id, bool) or not isinstance(self.wave_id, int) or self.wave_id < 1:
@@ -121,11 +221,16 @@ class Evidence:
 
     def __post_init__(self) -> None:
         self._check_record_kind()
+        self._check_claim_kind()
         self._check_wave_hash()
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'confidence' must be within 0..1")
         object.__setattr__(self, "supports", tuple(self.supports))
         object.__setattr__(self, "contradicts", tuple(self.contradicts))
+        object.__setattr__(
+            self, "provenance",
+            validate_provenance(self.provenance, f"evidence {self.evidence_id}: 'provenance'"),
+        )
 
 
 class EvidenceLedger:
@@ -213,24 +318,40 @@ def _iso(value: datetime | str | None) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else value
 
 
-def _ingest_missing(evidence: Evidence) -> list[str]:
-    missing = [
-        key
-        for key, value in (
+def _ingest_required(evidence: Evidence) -> tuple[tuple[str, object], ...]:
+    """Required fields. A discovery row is a navigation artifact: it carries no source document.
+
+    Only evidential rows need a source document/ref; a SearchRunRef stands in for an
+    absence observation, which has no document URI by construction.
+    """
+    if evidence.record_kind == "discovery":
+        return (
             ("session_id", evidence.session_id),
-            ("source_name", evidence.source_name),
-            ("source_ref", evidence.source_uri or evidence.source_record_id),
             ("retrieved_at", evidence.retrieved_at),
             ("lineage", evidence.job_id or evidence.agent_id),
         )
-        if not value
-    ]
+    provenance_search = evidence.provenance.get("search_id")
+    return (
+        ("session_id", evidence.session_id),
+        ("source_name", evidence.source_name),
+        ("source_ref", evidence.source_uri or evidence.source_record_id
+         or (provenance_search if isinstance(provenance_search, str) else None)),
+        ("retrieved_at", evidence.retrieved_at),
+        ("lineage", evidence.job_id or evidence.agent_id),
+    )
+
+
+def _ingest_missing(evidence: Evidence) -> list[str]:
+    missing = [key for key, value in _ingest_required(evidence) if not value]
     if isinstance(evidence.wave_id, bool) or not isinstance(evidence.wave_id, int):
         missing.append("wave_id")
     return missing
 
 
 def _ingest_pit_gate(evidence: Evidence, as_of: datetime | str | None) -> tuple[str, str]:
+    """PIT eligibility for an evidential row; a navigation artifact has no known_at to check."""
+    if evidence.record_kind == "discovery":
+        return "", ""
     try:
         unverified = pit_unverified(as_of, evidence.known_at)
         violated = False if unverified else pit_violated(as_of, evidence.known_at)
@@ -275,6 +396,11 @@ def ingest_evidence(
 ) -> Evidence:
     """Provenance + PIT gate: source/ref/retrieved_at/session/wave/lineage present, known_at <= as_of.
 
+    Discovery rows are navigation artifacts (search/navigation tool results): they
+    carry no source document, can never enter a freeze, and are never citable, so
+    only their session/retrieval/lineage fields are required and PIT eligibility
+    does not apply. Every evidential row keeps the full gate.
+
     Refusals journal ``evidence.rejected`` ({evidence_id, reason, known_at, as_of})
     via ``on_reject`` (wire KernelCore's append_event with functools.partial) then raise.
     """
@@ -316,6 +442,8 @@ def evidence_to_dict(evidence: Evidence) -> dict[str, JSONValue]:
         "metadata": dict(evidence.metadata),
         "superseded_by": evidence.superseded_by,
         "record_kind": evidence.record_kind,
+        "claim_kind": evidence.claim_kind,
+        "provenance": dict(evidence.provenance),
     }
 
 
@@ -404,6 +532,17 @@ def _evidence_record_kind(d: dict[str, object]) -> str:
         return raw
     raise EvidenceIntegrityError(f"evidence: 'record_kind' must be discovery|evidence, got {raw!r}")
 
+
+def _evidence_claim_kind(d: dict[str, object]) -> str:
+    """claim_kind; absent means observed_fact so persisted history stays readable."""
+    raw = d.get("claim_kind")
+    if raw is None:
+        return "observed_fact"
+    if isinstance(raw, str) and raw in CLAIM_KINDS:
+        return raw
+    raise EvidenceIntegrityError(f"evidence: 'claim_kind' must be one of {list(CLAIM_KINDS)}, got {raw!r}")
+
+
 def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
     """Rebuild validated Evidence (constructor re-checks hash/confidence)."""
     d = dict(data)
@@ -431,5 +570,7 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         metadata=validate_json_mapping(_evidence_metadata(d), "<evidence>: 'metadata'"),
         superseded_by=_opt_str(d, "superseded_by"),
         record_kind=_evidence_record_kind(d),
+        claim_kind=_evidence_claim_kind(d),
+        provenance=validate_provenance(d.get("provenance", {}), "<evidence>: 'provenance'"),
     )
 

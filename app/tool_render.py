@@ -124,8 +124,14 @@ def _final_ids(refs: object, cap: int = 6) -> str:
     return f" [{', '.join(ids[:cap])}]" if ids else ""
 
 
+def _final_type_suffix(row: dict[str, object]) -> str:
+    """Declared claim-type suffix (empty when the row states none)."""
+    ctype = _cell(row.get("claim_type")).strip()
+    return f" ({ctype})" if ctype else ""
+
+
 def _final_claims_block(claims: object) -> list[str]:
-    """Grounded-claim lines with filing refs ([] when none)."""
+    """Grounded-claim lines with declared type + filing refs ([] when none)."""
     items = _as_list(claims)
     lines: list[str] = []
     for item in items:
@@ -134,7 +140,7 @@ def _final_claims_block(claims: object) -> list[str]:
         text = _cell(item.get("text")).strip()
         if not text:
             continue
-        lines.append(f"- {text}{_final_ids(item.get('evidence_ids'))}")
+        lines.append(f"- {text}{_final_type_suffix(item)}{_final_ids(item.get('evidence_ids'))}")
     return lines
 
 
@@ -168,10 +174,10 @@ def _final_str_block(items: object) -> list[str]:
 
 
 def _final_effect_line(item: object) -> str:
-    """One first/second-order effect line with filing refs."""
+    """One first/second-order effect line with declared type + filing refs."""
     row = _as_dict(item)
     text = _cell(row.get("text", row.get("summary", row.get("name")))).strip()
-    return f"- {text}{_final_ids(row.get('evidence_ids'))}" if text else ""
+    return f"- {text}{_final_type_suffix(row)}{_final_ids(row.get('evidence_ids'))}" if text else ""
 
 
 def _final_effect_block(items: object) -> list[str]:
@@ -221,11 +227,32 @@ def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MES
     _final_section(out, "Bear case", _final_side_block(result.get("bear_case")))
     _final_section(out, "Critical disagreements", _final_str_block(result.get("critical_disagreements")))
     _final_section(out, "Uncertainties", _final_str_block(result.get("uncertainties")))
+    _final_section(out, "What would change the view", _final_str_block(result.get("what_would_change")))
     _final_section(out, "SEC-only limitations", _final_str_block(result.get("evidence_limitations")))
     _final_section(out, "Filing refs", _final_claims_block(result.get("grounded_claims", result.get("claims"))))
     out.append(_final_scope_line(result.get("research_scope")))
     text = "\n\n".join(line for line in out if line.strip())
     return _truncate_bytes(text if text.strip() else _cell(result.get("answer")) or "No grounded SEC findings.", max_bytes)
+
+
+def _finalize_counts(final: dict[str, object]) -> tuple[int, int]:
+    """(grounded claims, impact channels) of a persisted final_result."""
+    claims = _as_list(final.get("claims")) or _as_list(final.get("grounded_claims"))
+    return len(claims), len(_as_list(final.get("impact_channels")))
+
+
+def _render_finalize_confirmation(result: dict[str, object], max_bytes: int) -> str:
+    """Short research_finalize card: freeze id + counts, never the answer itself."""
+    final = _as_dict(result.get("final_result"))
+    claims, channels = _finalize_counts(final)
+    freeze = _cell(result.get("freeze_id")) or _cell(final.get("freeze_id")) or "unknown"
+    lines = [
+        "Research finalized",
+        f"Freeze: {freeze}",
+        f"Claims: {claims} | impact channels: {channels}",
+        "Answer delivered separately as this session's final response.",
+    ]
+    return _truncate_bytes("\n".join(lines), max_bytes)
 
 
 def _dispatch_shape_render_b(result: dict[str, object], max_bytes: int) -> str:
@@ -239,6 +266,9 @@ def _dispatch_shape_render_b(result: dict[str, object], max_bytes: int) -> str:
 
 def _dispatch_tool_render(result: dict[str, object], max_bytes: int) -> str:
     """First matching tool renderer (final table/briefing fallback never misses)."""
+    research = _dispatch_research_render(result, max_bytes)
+    if research is not None:
+        return research
     for render in (_dispatch_result_type_render_a, _dispatch_result_type_render_b, _dispatch_shape_render_a):
         text = render(result, max_bytes)
         if text is not None:
@@ -246,24 +276,124 @@ def _dispatch_tool_render(result: dict[str, object], max_bytes: int) -> str:
     return _dispatch_shape_render_b(result, max_bytes)
 
 
+def _dispatch_research_render(result: dict[str, object], max_bytes: int) -> str | None:
+    """Research evidence/search cards (scoped absence, paged hits), else None."""
+    evidence = _evidence_record(result)
+    if evidence is not None and evidence.get("claim_kind") == "absence_observation":
+        return _render_absence_observation(evidence, max_bytes)
+    return _research_search_card(result, max_bytes)
+
+
 def render_tool_result(
     result: object, max_bytes: int = MAX_TOOL_MESSAGE_BYTES
 ) -> str:
     """Render a tool result as compact text within the byte budget.
 
-    Always returns a non-empty string of at most max_bytes UTF-8 bytes.
+    Always returns a non-empty string of at most max_bytes UTF-8 bytes. The
+    research_finalize card stays a short confirmation: the substantive answer
+    is delivered once as the session's final response, never duplicated here.
     """
     result = result if isinstance(result, dict) else {"result": result}
     if "error" in result:
         return _render_error(result, max_bytes)
-    nested = result.get("final_result")
-    if isinstance(nested, dict) and nested:
-        return render_final_result(nested, max_bytes)
+    if isinstance(result.get("final_result"), dict) and result["final_result"]:
+        return _render_finalize_confirmation(result, max_bytes)
     content = result.get("content")
     if isinstance(content, str) and content.lstrip().startswith("Bottom line:"):
         return _truncate_bytes(content.strip(), max_bytes)
     text = _dispatch_tool_render(result, max_bytes)
     return text if _utf8_size(text) <= max_bytes else _minimal(result, max_bytes)
+
+
+_ABSENCE_SCOPE_LABEL = "Absence observation — searched SEC scope only"
+
+
+def _evidence_record(result: dict[str, object]) -> dict[str, object] | None:
+    """Evidence record in a tool result (research_add_evidence, or research_read)."""
+    for candidate in (result, _as_dict(result.get("record"))):
+        if candidate.get("claim_kind") and (candidate.get("evidence_id") or candidate.get("claim_text") or candidate.get("content")):
+            return candidate
+    return None
+
+
+def _absence_scope_line(record: dict[str, object]) -> str:
+    """Search-run scope of an absence observation ('' when unknown)."""
+    prov = _as_dict(record.get("provenance"))
+    search_id = _cell(prov.get("search_id")) or _cell(record.get("search_id"))
+    query = _cell(prov.get("query")) or _cell(record.get("query"))
+    parts = [part for part in (
+        f"search {search_id}" if search_id else "",
+        f"query {query!r}" if query else "",
+    ) if part]
+    return "Searched scope: " + " | ".join(parts) if parts else ""
+
+
+def _render_absence_observation(record: dict[str, object], max_bytes: int) -> str:
+    """Absence-observation card: scoped language, never a categorical denial."""
+    finding = _cell(record.get("claim_text")) or _cell(record.get("content"))
+    scoped = "No disclosure was located within the searched SEC scope"
+    lines = [_ABSENCE_SCOPE_LABEL]
+    scope = _absence_scope_line(record)
+    if scope:
+        lines.append(scope)
+    lines.append(f"{scoped}: {finding}" if finding else scoped + ".")
+    evidence_id = _cell(record.get("evidence_id"))
+    if evidence_id:
+        lines.append(f"Evidence: {evidence_id}")
+    return _truncate_bytes("\n".join(lines), max_bytes)
+
+
+def _research_search_hit_line(hit: object) -> str:
+    """One paged search-hit line (document identity + snippet, navigation only)."""
+    row = _as_dict(hit)
+    head = " ".join(part for part in (
+        _cell(row.get("form")), _cell(row.get("filed_at")),
+        _cell(row.get("accession")), _cell(row.get("document")),
+    ) if part)
+    score = _cell(row.get("score"))
+    if score:
+        head = f"{head} (score {score})" if head else f"(score {score})"
+    snippet = _cell(row.get("snippet"))
+    if not head:
+        return ""
+    return f"- {head}: {snippet}" if snippet else f"- {head}"
+
+
+def _research_search_head(result: dict[str, object], shown: list[object]) -> list[str]:
+    """Retrieval-truth header of a paged search card (coverage, never the display bound)."""
+    cov = _as_dict(result.get("coverage"))
+    return [
+        f"SEC search {_cell(result.get('search_id'))} — {len(shown)} hit(s) at offset {_cell(result.get('offset'))} of {_cell(result.get('total'))} persisted",
+        f"query: {_cell(result.get('query')) or 'none'}",
+        ("coverage: " + (_cell(cov.get("status")) or "unknown")
+         + f"; pagination complete: {_briefing_flag_status(cov.get('pagination_complete'))}"
+         + f"; source exhausted: {_briefing_flag_status(cov.get('source_exhausted'))}"),
+    ]
+
+
+def _research_search_hit_lines(shown: list[object]) -> list[str]:
+    """Rendered hit lines, dropping rows that carry no document identity."""
+    return [line for line in (_research_search_hit_line(hit) for hit in shown) if line]
+
+
+def _research_search_card(result: dict[str, object], max_bytes: int) -> str | None:
+    """Paged research_read_search card (retrieval truth + hits), else None."""
+    if not all(key in result for key in ("search_id", "total", "offset", "hits", "more", "coverage")):
+        return None
+    shown = _as_list(result.get("hits"))
+    offset = result.get("offset")
+    next_offset = offset + len(shown) if isinstance(offset, int) else None
+    head = _research_search_head(result, shown)
+    tail = [
+        "Hits are navigation artifacts: open the filing and cite a raw passage before recording evidence.",
+        (f"More hits: call research_read_search with offset={next_offset}"
+         if result.get("more") and next_offset is not None
+         else "More hits: none (every persisted hit is shown)"),
+    ]
+    budget = max_bytes - _utf8_size("\n".join(head + tail)) - 2
+    kept, omitted = _fit_lines(_research_search_hit_lines(shown), max(budget, 1))
+    body = kept + ([f"{TRUNCATED_MARKER} (Omitted hits: {omitted})"] if omitted else [])
+    return "\n".join(head + body + tail)
 
 
 def _render_market_snapshot(result: dict[str, object], max_bytes: int) -> str:

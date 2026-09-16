@@ -4,10 +4,11 @@ Same freeze input as bull/bear; no research caps (reads frozen evidence
 only, never calls tools). Model decides the balanced case; infra validates
 refs against the freeze and packages ``research_requests``.
 
-Fake-model sketch (no live calls): fake ``model(prompt)`` returns canned
-text with per-claim citations like ``CLAIM: <text> [EV-1]``; call
-``run_stockbot`` with a freeze id + evidence ids; assert refs are
-a subset of the freeze and ``research_requests`` carry requesting_agents.
+Fake-model sketch (no live calls): fake ``model(prompt)`` returns one canned
+rich-envelope JSON object (executive_view, typed claims, impact channels,
+materiality, uncertainties, what_would_change, follow_ups); call
+``run_stockbot`` with a freeze id + evidence ids; assert refs are a subset
+of the freeze and ``research_requests`` carry requesting_agents.
 """
 
 from __future__ import annotations
@@ -100,10 +101,22 @@ def run_stockbot(
     wave = _coerce_wave(wave_id)
     frozen = list(evidence_ids)
     prompt = (
-        f"Balanced read (no forced recommendation). Question: {question}\n"
+        "Role: balanced base case. Weigh the cited disclosures and the gaps between them with equal "
+        f"rigor and state the most probable evidence-supported outcome. Question: {question}\n"
         f"Freeze: {freeze_id} as of {as_of} evidence={len(frozen)}\n"
-        'Respond with one JSON object only: {"role": "stockbot", "executive_view": "<balanced read>", "claims": [{"statement": "<finding>", "evidence_ids": ["<freeze-id>", ...]}], "impact_channels": [{"name": "<channel>", "assessment": "<read>", "evidence_ids": ["<freeze-id>"]}], "materiality": {"overall": "critical|high|medium|low", "reasoning": "<why>"}, "uncertainties": ["<open question>"], "research_requests": [{"question": "<follow-up>?", "why_it_matters": "<why>", "suggested_source": "SEC"}]}. '
-        "Cite only freeze ids for each factual claim; legacy keys claims[].text and follow_ups[] are also accepted."
+        'Respond with one JSON object only: {"role": "stockbot", "executive_view": "<balanced read>", '
+        '"claims": [{"text": "<finding>", "claim_type": "observed_fact|inference|unknown|contradicted", "evidence_ids": ["<freeze-id>", ...]}], '
+        '"impact_channels": [{"text": "<channel>", "direction": "<what it does to the question>", "evidence_ids": ["<freeze-id>"]}], '
+        '"materiality": {"overall": "critical|high|medium|low", "reasoning": "<why>"}, '
+        '"uncertainties": ["<what the freeze does not establish>"], '
+        '"what_would_change": ["<concrete disclosure that would move this view>"], '
+        '"follow_ups": [{"question": "<follow-up>?", "why_it_matters": "<why>", "suggested_source": "SEC"}]}. '
+        "claim_type is declared, never inferred from wording: observed_fact when the cited passage states it directly, "
+        "inference when it is reasoned from cited evidence, contradicted when cited evidence conflicts with the claim text, "
+        "unknown when the frozen evidence does not establish it (for example no disclosure located within the searched scope). "
+        "observed_fact/inference/contradicted need at least one freeze id; unknown may cite none. "
+        "Cite only freeze ids; never invent ids, filings, or numbers. "
+        "Populate uncertainties and what_would_change with at least one concrete item each."
     )
     if evidence_text.strip():
         prompt += f"\nEvidence (cite ids; do not invent):\n{evidence_text.strip()}"
@@ -128,7 +141,7 @@ def run_stockbot(
         answer=view,
         base_case=view,
         unknowns=unknowns,
-        what_would_change=[],
+        what_would_change=list(env.what_would_change),
         claims=env.claims,
         research_requests=extra,
         executive_view=view,

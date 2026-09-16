@@ -1,0 +1,104 @@
+{
+  "answer_excerpt": "SEC evidence indicates Goldman Sachs has no disclosed direct OpenAI exposure: full-text search returns zero OpenAI hits. Its 10-K frames any such counterparty failure under general third-party credit and concentration risk, explicitly warning concentration increases potential for significant losses across market-making, underwriting, investing and financing, plus derivatives credit risk. Critically, the 10-K discloses no numeric single-name concentration limit and no OpenAI-specific bound, so an OpenAI bankruptcy cannot be shown as capped by SEC disclosure; impact would depend on undisclosed actual concentration and correlated exposures, likely manageable if diversified but potentially significant if concentrated.",
+  "as_of": null,
+  "budget_cap": 60,
+  "budget_used": 14,
+  "evidence_ids": [
+    "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:103c0d89",
+    "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:6e45a522",
+    "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:8a8ab0ac",
+    "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:df4191f6"
+  ],
+  "family": "factual",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze",
+  "freeze_before": "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze",
+  "known_ats": [
+    "2022-02-25",
+    "2026-02-25",
+    "2026-09-14"
+  ],
+  "question": "What will happen to Goldman Sachs in the event OpenAI goes bankrupt?",
+  "scenario_name": "gs-openai-sec-only-live-run",
+  "session_id": "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0",
+  "tool_calls": [],
+  "trace": {
+    "branches_covered": [],
+    "claims": [
+      {
+        "claim_type": "",
+        "rendered_as": "",
+        "text": "SEC search for OpenAI within Goldman Sachs filings returns no direct OpenAI disclosure or entity match, indicating no disclosed OpenAI-specific exposure size."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "",
+        "text": "Goldman Sachs FY2025 10-K filed 2026-02-25 is the authoritative SEC source for its credit and concentration framework relevant to an OpenAI failure."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "",
+        "text": "10-K Item 1A discloses concentration of risk increases potential for significant losses in market-making, underwriting, investing and financing, with no numeric single-name limit stated."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "",
+        "text": "10-K Item 1A covers OpenAI-type events only via general deterioration/defaults by third parties and derivatives credit risk, providing no quantified bound on OpenAI-related loss."
+      }
+    ],
+    "claims_by_type": {},
+    "committee_freeze_ids": [
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:1:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:1:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:1:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze"
+    ],
+    "coverage_complete": true,
+    "documents_opened": [],
+    "filings_opened": [
+      "0000886982-26-000091",
+      "0001193125-22-052682",
+      "0001193125-26-390796"
+    ],
+    "limitations": [],
+    "material_channels": [],
+    "navigation_evidence_ids": [
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:103c0d89",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:6e45a522",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:8a8ab0ac",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:df4191f6"
+    ],
+    "passages_opened": [],
+    "raw_evidence_ids": [],
+    "roles_completed": [
+      "stockbot",
+      "bullbot",
+      "bearbot"
+    ],
+    "searches": [],
+    "universal_absence_claims": [
+      "SEC evidence indicates Goldman Sachs has no disclosed direct OpenAI exposure: full-text search returns zero OpenAI hits."
+    ],
+    "waves": [
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:1:freeze",
+      "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:2:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "search_sec_filings",
+      "get_sec_document"
+    ],
+    "pit_as_of": null,
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze"
+    ]
+  }
+}

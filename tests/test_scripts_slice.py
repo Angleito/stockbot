@@ -443,8 +443,8 @@ class _NS:
     pass
 
 
-def _ns(provider: object = None, model: object = None) -> argparse.Namespace:
-    return argparse.Namespace(provider=provider, model=model)
+def _ns(provider: object = None, model: object = None, scenario: object = None) -> argparse.Namespace:
+    return argparse.Namespace(provider=provider, model=model, scenario=scenario)
 
 
 def test_resolve_prefers_flags_and_strips_whitespace():
@@ -457,29 +457,36 @@ def test_resolve_falls_back_to_env():
     assert (provider, model) == ("anthropic", "claude")
 
 
-def test_resolve_rejects_empty_provider():
-    try:
-        vas.resolve_provider_model(None, "m", {})
-    except RuntimeError as exc:
-        assert "--provider" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
+def test_resolve_defaults_to_pi_cli_when_unset():
+    """No flag and no env means Pi's own CLI default: resolved as ("", ""), never a hard failure."""
+    assert vas.resolve_provider_model(None, None, {}) == ("", "")
+    assert vas.resolve_provider_model("  ", "", {"STOCKBOT_PI_PROVIDER": "", "STOCKBOT_PI_MODEL": None}) == ("", "")
 
 
-def test_resolve_rejects_placeholders_and_missing_model():
-    for bad in ("unknown", "pi"):
-        try:
-            vas.resolve_provider_model(bad, "m", {})
-        except RuntimeError as exc:
-            assert "--provider" in str(exc)
-        else:
-            raise AssertionError(f"expected RuntimeError for {bad}")
-    try:
-        vas.resolve_provider_model("anthropic", None, {})
-    except RuntimeError as exc:
-        assert "--model" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError for missing model")
+def test_lookup_env_value_narrows_strings():
+    """Only real string values count as env configuration; anything else reads as unset."""
+    assert vas._lookup_env_value({"A": " v "}, "A") == " v "
+    assert vas._lookup_env_value({"A": 5}, "A") is None
+    assert vas._lookup_env_value({}, "A") is None
+
+    class _Lookup:
+        def get(self, key: str) -> object:
+            return "v" if key == "A" else None
+
+    class _NoGet:
+        get = 5
+
+    assert vas._lookup_env_value(_Lookup(), "A") == "v"
+    assert vas._lookup_env_value(_Lookup(), "B") is None
+    assert vas._lookup_env_value(object(), "A") is None
+    assert vas._lookup_env_value(_NoGet(), "A") is None
+
+
+def test_resolve_passes_explicit_flags_through():
+    """Explicit flags/env still override; Pi validates a bad provider at probe time, not here."""
+    assert vas.resolve_provider_model("unknown", "m", {}) == ("unknown", "m")
+    assert vas.resolve_provider_model("pi", None, {}) == ("pi", "")
+    assert vas.resolve_provider_model("anthropic", None, {}) == ("anthropic", "")
 
 
 def test_resolve_namespace_wrapper_strips():
@@ -487,11 +494,63 @@ def test_resolve_namespace_wrapper_strips():
     assert vas._resolve_provider_model(ns) == ("anthropic", "claude")
 
 
+def test_resolve_model_timeout_flag_env_default():
+    assert vas.resolve_model_timeout("120", {"STOCKBOT_PI_MODEL_TIMEOUT": "60"}) == 120
+    assert vas.resolve_model_timeout(None, {"STOCKBOT_PI_MODEL_TIMEOUT": " 60 "}) == 60
+    assert vas.resolve_model_timeout(None, {}) == vas._PI_CALL_TIMEOUT_DEFAULT_S
+    assert vas._PI_CALL_TIMEOUT_DEFAULT_S > 110
+
+
+def test_resolve_model_timeout_rejects_bad_values():
+    for bad in ("nope", "0", "-5"):
+        try:
+            vas.resolve_model_timeout(bad, {})
+        except RuntimeError as exc:
+            assert "invalid model timeout" in str(exc)
+        else:
+            raise AssertionError(f"expected RuntimeError for {bad!r}")
+
+
+def test_resolve_model_timeout_namespace_wrapper():
+    ns = argparse.Namespace(model_timeout="42")
+    assert vas._resolve_model_timeout(ns) == 42
+
+
+def test_model_label_names_the_pi_default():
+    assert vas._model_label("", "") == "pi default"
+    assert vas._model_label("openai", "gpt-x") == "openai/gpt-x"
+    assert vas._model_label("openai", "") == "openai/pi default"
+
+
+def test_pi_argv_drops_unset_flags():
+    """A flag-less default is a spawn with no --provider/--model at all (mirrors pi_runner)."""
+    default_argv = vas._pi_completion_argv("", "", "p?")
+    assert "--provider" not in default_argv and "--model" not in default_argv
+    assert default_argv[0] == "pi" and default_argv[-1] == "--no-context-files"
+    flagged = vas._pi_completion_argv("openai", "gpt-x", "p?")
+    assert flagged[flagged.index("--provider") + 1] == "openai"
+    assert flagged[flagged.index("--model") + 1] == "gpt-x"
+
+
 def test_parse_args_defaults():
     args = vas.parse_args([])
     assert args.prompt_version == "v1"
     assert args.list is False and args.json is False
     assert args.scenario is None and args.fixtures_dir is None
+    assert args.model_timeout is None
+
+
+def test_selected_names_excludes_fixture_only_regressions():
+    """The default live run never re-asks the two questions that only carry old broken-run fixtures."""
+    from app.research.evals.scenarios import get_scenario, list_scenarios
+
+    default_names = vas._selected_names(_ns())
+    assert len(default_names) == len(list_scenarios()) - 2
+    for name in ("spacex-openai-bankruptcy-sec-only-live-run", "gs-openai-sec-only-live-run"):
+        assert name not in default_names
+        assert get_scenario(name).fixture_only is True
+        assert name in vas._scenario_map()
+        assert vas._selected_names(_ns(scenario=name)) == [name]
 
 
 def test_summarize_pass_fail_counts():
@@ -515,7 +574,7 @@ def test_check_pi_ready_error_path_missing_binary(monkeypatch: pytest.MonkeyPatc
         raise FileNotFoundError("no pi")
     monkeypatch.setattr(subprocess, "run", boom)
     try:
-        vas._check_pi_ready("p", "m")
+        vas._check_pi_ready("p", "m", 30)
     except RuntimeError as exc:
         assert "not found" in str(exc)
     else:
@@ -527,11 +586,28 @@ def test_check_pi_ready_timeout_path(monkeypatch: pytest.MonkeyPatch):
         raise subprocess.TimeoutExpired(cmd="pi", timeout=1)
     monkeypatch.setattr(subprocess, "run", boom)
     try:
-        vas._check_pi_ready("p", "m")
+        vas._check_pi_ready("", "", 17)
     except RuntimeError as exc:
-        assert "timed out" in str(exc)
+        assert "timed out after 17s" in str(exc) and "pi default" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_check_pi_ready_probes_without_flags_and_ok(monkeypatch: pytest.MonkeyPatch):
+    """The probe uses the same flag-less default and timeout budget as the live calls."""
+    seen: dict[str, object] = {}
+
+    def _run(argv: list[str], **kw: object) -> object:
+        seen["argv"] = argv
+        seen["timeout"] = kw.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="OK", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    vas._check_pi_ready("", "", 42)
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert "--provider" not in argv and "--model" not in argv
+    assert seen["timeout"] == 42
 
 
 def test_search_dispatch_filters_and_caps():
@@ -659,6 +735,22 @@ def test_build_success_counts_recovery():
     assert out.failed_count == 1 and out.recovered_count == 1 and out.budget_used == 1
     out2 = vas._build_success_input(sc, "", ["t"], jobs, "failed", (), 1.0)
     assert out2.recovered_count == 0
+
+
+def test_build_success_failure_bucket_statuses():
+    """Only failed/cancelled/timed_out count as failures; successful jobs never do."""
+    sc = _g2_scenario(name="n", as_of="2024-01-01", requires_evidence=True)
+
+    def _job(job_id: str, status: str) -> Job:
+        return Job(job_id=job_id, session_id="s", wave_id=1, parent_job_id=None, job_type="research",
+                   owner="agent", status=status)
+
+    for status in ("failed", "cancelled", "timed_out"):
+        assert vas._job_failed(_job("j", status)) is True
+        assert vas._build_success_input(sc, "ans", ["t"], [_job("j", status)], "failed", (), 1.0).failed_count == 1
+    for status in ("completed", "running", "queued"):
+        assert vas._job_failed(_job("j", status)) is False
+        assert vas._build_success_input(sc, "ans", ["t"], [_job("j", status)], "completed", (), 1.0).failed_count == 0
 
 
 # ---- slice_judge_tests.py ----
@@ -1256,7 +1348,7 @@ def test_holdout_case_and_verdict_helpers(tmp_path: Path, monkeypatch: pytest.Mo
 
 Barrier-concurrency style per tests/test_pi_bridge.py; fake kernel doubles, never real storage.
 Covers: job_start, tool_invoke, session_finalize, source_submit, freeze_create,
-research_events, job_complete, heartbeat/wave2, evidence_add fallback, session_cancel/resume.
+research_events, job_complete, heartbeat/wave_decide, evidence_add fallback, session_cancel/resume.
 """
 
 
@@ -1514,6 +1606,59 @@ def test_freeze_create_branches(monkeypatch: pytest.MonkeyPatch):
         "id": "p", "result": {"freeze_id": "s:1:freeze"}}
 
 
+def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """research.committee.create over the bridge: arg shapes, then the atomic trio."""
+    def _dispatch(request: dict[str, object]) -> dict[str, object]:
+        out = pi_bridge._handle(json.dumps(
+            {"id": "c0", "op": "research.committee.create", **request}))
+        assert isinstance(out, dict)
+        return out
+
+    assert _dispatch({}) == {"id": "c0", "error": "missing_arg"}
+    assert _dispatch({"session_id": "s", "wave_id": 0}) == {
+        "id": "c0", "error": "invalid_arg", "detail": "'wave_id' must be an int >= 1"}
+
+    from app.research import service as svc
+    from app.research.repository import ResearchRepository
+
+    repo = ResearchRepository(data_root=tmp_path)
+    sid = svc.create_research("NVDA demand?", "o", as_of="2026-01-02T00:00:00+00:00", repo=repo)
+    svc.complete_job(repo.list_jobs(sid)[0].job_id, {}, repo=repo)
+    wire: dict[str, object] = {"session_id": sid, "data_root": str(tmp_path)}
+    assert _dispatch({**wire, "session_id": "nope"}) == {
+        "id": "c0", "error": "unknown_session", "session_id": "nope"}
+
+    freeze = pi_bridge._handle(json.dumps(
+        {"id": "f1", "op": "research.freeze.create", **wire}))
+    assert isinstance(freeze, dict)
+    froze = freeze["result"]
+    assert isinstance(froze, dict)
+
+    result = _dispatch(wire)["result"]
+    assert isinstance(result, dict)
+    # The trio names the freeze the gate produced for this session/wave.
+    assert result["freeze_id"] == froze["freeze_id"] == f"{sid}:1:freeze"
+    pending = result["pending_next_action"]
+    assert isinstance(pending, dict)
+    assert pending["freeze_id"] == result["freeze_id"] and "freeze_pending" not in pending
+    job_ids = result["jobs"]
+    assert isinstance(job_ids, list) and len(job_ids) == 3
+    jobs = [repo.get_job(str(jid)) for jid in job_ids]
+    assert sorted(j.job_type for j in jobs) == ["bearbot", "bullbot", "stockbot"]
+    assert all(j.status == "running" and j.wave_id == 1 for j in jobs)
+
+    class K:
+        class ResearchNotFound(Exception):
+            pass
+
+        def create_committee_jobs(self, *a: object, **k: object) -> object:
+            raise ValueError("trio blocked")
+
+    monkeypatch.setattr(pi_bridge, "_kernel", K())
+    assert _dispatch({"session_id": "s"}) == {
+        "id": "c0", "error": "invalid_arg", "detail": "trio blocked"}
+
+
 def test_research_events_branches(monkeypatch: pytest.MonkeyPatch):
     assert pi_bridge._op_research_events({}, "p")["error"] == "missing_arg"
 
@@ -1539,10 +1684,10 @@ def test_research_events_branches(monkeypatch: pytest.MonkeyPatch):
         "id": "p", "result": {"events": []}}
 
 
-def test_job_complete_and_heartbeat_and_wave2(monkeypatch: pytest.MonkeyPatch):
+def test_job_complete_and_heartbeat_and_wave_decide(monkeypatch: pytest.MonkeyPatch):
     assert pi_bridge._op_research_job_complete({}, "p")["error"] == "missing_arg"
     assert pi_bridge._op_research_job_heartbeat({}, "p")["error"] == "missing_arg"
-    assert pi_bridge._op_research_wave2_decide({}, "p")["error"] == "missing_arg"
+    assert pi_bridge._op_research_wave_decide({}, "p")["error"] == "missing_arg"
 
     class K:
         class ResearchNotFound(Exception):
@@ -1554,7 +1699,7 @@ def test_job_complete_and_heartbeat_and_wave2(monkeypatch: pytest.MonkeyPatch):
         def heartbeat_job(self, *a: object, **k: object) -> object:
             raise K.ResearchNotFound()
 
-        def decide_wave2(self, *a: object, **k: object) -> object:
+        def decide_next_wave(self, *a: object, **k: object) -> object:
             raise K.ResearchNotFound()
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
@@ -1562,7 +1707,7 @@ def test_job_complete_and_heartbeat_and_wave2(monkeypatch: pytest.MonkeyPatch):
         "id": "p", "error": "unknown_job", "job_id": "j"}
     assert pi_bridge._op_research_job_heartbeat({"job_id": "j"}, "p") == {
         "id": "p", "error": "unknown_job", "job_id": "j"}
-    assert pi_bridge._op_research_wave2_decide({"session_id": "s"}, "p") == {
+    assert pi_bridge._op_research_wave_decide({"session_id": "s"}, "p") == {
         "id": "p", "error": "unknown_session", "session_id": "s"}
 
     class K2(K):
@@ -1575,14 +1720,14 @@ def test_job_complete_and_heartbeat_and_wave2(monkeypatch: pytest.MonkeyPatch):
             return {"status": "running"}
 
         @override
-        def decide_wave2(self, *a: object, **k: object) -> object:
+        def decide_next_wave(self, *a: object, **k: object) -> object:
             return {"authorized": False}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
     assert pi_bridge._op_research_job_complete({"job_id": "j"}, "p")["error"] == "invalid_arg"
     assert pi_bridge._op_research_job_heartbeat({"job_id": "j"}, "p") == {
         "id": "p", "result": {"status": "running"}}
-    assert pi_bridge._op_research_wave2_decide({"session_id": "s"}, "p") == {
+    assert pi_bridge._op_research_wave_decide({"session_id": "s"}, "p") == {
         "id": "p", "result": {"authorized": False}}
 
 
@@ -3219,7 +3364,7 @@ def _g2_scenario(**kw: object) -> Scenario:
 def _g2_ns(**kw: object) -> argparse.Namespace:
     base: dict[str, object] = dict(
         list=False, scenario=None, model=None, provider=None,
-        prompt_version="v1", fixtures_dir=None, json=False, all=False,
+        prompt_version="v1", fixtures_dir=None, json=False, all=False, model_timeout=None,
     )
     for key, value in kw.items():
         base[key] = value
@@ -3227,10 +3372,6 @@ def _g2_ns(**kw: object) -> argparse.Namespace:
 
 
 # ---- verify_agent_scenarios._pi_model_callable._call (cc6, needs >=52%) ----
-
-def _pi_run_ok(*a: object, **k: object) -> object:
-    return SimpleNamespace(returncode=0, stdout="  hello\n", stderr="")
-
 
 def _pi_run_fail(*a: object, **k: object) -> object:
     return SimpleNamespace(returncode=1, stdout="", stderr="boom")
@@ -3256,8 +3397,8 @@ def _list_7() -> int:
     return 7
 
 
-def _prep_pm(args: argparse.Namespace) -> tuple[str, str]:
-    return ("p", "m")
+def _prep_pm(args: argparse.Namespace) -> tuple[str, str, int]:
+    return ("p", "m", 300)
 
 
 def _scenario_a() -> dict[str, Scenario]:
@@ -3272,11 +3413,11 @@ def _build_empty(*a: object) -> dict[str, object]:
     return {}
 
 
-def _dispatch_d(provider: str, model: str) -> object:
+def _dispatch_d(*a: object) -> object:
     return "d"
 
 
-def _model_mc(provider: str, model: str) -> object:
+def _model_mc(*a: object) -> object:
     return "mc"
 
 
@@ -3284,18 +3425,37 @@ def _run_live_sess(**k: object) -> dict[str, object]:
     return {"session_id": "s"}
 
 
-def _eval_in(scenario: object, out: dict[str, object], wall: float) -> object:
+def _eval_in(scenario: object, out: dict[str, object], wall: float, cap: int = 0) -> object:
     return "IN"
 
 
 def test_pi_model_call_ok(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        vas.subprocess, "run",
-        _pi_run_ok,
-    )
-    call = vas._pi_model_callable("p", "m")
+    seen: dict[str, object] = {}
+
+    def _run(argv: list[str], **kw: object) -> object:
+        seen["argv"] = argv
+        seen["timeout"] = kw.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="  hello\n", stderr="")
+
+    monkeypatch.setattr(vas.subprocess, "run", _run)
+    call = vas._pi_model_callable("p", "m", 250)
     assert call("prompt?") == "hello"
     assert call.__name__ == "pi_p_m"
+    assert seen["timeout"] == 250
+    assert seen["argv"] == ["pi", "--provider", "p", "--model", "m", "--print", "--no-session", *vas._PI_ISOLATION_FLAGS]
+
+
+def test_pi_model_call_ok_without_flags(monkeypatch: pytest.MonkeyPatch):
+    """Flag-less default: the spawn carries no provider/model so Pi uses its own config."""
+    seen: dict[str, object] = {}
+
+    def _run(argv: list[str], **kw: object) -> object:
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout="  hello\n", stderr="")
+
+    monkeypatch.setattr(vas.subprocess, "run", _run)
+    assert vas._pi_model_callable("", "", 300)("prompt?") == "hello"
+    assert seen["argv"] == ["pi", "--print", "--no-session", *vas._PI_ISOLATION_FLAGS]
 
 
 def test_pi_model_call_failure(monkeypatch: pytest.MonkeyPatch):
@@ -3304,9 +3464,19 @@ def test_pi_model_call_failure(monkeypatch: pytest.MonkeyPatch):
         _pi_run_fail,
     )
     try:
-        vas._pi_model_callable("p", "m")("prompt?")
+        vas._pi_model_callable("p", "m", 300)("prompt?")
     except RuntimeError as exc:
         assert "Pi model call failed (p/m)" in str(exc) and "boom" in str(exc)
+    else:
+        raise AssertionError("should raise")
+
+
+def test_pi_model_call_failure_names_the_default(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(vas.subprocess, "run", _pi_run_fail)
+    try:
+        vas._pi_model_callable("", "", 300)("prompt?")
+    except RuntimeError as exc:
+        assert "Pi model call failed (pi default)" in str(exc)
     else:
         raise AssertionError("should raise")
 
@@ -3317,7 +3487,7 @@ def test_pi_model_call_blank(monkeypatch: pytest.MonkeyPatch):
         _pi_run_blank,
     )
     try:
-        vas._pi_model_callable("p", "m")("prompt?")
+        vas._pi_model_callable("p", "m", 300)("prompt?")
     except RuntimeError as exc:
         assert "blank output" in str(exc)
     else:
@@ -3360,10 +3530,14 @@ def _sr(passed: bool) -> ScenarioResult:
             pit_provenance_violations=0, disagreement=False, completeness=1.0))
 
 
-def test_suite_info_skipped_without_flag():
+def test_suite_info_records_flagless_default(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    """A flag-less live run still tallies and records its git sha: there is no model flag to gate on."""
+    monkeypatch.setattr(vas.subprocess, "check_output", _check_out_abc)
     summary: dict[str, object] = {}
-    vas._maybe_print_suite_info(None, [], "p", "m", summary)
-    assert summary == {}
+    vas._maybe_print_suite_info([_sr(True), _sr(False)], "", "", summary)
+    out = capsys.readouterr().out
+    assert "1/2 passed" in out and "pi default" in out and "abc123" in out
+    assert summary["git_sha"] == "abc123"
 
 
 def test_suite_info_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
@@ -3372,7 +3546,7 @@ def test_suite_info_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
     )
     summary: dict[str, object] = {}
     results = [_sr(True), _sr(False)]
-    vas._maybe_print_suite_info("m", results, "p", "m", summary)
+    vas._maybe_print_suite_info(results, "p", "m", summary)
     out = capsys.readouterr().out
     assert "1/2 passed" in out and "abc123" in out
     assert summary["git_sha"] == "abc123"
@@ -3384,9 +3558,31 @@ def test_suite_info_git_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Ca
 
     monkeypatch.setattr(vas.subprocess, "check_output", _boom)
     summary: dict[str, object] = {}
-    vas._maybe_print_suite_info("m", [_sr(True)], "p", "m", summary)
+    vas._maybe_print_suite_info([_sr(True)], "p", "m", summary)
     assert summary["git_sha"] == "unknown"
     assert "unknown" in capsys.readouterr().out
+
+
+def test_failed_results_selects_unpassed_only():
+    results = [_sr(True), _sr(False)]
+    assert vas._failed_results(results) == [results[1]]
+    assert vas._failed_results([]) == []
+
+
+def test_print_results_lines(capsys: pytest.CaptureFixture[str]):
+    vas._print_results([_sr(True), _sr(False)], "p", "m")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("PASS s (live via Pi p/m)")
+    assert out[1].startswith("FAIL s (live via Pi p/m):")
+    vas._print_results([_sr(True)], "", "")
+    assert "live via Pi pi default" in capsys.readouterr().out
+
+def test_build_summary_records_default_label():
+    summary = vas._build_summary("", "", "v1", [_sr(True)])
+    assert summary["provider"] == "pi default" and summary["model"] == "pi default"
+    assert summary["prompt_version"] == "v1"
+    assert summary["scenarios"] == [{"scenario": "s", "passed": True, "violations": []}]
+    assert vas._build_summary("p", "m", "v1", [])["model"] == "m"
 
 
 # ---- verify_agent_scenarios._run_cli (cc4, needs >=28%) ----
@@ -3431,7 +3627,70 @@ def test_agent_run_cli_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
     assert vas._run_cli(_g2_ns(scenario="a", model="m")) == 1
 
 
+def test_agent_run_cli_bad_timeout_skips_before_probing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """An invalid timeout is a prerequisite failure: exit 2 with the reason, no Pi probe."""
+    def _boom(*a: object, **k: object) -> object:
+        raise AssertionError("probe must not run for an invalid timeout")
+
+    monkeypatch.setattr(vas, "_check_pi_ready", _boom)
+    assert vas._run_cli(_g2_ns(model_timeout="nope")) == 2
+    assert "invalid model timeout" in capsys.readouterr().err
+
+
+def _cli_tuple(args: argparse.Namespace) -> tuple[str, str, int, list[str], dict[str, Scenario]]:
+    """Prereqs as the success tuple; the int branch is the skip exit code."""
+    got = vas._cli_prereqs(args)
+    assert not isinstance(got, int)
+    return got
+
+
+def test_cli_prereqs_resolves_flagless_default(monkeypatch: pytest.MonkeyPatch):
+    """Default live selection: Pi's CLI default model, the default budget, no fixture-carrier scenarios."""
+    for key in ("STOCKBOT_PI_PROVIDER", "STOCKBOT_PI_MODEL", "STOCKBOT_PI_MODEL_TIMEOUT"):
+        monkeypatch.delenv(key, raising=False)
+    probed: list[tuple[str, str, int]] = []
+
+    def _probe(p: str, m: str, t: int) -> None:
+        probed.append((p, m, t))
+
+    monkeypatch.setattr(vas, "_check_pi_ready", _probe)
+    provider, model, timeout_s, names, by_name = _cli_tuple(_g2_ns())
+    assert (provider, model) == ("", "")
+    assert timeout_s == vas._PI_CALL_TIMEOUT_DEFAULT_S and probed == [("", "", vas._PI_CALL_TIMEOUT_DEFAULT_S)]
+    assert "gs-openai-sec-only" in names
+    for carrier in ("spacex-openai-bankruptcy-sec-only-live-run", "gs-openai-sec-only-live-run"):
+        assert carrier not in names and carrier in by_name
+    # The flag/env knob overrides the default, and --scenario still reaches a fixture carrier.
+    assert _cli_tuple(_g2_ns(model_timeout="45"))[2] == 45
+    monkeypatch.setenv("STOCKBOT_PI_MODEL_TIMEOUT", "77")
+    assert _cli_tuple(_g2_ns())[2] == 77
+    assert _cli_tuple(_g2_ns(scenario="gs-openai-sec-only-live-run"))[3] == ["gs-openai-sec-only-live-run"]
+
+
 # ---- verify_agent_scenarios._run_live_scenario (cc4, needs >=28%) ----
+
+def test_live_kwargs_shape_and_default_label(monkeypatch: pytest.MonkeyPatch):
+    """Run kwargs carry the scenario question/tickers, the model callables, and a recordable label."""
+    seen: list[tuple[object, ...]] = []
+
+    def _capture(*a: object) -> str:
+        seen.append(a)
+        return "mc"
+
+    monkeypatch.setattr(vas, "_pi_dispatch_callable", _dispatch_d)
+    monkeypatch.setattr(vas, "_pi_model_callable", _capture)
+    kw = vas._live_kwargs(_g2_scenario(), "", "", 275)
+    assert kw["question"] == "What drove NVDA?" and kw["tickers"] == ["NVDA"]
+    assert kw["as_of"] is None and kw["objective"] == "n"
+    assert kw["provider"] == "pi default" and kw["model_name"] == "pi default"
+    assert kw["dispatch"] == "d" and kw["model"] == "mc"
+    assert seen == [("", "", 275)]
+    untickered = vas._live_kwargs(_g2_scenario(ticker=None, notes=""), "p", "m", 300)
+    assert untickered["tickers"] == [] and untickered["provider"] == "p"
+    assert untickered["objective"] == "What drove NVDA?"  # no notes: the question carries the objective
+
 
 def test_run_live_scenario_success(monkeypatch: pytest.MonkeyPatch):
     import app.research.runner as runner
@@ -3440,7 +3699,25 @@ def test_run_live_scenario_success(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(vas, "_pi_model_callable", _model_mc)
     monkeypatch.setattr(runner, "run_live", _run_live_sess)
     monkeypatch.setattr(vas, "evaluate_and_record", _eval_in)
-    assert vas._run_live_scenario(_g2_scenario(), "p", "m", "v1") == "IN"
+    assert vas._run_live_scenario(_g2_scenario(), "p", "m", "v1", 300) == "IN"
+
+
+def test_run_live_scenario_passes_the_timeout_knob(monkeypatch: pytest.MonkeyPatch):
+    """The resolved per-call budget is what the model callable that spawns Pi receives."""
+    from app.research import runner
+
+    seen: list[tuple[object, ...]] = []
+
+    def _capture(*a: object) -> str:
+        seen.append(a)
+        return "mc"
+
+    monkeypatch.setattr(vas, "_pi_dispatch_callable", _dispatch_d)
+    monkeypatch.setattr(vas, "_pi_model_callable", _capture)
+    monkeypatch.setattr(runner, "run_live", _run_live_sess)
+    monkeypatch.setattr(vas, "evaluate_and_record", _eval_in)
+    assert vas._run_live_scenario(_g2_scenario(), "p", "m", "v1", 275) == "IN"
+    assert seen == [("p", "m", 275)]
 
 
 def test_run_live_scenario_crash(monkeypatch: pytest.MonkeyPatch):
@@ -3453,7 +3730,7 @@ def test_run_live_scenario_crash(monkeypatch: pytest.MonkeyPatch):
         raise ValueError("pi down")
 
     monkeypatch.setattr(runner, "run_live", _boom)
-    out = vas._run_live_scenario(_g2_scenario(), "p", "m", "v1")
+    out = vas._run_live_scenario(_g2_scenario(), "p", "m", "v1", 300)
     assert out.scenario_crashed is True and out.failed_count == 1
 
 
@@ -3468,6 +3745,12 @@ class _FakeRepo:
 
     def list_jobs(self, sid: str) -> list[Job]:
         return self._jobs
+
+    def list_evidence(self, sid: str) -> list[dict[str, object]]:
+        return []
+
+    def list_events(self, sid: str) -> list[object]:
+        return []
 
 
 def _eval_patient(monkeypatch: pytest.MonkeyPatch, traces: list[TraceHeader], sess: ResearchSession):
@@ -3867,7 +4150,9 @@ def test_export_main_mixed_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 def test_bridge_committee_routes(monkeypatch: pytest.MonkeyPatch):
     for op, fn in [
         ("research.freeze.create", "_op_research_freeze_create"),
-        ("research.wave2.decide", "_op_research_wave2_decide"),
+        ("research.committee.create", "_op_research_committee_create"),
+        ("research.analysis.record", "_op_research_analysis_record"),
+        ("research.wave.decide", "_op_research_wave_decide"),
         ("research.session.finalize", "_op_research_session_finalize"),
         ("research.source.submit", "_op_research_source_submit"),
         ("research.job.heartbeat", "_op_research_job_heartbeat"),
@@ -3878,6 +4163,13 @@ def test_bridge_committee_routes(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(pi_bridge, fn, _route)
         out = pi_bridge._handle_research_committee(op, {}, "p1")
         assert out == {"id": "p1", "op": op}
+    # The legacy wire name stays an alias of the same gate (no behavior difference).
+    def _alias(req: dict[str, object], pid: str) -> dict[str, object]:
+        assert req == {}
+        return {"id": pid, "op": "research.wave.decide"}
+    monkeypatch.setattr(pi_bridge, "_op_research_wave_decide", _alias)
+    assert pi_bridge._handle_research_committee("research.wave2.decide", {}, "p1") == {
+        "id": "p1", "op": "research.wave.decide"}
     assert pi_bridge._handle_research_committee("research.nope", {}, "p1") is None
 
 
@@ -4037,3 +4329,89 @@ def test_escape_namespaced_decorator_branches():
     b, c = _col()
     _flag_namespaced_decorator(_dec("import a\n@a.b.no_type_check\ndef f(): pass"), b, c)
     assert c.hits == []
+
+
+def test_build_success_does_not_invent_a_budget_cap():
+    """Unlimited live research must not trip budget-violation on depth alone."""
+    from app.research.evals.evaluators import evaluate
+
+    sc = _g2_scenario(name="n", as_of="2024-01-01", requires_evidence=True)
+    deep = vas._build_success_input(sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0)
+    assert deep.budget_used == 100 and deep.budget_cap == 0
+    assert "budget-violation" not in evaluate(deep).violations
+    # A cap the run was actually given still trips the rule.
+    capped = vas._build_success_input(sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0,
+                                      tool_call_cap=60)
+    assert "budget-violation" in evaluate(capped).violations
+
+
+def test_live_trace_fields_reach_the_evaluator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live verdict must see the run's real trace: branch coverage, opened docs, ledger kinds."""
+    from app.research.director import DirectorBudgets
+    from app.research.evals.scenarios import get_scenario
+    from app.research.repository import ResearchRepository
+    from app.research.runner import _LiveRun
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    run = _LiveRun(repo, "q?", "o", "2026-08-10", "NVDA", [],
+                   lambda name, args: {}, lambda prompt: "[]", DirectorBudgets())
+    sid = run._create_session("q?", "2026-08-10", None)
+    for eid, kind in (("ev:1", "evidence"), ("ev:2", "discovery")):
+        repo.save_evidence({"evidence_id": eid, "session_id": sid, "wave_id": 1, "record_kind": kind})
+    scenario = get_scenario("msft-openai-bankruptcy-sec-only")
+    # Only ids the run advertises for citation count as raw: the trace gate compares
+    # them against the same advertised set, so a wider ledger read would fail it falsely.
+    trace = vas._live_trace(scenario, repo, sid, repo.list_jobs(sid), ("ev:1", "ev:2"))
+    assert trace["requires_trace"] is True
+    assert trace["raw_evidence_ids"] == ("ev:1",) and trace["navigation_evidence_ids"] == ("ev:2",)
+    assert vas._live_trace(scenario, repo, sid, [], ("ev:2",))["raw_evidence_ids"] == ()
+    built = vas._build_success_input(scenario, "answer", ["get_sec_document"], repo.list_jobs(sid), "researching",
+                                     ("ev:1",), 1.0, 0, trace)
+    assert built.raw_evidence_ids == ("ev:1",) and built.requires_trace is True
+    # The branch gate reads the run's real branch coverage, not just the answer prose.
+    telemetry_branches = vas._build_success_input(
+        scenario, "answer", [], [], "researching", ("ev:1",), 1.0, 0,
+        {**trace, "branches_covered": ["orcl"]})
+    assert telemetry_branches.branches_covered == ("orcl",)
+
+
+def test_row_provenance_narrows_raw_rows():
+    """Only an evidence row with a real accession is provenance for an opened filing."""
+    assert vas._row_provenance("not-a-row") is None
+    assert vas._row_provenance({"record_kind": "discovery", "metadata": {"accession_no": "1"}}) is None
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": "junk"}) is None
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": ""}}) is None
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": 7}}) is None
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": "1"}}) == ("1", None)
+    assert vas._row_provenance(
+        {"record_kind": "evidence", "metadata": {"accession_no": "1", "document_name": "d.htm"}}) == ("1", "d.htm")
+
+
+def test_ledger_documents_keeps_row_order_without_duplicates():
+    """Opened filings/documents are read off the raw rows, deduped in first-seen order."""
+    repo = FakeRepo(evidence=[
+        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
+        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
+        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "8-k.htm"}},
+        {"record_kind": "evidence", "metadata": {"accession_no": "0003"}},
+        {"record_kind": "discovery", "metadata": {"accession_no": "0002", "document_name": "nav.htm"}},
+        {"record_kind": "evidence", "metadata": {"document_name": "no-accession.htm"}},
+    ])
+    filings, documents = vas._ledger_documents(repo, "s")
+    assert filings == ("0001", "0003")
+    assert documents == ("0001|10-q.htm", "0001|8-k.htm")
+
+
+def test_invoke_live_reports_the_crash_cause(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A crashed live run names its exception on stderr; the verdict alone cannot explain it."""
+    import app.research.runner as runner
+
+    def _boom(**k: object) -> object:
+        raise ValueError("embedded null byte")
+    monkeypatch.setattr(runner, "run_live", _boom)
+    out, _wall, cap = vas._invoke_live({"question": "q?", "objective": "o", "as_of": None, "tickers": [],
+                                        "dispatch": lambda name, args: {}, "model": lambda prompt: "[]",
+                                        "provider": "p", "model_name": "m"})
+    assert out is None and cap == 0
+    assert "CRASH ValueError: embedded null byte" in capsys.readouterr().err

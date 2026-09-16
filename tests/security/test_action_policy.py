@@ -244,5 +244,9 @@ def test_job_source_gate_and_budgets() -> None:
     with pytest.raises(ValueError, match="policy_denied"):
         _jobs.check_source_allowed(sess, "FINRA")
     assert _jobs.job_tool_budget(sess, "scout") is None  # §1 unlimited default
-    assert _jobs.job_deadline_seconds(sess) == 600
+    # No default deadline: research is unlimited unless a deadline is configured.
+    assert _jobs.job_deadline_seconds(sess) is None
+    configured = _session.create_session("q?", "o", as_of="2025-06-30T00:00:00+00:00",
+                                         budget={"deadline_seconds": 600})
+    assert _jobs.job_deadline_seconds(configured) == 600
     assert _jobs.job_token_budget(sess) is None

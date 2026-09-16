@@ -635,6 +635,7 @@ def _run_budget_refusal(name: str, session: PiSessionContext) -> dict[str, objec
         else:
             used = session.budget.tool_calls
             maximum = session.budget.max_tool_calls
+    shown = "unlimited" if maximum is None else maximum
     if remaining <= 0:
         return {
             "error": f"Pi run runtime budget exceeded (remaining {remaining:.1f}s); retry with a narrower question or fewer tool calls.",
@@ -642,11 +643,11 @@ def _run_budget_refusal(name: str, session: PiSessionContext) -> dict[str, objec
         }
     if name == "search_web":
         return {
-            "error": f"Pi run search budget exceeded (used {used}/{maximum} search calls); retry with a narrower question or fewer tool calls.",
+            "error": f"Pi run search budget exceeded (used {used}/{shown} search calls); retry with a narrower question or fewer tool calls.",
             "error_type": "run_budget_exceeded",
         }
     return {
-        "error": f"Pi run tool budget exceeded (used {used}/{maximum} tool calls); retry with a narrower question or fewer tool calls.",
+        "error": f"Pi run tool budget exceeded (used {used}/{shown} tool calls); retry with a narrower question or fewer tool calls.",
         "error_type": "run_budget_exceeded",
     }
 

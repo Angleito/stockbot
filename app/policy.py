@@ -19,13 +19,17 @@ class Capability(StrEnum):
 class RunLimits:
     """Run budget for a single research run.
 
-    max_tool_result_bytes mirrors tool_render.MAX_TOOL_MESSAGE_BYTES.
+    No limit by default: a research run continues while materially useful
+    (the Director owns completion). An explicitly configured int/float still
+    enforces. max_tool_result_bytes mirrors tool_render.MAX_TOOL_MESSAGE_BYTES.
     """
 
-    max_tool_calls: int = 64
-    max_runtime: float = 600.0     # seconds
+    max_tool_calls: int | None = None
+    max_runtime: float | None = None     # seconds
     max_tool_result_bytes: int = 64 * 1024   # == tool_render.MAX_TOOL_MESSAGE_BYTES
-    max_evidence_tokens: int = 48_000
+    # Context-window guard, not a research count: evidence text packed into one
+    # run context stays bounded; retrieval itself is unlimited (ledger + paged reads).
+    max_evidence_tokens: int | None = 48_000
 
 
 @dataclass(frozen=True)

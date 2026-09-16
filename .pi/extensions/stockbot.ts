@@ -47,91 +47,13 @@ export function toolCallRequest(
 export function bridgeModelText(bridge: Json): string {
  const result = bridge.result;
  if (result && typeof result === "object") {
-  const res = result as Json;
-  // research_finalize carries the persisted rich final_result: render the
-  // substantive structured answer in the same turn, never a bare status line.
-  // Thin stubs (answer only, no sections) keep exact kernel text.
-  const fr = res.final_result;
-  if (fr && typeof fr === "object") {
-   const rendered = hasFinalSections(fr as Json) ? renderFinalText(fr as Json) : "";
-   if (rendered) return rendered;
-  }
-  const content = res.content;
+  // Tool results carry prose only. The session's final answer is rendered once
+  // by the driver (renderFinalAnswer) at agent_end; the research_finalize card
+  // stays a short confirmation, never a second copy of the answer.
+  const content = (result as Json).content;
   if (typeof content === "string" && content) return content;
  }
  return JSON.stringify(bridge);
-}
-function hasFinalSections(fr: Json): boolean {
- if (!fr || typeof fr !== "object") return false;
- return ["executive_summary", "consensus", "impact_channels", "first_order_effects", "second_order_effects", "bull_case", "bear_case", "critical_disagreements", "uncertainties", "evidence_limitations", "grounded_claims", "claims"].some((key) => {
-  const value = (fr as Json)[key];
-  if (Array.isArray(value)) return value.length > 0;
-  if (value && typeof value === "object") return Object.keys(value).length > 0;
-  return typeof value === "string" && value.trim().length > 0 && key !== "answer";
- });
-}
-function finalIdSuffix(row: Json): string {
- const raw = row.evidence_ids;
- const ids = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.length > 0).slice(0, 6) : [];
- return ids.length > 0 ? ` [${ids.join(", ")}]` : "";
-}
-function finalClaimLine(item: unknown): string {
- if (!item || typeof item !== "object") return "";
- const row = item as Json;
- const text = typeof row.text === "string" ? row.text.trim() : "";
- if (!text) return "";
- return `- ${text}${finalIdSuffix(row)}`;
-}
-function finalChannelLine(item: unknown): string {
- if (!item || typeof item !== "object") return "";
- const row = item as Json;
- const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : "Exposure";
- const severity = typeof row.severity === "string" && row.severity.trim() ? row.severity.trim() : "direct";
- const explanation = typeof row.explanation === "string" ? row.explanation.trim() : "";
- const detail = explanation && explanation !== name && explanation !== severity ? `: ${explanation}` : "";
- return `- ${name} (${severity})${detail}${finalIdSuffix(row)}`;
-}
-function finalSide(side: unknown): string[] {
- if (!side || typeof side !== "object") return [];
- const row = side as Json;
- const summary = typeof row.summary === "string" ? row.summary.trim() : "";
- if (!summary) return [];
- return [`- ${summary}${finalIdSuffix(row)}`];
-}
-function finalEffectLine(item: unknown): string {
- if (!item || typeof item !== "object") return "";
- const row = item as Json;
- const found = [row.text, row.summary, row.name].find((v): v is string => typeof v === "string" && v.trim().length > 0);
- const text = found === undefined ? "" : found.trim();
- if (!text) return "";
- return `- ${text}${finalIdSuffix(row)}`;
-}
-export function renderFinalText(fr: Json): string {
- if (!fr || typeof fr !== "object" || Object.keys(fr).length === 0) return "";
- const bulleted = (value: unknown): string[] => (Array.isArray(value) ? value.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : []).map((line: string) => `- ${line.trim()}`);
- const effects = (value: unknown): string[] => (Array.isArray(value) ? (value as unknown[]).map(finalEffectLine).filter((line: string) => line.length > 0) : []);
- const section = (header: string, lines: string[]): string[] => (lines.length > 0 ? [`## ${header}`, ...lines] : []);
- const summary = typeof fr.executive_summary === "string" && fr.executive_summary.trim() ? fr.executive_summary.trim() : typeof fr.answer === "string" ? fr.answer.trim() : "";
- const out: string[] = summary ? [`Bottom line: ${summary}`] : [];
- const consensus = typeof fr.consensus === "string" ? fr.consensus.trim() : "";
- if (consensus && consensus.toLowerCase() !== "none stated") out.push(`Consensus: ${consensus}`);
- const channels = Array.isArray(fr.impact_channels) ? (fr.impact_channels as unknown[]).map(finalChannelLine).filter((line: string) => line.length > 0) : [];
- out.push(...section("Major direct exposures", channels));
- out.push(...section("First-order effects", effects(fr.first_order_effects)));
- out.push(...section("Second-order effects", effects(fr.second_order_effects)));
- out.push(...section("Bull case", finalSide(fr.bull_case)));
- out.push(...section("Bear case", finalSide(fr.bear_case)));
- out.push(...section("Critical disagreements", bulleted(fr.critical_disagreements)));
- out.push(...section("Uncertainties", bulleted(fr.uncertainties)));
- out.push(...section("SEC-only limitations", bulleted(fr.evidence_limitations)));
- const rawClaims = Array.isArray(fr.grounded_claims) ? fr.grounded_claims : fr.claims;
- const claims = Array.isArray(rawClaims) ? (rawClaims as unknown[]).map(finalClaimLine).filter((line: string) => line.length > 0) : [];
- out.push(...section("Filing refs", claims));
- const scope = fr.research_scope && typeof fr.research_scope === "object" ? (fr.research_scope as Json).allowed_sources : undefined;
- const names = Array.isArray(scope) ? scope.filter((e): e is string => typeof e === "string" && e.trim().length > 0) : [];
- const allowed = names.length > 0 ? names : ["SEC"];
- out.push(allowed.length === 1 && allowed[0].toUpperCase() === "SEC" ? "Scope: SEC filings only; nothing here draws on non-SEC sources." : `Scope: ${allowed.join(", ")} sources only.`);
- return out.join("\n\n");
 }
 // Stable visible grammar: the model permanently sees only DISCOVERY_TOOLS
 // plus pre-existing host tools. Every other registered research schema stays
@@ -1071,6 +993,11 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    }
    return;
   }
+  // Single user-facing render: the staged driver renders the persisted
+  // final_result exactly once (renderFinalAnswer) and its answer replaces the
+  // model's chat text here. The finalize card is a short confirmation, so the
+  // answer reaches the user/bridge/done-file once — never as a second render
+  // alongside a "finalized" note. Non-research turns keep the model text.
   if (driver && driver.done && driver.answer) answer = driver.answer;
   const hasEvidence = routing.successfulResearchToolNames.length > 0;
   await emit({

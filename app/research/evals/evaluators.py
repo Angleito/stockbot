@@ -15,15 +15,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_data_root
+from app.research.agents import CLAIM_TYPES
 from app.research.evals.regression import AgentFixture, list_fixtures, load_fixture
 from app.research.evals.scenarios import SCENARIO_VERSION, get_scenario, list_scenarios
 from app.research.evals.traces import HARNESS_VERSION
@@ -137,6 +139,24 @@ class EvalInput:
     relationships_skipped: int = 0
     unresolved: tuple[str, ...] = ()
     stop_reason: str = ""
+    # Trace-derived structural fields (plan Phase 17). Absent trace = empty
+    # fields; a trace-gated scenario fails closed on them (prose is never
+    # evidence of what a run actually opened).
+    requires_trace: bool = False
+    trace_present: bool = False
+    filings_opened: tuple[str, ...] = ()
+    documents_opened: tuple[str, ...] = ()
+    passages_opened: tuple[str, ...] = ()
+    raw_evidence_ids: tuple[str, ...] = ()
+    navigation_evidence_ids: tuple[str, ...] = ()
+    claims: tuple[tuple[str, str, str], ...] = ()
+    claims_by_type: Mapping[str, int] = field(default_factory=dict)
+    waves: tuple[str, ...] = ()
+    trace_searches: tuple[str, ...] = ()
+    roles_completed: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    coverage_complete: bool = True
+    universal_absence_claims: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -241,8 +261,18 @@ def _v_untraced(inp: EvalInput) -> str | None:
     return "untraceable-dossier-claim" if inp.claims_untraced > 0 else None
 
 
+def _committee_freeze_disagreement(ids: tuple[str, ...]) -> bool:
+    """True when roles inside one committee round ran on different freezes.
+
+    ``committee_freeze_ids`` carries one entry per role job in job order (three
+    per round); separate waves legitimately use separate freezes, so only a
+    mixed chunk counts as disagreement.
+    """
+    return any(len(set(ids[start:start + 3])) > 1 for start in range(0, len(ids), 3))
+
+
 def _v_committee(inp: EvalInput) -> str | None:
-    if len(set(inp.committee_freeze_ids)) > 1:
+    if _committee_freeze_disagreement(inp.committee_freeze_ids):
         return "committee-different-freeze"
     return None
 
@@ -294,15 +324,93 @@ def _v_coverage_quality(inp: EvalInput) -> str | None:
     return None
 
 
+def _raw_evidence_ids(inp: EvalInput) -> tuple[str, ...]:
+    """Evidence ids that resolve to a raw document; navigation ids never count."""
+    navigation = set(inp.navigation_evidence_ids)
+    return tuple(e for e in inp.raw_evidence_ids if e not in navigation)
+
+
+def _v_trace_evidence(inp: EvalInput) -> str | None:
+    """Trace-gated scenarios: SEC answers need opened filings/documents and raw-document evidence."""
+    if not inp.requires_trace:
+        return None
+    if not inp.trace_present:
+        return "trace-missing"
+    if not inp.filings_opened:
+        return "trace-no-filings-opened"
+    if not inp.documents_opened and not inp.passages_opened:
+        return "trace-no-documents-opened"
+    raw = _raw_evidence_ids(inp)
+    if not raw:
+        return "trace-no-raw-source-evidence"
+    if not set(raw) <= set(inp.evidence_ids):
+        return "trace-raw-evidence-unresolved"
+    return None
+
+
+def _v_claim_types(inp: EvalInput) -> str | None:
+    """Every claim declares its type; an inference never renders as an observed fact."""
+    for _text, declared, rendered in inp.claims:
+        if declared not in CLAIM_TYPES or (rendered and rendered not in CLAIM_TYPES):
+            return "claim-without-type"
+        if declared != "observed_fact" and (rendered or declared) == "observed_fact":
+            return "inference-rendered-as-observed-fact"
+    if any(shown not in CLAIM_TYPES for shown in inp.claims_by_type):
+        return "claim-type-unknown"
+    return None
+
+
+def _v_overconfident_absence(inp: EvalInput) -> str | None:
+    """Real-world nonexistence claimed from a search miss is an eval failure."""
+    if inp.universal_absence_claims:
+        return "overconfident-absence"
+    text = " ".join((inp.answer_text, *(text for text, _declared, _rendered in inp.claims))).lower()
+    if any(pattern.search(text) for pattern in _UNIVERSAL_ABSENCE_PATTERNS):
+        return "overconfident-absence"
+    return None
+
+
+def _v_limitations(inp: EvalInput) -> str | None:
+    """Incomplete coverage must record its unresolved limitations."""
+    if not inp.coverage_complete and not inp.limitations:
+        return "limitations-missing"
+    return None
+
+
+def _v_committee_roles(inp: EvalInput) -> str | None:
+    """A committee run reports every role; freeze identity is checked separately."""
+    if inp.roles_completed and set(inp.roles_completed) != set(_COMMITTEE_ROLES):
+        return "committee-roles-incomplete"
+    return None
+
+
 _COMMITTEE_JOB_CHECKS: tuple[tuple[str, str], ...] = (
     ("job_created_before_run", "committee-jobs-not-preregistered"),
     ("jobs_concurrent", "committee-jobs-not-concurrent"),
     ("cross_role_write_rejected", "committee-cross-role-write-allowed"),
 )
 
+_COMMITTEE_ROLES: tuple[str, ...] = ("stockbot", "bullbot", "bearbot")
+
+# "No relationship exists" style universals: a search miss is never proof of
+# real-world nonexistence. Scoped language ("no disclosure was located within
+# the searched SEC scope") is the correct form and never matches these.
+_UNIVERSAL_ABSENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bno (?:material |direct |indirect )?(?:relationship|link) exists?\b"),
+    re.compile(r"\b(?:relationship|link)s? (?:does not|doesn't|do not|don't) exist\b"),
+    re.compile(r"\bthere (?:is|are) no (?:material )?(?:relationship|link)\b"),
+    re.compile(r"\bnonexistent (?:relationship|link)\b"),
+)
+
 
 def _v_committee_invariants(inp: EvalInput) -> str | None:
-    if len(set(inp.committee_freeze_ids)) > 1:
+    """Roles share one freeze per round; separate waves legitimately use separate freezes.
+
+    ``committee_freeze_ids`` carries one entry per role job in job order (three
+    per round), so a multi-wave run has one repeated id per chunk rather than a
+    single global id.
+    """
+    if _committee_freeze_disagreement(inp.committee_freeze_ids):
         return "committee-different-freeze"
     if inp.job_ids:
         if len(set(inp.job_ids)) < 3:
@@ -338,6 +446,11 @@ _CHECKS: tuple[Callable[[EvalInput], str | None], ...] = (
     _v_coverage_quality,
     _v_committee_invariants,
     _v_finalize_answer,
+    _v_trace_evidence,
+    _v_claim_types,
+    _v_overconfident_absence,
+    _v_limitations,
+    _v_committee_roles,
 )
 
 _PIT_PROVENANCE: frozenset[str] = frozenset(
@@ -369,7 +482,7 @@ def _eval_metrics(inp: EvalInput, violations: tuple[str, ...]) -> EvalMetrics:
         output_tokens=inp.output_tokens,
         estimated_cost=inp.estimated_cost,
         pit_provenance_violations=sum(1 for v in violations if v in _PIT_PROVENANCE),
-        disagreement=len(set(inp.committee_freeze_ids)) > 1,
+        disagreement=_committee_freeze_disagreement(inp.committee_freeze_ids),
         completeness=_eval_completeness(inp),
     )
 
@@ -402,12 +515,88 @@ def _telemetry_strs(telemetry: object, key: str) -> tuple[str, ...]:
     return tuple(value) if isinstance(value, list) and all(isinstance(v, str) for v in value) else ()
 
 
+def _trace_strs(trace: object, key: str) -> tuple[str, ...]:
+    """Validated trace string tuple (mistyped lists coerce to ())."""
+    value = trace.get(key) if isinstance(trace, dict) else None
+    return tuple(v for v in value if isinstance(v, str)) if isinstance(value, list) else ()
+
+
+def _trace_claims(trace: object) -> tuple[tuple[str, str, str], ...]:
+    """Validated (text, declared type, rendered type) claims; undeclared types stay ""."""
+    value = trace.get("claims") if isinstance(trace, dict) else None
+    if not isinstance(value, list):
+        return ()
+    claims: list[tuple[str, str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text, declared, rendered = item.get("text"), item.get("claim_type"), item.get("rendered_as")
+        claims.append((
+            text if isinstance(text, str) else "",
+            declared if isinstance(declared, str) else "",
+            rendered if isinstance(rendered, str) else "",
+        ))
+    return tuple(claims)
+
+
+def _trace_counts(trace: object) -> Mapping[str, int]:
+    """Validated claim-type counts (mistyped entries dropped)."""
+    value = trace.get("claims_by_type") if isinstance(trace, dict) else None
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _trace_flag(trace: object, key: str, default: bool) -> bool:
+    """One optional trace bool (default when absent/mistyped)."""
+    value = trace.get(key) if isinstance(trace, dict) else None
+    return value if isinstance(value, bool) else default
+
+
+def _requires_trace(scenario_name: str) -> bool:
+    """Scenario-declared trace gate; unknown names never gate."""
+    try:
+        return get_scenario(scenario_name).requires_trace
+    except KeyError:
+        return False
+
+
 def eval_input_from_fixture(fixture: AgentFixture) -> EvalInput:
     """Convert a promoted fixture into an evaluable outcome."""
     evidence, coverage, untraced = _fixture_evidence(fixture)
     telemetry = fixture.get("telemetry") or {}
+    trace = fixture.get("trace")
     stop_reason = telemetry.get("stop_reason") if isinstance(telemetry, dict) else None
-    return EvalInput(scenario_name=fixture["scenario_name"], answer_text=fixture["answer_excerpt"], tool_calls=tuple(fixture["tool_calls"]), evidence_ids=evidence, evidence_coverage=coverage, as_of=fixture["as_of"], known_ats=tuple(fixture["known_ats"]), budget_used=fixture["budget_used"] or 0, budget_cap=fixture["budget_cap"] or 0, freeze_before=fixture["freeze_before"], freeze_after=fixture["freeze_after"], claims_untraced=untraced, requires_evidence=fixture["validator"]["requires_evidence"], searches=_telemetry_int(telemetry, "searches"), queries=_telemetry_strs(telemetry, "queries"), forms=_telemetry_strs(telemetry, "forms"), entities=_telemetry_strs(telemetry, "entities"), exhibits=_telemetry_int(telemetry, "exhibits"), relationships_found=_telemetry_int(telemetry, "relationships_found"), relationships_skipped=_telemetry_int(telemetry, "relationships_skipped"), unresolved=_telemetry_strs(telemetry, "unresolved"), stop_reason=stop_reason if isinstance(stop_reason, str) else "")
+    return EvalInput(
+        scenario_name=fixture["scenario_name"], answer_text=fixture["answer_excerpt"],
+        tool_calls=tuple(fixture["tool_calls"]), evidence_ids=evidence, evidence_coverage=coverage,
+        as_of=fixture["as_of"], known_ats=tuple(fixture["known_ats"]),
+        budget_used=fixture["budget_used"] or 0, budget_cap=fixture["budget_cap"] or 0,
+        freeze_before=fixture["freeze_before"], freeze_after=fixture["freeze_after"],
+        claims_untraced=untraced, requires_evidence=fixture["validator"]["requires_evidence"],
+        searches=_telemetry_int(telemetry, "searches"), queries=_telemetry_strs(telemetry, "queries"),
+        forms=_telemetry_strs(telemetry, "forms"), entities=_telemetry_strs(telemetry, "entities"),
+        exhibits=_telemetry_int(telemetry, "exhibits"),
+        relationships_found=_telemetry_int(telemetry, "relationships_found"),
+        relationships_skipped=_telemetry_int(telemetry, "relationships_skipped"),
+        unresolved=_telemetry_strs(telemetry, "unresolved"),
+        stop_reason=stop_reason if isinstance(stop_reason, str) else "",
+        requires_trace=_requires_trace(fixture["scenario_name"]), trace_present=trace is not None,
+        filings_opened=_trace_strs(trace, "filings_opened"),
+        documents_opened=_trace_strs(trace, "documents_opened"),
+        passages_opened=_trace_strs(trace, "passages_opened"),
+        raw_evidence_ids=_trace_strs(trace, "raw_evidence_ids"),
+        navigation_evidence_ids=_trace_strs(trace, "navigation_evidence_ids"),
+        claims=_trace_claims(trace), claims_by_type=_trace_counts(trace),
+        waves=_trace_strs(trace, "waves"), trace_searches=_trace_strs(trace, "searches"),
+        committee_freeze_ids=_trace_strs(trace, "committee_freeze_ids"),
+        roles_completed=_trace_strs(trace, "roles_completed"),
+        limitations=_trace_strs(trace, "limitations"),
+        coverage_complete=_trace_flag(trace, "coverage_complete", True),
+        universal_absence_claims=_trace_strs(trace, "universal_absence_claims"),
+        material_channels=_trace_strs(trace, "material_channels"),
+        branches_covered=_trace_strs(trace, "branches_covered"),
+    )
 
 
 def _static_outcome(name: str) -> EvalInput:

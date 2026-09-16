@@ -8,10 +8,10 @@ every follow-up lands in ``requested_research`` with requesting agents kept.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from app.research.agents import ResearchRequest
+from app.research.agents import ResearchRequest, claims_refs
 from app.research.agents.bearbot import BearAnalysis
 from app.research.agents.bullbot import BullAnalysis
 from app.research.agents.stockbot import StockbotAnalysis
@@ -121,6 +121,47 @@ def _member_view(analysis: object, keys: tuple[str, ...]) -> str:
     return ""
 
 
+_ROLE_ORDER: tuple[tuple[str, str], ...] = (("stockbot", "stock"), ("bullbot", "bull"), ("bearbot", "bear"))
+
+
+def _declared_by_text(analyses: Mapping[str, object], attr: str, field: str) -> dict[str, dict[str, str]]:
+    """One member mapping per text: {role: declared value} for claims/channels that carry it."""
+    by_text: dict[str, dict[str, str]] = {}
+    for role, name in _ROLE_ORDER:
+        for item in getattr(analyses[name], attr, None) or []:
+            text = getattr(item, "text", None)
+            declared = getattr(item, field, None)
+            if isinstance(text, str) and text.strip() and isinstance(declared, str) and declared.strip():
+                by_text.setdefault(text.strip(), {})[role] = declared.strip()
+    return by_text
+
+
+def _conflict_lines(by_text: Mapping[str, Mapping[str, str]], label: str) -> list[str]:
+    """One line per text whose declared value differs across committee roles."""
+    out: list[str] = []
+    for text, reads in by_text.items():
+        if len(set(reads.values())) > 1:
+            detail = ", ".join(f"{role} {read}" for role, read in reads.items())
+            out.append(f"{label} conflict on {text[:160]!r}: {detail}")
+    return out
+
+
+def _claim_conflicts(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[str]:
+    """Same text declared with different claim_type across roles (contradicted vs observed_fact above all)."""
+    return _conflict_lines(
+        _declared_by_text({"stock": stock, "bull": bull, "bear": bear}, "claims", "claim_type"),
+        "claim type",
+    )
+
+
+def _channel_conflicts(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[str]:
+    """Same impact channel declared with different directions across roles."""
+    return _conflict_lines(
+        _declared_by_text({"stock": stock, "bull": bull, "bear": bear}, "impact_channels", "direction"),
+        "impact channel",
+    )
+
+
 _SPLIT_SIDES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("bullish", ("executive_view", "bull_case"), "bullish read stands on bull-only evidence", "bearish read disputes the bullish read"),
     ("bearish", ("executive_view", "bear_case"), "bullish read disputes the bearish read", "bearish read stands on bear-only evidence"),
@@ -145,12 +186,19 @@ def compute_disagreement(
     bull: BullAnalysis,
     bear: BearAnalysis,
 ) -> CommitteeDisagreement:
-    """Deterministic merge: shared evidence agrees, stance split disagrees."""
-    from app.research.agents import claims_refs
+    """Deterministic merge: shared evidence agrees; stance, claim-type, and channel splits disagree.
+
+    Claim-type conflicts (a text declared ``observed_fact`` by one role and
+    ``contradicted`` or ``inference`` by another) and opposite channel
+    directions are preserved as disagreement lines; every merged research
+    request stays in ``requested_research`` for the Director to route.
+    """
     stock_refs = claims_refs(stock.claims)
     bull_refs = claims_refs(bull.claims)
     bear_refs = claims_refs(bear.claims)
     agreement, disagreement = _stance_lines(stock, bull, bear, stock_refs, bull_refs, bear_refs)
+    disagreement.extend(_claim_conflicts(stock, bull, bear))
+    disagreement.extend(_channel_conflicts(stock, bull, bear))
     return CommitteeDisagreement(
         session_id=stock.session_id,
         wave_id=_coerce_wave_id(stock.wave_id),

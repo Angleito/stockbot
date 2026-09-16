@@ -2,6 +2,9 @@
 
 import hashlib
 import re
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -23,6 +26,7 @@ _STYLE_SCRIPT_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.IGNORECASE | 
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t\x0b\x0c\r]+")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _HEADING_RE = re.compile(r"^\s*(item\s+\d+[a-z]?(?:\([^)]*\))?\.?.*|part\s+[ivx]+\.?|signatures?)\s*$", re.IGNORECASE)
 _BLOCK_TAGS = frozenset({"br", "p", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "li", "table"})
 _CELL_TAGS = frozenset({"td", "th"})
@@ -459,6 +463,68 @@ def _attach_view(out: dict[str, object], *, accession_no: str, document_name: ob
     out["next_cursor"] = end if end < len(view_text) else None
 
 
+def _binary_source_kind(text: str) -> str | None:
+    """Binary representation marker for retrieved text: "pdf" for the %PDF magic, else None."""
+    return "pdf" if text[:16].lstrip("\ufeff \t\r\n\v\f")[:4] == "%PDF" else None
+
+
+def _pdftotext_output(extractor: str, path: str) -> str | None:
+    """One ``pdftotext -layout`` run: cleaned stdout text, or None on nonzero exit or no text."""
+    completed = subprocess.run([extractor, "-q", "-layout", path, "-"],
+                               capture_output=True, timeout=30, check=False)
+    if completed.returncode != 0:
+        return None
+    text = _CONTROL_CHARS_RE.sub("", completed.stdout.decode("utf-8", "replace"))
+    return text if text.strip() else None
+
+
+def _extract_pdf_text(payload: bytes | Path) -> str | None:
+    """Text of a PDF payload (exact source bytes, or the archived file holding them).
+
+    None when no ``pdftotext`` is installed, the source is unreadable, or extraction
+    fails or yields no text; the caller reports that as ``binary_unsupported``.
+    """
+    extractor = shutil.which("pdftotext")
+    if extractor is None:
+        return None
+    try:
+        if isinstance(payload, Path):
+            return _pdftotext_output(extractor, str(payload))
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+            handle.write(payload)
+            handle.flush()
+            return _pdftotext_output(extractor, handle.name)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _readable_document_text(text: str, representation: object,
+                            payload: bytes | Path | None) -> tuple[str, object, list[str]]:
+    """Caller-facing document text: a binary payload never leaves here as ``text``.
+
+    Non-binary text passes through untouched with its representation. A binary payload
+    becomes extracted PDF text (``pdf_extracted``) or empty text plus an explicit
+    ``binary_unsupported`` marker and a warning naming the reason. ``payload`` is the
+    exact source (bytes, or the archived file path) and is only read for binary text.
+    """
+    kind = _binary_source_kind(text)
+    if kind is None and "\x00" not in text:
+        return text, representation, []
+    extracted = _extract_pdf_text(payload) if kind == "pdf" and payload is not None else None
+    if extracted is not None:
+        # cleaned once more: no NUL may reach a caller, and extraction is a monkeypatch seam
+        return _CONTROL_CHARS_RE.sub("", extracted), "pdf_extracted", ["pdf text extracted via pdftotext"]
+    if kind != "pdf":
+        reason = f"binary {representation} payload has no text representation"
+    elif payload is None:
+        reason = "no raw pdf bytes available for extraction"
+    elif shutil.which("pdftotext") is None:
+        reason = "pdftotext unavailable"
+    else:
+        reason = "pdf text extraction failed"
+    return "", "binary_unsupported", [f"{reason}; raw bytes remain at raw_archive_path"]
+
+
 def _build_view(full: str, *, section: str | None, query: str | None, raw: bool) -> tuple[str, str | None, int, bool, list[str]]:
     """Derived window over stored text; returns (view, resolved, base, is_raw, sections)."""
     if raw:
@@ -630,6 +696,10 @@ def _archived_bounded(accession_no: str, document_name: str | None,
                       raw: bool = False) -> dict[str, object]:
     name_raw = row.get("document_name")
     doc_name = (name_raw if isinstance(name_raw, str) else None) or document_name
+    raw_path = row.get("raw_archive_path")
+    full, representation, binary_warnings = _readable_document_text(
+        full, row.get("source_representation"),
+        Path(raw_path) if isinstance(raw_path, str) and raw_path else None)
     view, resolved, base, is_raw, sections = _build_view(full, section=section, query=query, raw=raw)
     return _bounded_response(
         accession_no=accession_no,
@@ -639,7 +709,7 @@ def _archived_bounded(accession_no: str, document_name: str | None,
         full_text=full,
         content_hash=row.get("content_hash"),
         source_content_hash=row.get("source_content_hash"),
-        source_representation=row.get("source_representation"),
+        source_representation=representation,
         raw_archive_path=row.get("raw_archive_path"),
         source_url=source_url,
         filed_at=row.get("filed_at"),
@@ -647,7 +717,7 @@ def _archived_bounded(accession_no: str, document_name: str | None,
         retrieved_at=row.get("retrieved_at"),
         offset=offset, max_chars=max_chars,
         cache_hit=True, cache_type="stockbot_archive",
-        warnings=rev_warnings,
+        warnings=((rev_warnings or []) + binary_warnings) or None,
         view_text=view, view_base=base, resolved_section=resolved,
         raw_view=is_raw, available_sections=sections,
     )
@@ -758,13 +828,15 @@ def _live_response(accession_no: str, document_name: str | None, *,
         representation=representation, normalized=normalized,
         source_content_hash=source_content_hash, content_hash=content_hash,
         meta=meta, source_url=source_url, data_root=data_root)
-    view, resolved, base, is_raw, sections = _build_view(normalized, section=section, query=query, raw=raw)
+    payload = source_bytes if representation == "source_bytes" else None
+    full, representation, binary_warnings = _readable_document_text(normalized, representation, payload)
+    view, resolved, base, is_raw, sections = _build_view(full, section=section, query=query, raw=raw)
     return _bounded_response(
         accession_no=accession_no,
         document_name=doc_name,
         description=description,
         url=url,
-        full_text=normalized,
+        full_text=full,
         content_hash=content_hash,
         source_content_hash=source_content_hash,
         source_representation=representation,
@@ -775,7 +847,7 @@ def _live_response(accession_no: str, document_name: str | None, *,
         retrieved_at=retrieved_at,
         offset=offset, max_chars=max_chars,
         cache_hit=False, cache_type="live_or_edgartools_http",
-        warnings=warnings or None,
+        warnings=(warnings + binary_warnings) or None,
         view_text=view, view_base=base, resolved_section=resolved,
         raw_view=is_raw, available_sections=sections,
     )

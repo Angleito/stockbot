@@ -845,7 +845,7 @@ def _freeze_session_id(request: Mapping[str, object], protocol_id: str) -> str |
 
 
 def _freeze_wave_id(request: Mapping[str, object], protocol_id: str) -> int | dict[str, object]:
-    """wave_id shape for freeze.create; value or an error response."""
+    """wave_id shape for wave-scoped ops (freeze.create, committee.create); value or an error response."""
     wave_id = request.get("wave_id", 1)
     wave_id = wave_id if wave_id is not None else 1
     if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
@@ -873,19 +873,77 @@ def _op_research_freeze_create(request: Mapping[str, object], protocol_id: str) 
     return {"id": protocol_id, "result": freeze}
 
 
-def _op_research_wave2_decide(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
-    """Dumb dispatch: research.wave2.decide -> service.decide_wave2 (internal-only)."""
+def _op_research_wave_decide(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.wave.decide (alias research.wave2.decide) -> the director's next-wave gate."""
     session_id = request.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return {"id": protocol_id, "error": "missing_arg"}
     ctx = _bridge_ctx(request)
+    # Single defensive resolution: decide_next_wave lands with the director
+    # rename, so fall back to the legacy name until it does (same wiring, never
+    # a behavior switch).
+    decide = getattr(_kernel, "decide_next_wave", None) or _kernel.decide_wave2
     try:
-        decision = _kernel.decide_wave2(session_id, repo=ResearchRepository(data_root=ctx.data_root))
+        decision = decide(session_id, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": decision}
+
+
+def _op_research_committee_create(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.committee.create -> service.create_committee_jobs (atomic trio)."""
+    session_id = request.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    wave_id = _freeze_wave_id(request, protocol_id)
+    if isinstance(wave_id, dict):
+        return wave_id
+    ctx = _bridge_ctx(request)
+    try:
+        jobs = _kernel.create_committee_jobs(
+            session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root)
+        )
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": jobs}
+
+
+COMMITTEE_ROLES: tuple[str, ...] = ("stockbot", "bullbot", "bearbot")
+
+
+def _required_arg(request: Mapping[str, object], key: str) -> str | None:
+    """One non-empty string argument, or None when missing/mistyped."""
+    value = request.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _op_research_analysis_record(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.analysis.record -> service.record_committee_analysis."""
+    session_id = _required_arg(request, "session_id")
+    job_id = _required_arg(request, "job_id")
+    role = _required_arg(request, "role")
+    if session_id is None or job_id is None or role is None:
+        return {"id": protocol_id, "error": "missing_arg"}
+    if role not in COMMITTEE_ROLES:
+        return {"id": protocol_id, "error": "invalid_arg",
+                "detail": "'role' must be " + "|".join(COMMITTEE_ROLES)}
+    analysis = request.get("analysis")
+    if not isinstance(analysis, dict):
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'analysis' must be a mapping"}
+    ctx = _bridge_ctx(request)
+    try:
+        out = _kernel.record_committee_analysis(
+            session_id, job_id, role, analysis, repo=ResearchRepository(data_root=ctx.data_root)
+        )
+    except _kernel.ResearchNotFound as exc:
+        return _evidence_add_error(exc, protocol_id, session_id, job_id)
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": out}
 
 
 def _op_research_session_finalize(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
@@ -1100,7 +1158,9 @@ _RESEARCH_OPS: tuple[str, ...] = (
     "research.session.resume",
     "research.session.cancel",
     "research.freeze.create",
-    "research.wave2.decide",
+    "research.committee.create",
+    "research.analysis.record",
+    "research.wave.decide",
     "research.session.finalize",
     "research.source.submit",
     "research.job.heartbeat",
@@ -1128,11 +1188,15 @@ def _handle_research_lifecycle(op: object, request: dict[str, object], protocol_
 
 
 def _handle_research_committee(op: object, request: dict[str, object], protocol_id: str) -> dict[str, object] | None:
-    """Freeze/wave2/finalize/submit/heartbeat/events ops; None when outside this group."""
+    """Freeze/committee/gate/finalize/submit/heartbeat/events ops; None when outside this group."""
     if op == "research.freeze.create":
         return _op_research_freeze_create(request, protocol_id)
-    if op == "research.wave2.decide":
-        return _op_research_wave2_decide(request, protocol_id)
+    if op == "research.committee.create":
+        return _op_research_committee_create(request, protocol_id)
+    if op == "research.analysis.record":
+        return _op_research_analysis_record(request, protocol_id)
+    if op in ("research.wave.decide", "research.wave2.decide"):
+        return _op_research_wave_decide(request, protocol_id)
     if op == "research.session.finalize":
         return _op_research_session_finalize(request, protocol_id)
     if op == "research.source.submit":

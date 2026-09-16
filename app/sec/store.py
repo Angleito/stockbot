@@ -870,6 +870,8 @@ def _ledger_search_row(
     errors: Iterable[str],
     evidence_packet_ids: Iterable[str],
     counts: dict[str, int],
+    pagination_complete: bool,
+    source_exhausted: bool,
 ) -> dict[str, object]:
     """Interactive-search header row with coverage and dedup counts."""
     return {
@@ -891,6 +893,9 @@ def _ledger_search_row(
         "errors_json": _json(list(errors)),
         "evidence_packet_ids_json": _json(list(evidence_packet_ids)),
         "dedup_counts_json": _json(counts),
+        # Retrieval truth, independent of the display-packet bound.
+        "pagination_complete": pagination_complete,
+        "source_exhausted": source_exhausted,
         "retrieved_at": now,
         "known_at": now,
         "parser_version": PARSER_VERSION,
@@ -919,9 +924,15 @@ def persist_search_ledger(
     forms_covered: Iterable[str] = (),
     pages: int = 1,
     date_coverage: str | None = None,
+    pagination_complete: bool = False,
+    source_exhausted: bool = False,
     root: Path | str | None = None,
 ) -> dict[str, int]:
     """Persist one interactive search: request, attempts, hits, coverage.
+
+    ``pagination_complete``/``source_exhausted`` describe RETRIEVAL, never the
+    display packet bound: paging drained every route, and the source itself
+    carried no limits. Unknown callers default to the honest "not proven".
 
     Returns ``{"searches": n, "attempts": n, "hits": n}`` rows written.
     """
@@ -940,7 +951,8 @@ def persist_search_ledger(
             "documents": len(tuple(documents)),
             "text_hits": len(hit_list),
             "attempts": len(attempt_list),
-        })
+        },
+        pagination_complete, source_exhausted)
     attempt_rows = [
         _attempt_row(attempt, search_id, now) for attempt in attempt_list]
     hit_rows = [_hit_row(hit, search_id, now) for hit in hit_list]
@@ -971,13 +983,51 @@ def query_attempts(
         [search_id], data_root=_duckdb_root(root))
 
 
+def _hits_filter(search_id: str, forms: Iterable[str] | None) -> tuple[str, list[object]]:
+    """WHERE fragment + params shared by query_hits/query_hits_count."""
+    where = "search_id = ?"
+    params: list[object] = [search_id]
+    wanted = sorted({f.strip().upper() for f in (forms or ()) if isinstance(f, str) and f.strip()})
+    if wanted:
+        where += f" AND upper(form) IN ({', '.join('?' * len(wanted))})"
+        params.extend(wanted)
+    return where, params
+
+
 def query_hits(
-    search_id: str, *, root: Path | str | None = None,
+    search_id: str, *, offset: int = 0, limit: int | None = None,
+    forms: Iterable[str] | None = None,
+    root: Path | str | None = None,
 ) -> list[dict[str, object]]:
-    """All persisted text-hit rows for one search, best score first."""
-    return duckdb.query(
-        "SELECT * FROM sec_text_hits WHERE search_id = ? ORDER BY score DESC",
-        [search_id], data_root=_duckdb_root(root))
+    """Persisted text-hit rows for one search, best score first.
+
+    Whole persisted universe by default; ``offset``/``limit`` page it and
+    ``forms`` narrows to those form values (case-insensitive). The tiebreaker
+    keeps paging stable across equal scores.
+    """
+    where, params = _hits_filter(search_id, forms)
+    sql = (f"SELECT * FROM sec_text_hits WHERE {where} "
+           "ORDER BY score DESC, hit_id")
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+    elif offset:
+        sql += " OFFSET ?"
+        params.append(offset)
+    return duckdb.query(sql, params, data_root=_duckdb_root(root))
+
+
+def query_hits_count(
+    search_id: str, *, forms: Iterable[str] | None = None,
+    root: Path | str | None = None,
+) -> int:
+    """Persisted text-hit rows for one search under the same filter."""
+    where, params = _hits_filter(search_id, forms)
+    rows = duckdb.query(
+        f"SELECT count(*) AS n FROM sec_text_hits WHERE {where}",
+        params, data_root=_duckdb_root(root))
+    count = rows[0].get("n") if rows else None
+    return count if isinstance(count, int) else 0
 
 
 def store_coverage(

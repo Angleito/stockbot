@@ -1467,3 +1467,21 @@ def test_holdout_hash_rejects_altered(tmp_path: Path, monkeypatch: pytest.Monkey
     # run_holdout must fail before spawning Pi
     assert v.run_holdout(str(bad)) == 1
 
+
+def test_pi_completion_argv_carries_no_prompt():
+    """The prompt travels on stdin: argv cannot hold NUL bytes and a frozen-evidence
+    prompt overflows the kernel's per-argument limit (`Argument list too long`)."""
+    import scripts.verify_agent_scenarios as vas
+
+    argv = vas._pi_completion_argv("openai", "gpt-x", "PDF head:\x00\x00%PDF-1.5")
+    assert "PDF head" not in " ".join(argv)
+    assert "\x00" not in "".join(argv)
+    assert argv[-1] == "--no-context-files"
+
+
+def test_clean_prompt_strips_nul():
+    """A binary-derived prompt is stripped before it reaches the stdin pipe."""
+    import scripts.verify_agent_scenarios as vas
+
+    assert vas._clean_prompt("PDF\x00 head") == "PDF head"
+

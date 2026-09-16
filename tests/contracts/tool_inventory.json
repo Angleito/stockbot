@@ -54,6 +54,7 @@
   "research_cancel",
   "research_finalize",
   "research_read",
+  "research_read_search",
   "research_resume",
   "research_start",
   "research_status",

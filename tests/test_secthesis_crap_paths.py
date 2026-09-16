@@ -3690,9 +3690,13 @@ def _shapes_env(channels: object) -> str:
 
     return _json.dumps(
         {
-            "claims": [{"text": "10-K notes steady demand", "evidence_ids": ["ev:1"]}],
-            "follow_ups": [],
+            "executive_view": "Filing-backed base case.",
+            "claims": [{"text": "10-K notes steady demand", "claim_type": "observed_fact", "evidence_ids": ["ev:1"]}],
             "impact_channels": channels,
+            "materiality": {"overall": "medium", "reasoning": "filing-visible demand"},
+            "uncertainties": ["order book"],
+            "what_would_change": ["a filed update"],
+            "follow_ups": [],
         }
     )
 
@@ -3703,11 +3707,11 @@ def test_committee_envelope_skips_malformed_channel_keeps_grounded() -> None:
     env = parse_committee_envelope(
         _shapes_env(
             [
-                {"name": "  ", "assessment": "noise", "evidence_ids": ["ev:1"]},
+                {"text": "  ", "direction": "none", "evidence_ids": ["ev:1"]},
                 42,
                 {
-                    "name": "Azure demand",
-                    "assessment": "raises commercial revenue",
+                    "text": "Azure demand",
+                    "direction": "raises commercial revenue",
                     "evidence_ids": ["ev:1", "ev:1"],
                 },
             ]
@@ -3715,30 +3719,33 @@ def test_committee_envelope_skips_malformed_channel_keeps_grounded() -> None:
         frozen=["ev:1"],
         agent="stockbot",
     )
-    assert [c.name for c in env.impact_channels] == ["Azure demand"]
+    assert [c.text for c in env.impact_channels] == ["Azure demand"]
+    assert env.impact_channels[0].direction == "raises commercial revenue"
     assert env.impact_channels[0].evidence_ids == ["ev:1"]
 
 
-def test_committee_envelope_channel_ids_must_be_string_list() -> None:
+def test_committee_envelope_channel_ids_reject_mixed_shapes() -> None:
     from app.research.agents import parse_committee_envelope
 
     env = parse_committee_envelope(
         _shapes_env(
             [
-                {"name": "Bad shape", "evidence_ids": "ev:1"},
-                {"name": "Azure demand", "evidence_ids": ["ev:1", 7]},
+                {"text": "Bad shape", "evidence_ids": "ev:1"},
+                {"text": "Azure demand", "evidence_ids": ["ev:1", 7]},
             ]
         ),
         frozen=["ev:1"],
         agent="stockbot",
     )
     assert env.impact_channels == []
+
+
 def test_committee_envelope_rejects_channel_citing_unknown_freeze_id() -> None:
     from app.research.agents import ModelOutputFailure, parse_committee_envelope
 
     with pytest.raises(ModelOutputFailure):
         parse_committee_envelope(
-            _shapes_env([{"name": "Azure demand", "evidence_ids": ["ev:nope"]}]),
+            _shapes_env([{"text": "Azure demand", "evidence_ids": ["ev:nope"]}]),
             frozen=["ev:1"],
             agent="stockbot",
         )
@@ -3748,7 +3755,7 @@ def test_committee_envelope_drops_ungrounded_channel() -> None:
     from app.research.agents import parse_committee_envelope
 
     env = parse_committee_envelope(
-        _shapes_env([{"name": "Azure demand", "evidence_ids": []}]),
+        _shapes_env([{"text": "Azure demand", "evidence_ids": []}]),
         frozen=["ev:1"],
         agent="stockbot",
     )
@@ -3759,11 +3766,91 @@ def test_committee_envelope_channel_ids_must_be_string_list() -> None:
     from app.research.agents import parse_committee_envelope
 
     env = parse_committee_envelope(
-        _shapes_env([{"name": "Azure demand", "evidence_ids": ["ev:1", 7]}]),
+        _shapes_env([{"text": "Azure demand", "evidence_ids": ["ev:1", 7]}]),
         frozen=["ev:1"],
         agent="stockbot",
     )
     assert env.impact_channels == []
+
+
+def _shapes_env_with(**overrides: object) -> str:
+    import json as _json
+
+    base: dict[str, object] = _json.loads(_shapes_env(
+        [{"text": "Azure demand", "direction": "up", "evidence_ids": ["ev:1"]}]))
+    base.update(overrides)
+    return _json.dumps(base)
+
+
+def test_committee_envelope_missing_keys_reports_the_list() -> None:
+    from app.research.agents import ModelOutputFailure, parse_committee_envelope
+
+    with pytest.raises(ModelOutputFailure) as exc:
+        parse_committee_envelope('{"claims": [], "follow_ups": []}', frozen=["ev:1"], agent="stockbot")
+    assert str(exc.value) == (
+        "ERR_COMMITTEE_ENVELOPE_INCOMPLETE: committee envelope missing "
+        "['executive_view', 'impact_channels', 'materiality', 'uncertainties', 'what_would_change']"
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"claims": {"text": "x"}}, "'claims' must be a list"),
+        ({"impact_channels": "none"}, "'impact_channels' must be a list"),
+        ({"follow_ups": None}, "'follow_ups' must be a list"),
+        ({"uncertainties": "order book"}, "'uncertainties' must be a list"),
+        ({"what_would_change": {"x": 1}}, "'what_would_change' must be a list"),
+        ({"executive_view": 7}, "'executive_view' must be a string"),
+        ({"materiality": "medium"}, "'materiality' must be {overall: one of"),
+        ({"materiality": {"overall": "huge", "reasoning": "r"}}, "'materiality' must be {overall: one of"),
+        ({"materiality": {"overall": "medium"}}, "'materiality' must be {overall: one of"),
+    ],
+)
+def test_committee_envelope_mistyped_fields_fail_closed(overrides: dict[str, object], message: str) -> None:
+    from app.research.agents import ModelOutputFailure, parse_committee_envelope
+
+    with pytest.raises(ModelOutputFailure) as exc:
+        parse_committee_envelope(_shapes_env_with(**overrides), frozen=["ev:1"], agent="stockbot")
+    assert str(exc.value).startswith("ERR_COMMITTEE_ENVELOPE_INCOMPLETE")
+    assert message in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ('[{"text": "steady demand", "evidence_ids": "ev:1"}]',
+         "each claim needs an evidence_ids list of ids"),
+        ('[{"text": "steady demand", "evidence_ids": ["ev:1", 7]}]',
+         "each claim needs an evidence_ids list of ids"),
+        ('[{"text": "steady demand", "evidence_ids": ["ev:1", ""]}]',
+         "each claim needs an evidence_ids list of ids"),
+        ('[{"text": "steady demand", "evidence_ids": ["ev:999"]}]',
+         "unknown evidence id 'ev:999'"),
+        ('[{"text": "steady demand", "evidence_ids": []}]',
+         "uncited inference claim: 'steady demand'"),
+    ],
+)
+def test_grounded_claims_reject_ungrounded_evidence_ids(document: str, message: str) -> None:
+    from app.research.agents import ModelOutputFailure, parse_grounded_claims
+
+    with pytest.raises(ModelOutputFailure) as exc:
+        parse_grounded_claims(document, frozen=["ev:1"])
+    assert str(exc.value) == message
+
+
+def test_grounded_claims_dedupe_in_first_seen_order_and_allow_uncited_unknown() -> None:
+    from app.research.agents import parse_grounded_claims
+
+    claims = parse_grounded_claims(
+        '[{"text": "steady demand", "claim_type": "observed_fact", "evidence_ids": ["ev:2", "ev:1", "ev:2"]},'
+        ' {"text": "no disclosure located", "claim_type": "unknown", "evidence_ids": []}]',
+        frozen=["ev:1", "ev:2"],
+    )
+    assert [(c.claim_type, c.evidence_ids) for c in claims] == [
+        ("observed_fact", ["ev:2", "ev:1"]),
+        ("unknown", []),
+    ]
 
 
 def test_validate_relationship_shape_rejects_non_mapping() -> None:
@@ -3830,36 +3917,44 @@ def _shapes_trio(
                         evidence_ids=["ev:1"], as_of="2025-06-30",
                         question="q", impact_channels=[_shapes_channel(c) for c in bear_ch])
     if isinstance(bull_ch, str):
-        bear.impact_channels.append(ImpactChannel(name=bull_ch, assessment="raw", evidence_ids=["ev:1"]))
+        bear.impact_channels.append(ImpactChannel(text=bull_ch, evidence_ids=["ev:1"]))
     return stock, bull, bear
 
 
 def _shapes_channel(raw: dict[str, object]) -> ImpactChannel:
     """Validated test channel (malformed test payloads raise, mirroring parse rules)."""
-    name = raw.get("name")
+    text = raw.get("text")
     ids = raw.get("evidence_ids")
-    assert isinstance(name, str) and name.strip()
+    assert isinstance(text, str) and text.strip()
     assert isinstance(ids, list) and ids and all(isinstance(e, str) for e in ids)
-    detail = raw.get("explanation", raw.get("assessment", ""))
-    return ImpactChannel(name=name.strip()[:200], assessment=str(detail),
+    direction = raw.get("direction", "")
+    return ImpactChannel(text=text.strip()[:500], direction=str(direction),
                          evidence_ids=[e for e in ids if isinstance(e, str)])
 
 
-def test_normalize_channel_prefers_name_over_explanation_fallback() -> None:
+def test_normalize_channel_prefers_text_and_reads_direction() -> None:
     from app.research.synthesis.final import _normalize_channel
 
-    named = _normalize_channel(
+    typed = _normalize_channel({"text": "Azure demand", "direction": "high", "evidence_ids": ["ev:1"]})
+    assert typed is not None
+    assert typed["name"] == "Azure demand"
+    assert typed["severity"] == "high"
+    # The new text/direction shape wins over a legacy name/explanation dict.
+    preferred = _normalize_channel({"text": "Azure demand", "name": "legacy name",
+                                    "explanation": "raises revenue", "evidence_ids": ["ev:1"]})
+    assert preferred is not None and preferred["name"] == "Azure demand"
+    legacy = _normalize_channel(
         {"name": "Azure demand", "severity": "high", "explanation": "raises revenue", "evidence_ids": ["ev:1"]}
     )
-    assert named is not None
-    assert named["name"] == "Azure demand"
-    assert named["severity"] == "high"
+    assert legacy is not None
+    assert legacy["name"] == "Azure demand"
+    assert legacy["severity"] == "high"
     aliased = _normalize_channel({"title": "Azure demand", "text": "raises revenue", "refs": ["ev:1"]})
     assert aliased is not None
-    assert aliased["name"] == "Azure demand"
+    assert aliased["name"] == "raises revenue"
     assert aliased["explanation"] == "raises revenue"
     assert _normalize_channel({"severity": "high", "evidence_ids": ["ev:1"]}) is None
-    assert _normalize_channel({"name": "Azure demand", "evidence_ids": []}) is None
+    assert _normalize_channel({"text": "Azure demand", "evidence_ids": []}) is None
 
 
 def test_normalize_channel_reads_object_attribute_paths() -> None:
@@ -3874,23 +3969,18 @@ def test_normalize_channel_reads_object_attribute_paths() -> None:
     assert chan["evidence_ids"] == ["ev:1"]
 
 
-def test_channels_from_analyses_dedupes_and_skips_nameless() -> None:
+def test_channels_from_analyses_dedupes_and_skips_untexted() -> None:
     from app.research.synthesis.final import _channels_from_analyses
 
-    channel: dict[str, object] = {
-        "name": "Azure demand",
-        "severity": "high",
-        "explanation": "raises revenue",
-        "evidence_ids": ["ev:1"],
-    }
     stock, bull, bear = _shapes_trio(
-        [dict(channel), dict(channel)],
+        [{"text": "Azure demand", "direction": "high", "evidence_ids": ["ev:1"]},
+         {"text": "Azure demand", "direction": "high", "evidence_ids": ["ev:1"]}],
         [],
-        [{"name": "Other branch", "evidence_ids": ["ev:1"]}],
+        [{"text": "Other branch", "evidence_ids": ["ev:1"]}],
     )
     out = _channels_from_analyses(stock, bull, bear)
     assert [(c["name"], c["explanation"]) for c in out] == [
-        ("Azure demand", "raises revenue"),
+        ("Azure demand", "Azure demand"),
         ("Other branch", "Other branch"),
     ]
 
@@ -3899,13 +3989,14 @@ def test_channels_from_analyses_keeps_sibling_impact_channel_shape() -> None:
     from app.research.synthesis.final import _channels_from_analyses
 
     stock, bull, bear = _shapes_trio(
-        [{"name": "Azure demand", "assessment": "raises revenue", "evidence_ids": ["ev:1"]}],
+        [{"text": "Azure demand", "direction": "raises revenue", "evidence_ids": ["ev:1"]}],
         [],
         [],
     )
     out = _channels_from_analyses(stock, bull, bear)
     assert len(out) == 1
     assert out[0]["name"] == "Azure demand"
+    assert out[0]["severity"] == "raises revenue"
     assert out[0]["evidence_ids"] == ["ev:1"]
 
 

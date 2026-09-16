@@ -34,6 +34,10 @@ class Scenario:
     expected_tools: tuple[str, ...]
     requires_evidence: bool
     notes: str
+    requires_trace: bool = False
+    # Fixture carriers: kept so their recorded broken runs stay pinned in the
+    # offline evaluator, but excluded from the default live run.
+    fixture_only: bool = False
 
 
 SCENARIOS: tuple[Scenario, ...] = (
@@ -166,6 +170,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         expected_tools=("find_sec_entities", "list_sec_filings", "get_sec_document", "search_sec_filings"),
         requires_evidence=True,
         notes="SEC-only architecture eval: GS direct OpenAI exposure + indirect channels, latest filings pinned, unbounded useful reads, duplicate-no-progress rejected, raw preserved + derived views linked, one submit, freeze, same-freeze committee, unknown stays unknown, facts/inference split, material claims trace to raw.",
+        requires_trace=True,
     ),
     Scenario(
         name="msft-openai-bankruptcy-sec-only",
@@ -176,6 +181,42 @@ SCENARIOS: tuple[Scenario, ...] = (
         expected_tools=("find_sec_entities", "list_sec_filings", "get_sec_document", "search_sec_filings"),
         requires_evidence=True,
         notes="OpenAI-bankruptcy SEC-only regression: pinned as_of fixtures; material Microsoft exposure channels (investment/ownership, commercial/revenue, receivable/credit, Azure/purchase commitment) plus at least one non-MSFT branch (AMZN/CoreWeave/AMD/Cerebras/ORCL per as_of); no facts past the fixture cutoff.",
+        requires_trace=True,
+    ),
+    Scenario(
+        name="spacex-openai-bankruptcy-sec-only-live-run",
+        family=ScenarioFamily.MISSING,
+        question="What would happen to SpaceX were openai go bankrupt",
+        ticker=None,
+        as_of=None,
+        expected_tools=("find_sec_entities", "search_sec_filings", "get_sec_document"),
+        requires_evidence=True,
+        notes="Live-run regression (rs:6099bbe0): the shipped run stored search ids as filing record ids, recorded zero raw-document provenance, declared no claim types, and concluded a universal no-channel absence; this fixture must FAIL the trace/absence/claim-type checks.",
+        requires_trace=True,
+        fixture_only=True,
+    ),
+    Scenario(
+        name="gs-openai-sec-only-live-run",
+        family=ScenarioFamily.MULTI_STEP,
+        question="What will happen to Goldman Sachs in the event OpenAI goes bankrupt?",
+        ticker="GS",
+        as_of=None,
+        expected_tools=("search_sec_filings", "get_sec_document"),
+        requires_evidence=True,
+        notes="Live-run regression (rs:4d6534bd): zero-raw-provenance evidence and a search-miss promoted to 'no disclosed exposure'; this fixture must FAIL the trace/absence checks.",
+        requires_trace=True,
+        fixture_only=True,
+    ),
+    Scenario(
+        name="spacex-openai-bankruptcy-sec-only",
+        family=ScenarioFamily.MISSING,
+        question="What happens to SpaceX if OpenAI goes bankrupt?",
+        ticker=None,
+        as_of=None,
+        expected_tools=("find_sec_entities", "search_sec_filings", "list_sec_filings", "get_sec_document"),
+        requires_evidence=True,
+        notes="Scoped-absence regression: SpaceX has no SEC issuer record, so the answer stays a scoped absence observation within the searched SEC corpus — never a universal claim that no relationship exists; filings opened for the OpenAI-linked chain still back every observed fact in the trace.",
+        requires_trace=True,
     ),
 )
 

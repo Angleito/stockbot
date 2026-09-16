@@ -269,15 +269,15 @@ def test_agent_scenario_helpers():
     assert (name, inner) == ("t", {"a": 1})
     assert vas._extract_call_tool_request({}) == ("", {})
     assert vas.resolve_provider_model("p", "m", {"STOCKBOT_PI_PROVIDER": "x", "STOCKBOT_PI_MODEL": "y"}) == ("p", "m")
-    with pytest.raises(RuntimeError):
-        vas.resolve_provider_model(None, None, {})
+    # Re-pinned: an unset provider/model is the flag-less default (Pi's own CLI default), not a failure.
+    assert vas.resolve_provider_model(None, None, {}) == ("", "")
     assert vas._selected_names(argparse.Namespace(scenario="s")) == ["s"]
     assert vas._scenario_map() != {}
     assert vas._find_unknown(["a"], {"a": _scenario()}) == []
     assert vas._failed_results([]) == []
     failed, code = vas.summarize_results([])
     assert (failed, code) == ([], 0)
-    assert vas._live_kwargs(_scenario(), "p", "m")["question"] == "q"
+    assert vas._live_kwargs(_scenario(), "p", "m", 300)["question"] == "q"
     assert vas._eval_one_scenario.__name__ == "_eval_one_scenario"
     assert vas._cli_prereqs.__name__ == "_cli_prereqs"
     assert vas._extract_evidence_ids({"evidence_ids": ["a", 5]}) == ("a",)

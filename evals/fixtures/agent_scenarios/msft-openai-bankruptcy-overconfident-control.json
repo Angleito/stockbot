@@ -1,0 +1,100 @@
+{
+  "answer_excerpt": "Microsoft Azure commercial exposure and CoreWeave are the two branches named in the searched hits. No relationship exists between Microsoft and OpenAI: the search returned nothing material, so the banks have no exposure. (rendered from a SEC search miss with no filing opened)",
+  "as_of": "2026-08-10",
+  "budget_cap": 60,
+  "budget_used": 3,
+  "evidence_ids": [],
+  "family": "multi-step",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:msft-openai-overconfident-control:1:freeze",
+  "freeze_before": "rs:msft-openai-overconfident-control:1:freeze",
+  "known_ats": [
+    "2026-08-01"
+  ],
+  "question": "What happens to Microsoft if OpenAI goes bankrupt?",
+  "scenario_name": "msft-openai-bankruptcy-sec-only",
+  "session_id": "rs:msft-openai-overconfident-control",
+  "telemetry": {
+    "coverage": "partial",
+    "entities": [
+      "MSFT"
+    ],
+    "exhibits": 0,
+    "forms": [],
+    "queries": [
+      "MSFT OpenAI"
+    ],
+    "relationships_found": 0,
+    "relationships_skipped": 0,
+    "searches": 1,
+    "stop_reason": "complete:wave1",
+    "unresolved": []
+  },
+  "tool_calls": [
+    "search_sec_filings"
+  ],
+  "trace": {
+    "branches_covered": [
+      "coreweave"
+    ],
+    "claims": [
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "No relationship exists between Microsoft and OpenAI"
+      }
+    ],
+    "claims_by_type": {
+      "contradicted": 0,
+      "inference": 0,
+      "observed_fact": 1,
+      "unknown": 0
+    },
+    "committee_freeze_ids": [
+      "rs:msft-openai-overconfident-control:1:freeze"
+    ],
+    "coverage_complete": false,
+    "documents_opened": [],
+    "filings_opened": [],
+    "limitations": [],
+    "material_channels": [
+      "azure",
+      "commercial"
+    ],
+    "navigation_evidence_ids": [
+      "sec-search:msft-openai:1"
+    ],
+    "passages_opened": [],
+    "raw_evidence_ids": [],
+    "roles_completed": [
+      "stockbot"
+    ],
+    "searches": [
+      "sec-search:msft-openai:1"
+    ],
+    "universal_absence_claims": [
+      "No relationship exists between Microsoft and OpenAI"
+    ],
+    "waves": [
+      "rs:msft-openai-overconfident-control:1:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "find_sec_entities",
+      "list_sec_filings",
+      "get_sec_document",
+      "search_sec_filings"
+    ],
+    "pit_as_of": "2026-08-10",
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze",
+      "timeout_resume_requires_failed"
+    ]
+  }
+}

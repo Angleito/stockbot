@@ -4,10 +4,10 @@ Same freeze input as stockbot/bearbot; no research caps (frozen evidence
 only, never calls tools). Model argues the bull case; infra validates refs
 against the freeze and packages ``research_requests``.
 
-Fake-model sketch (no live calls): fake ``model(prompt)`` returns canned
-bull text with per-claim citations like ``CLAIM: <text> [EV-1]``; call
-``run_bullbot``; assert ``stance`` is bullish and refs stay
-within the freeze.
+Fake-model sketch (no live calls): fake ``model(prompt)`` returns one canned
+rich-envelope JSON object (executive_view, typed claims, impact channels,
+materiality, uncertainties, what_would_change, follow_ups); call
+``run_bullbot``; assert ``stance`` is bullish and refs stay within the freeze.
 """
 
 from __future__ import annotations
@@ -98,10 +98,24 @@ def run_bullbot(
     wave = _coerce_wave(wave_id)
     frozen = list(evidence_ids)
     prompt = (
-        f"Bull case only (strongest defensible limited-damage/upside read). Question: {question}\n"
+        "Role: bull case. Build the strongest evidence-supported resilience case: where the cited "
+        "disclosures show limited damage, buffers, mitigants, contractual protection, or diversified "
+        f"revenue. Do not fabricate optimism. Question: {question}\n"
         f"Freeze: {freeze_id} as of {as_of} evidence={len(frozen)}\n"
-        'Respond with one JSON object only: {"role": "bullbot", "executive_view": "<bullish read>", "claims": [{"statement": "<finding>", "evidence_ids": ["<freeze-id>", ...]}], "impact_channels": [{"name": "<channel>", "assessment": "<read>", "evidence_ids": ["<freeze-id>"]}], "materiality": {"overall": "critical|high|medium|low", "reasoning": "<why>"}, "uncertainties": ["<open question>"], "research_requests": [{"question": "<follow-up>?", "why_it_matters": "<why>", "suggested_source": "SEC"}]}. '
-        "Cite only freeze ids for each factual claim; legacy keys claims[].text and follow_ups[] are also accepted."
+        'Respond with one JSON object only: {"role": "bullbot", "executive_view": "<bullish read>", '
+        '"claims": [{"text": "<finding>", "claim_type": "observed_fact|inference|unknown|contradicted", "evidence_ids": ["<freeze-id>", ...]}], '
+        '"impact_channels": [{"text": "<channel>", "direction": "<what it does to the question>", "evidence_ids": ["<freeze-id>"]}], '
+        '"materiality": {"overall": "critical|high|medium|low", "reasoning": "<why>"}, '
+        '"uncertainties": ["<what the freeze does not establish>"], '
+        '"what_would_change": ["<concrete disclosure that would move this view>"], '
+        '"follow_ups": [{"question": "<follow-up>?", "why_it_matters": "<why>", "suggested_source": "SEC"}]}. '
+        "claim_type is declared, never inferred from wording: observed_fact when the cited passage states it directly, "
+        "inference when it is reasoned from cited evidence, contradicted when cited evidence conflicts with the claim text, "
+        "unknown when the frozen evidence does not establish it (for example no disclosure located within the searched scope). "
+        "observed_fact/inference/contradicted need at least one freeze id; unknown may cite none. "
+        "Cite only freeze ids; never invent ids, filings, or numbers. Every favorable claim needs a passage that supports it; "
+        "if the freeze supports no resilience case, say so instead of asserting one. "
+        "Populate uncertainties and what_would_change with at least one concrete item each."
     )
     if evidence_text.strip():
         prompt += f"\nEvidence (cite ids; do not invent):\n{evidence_text.strip()}"
@@ -126,7 +140,7 @@ def run_bullbot(
         stance="bullish",
         bull_case=view,
         unknowns=unknowns,
-        what_would_change=[],
+        what_would_change=list(env.what_would_change),
         claims=env.claims,
         research_requests=extra,
         executive_view=view,

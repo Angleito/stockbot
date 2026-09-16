@@ -1249,14 +1249,56 @@ TOOLS: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
+            "name": "research_read_search",
+            "description": "Pages the persisted SEC search universe of one search_id: every ranked hit that search retrieved, with retrieval truth (pagination_complete/source_exhausted) and coverage. display_limit only bounded the earlier model packet, never the stored set, so this is how the full remainder is read. Nonmutating; hits are navigation artifacts — open the filing and cite a raw passage before recording evidence.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "search_id": {"type": "string", "description": "Search id returned by search_sec_filings."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "Hits to skip, best score first (default 0)."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Hits per page (default 50)."},
+                    "forms": {"type": "array", "items": {"type": "string"}, "description": "Optional form filter, e.g. [\"10-K\", \"8-K\"]."},
+                },
+                "required": ["session_id", "search_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "research_add_evidence",
-            "description": "Records one finding on a research job; provenance, point-in-time, and IDs are kernel-validated.",
+            "description": "Records one typed finding on a running research job. observed_fact requires raw-source provenance (source_record_id/accession_no, document_name, and a passage/matching_passage/section from the opened document): SEC search results are navigation artifacts, so a hit cited without a raw passage fails ERR_RAW_SOURCE_REQUIRED. absence_observation requires search_id + query + coverage of what was searched. Provenance, point-in-time, and IDs are kernel-validated.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "Research session ID."},
                     "job_id": {"type": "string", "description": "Running job ID the finding belongs to."},
-                    "item": {"type": "object", "description": "Finding with content, source, and provenance fields."},
+                    "item": {
+                        "type": "object",
+                        "description": "Finding whose provenance must match its claim_kind: raw filing passage for observed_fact, search scope for absence_observation.",
+                        "properties": {
+                            "claim_kind": {"type": "string", "enum": ["observed_fact", "absence_observation"], "description": "Defaults to observed_fact; evidence_type/ev_type are legacy aliases (filing_observation/search_coverage)."},
+                            "claim_text": {"type": "string", "description": "The finding, stated over its provenance."},
+                            "content": {"type": "string", "description": "Recorded content (defaults to claim_text)."},
+                            "source_record_id": {"type": "string", "description": "SEC accession of the opened filing (also accession_no/accession; 18 bare digits normalize)."},
+                            "document_name": {"type": "string", "description": "Document the passage came from (also document)."},
+                            "passage": {"type": "string", "description": "Raw passage/section quoted from that document (also matching_passage/section/fact)."},
+                            "source_uri": {"type": "string", "description": "URL of the opened document, when known."},
+                            "known_at": {"type": "string", "description": "ISO-8601 public-knowledge timestamp (e.g. filing date); never a retrieval time."},
+                            "search_id": {"type": "string", "description": "Absence observations only: search-run id the scope covers."},
+                            "query": {"type": "string", "description": "Absence observations only: the exact query that was run."},
+                            "coverage": {
+                                "type": "object",
+                                "description": "Absence observations only: what was searched and whether paging was exhausted.",
+                                "properties": {
+                                    "forms": {"type": "array", "items": {"type": "string"}, "description": "Forms searched (also dates/partitions/entities/docs/gaps)."},
+                                    "pagination_complete": {"type": "boolean", "description": "True only when every page of the search was retrieved."},
+                                    "complete": {"type": "boolean", "description": "True only when the searched scope is the whole intended scope."},
+                                },
+                            },
+                        },
+                    },
                 },
                 "required": ["session_id", "job_id", "item"],
             },
@@ -1266,15 +1308,33 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "research_submit_source_result",
-            "description": "Complete one running source job with validated coverage; evidence stays mutation-only.",
+            "description": "Complete one running source job with validated coverage; evidence stays mutation-only. coverage requires useful_for_question. sufficient additionally requires major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, search_runs (persisted search ids), and covered_branches, and must leave material_open_questions, major_entities_missing, remaining_branches, routes_unsearched, and the unresolved_questions argument empty (else ERR_COVERAGE_REQUIRED / ERR_COVERAGE_INCOMPLETE). insufficient keeps evidence optional and residuals allowed.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "Research session ID."},
                     "job_id": {"type": "string", "description": "Running source job ID to complete."},
-                    "coverage": {"type": "object", "description": "Coverage with useful_for_question sufficient|insufficient (required). New sufficiency keys (major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, major_entities_missing, remaining_branches, routes_unsearched) ride alongside existing resolved/partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps; when any sufficiency key is present, sufficient requires non-empty investigated entities/relationships/forms/exhibits and empty material opens/missing entities/remaining branches/routes, else the legacy envelope applies."},
+                    "coverage": {
+                        "type": "object",
+                        "description": "Coverage envelope: what was searched and how far it got.",
+                        "properties": {
+                            "useful_for_question": {"type": "string", "enum": ["sufficient", "insufficient"], "description": "Required. sufficient = SCC scope drained with no material open branch; insufficient = honest residual coverage."},
+                            "major_entities_investigated": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — entities actually investigated in filings."},
+                            "relationship_types_checked": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — relationship channels checked."},
+                            "forms_examined": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — forms opened."},
+                            "exhibits_examined": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — exhibits/documents opened."},
+                            "material_open_questions": {"type": "array", "items": {"type": "string"}, "description": "sufficient: present and empty."},
+                            "search_runs": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty search ids backing the coverage."},
+                            "covered_branches": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — material branches the run covered."},
+                            "major_entities_missing": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
+                            "remaining_branches": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
+                            "routes_unsearched": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
+                            "resolved": {"type": "array", "items": {"type": "string"}, "description": "Optional existing envelope: resolved questions (also partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps)."},
+                        },
+                        "required": ["useful_for_question"],
+                    },
                     "evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Evidence IDs grounding a sufficient result (empty only with insufficient)."},
-                    "unresolved_questions": {"type": "array", "items": {"type": "string"}, "description": "Open questions left by the source run."},
+                    "unresolved_questions": {"type": "array", "items": {"type": "string"}, "description": "Open questions left by the source run; must be empty with sufficient."},
                 },
                 "required": ["session_id", "job_id", "coverage", "evidence_ids", "unresolved_questions"],
             },
@@ -3366,6 +3426,25 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         prerequisites=(),
         direct_activation=False,
     ),
+    "research_read_search": ToolDiscovery(
+        domain="research",
+        family="session",
+        intent="read_search_hits",
+        output_kind="current_snapshot",
+        source="local",
+        entity_scope="single_session",
+        time_mode="latest_or_as_of",
+        summary="Page the persisted ranked hit universe of one SEC search, with retrieval truth.",
+        choose_when=(
+            "Reading hits beyond the compact top_hits/additional_hits packet of a search_sec_filings result.",
+            "Paging a large search to exhaustion instead of rerunning the search with a higher limit.",
+        ),
+        reject_when=("Not for running a new SEC search (search_sec_filings).",),
+        conflicts_with=(),
+        related_tools=("research_read", "research_add_evidence",),
+        prerequisites=(),
+        direct_activation=False,
+    ),
     "research_add_evidence": ToolDiscovery(
         domain="research",
         family="session",
@@ -4069,14 +4148,25 @@ def _hit_window(hit: dict[str, object]) -> dict[str, object]:
     }
 
 
+_SEARCH_RETRIEVAL_NOTE = (
+    "SEC search hits are navigation artifacts, never evidence: open the "
+    "underlying filing/document and cite a raw passage before recording "
+    "anything. This packet is a bounded display window — display_limit is a "
+    "context saver, NOT retrieval completeness; the full ranked hit set is "
+    "persisted and paged with research_read_search(session_id, search_id)."
+)
+
+
 def _discovery_packet(hits: list[dict[str, object]], search_id: object,
                       limit: int | None) -> tuple[list[dict[str, object]], dict[str, object]]:
-    """Compact discovery packet: bounded top_hits + remainder pointer (display only)."""
+    """Compact discovery packet: bounded top_hits + paging pointer (display only)."""
     top = [_hit_window(hit) for hit in hits] if limit is None else [_hit_window(hit) for hit in hits[:limit]]
     rest = 0 if limit is None else max(len(hits) - len(top), 0)
     remainder: dict[str, object] = {"count": rest}
     if rest and isinstance(search_id, str) and search_id:
-        remainder["resource_uri"] = f"source://sec/search/{search_id}/hits?offset={len(top)}"
+        remainder["page_with"] = "research_read_search"
+        remainder["next_offset"] = len(top)
+        remainder["note"] = _SEARCH_RETRIEVAL_NOTE
     return top, remainder
 
 
@@ -4136,6 +4226,13 @@ def _search_envelope(result: SECSearchResult, *, limit: int | None = 20) -> dict
         "request": request,
         "scope": _envelope_scope(request),
         "count": len(hits),
+        "retrieval": {
+            "hits_are": "navigation_artifacts",
+            "display_limit": limit,
+            "display_limit_note": "context saver only; the full ranked hit set is persisted and never truncated by display_limit",
+            "page_with": "research_read_search",
+            "note": _SEARCH_RETRIEVAL_NOTE,
+        },
         "top_hits": top_hits,
         "additional_hits": additional_hits,
         "entities": data.get("entities"),
@@ -4788,6 +4885,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "research_status": Capability.RESEARCH,
     "research_cancel": Capability.RESEARCH,
     "research_read": Capability.RESEARCH,
+    "research_read_search": Capability.RESEARCH,
     "research_add_evidence": Capability.RESEARCH,
     "research_submit_source_result": Capability.RESEARCH,
     "research_add_analysis": Capability.RESEARCH,
@@ -5498,6 +5596,128 @@ def _research_read(arguments: dict[str, object], context: RequestContext) -> dic
     return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
 
 
+_READ_SEARCH_DEFAULT_LIMIT = 50
+_READ_SEARCH_MAX_LIMIT = 500
+
+
+def _read_search_count(arguments: dict[str, object], key: str, default: int, minimum: int) -> int:
+    """Validated int page argument (bools are never counts)."""
+    value = arguments.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"research_read_search: '{key}' must be an integer >= {minimum}, got {value!r}")
+    return value
+
+
+def _read_search_forms(arguments: dict[str, object]) -> tuple[str, ...] | None:
+    """Validated form filter of the page window (None when absent)."""
+    forms = arguments.get("forms")
+    if forms is None:
+        return None
+    if not isinstance(forms, (list, tuple)) or any(not isinstance(f, str) for f in forms):
+        raise ValueError(f"research_read_search: 'forms' must be a list of strings, got {type(forms).__name__}")
+    return tuple(forms)
+
+
+def _read_search_page(arguments: dict[str, object]) -> tuple[int, int, tuple[str, ...] | None]:
+    """Validated (offset, limit, forms) page window for research_read_search."""
+    offset = _read_search_count(arguments, "offset", 0, 0)
+    limit = min(_read_search_count(arguments, "limit", _READ_SEARCH_DEFAULT_LIMIT, 1),
+                _READ_SEARCH_MAX_LIMIT)
+    return offset, limit, _read_search_forms(arguments)
+
+
+def _ledger_json_list(raw: object) -> list[str]:
+    """JSON string column -> string list ([] on absent/mistyped)."""
+    if not isinstance(raw, str):
+        return []
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(v) for v in parsed] if isinstance(parsed, list) else []
+
+
+def _ledger_search_request(row: dict[str, object]) -> dict[str, object]:
+    """Decoded request_json of one persisted search row ({} when absent/bad)."""
+    raw = row.get("request_json")
+    if not isinstance(raw, str):
+        return {}
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return {str(k): v for k, v in parsed.items()} if isinstance(parsed, dict) else {}
+
+
+def _ledger_search_coverage(row: dict[str, object]) -> dict[str, object]:
+    """Persisted coverage + retrieval truth of one search row (never the display bound).
+
+    Retrieval flags stay null for rows persisted before they were recorded:
+    unknown is reported as unknown, never as "not complete".
+    """
+    return {
+        "status": row.get("coverage_status"),
+        "date_coverage": row.get("date_coverage"),
+        "forms_covered": _ledger_json_list(row.get("forms_covered_json")),
+        "results_reported": row.get("results_reported"),
+        "results_retrieved": row.get("results_retrieved"),
+        "pages": row.get("pages"),
+        "pending_backfill_jobs": _ledger_json_list(row.get("pending_jobs_json")),
+        "pagination_complete": row.get("pagination_complete"),
+        "source_exhausted": row.get("source_exhausted"),
+    }
+
+
+def _ledger_hit(hit: dict[str, object]) -> dict[str, object]:
+    """One persisted hit as a paged packet row (navigation artifact, not evidence)."""
+    return {
+        "accession": hit.get("accession"),
+        "form": hit.get("form"),
+        "filed_at": hit.get("filed_at"),
+        "document": hit.get("matched_document"),
+        "section": hit.get("file_description") or hit.get("file_type"),
+        "query": hit.get("query"),
+        "score": hit.get("score"),
+        "page": hit.get("page"),
+        "known_at": hit.get("known_at"),
+        "source_url": hit.get("source_url"),
+        "snippet": hit.get("snippet") or hit.get("file_description"),
+    }
+
+
+def _research_read_search(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
+    """Paged view of one persisted SEC search's full ranked hit universe."""
+    from app.sec import store as sec_store
+
+    session_id = str(arguments["session_id"])
+    search_id = str(arguments["search_id"])
+    offset, limit, forms = _read_search_page(arguments)
+    try:
+        _research_repo_for(context).get_session(session_id)
+    except KeyError as e:
+        return _research_not_found_error(e)
+    root = get_data_root()
+    row = sec_store.query_search(search_id, root=root)
+    if row is None:
+        return {"error": f"unknown search_id: {search_id!r}", "error_type": "unknown_search"}
+    total = sec_store.query_hits_count(search_id, forms=forms, root=root)
+    hits = sec_store.query_hits(
+        search_id, offset=offset, limit=limit, forms=forms, root=root)
+    request = _ledger_search_request(row)
+    return {
+        "session_id": session_id,
+        "search_id": search_id,
+        "query": request.get("query") or request.get("company_name"),
+        "coverage": _ledger_search_coverage(row),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hits": [_ledger_hit(hit) for hit in hits],
+        "pagination_complete": row.get("pagination_complete"),
+        "more": offset + len(hits) < total,
+    }
+
+
 def _research_add_evidence(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
     from app.research.service import ResearchNotFound
@@ -5648,6 +5868,7 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
     "research_status": _research_status,
     "research_cancel": _research_cancel,
     "research_read": _research_read,
+    "research_read_search": _research_read_search,
     "research_add_evidence": _research_add_evidence,
     "research_submit_source_result": _research_submit_source_result,
     "research_add_analysis": _research_add_analysis,

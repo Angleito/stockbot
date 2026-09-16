@@ -1,4 +1,9 @@
-"""Context-aware SEC source agent: generic context + query families + dossier assembly.
+"""Context-aware SEC source agent: branch map + query families + dossier assembly.
+
+Workflow it drives: build the material branch map -> search SEC (navigation
+only, never evidence) -> open filings -> raw-document findings -> continue
+with materially new searches -> structured coverage submit. No maximum number
+of searches, filing/document/exhibit reads, or waves.
 
 Fake-model sketch (no live calls): fake ``dispatch`` + fake ``model`` into
 ``decompose_question`` / ``assemble_dossier``; assert non-SEC tools are
@@ -12,8 +17,14 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from . import GroundedClaim, ModelOutputFailure
-from .scout import ScoutAssignment, ScoutResult, ScoutRole, normalize_query
+from . import GroundedClaim, ModelOutputFailure, conservative_claim_type
+from .scout import (
+    SOURCE_WORKFLOW,
+    ScoutAssignment,
+    ScoutResult,
+    ScoutRole,
+    normalize_query,
+)
 
 # SEC-only allowlist: discovery wrappers + SEC/financial-statement tools.
 # Domain guard also consults TOOL_DOMAINS (portfolio_read always denied).
@@ -188,19 +199,22 @@ def _deterministic_context(question: str, tickers: Sequence[str]) -> dict[str, o
 
 
 def _context_prompt(question: str, tickers: Sequence[str]) -> str:
-    """Provider-agnostic JSON prompt for the generic research context."""
+    """Provider-agnostic JSON prompt for the generic research context (the branch map)."""
     scoped = ", ".join(t for t in tickers if isinstance(t, str) and t.strip()) or "none provided"
     return (
-        "Extract a generic SEC research context as JSON only with keys "
+        "Build the material branch map for this SEC research question as JSON only with keys "
         "primary_entities, related_entities, industries, products, technologies, "
         "relationships [{subject, relation, object}], concepts, risks, catalysts. "
         f"Question: {question}\nScope tickers: {scoped}\n"
         "List scope tickers as primary entities; other named issuers (customers, "
         "competitors, suppliers, peers, funds) as related entities; "
         "subject matter as concepts/risks/catalysts. "
+        "The map drives later searches, not the answer: search results are navigation artifacts and "
+        "only raw SEC documents become evidence. "
         "Expand dynamically to the causal channels the question implies "
         "(counterparty, credit, concentration, lending, commitments, derivatives, "
-        "off-balance-sheet, supply-chain, funding/liquidity) — never a fixed issuer list. JSON only."
+        "off-balance-sheet, supply-chain, funding/liquidity) — never a fixed issuer list. "
+        f"{SOURCE_WORKFLOW} JSON only."
     )
 
 
@@ -302,6 +316,7 @@ def build_research_context(
 
 _RELATED_ROLES = ("customer", "supplier", "competitor", "peer", "fund")
 _SUPP_FILING_SUFFIXES = ("8-K", "proxy", "N-PX", "agreement")
+_COUNTERPARTY_SUFFIXES = ("exposure", "agreement", "8-K")
 
 
 def _entity_pairs(primaries: list[str], related: list[str]) -> list[tuple[str, str]]:
@@ -336,6 +351,20 @@ def _add_related_groups(groups: dict[str, list[str]], related: list[str]) -> Non
         groups["related"].extend(f"{entity} {role}" for role in _RELATED_ROLES)
 
 
+def _add_counterparty_groups(groups: dict[str, list[str]], related: list[str], primaries: list[str]) -> None:
+    """Non-issuer counterparty queries: bare names first, then disclosure variants.
+
+    These are the queries a scout issues WITHOUT a ticker filter, so EDGAR
+    full-text search is global and its hits name the filers whose filings then
+    get opened. Built first in the global dedupe so the bare names survive it.
+    """
+    scoped = {normalize_query(p) for p in primaries}
+    entities = [e for e in related if normalize_query(e) not in scoped][:6]
+    groups["cp"].extend(entities)
+    for suffix in _COUNTERPARTY_SUFFIXES:
+        groups["cp"].extend(f"{entity} {suffix}" for entity in entities)
+
+
 def _add_supplement_groups(groups: dict[str, list[str]], concepts: list[str], products: list[str], technologies: list[str], catalysts: list[str]) -> None:
     """Conceptual supplements: bare terms plus filing/risk-factor mentions."""
     for term in _dedupe_keep([*concepts, *products, *technologies, *catalysts])[:5]:
@@ -360,14 +389,19 @@ def _dedupe_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
 
 
 def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
-    """Family-grouped SEC queries with global normalized dedup."""
+    """Family-grouped SEC queries with global normalized dedup.
+
+    ``cp`` (non-issuer counterparty names) is built first so its bare names win
+    the global dedupe against the scoped anchor families.
+    """
     source: Mapping[str, object] = context if isinstance(context, Mapping) else {}
     lists = {k: _coerce_str_list(source.get(k)) for k in
              ("primary_entities", "related_entities", "industries", "products",
               "technologies", "concepts", "risks", "catalysts")}
-    groups: dict[str, list[str]] = {"a": [], "b": [], "c": [], "d": [], "e": [],
-                                    "f": [], "related": [], "supp_bare": [],
+    groups: dict[str, list[str]] = {"cp": [], "a": [], "b": [], "c": [], "d": [],
+                                    "e": [], "f": [], "related": [], "supp_bare": [],
                                     "supp_filing": [], "supp_risk": []}
+    _add_counterparty_groups(groups, lists["related_entities"], lists["primary_entities"])
     _add_entity_groups(groups, lists["primary_entities"], lists["related_entities"],
                        _coerce_relationships(source.get("relationships")))
     _add_topic_groups(groups, lists["industries"], lists["products"],
@@ -377,7 +411,7 @@ def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
                            lists["technologies"], lists["catalysts"])
     return _dedupe_groups(groups)
 _ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
-    "filings": ("a", "b", "related", "supp_filing"),
+    "filings": ("a", "b", "related", "supp_filing", "cp"),
     "financials": ("c", "d", "supp_bare"),
     "risk": ("e", "f", "supp_risk"),
 }
@@ -388,14 +422,16 @@ def build_query_families(context: Mapping[str, object], as_of: str = "") -> list
 
     A named entity, B entity-pair, C industry, D demand, E exposure, F risk,
     then related-issuer role anchors (customer/supplier/competitor/peer/fund)
-    and conceptual supplements (risk-factor/8-K/proxy/N-PX/agreement mentions).
-    Non-issuer terms search as concepts, never dead-end. ``as_of`` is accepted
-    for call symmetry; point-in-time filtering applies at execution.
+    and conceptual supplements (risk-factor/8-K/proxy/N-PX/agreement mentions),
+    then non-issuer counterparty names + disclosure variants (``cp``, searched
+    unscoped so EDGAR full-text search is global). Non-issuer terms search as
+    concepts, never dead-end. ``as_of`` is accepted for call symmetry;
+    point-in-time filtering applies at execution.
     """
     _ = as_of
     groups = _grouped_queries(context)
     out: list[str] = []
-    for key in ("a", "b", "c", "d", "e", "f", "related", "supp_bare", "supp_filing", "supp_risk"):
+    for key in ("a", "b", "c", "d", "e", "f", "related", "supp_bare", "supp_filing", "supp_risk", "cp"):
         out.extend(groups.get(key, []))
     return out
 
@@ -510,9 +546,11 @@ def _role_assignments(question: str, session_id: str, as_of: str, tickers: Seque
     for role in roles:
         queries = [q for family in _ROLE_FAMILIES[role] for q in groups.get(family, [])[:2]]
         context_copy = {k: (list(v) if isinstance(v, list) else v) for k, v in context.items()}
+        unscoped: list[str] = list(groups.get("cp", [])) if role == "filings" else []
         assignments.append(ScoutAssignment(assignment_id=f"scout-{role}", session_id=session_id, as_of=as_of,
                                            role=role, question=question, tickers=list(scoped),
-                                           context=context_copy, queries=list(queries), baseline=list(baseline)))
+                                           context=context_copy, queries=list(queries),
+                                           unscoped_queries=unscoped, baseline=list(baseline)))
     return assignments
 
 
@@ -546,13 +584,14 @@ def _check_claim_refs(claim: GroundedClaim, known_set: set[str], session_id: str
 
 
 def _merge_claim(findings: list[GroundedClaim], claim: GroundedClaim) -> None:
-    """Append new claim text or union evidence ids into the prior same-text claim."""
+    """Append new claim text or merge duplicates: union ids, least assertive type."""
     prior = next((c for c in findings if c.text == claim.text), None)
     if prior is None:
-        findings.append(GroundedClaim(text=claim.text, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
+        findings.append(GroundedClaim(text=claim.text, claim_type=claim.claim_type, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
     else:
         merged_ids = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
-        findings[findings.index(prior)] = GroundedClaim(text=prior.text, evidence_ids=merged_ids)
+        merged_type = conservative_claim_type([prior.claim_type, claim.claim_type])
+        findings[findings.index(prior)] = GroundedClaim(text=prior.text, claim_type=merged_type, evidence_ids=merged_ids)
 
 def assemble_dossier(
     *,

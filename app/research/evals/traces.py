@@ -16,13 +16,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
 
 from app.config import get_data_root
 
 logger = logging.getLogger(__name__)
 
-Scalar = Union[str, int, float, bool, None]
+Scalar = str | int | float | bool | None
 # ponytail: flat string-map payloads only; nest via a JSON-encoded string value if it matters.
 Payload = dict[str, Scalar]
 

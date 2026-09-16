@@ -36,7 +36,7 @@ DISCOVERY_TOOLS: frozenset[str] = frozenset({
 
 CONTROL_TOOLS: frozenset[str] = frozenset({
     "research_start", "research_resume", "research_status", "research_cancel",
-    "research_read", "research_add_evidence", "research_submit_source_result", "research_add_analysis",
+    "research_read", "research_read_search", "research_add_evidence", "research_submit_source_result", "research_add_analysis",
     "research_finalize",
 })
 
@@ -53,7 +53,7 @@ DISPATCH_TOOLS: frozenset[str] = frozenset(
 
 STAGE_ALLOW: dict[Stage, frozenset[str]] = {
     "SOURCE_RESEARCH": DISCOVERY_TOOLS | DISPATCH_TOOLS | frozenset({
-        "research_resume", "research_status", "research_read", "research_cancel", "research_add_evidence", "research_submit_source_result",
+        "research_resume", "research_status", "research_read", "research_read_search", "research_cancel", "research_add_evidence", "research_submit_source_result",
     }),
     "COMMITTEE": DISCOVERY_TOOLS | frozenset({
         "research_resume", "research_status", "research_read", "research_cancel", "research_add_analysis",

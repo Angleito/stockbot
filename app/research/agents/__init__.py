@@ -1,4 +1,4 @@
-"""Agent package: shared request type + stable re-exports.
+"""Agent package: shared request/claim types + committee envelope parsing.
 
 Fake-model sketch (no live calls): build a ``ScoutAssignment``, pass a
 ``dispatch`` callable wrapping ``app.tools.execute_tool`` (or a dict-returning
@@ -10,10 +10,23 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from app.research.models import FailureCategory
+
+CLAIM_TYPES = ("observed_fact", "inference", "unknown", "contradicted")
+"""Claim vocabulary: declared by the authoring model, never inferred from wording.
+
+``observed_fact``/``contradicted``/``inference`` need at least one freeze id;
+``unknown`` (nothing located within the searched scope) may cite none.
+"""
+
+MATERIALITY_LEVELS = ("critical", "high", "medium", "low")
+
+COMMITTEE_REQUIRED_KEYS = ("executive_view", "claims", "impact_channels",
+                           "materiality", "uncertainties", "what_would_change", "follow_ups")
+COMMITTEE_ENVELOPE_ERROR = "ERR_COMMITTEE_ENVELOPE_INCOMPLETE"
 
 
 @dataclass
@@ -28,7 +41,7 @@ class ResearchRequest:
 
 
 class ModelOutputFailure(ValueError):
-    """Model cited an unknown id or left a factual claim uncited (fail-closed)."""
+    """Malformed model output: unknown id, uncited claim, or incomplete envelope."""
 
     _failure_category: FailureCategory
 
@@ -37,37 +50,12 @@ class ModelOutputFailure(ValueError):
         self._failure_category = FailureCategory.MODEL_OUTPUT_FAILURE
 
 
-CLAIM_CLASSES = ("DIRECTLY_SUPPORTED", "INFERENCE", "UNKNOWN", "CONTRADICTED")
-MATERIALITY_LEVELS = ("critical", "high", "medium", "low")
-
-_MANAGEABLE_RE = re.compile(
-    r"\b(manageab\w*|immaterial\w*|absorb\w*|contained|digestible|modest|limited\s+impact)\b",
-    re.IGNORECASE,
-)
-_CLAIM_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("CONTRADICT",), "CONTRADICTED"),
-    (("UNKNOWN", "UNCERTAIN", "UNCLEAR"), "UNKNOWN"),
-    (("INFERENCE", "INFER", "MAY ", "LIKELY", "SUGGEST"), "INFERENCE"),
-)
-
-
-def classify_claim(text: str, *, cited: bool) -> str:
-    """Deterministic claim label: uncited manageable/immaterial reads are never DIRECTLY_SUPPORTED."""
-    hay = f" {(text or '').upper()} "
-    for markers, label in _CLAIM_RULES:
-        if any(m in hay for m in markers):
-            return label
-    if not cited:
-        return "INFERENCE" if _MANAGEABLE_RE.search(text or "") else "UNKNOWN"
-    return "DIRECTLY_SUPPORTED"
-
-
 @dataclass
 class ImpactChannel:
-    """One impact channel with frozen evidence links."""
+    """One impact channel: what it does to the question, its direction, frozen evidence links."""
 
-    name: str
-    assessment: str
+    text: str
+    direction: str = ""
     evidence_ids: list[str] = field(default_factory=list)
 
 
@@ -81,20 +69,11 @@ class CommitteeMateriality:
 
 @dataclass
 class GroundedClaim:
-    """One finding/claim with explicit freeze-contained evidence links."""
+    """One claim with its declared type and freeze-contained evidence links."""
 
     text: str
+    claim_type: str = "inference"
     evidence_ids: list[str] = field(default_factory=list)
-
-    @property
-    def claim_class(self) -> str:
-        """Deterministic classification; manageable/immaterial without support is INFERENCE/UNKNOWN."""
-        return classify_claim(self.text, cited=bool(self.evidence_ids))
-
-    @property
-    def label(self) -> str:
-        """Alias for claim_class (eval hook)."""
-        return self.claim_class
 
 
 def _frozen_set(frozen: Sequence[str]) -> set[str]:
@@ -117,59 +96,158 @@ def _decode_claims_list(text: str) -> list[object]:
 
 
 def _claim_text(item: dict[object, object]) -> str:
-    """Validated non-empty claim text (truncation happens at build time; 'statement' aliases 'text')."""
-    raw_text = item.get("text", item.get("statement"))
+    """Validated non-empty claim text (truncation happens at build time)."""
+    raw_text = item.get("text")
     if not isinstance(raw_text, str) or not raw_text.strip():
         raise ModelOutputFailure("each claim needs non-empty text")
     return raw_text
 
 
-def _claim_ids(
-    item: dict[object, object], raw_text: str, frozen_set: set[str]
-) -> list[str]:
-    """Validated deduped evidence ids, all contained in the freeze."""
-    raw_ids = item.get("evidence_ids")
-    if (
-        not isinstance(raw_ids, list)
-        or not raw_ids
-        or any(not isinstance(e, str) or not e for e in raw_ids)
+def _claim_type(item: dict[object, object]) -> str:
+    """Declared claim type; an absent type is ``inference`` (never observed_fact)."""
+    raw = item.get("claim_type")
+    if raw is None:
+        return "inference"
+    if isinstance(raw, str) and raw.strip().lower() in CLAIM_TYPES:
+        return raw.strip().lower()
+    raise ModelOutputFailure(f"claim_type must be one of {CLAIM_TYPES}, got {raw!r}")
+
+
+def _grounded_ids(raw_ids: object, frozen_set: set[str]) -> list[str] | None:
+    """Deduped non-empty ids, all inside the freeze; None when malformed, raises on unknown id."""
+    if not isinstance(raw_ids, list) or any(
+        not isinstance(eid, str) or not eid for eid in raw_ids
     ):
-        raise ModelOutputFailure(f"uncited factual claim: {str(raw_text)[:120]!r}")
-    seen: list[str] = []
-    for eid in raw_ids:
-        if eid not in frozen_set:
-            raise ModelOutputFailure(f"unknown evidence id {eid!r}")
-        if eid not in seen:
-            seen.append(eid)
+        return None
+    unknown = next((eid for eid in raw_ids if eid not in frozen_set), None)
+    if unknown is not None:
+        raise ModelOutputFailure(f"unknown evidence id {unknown!r}")
+    return list(dict.fromkeys(raw_ids))
+
+
+def _claim_ids(
+    item: dict[object, object], raw_text: str, frozen_set: set[str], claim_type: str
+) -> list[str]:
+    """Validated deduped evidence ids, all contained in the freeze.
+
+    ``unknown`` may cite nothing; every other type needs at least one id.
+    """
+    seen = _grounded_ids(item.get("evidence_ids"), frozen_set)
+    if seen is None:
+        raise ModelOutputFailure("each claim needs an evidence_ids list of ids")
+    if not seen and claim_type != "unknown":
+        raise ModelOutputFailure(f"uncited {claim_type} claim: {raw_text[:120]!r}")
     return seen
 
 
 def _build_claim(item: object, frozen_set: set[str]) -> GroundedClaim:
-    """Validate one {text, evidence_ids} record against the freeze (statement aliases text)."""
+    """Validate one {text, claim_type, evidence_ids} record against the freeze."""
     if not isinstance(item, dict):
-        raise ModelOutputFailure("each claim must be {text, evidence_ids}")
+        raise ModelOutputFailure("each claim must be {text, claim_type, evidence_ids}")
     keys = set(item)
     if (
-        keys - {"text", "statement", "evidence_ids"}
+        keys - {"text", "claim_type", "evidence_ids"}
         or "evidence_ids" not in keys
-        or not ({"text", "statement"} & keys)
+        or "text" not in keys
     ):
-        raise ModelOutputFailure("each claim must contain exactly {text, evidence_ids}")
+        raise ModelOutputFailure("each claim must contain exactly {text, claim_type, evidence_ids}")
     raw_text = _claim_text(item)
+    claim_type = _claim_type(item)
     return GroundedClaim(
-        text=raw_text.strip()[:500], evidence_ids=_claim_ids(item, raw_text, frozen_set)
+        text=raw_text.strip()[:500],
+        claim_type=claim_type,
+        evidence_ids=_claim_ids(item, raw_text, frozen_set, claim_type),
     )
 
 
 def parse_grounded_claims(text: str, *, frozen: Sequence[str]) -> list[GroundedClaim]:
     """Parse model JSON records; each claim must cite only freeze ids.
 
-    Expected shape: [{"text": "...", "evidence_ids": ["EV-1", ...]}, ...].
-    Unknown IDs (e.g. EV-999), empty citations, or blank/non-JSON output
-    raise ``ModelOutputFailure``. Represent nothing found explicitly as [].
+    Expected shape: [{"text": "...", "claim_type": "...", "evidence_ids": [...]}, ...].
+    A missing ``claim_type`` is ``inference``; ``unknown`` may leave
+    ``evidence_ids`` empty. Unknown IDs (e.g. EV-999), uncited non-unknown
+    claims, or blank/non-JSON output raise ``ModelOutputFailure``. Represent
+    nothing found explicitly as [].
     """
     frozen_set = _frozen_set(frozen)
     return [_build_claim(item, frozen_set) for item in _decode_claims_list(text)]
+
+
+_FENCED_JSON = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _embedded_claim_list(text: str) -> list[object] | None:
+    """Claim list from fenced or prose-wrapped model text; None when nothing parses."""
+    for match in _FENCED_JSON.finditer(text):
+        decoded = _try_json_list(match.group(1))
+        if decoded is not None and any(isinstance(item, dict) for item in decoded):
+            return decoded
+    # A bare claim object before bracket scanning: `[...]` inside its own fields
+    # must never be mistaken for the claim list.
+    single = _try_json_object(text)
+    if single is not None:
+        return [single]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end > start:
+        decoded = _try_json_list(text[start:end + 1])
+        if decoded is not None:
+            return decoded
+    return None
+
+
+def _try_json_list(text: str) -> list[object] | None:
+    try:
+        decoded: object = json.loads(text.strip())
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, list) else None
+
+
+def _try_json_object(text: str) -> object | None:
+    try:
+        decoded: object = json.loads(text.strip())
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _decode_claims_list_relaxed(text: str) -> list[object] | None:
+    """Strict JSON list first, then fenced/prose-wrapped content; None when unparseable."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    decoded = _try_json_list(stripped)
+    if decoded is not None:
+        return decoded
+    return _embedded_claim_list(stripped)
+
+
+def parse_grounded_claims_tolerant(
+    text: str, *, frozen: Sequence[str], on_reject: Callable[[str, str], None] | None = None
+) -> list[GroundedClaim]:
+    """Scout-stage parse: keep the claims that ground, report the ones that do not.
+
+    A long exploratory stage must not abort because one model record cited an id
+    it invented: the offending record is dropped and reported (never accepted),
+    while the rest of the findings survive. Blank/non-JSON output is still a
+    ``ModelOutputFailure`` (the model failed to answer in shape at all).
+    """
+    frozen_set = _frozen_set(frozen)
+    items = _decode_claims_list_relaxed(text)
+    if items is None:
+        if on_reject is not None:
+            on_reject(text.strip()[:200] or "<blank>", "model output was not a JSON claim list")
+        return []
+    kept: list[GroundedClaim] = []
+    for item in items:
+        try:
+            kept.append(_build_claim(item, frozen_set))
+        except ModelOutputFailure as exc:
+            if on_reject is not None:
+                shown = json.dumps(item, default=str)[:200]
+                on_reject(shown, str(exc))
+    return kept
 
 
 def claims_refs(claims: Sequence[GroundedClaim]) -> list[str]:
@@ -180,6 +258,18 @@ def claims_refs(claims: Sequence[GroundedClaim]) -> list[str]:
             if eid not in refs:
                 refs.append(eid)
     return refs
+
+
+_CONSERVATIVE_ORDER = ("contradicted", "unknown", "inference", "observed_fact")
+
+
+def conservative_claim_type(claim_types: Sequence[str]) -> str:
+    """Least assertive declared type among duplicates (never upgrades a claim)."""
+    rank = {claim_type: i for i, claim_type in enumerate(_CONSERVATIVE_ORDER)}
+    declared = [claim_type for claim_type in claim_types if claim_type in rank]
+    if not declared:
+        return "inference"
+    return min(declared, key=rank.__getitem__)
 
 
 def _decode_envelope(text: str) -> dict[object, object]:
@@ -202,13 +292,56 @@ def _decode_envelope(text: str) -> dict[object, object]:
 
 def _envelope_lists(decoded: dict[object, object]) -> tuple[list[object], list[object]]:
     """Validated claims + follow_ups lists from the envelope."""
-    raw_claims = decoded.get("claims", [])
-    raw_follow = decoded.get("follow_ups", decoded.get("research_requests", []))
-    if not isinstance(raw_claims, list):
-        raise ModelOutputFailure("committee claims must be a list")
-    if not isinstance(raw_follow, list):
-        raise ModelOutputFailure("committee follow_ups must be a list")
+    raw_claims = decoded["claims"]
+    raw_follow = decoded["follow_ups"]
+    assert isinstance(raw_claims, list) and isinstance(raw_follow, list)
     return raw_claims, raw_follow
+
+
+_MATERIALITY_ERROR = (
+    f"{COMMITTEE_ENVELOPE_ERROR}: committee 'materiality' must be "
+    f"{{overall: one of {MATERIALITY_LEVELS}, reasoning: str}}"
+)
+
+_ENVELOPE_SHAPE: tuple[tuple[str, type, str], ...] = (
+    ("claims", list, "must be a list"),
+    ("impact_channels", list, "must be a list"),
+    ("follow_ups", list, "must be a list"),
+    ("uncertainties", list, "must be a list"),
+    ("what_would_change", list, "must be a list"),
+    ("executive_view", str, "must be a string"),
+)
+
+
+def _require_materiality_payload(raw: object) -> None:
+    """Rich materiality shape: {overall: one of MATERIALITY_LEVELS, reasoning: str}."""
+    payload = raw if isinstance(raw, dict) else {}
+    overall = payload.get("overall")
+    if (
+        not isinstance(overall, str)
+        or overall.strip().lower() not in MATERIALITY_LEVELS
+        or not isinstance(payload.get("reasoning"), str)
+    ):
+        raise ModelOutputFailure(_MATERIALITY_ERROR)
+
+
+def _require_rich_envelope(decoded: dict[object, object]) -> None:
+    """Reject claims/follow_ups-only and otherwise incomplete committee envelopes.
+
+    Everything missing or mistyped fails closed with ``ERR_COMMITTEE_ENVELOPE_INCOMPLETE``:
+    a role that cannot fill the rich envelope has not produced a committee read.
+    """
+    missing = [key for key in COMMITTEE_REQUIRED_KEYS if key not in decoded]
+    if missing:
+        raise ModelOutputFailure(
+            f"{COMMITTEE_ENVELOPE_ERROR}: committee envelope missing {missing}"
+        )
+    for key, expected, requirement in _ENVELOPE_SHAPE:
+        if not isinstance(decoded[key], expected):
+            raise ModelOutputFailure(
+                f"{COMMITTEE_ENVELOPE_ERROR}: committee {key!r} {requirement}"
+            )
+    _require_materiality_payload(decoded["materiality"])
 
 
 def _follow_up_question(item: object) -> str:
@@ -235,37 +368,27 @@ def _str_or_blank(value: object, cap: int = 2000) -> str:
     return value.strip()[:cap] if isinstance(value, str) else ""
 
 
-def _channel_ids_ok(raw_ids: object, frozen_set: set[str]) -> list[str] | None:
-    """Validated deduped channel ids; None when malformed, raises on unknown freeze id."""
-    if not isinstance(raw_ids, list) or any(not isinstance(eid, str) or not eid for eid in raw_ids):
-        return None
-    unknown = next((eid for eid in raw_ids if eid not in frozen_set), None)
-    if unknown is not None:
-        raise ModelOutputFailure(f"unknown evidence id {unknown!r}")
-    return list(dict.fromkeys(raw_ids))
-
-
 def _parse_channel(item: object, frozen_set: set[str]) -> ImpactChannel | None:
-    """One {name, assessment, evidence_ids} channel; None when malformed or ungrounded (skipped)."""
+    """One {text, direction, evidence_ids} channel; None when malformed or ungrounded (skipped)."""
     if not isinstance(item, dict):
         return None
-    name = item.get("name")
-    seen = _channel_ids_ok(item.get("evidence_ids", []), frozen_set)
-    if not isinstance(name, str) or not name.strip() or not seen:
+    text = item.get("text")
+    seen = _grounded_ids(item.get("evidence_ids", []), frozen_set)
+    if not isinstance(text, str) or not text.strip() or not seen:
         return None
-    return ImpactChannel(name=name.strip()[:200], assessment=_str_or_blank(item.get("assessment")), evidence_ids=seen)
+    return ImpactChannel(text=text.strip()[:500], direction=_str_or_blank(item.get("direction"), 200), evidence_ids=seen)
 
 
 def _parse_materiality(raw: object) -> CommitteeMateriality:
-    """Coerce {overall, reasoning}; unknown overall falls back to medium."""
-    overall = raw.get("overall") if isinstance(raw, dict) else None
-    level = overall.strip().lower() if isinstance(overall, str) else "medium"
-    reasoning = raw.get("reasoning") if isinstance(raw, dict) else None
-    return CommitteeMateriality(overall=level if level in MATERIALITY_LEVELS else "medium", reasoning=_str_or_blank(reasoning))
+    """Read one validated {overall, reasoning} payload (gate checked it already)."""
+    assert isinstance(raw, dict)
+    overall = raw["overall"]
+    assert isinstance(overall, str)
+    return CommitteeMateriality(overall=overall.strip().lower(), reasoning=_str_or_blank(raw.get("reasoning")))
 
 
 def _parse_str_items(raw: object, cap: int = 2000) -> list[str]:
-    """Filter one uncertainties list down to stripped strings."""
+    """Filter one string list down to stripped non-empty entries."""
     if not isinstance(raw, list):
         return []
     return [s.strip()[:cap] for s in raw if isinstance(s, str) and s.strip()]
@@ -273,7 +396,7 @@ def _parse_str_items(raw: object, cap: int = 2000) -> list[str]:
 
 @dataclass
 class CommitteeEnvelope:
-    """Expanded role output: claims + impact channels + materiality + uncertainties + requests."""
+    """Committee role output: view, typed claims, channels, materiality, uncertainties, changes, requests."""
 
     claims: list[GroundedClaim] = field(default_factory=list)
     follow_ups: list[ResearchRequest] = field(default_factory=list)
@@ -281,46 +404,49 @@ class CommitteeEnvelope:
     impact_channels: list[ImpactChannel] = field(default_factory=list)
     materiality: CommitteeMateriality = field(default_factory=CommitteeMateriality)
     uncertainties: list[str] = field(default_factory=list)
+    what_would_change: list[str] = field(default_factory=list)
 
 
 def parse_committee_envelope(
     text: str, *, frozen: Sequence[str], agent: str
 ) -> CommitteeEnvelope:
-    """Expanded envelope: legacy claims/follow_ups plus executive_view, impact_channels, materiality, uncertainties."""
+    """Rich committee envelope; incomplete envelopes fail ``ERR_COMMITTEE_ENVELOPE_INCOMPLETE``."""
     decoded = _decode_envelope(text)
+    _require_rich_envelope(decoded)
     frozen_set = _frozen_set(frozen)
     raw_claims, raw_follow = _envelope_lists(decoded)
     claims = parse_grounded_claims(json.dumps(raw_claims), frozen=frozen)
-    follow_ups = [_build_follow_up(item, agent) for item in raw_follow[:3]]
-    raw_channels = decoded.get("impact_channels", [])
+    follow_ups = [_build_follow_up(item, agent) for item in raw_follow]
+    raw_channels = decoded["impact_channels"]
+    assert isinstance(raw_channels, list)
     parsed: list[ImpactChannel] = []
-    if isinstance(raw_channels, list):
-        for item in raw_channels:
-            channel = _parse_channel(item, frozen_set)
-            if channel is not None:
-                parsed.append(channel)
+    for item in raw_channels:
+        channel = _parse_channel(item, frozen_set)
+        if channel is not None:
+            parsed.append(channel)
     return CommitteeEnvelope(
         claims=claims,
         follow_ups=follow_ups,
-        executive_view=_str_or_blank(decoded.get("executive_view")),
+        executive_view=_str_or_blank(decoded["executive_view"]),
         impact_channels=parsed,
-        materiality=_parse_materiality(decoded.get("materiality")),
-        uncertainties=_parse_str_items(
-            decoded.get("uncertainties", decoded.get("unknowns", []))
-        )[:10],
+        materiality=_parse_materiality(decoded["materiality"]),
+        uncertainties=_parse_str_items(decoded["uncertainties"]),
+        what_would_change=_parse_str_items(decoded["what_would_change"]),
     )
 
 
 def parse_committee_output(
     text: str, *, frozen: Sequence[str], agent: str
 ) -> tuple[list[GroundedClaim], list[ResearchRequest]]:
-    """Strict JSON envelope: {"claims": [{text, evidence_ids}], "follow_ups": ["Q?", ...]} (extra keys ignored for back-compat)."""
+    """Committee envelope reduced to (claims, follow_ups)."""
     env = parse_committee_envelope(text, frozen=frozen, agent=agent)
     return env.claims, env.follow_ups
 
 
 __all__ = [
-    "CLAIM_CLASSES",
+    "CLAIM_TYPES",
+    "COMMITTEE_ENVELOPE_ERROR",
+    "COMMITTEE_REQUIRED_KEYS",
     "MATERIALITY_LEVELS",
     "CommitteeEnvelope",
     "CommitteeMateriality",
@@ -329,8 +455,9 @@ __all__ = [
     "ModelOutputFailure",
     "ResearchRequest",
     "claims_refs",
-    "classify_claim",
+    "conservative_claim_type",
     "parse_committee_envelope",
     "parse_committee_output",
     "parse_grounded_claims",
+    "parse_grounded_claims_tolerant",
 ]

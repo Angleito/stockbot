@@ -59,11 +59,44 @@ class ResearchTelemetry(TypedDict, total=False):
     stop_reason: str
 
 
+class FixtureClaim(TypedDict):
+    """One persisted claim: declared type plus how the answer rendered it ("" = undeclared)."""
+
+    text: str
+    claim_type: str
+    rendered_as: str
+
+
 class FixtureValidator(TypedDict):
     pit_as_of: str | None
     expected_tools: list[str]
     requires_evidence: bool
     validators: list[str]
+
+
+class FixtureTrace(TypedDict, total=False):
+    """Structural run trace (plan Phase 17): what the run actually opened, cited and froze.
+
+    Optional fixture section; a fixture without it stays readable, but a
+    trace-gated scenario cannot pass its evaluation without it.
+    """
+
+    filings_opened: list[str]
+    documents_opened: list[str]
+    passages_opened: list[str]
+    raw_evidence_ids: list[str]
+    navigation_evidence_ids: list[str]
+    claims: list[FixtureClaim]
+    claims_by_type: dict[str, int]
+    waves: list[str]
+    searches: list[str]
+    committee_freeze_ids: list[str]
+    roles_completed: list[str]
+    limitations: list[str]
+    coverage_complete: bool
+    universal_absence_claims: list[str]
+    material_channels: list[str]
+    branches_covered: list[str]
 
 
 class AgentFixture(TypedDict):
@@ -83,6 +116,7 @@ class AgentFixture(TypedDict):
     freeze_after: str | None
     validator: FixtureValidator
     telemetry: NotRequired[ResearchTelemetry]
+    trace: NotRequired[FixtureTrace]
 
 
 # OpenAI-bankruptcy MSFT regression gate (fixture cutoff 2026-08-10): a run
@@ -104,13 +138,19 @@ _MSFT_NON_MSFT_BRANCHES: tuple[str, ...] = ("amzn", "amazon", "coreweave", "amd"
 
 
 def _v_fixture_msft_openai(fixture: AgentFixture) -> str | None:
-    """MSFT OpenAI-bankruptcy gate: material MSFT channel + one non-MSFT branch."""
+    """MSFT OpenAI-bankruptcy gate: material MSFT channel + one non-MSFT branch.
+
+    Trace channel/branch coverage counts alongside the answer excerpt, so a
+    structurally covered run never depends on prose wording alone.
+    """
     if fixture["scenario_name"] != "msft-openai-bankruptcy-sec-only":
         return None
-    lowered = fixture["answer_excerpt"].lower()
-    if not any(channel in lowered for channel in _MSFT_CHANNELS):
+    trace = fixture.get("trace") or {}
+    channel_text = " ".join((*trace.get("material_channels", ()), fixture["answer_excerpt"])).lower()
+    if not any(channel in channel_text for channel in _MSFT_CHANNELS):
         return "msft-openai-no-material-msft-exposure"
-    if not any(branch in lowered for branch in _MSFT_NON_MSFT_BRANCHES):
+    branch_text = " ".join((*trace.get("branches_covered", ()), fixture["answer_excerpt"])).lower()
+    if not any(branch in branch_text for branch in _MSFT_NON_MSFT_BRANCHES):
         return "msft-openai-no-branch"
     return None
 
@@ -139,6 +179,7 @@ def build_fixture(
     freeze_before: str | None = None,
     freeze_after: str | None = None,
     telemetry: ResearchTelemetry | None = None,
+    trace: FixtureTrace | None = None,
 ) -> AgentFixture:
     """Assemble a fixture; question/as_of default to the scenario definition."""
     scenario = get_scenario(scenario_name)
@@ -168,6 +209,8 @@ def build_fixture(
     }
     if telemetry is not None:
         fixture["telemetry"] = telemetry
+    if trace is not None:
+        fixture["trace"] = trace
     return fixture
 
 
@@ -249,7 +292,7 @@ _TELEMETRY_STR_KEYS: tuple[_TelemetryStrKey, ...] = ("coverage", "stop_reason")
 def _valid_telemetry_int(value: object, key: _TelemetryIntKey) -> int:
     """Validated telemetry int (ValueError on bool/mistyped)."""
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"fixture: 'telemetry.{key}' must be an int")
+        raise ValueError(f"fixture: 'telemetry.{key}' must be an int")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return value
 
 
@@ -299,6 +342,96 @@ def _opt_telemetry(raw: dict[str, object]) -> ResearchTelemetry | None:
     return out
 
 
+def _trace_claim(raw: object) -> FixtureClaim:
+    """One persisted claim; an undeclared type stays "", never invented."""
+    if not isinstance(raw, dict):
+        raise ValueError("fixture: 'trace.claims' entries must be objects")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    text = raw.get("text")
+    if not isinstance(text, str):
+        raise ValueError("fixture: 'trace.claims[].text' must be a string")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    declared = raw.get("claim_type")
+    rendered = raw.get("rendered_as")
+    return FixtureClaim(
+        text=text,
+        claim_type=declared if isinstance(declared, str) else "",
+        rendered_as=rendered if isinstance(rendered, str) else "",
+    )
+
+
+def _opt_claims_by_type(value: dict[str, object]) -> dict[str, int]:
+    """Declared claim-type counts for one trace section ({} when absent)."""
+    raw = value.get("claims_by_type")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("fixture: 'trace.claims_by_type' must be an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    out: dict[str, int] = {}
+    for key, item in raw.items():
+        if isinstance(key, str) and isinstance(item, int) and not isinstance(item, bool):
+            out[key] = item
+    return out
+
+
+def _opt_str_list(value: dict[str, object], key: str) -> list[str]:
+    """One optional string list inside a section ([] when absent)."""
+    raw = value.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ValueError(f"fixture: 'trace.{key}' must be a list of strings")
+    return [item for item in raw if isinstance(item, str)]
+
+
+def _trace_claims(value: dict[str, object]) -> list[FixtureClaim]:
+    """One trace section's persisted claims ([] when the section has none)."""
+    claims = value.get("claims")
+    if claims is None:
+        return []
+    if not isinstance(claims, list):
+        raise ValueError("fixture: 'trace.claims' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return [_trace_claim(item) for item in claims]
+
+
+def _opt_bool(value: dict[str, object], key: str) -> bool | None:
+    """One optional bool field (None when absent, ValueError when mistyped)."""
+    raw = value.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, bool):
+        raise ValueError(f"fixture: 'trace.{key}' must be a bool")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return raw
+
+
+def _opt_trace(raw: dict[str, object]) -> FixtureTrace | None:
+    """Read the optional trace section; None keeps pre-Phase-17 fixtures readable."""
+    value = raw.get("trace")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("fixture: 'trace' must be an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    trace: FixtureTrace = {
+        "filings_opened": _opt_str_list(value, "filings_opened"),
+        "documents_opened": _opt_str_list(value, "documents_opened"),
+        "passages_opened": _opt_str_list(value, "passages_opened"),
+        "raw_evidence_ids": _opt_str_list(value, "raw_evidence_ids"),
+        "navigation_evidence_ids": _opt_str_list(value, "navigation_evidence_ids"),
+        "claims": _trace_claims(value),
+        "claims_by_type": _opt_claims_by_type(value),
+        "waves": _opt_str_list(value, "waves"),
+        "searches": _opt_str_list(value, "searches"),
+        "committee_freeze_ids": _opt_str_list(value, "committee_freeze_ids"),
+        "roles_completed": _opt_str_list(value, "roles_completed"),
+        "limitations": _opt_str_list(value, "limitations"),
+        "universal_absence_claims": _opt_str_list(value, "universal_absence_claims"),
+        "material_channels": _opt_str_list(value, "material_channels"),
+        "branches_covered": _opt_str_list(value, "branches_covered"),
+    }
+    complete = _opt_bool(value, "coverage_complete")
+    if complete is not None:
+        trace["coverage_complete"] = complete
+    return trace
+
+
 def _fixture_raw(path: Path) -> tuple[dict[str, object], dict[str, object], bool]:
     decoded: object = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(decoded, dict):
@@ -340,6 +473,9 @@ def _fixture_body(raw: dict[str, object], vraw: dict[str, object], flag: bool) -
     telemetry = _opt_telemetry(raw)
     if telemetry is not None:
         fixture["telemetry"] = telemetry
+    trace = _opt_trace(raw)
+    if trace is not None:
+        fixture["trace"] = trace
     return fixture
 
 

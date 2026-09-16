@@ -249,7 +249,11 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
     try:
         assert _start_run(run_one) == {"ok": True}
         first = pi_bridge._sessions[run_one]
-        for _ in range(first.budget.max_tool_calls):
+        # No default run-count cap (research is unlimited unless configured); an
+        # explicit limit still enforces and never leaks into the next run.
+        assert first.budget.max_tool_calls is None
+        first.budget.max_tool_calls = 3
+        for _ in range(3):
             assert first.budget.reserve_tool_call()
         assert first.budget.reserve_tool_call() is False
         refused = execute_pi_tool("search_tools", {"query": "budget probe"}, first)
@@ -374,12 +378,15 @@ def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch: pytest.Mo
         pi_bridge._recorders.pop(run_id, None)
 
 
-def test_pi_search_web_caps_at_25_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pi_search_web_cap_configured_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
 
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     session = PiSessionContext(session_id=_new_run_id("cap"))
+    # Unlimited by default; the cap enforces only when explicitly configured.
+    assert session.budget.max_search_calls is None
+    session.budget.max_search_calls = 25
     results = [
         execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)
     ]
@@ -401,6 +408,7 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
     run_b = _new_run_id("cap-b")
     try:
         assert _start_run(run_a) == {"ok": True}
+        pi_bridge._sessions[run_a].budget.max_search_calls = 25
         for i in range(25):
             response = _bridge_search(run_a, f"probe {i}")
             probe_result = response["result"]
@@ -414,6 +422,8 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
         assert len(calls) == 25
         assert _end_run(run_a) == {"ok": True}
         assert _start_run(run_b) == {"ok": True}
+        # A fresh run gets an unlimited budget again (no inherited cap).
+        assert pi_bridge._sessions[run_b].budget.max_search_calls is None
         response = _bridge_search(run_b, "probe fresh")
         fresh_result = response["result"]
         assert isinstance(fresh_result, dict)
@@ -570,3 +580,18 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
             pi_bridge._recorders.pop(rid, None)
             with pi_bridge._state_lock:
                 pi_bridge._inflight.pop(rid, None)
+
+
+def test_pi_run_budget_defaults_are_unlimited() -> None:
+    """No default run-count caps: attached research control calls are never refused by count."""
+    from app.pi_gateway import PiSessionContext, _reserve_run_budget
+
+    session = PiSessionContext(session_id=_new_run_id("unbounded"))
+    assert session.budget.max_tool_calls is None
+    assert session.budget.max_search_calls is None
+    assert session.budget.max_runtime is None
+    # 70 attached calls — more than the old 64 default — all proceed.
+    for i in range(70):
+        name = "research_add_evidence" if i % 2 else "research_read_search"
+        assert _reserve_run_budget(name, session, dispatch_consumed=False) is True
+    assert session.budget.tool_calls == 70

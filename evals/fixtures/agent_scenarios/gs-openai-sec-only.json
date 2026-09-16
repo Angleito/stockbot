@@ -1,0 +1,150 @@
+{
+  "answer_excerpt": "GS's 10-K [rs:gs-openai-2026-08-14:ev:1] discloses OpenAI-linked exposure inside its investing-and-lending marks and the fund/private-credit branch [rs:gs-openai-2026-08-14:ev:2] carries it through fund-level marks. A bankruptcy would force marks down and lift counterparty-credit provisions (inference). No disclosure of OpenAI's private loan covenants was located within the searched SEC scope (SEC-only limitation).",
+  "as_of": null,
+  "budget_cap": 60,
+  "budget_used": 22,
+  "evidence_ids": [
+    "rs:gs-openai-2026-08-14:ev:1",
+    "rs:gs-openai-2026-08-14:ev:2",
+    "rs:gs-openai-2026-08-14:ev:3"
+  ],
+  "family": "multi-step",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:gs-openai-2026-08-14:1:freeze",
+  "freeze_before": "rs:gs-openai-2026-08-14:1:freeze",
+  "known_ats": [
+    "2026-02-20",
+    "2026-02-27"
+  ],
+  "question": "What happens to Goldman Sachs if OpenAI goes bankrupt?",
+  "scenario_name": "gs-openai-sec-only",
+  "session_id": "rs:gs-openai-2026-08-14",
+  "telemetry": {
+    "coverage": "partial",
+    "entities": [
+      "GS",
+      "OPENAI",
+      "OWL"
+    ],
+    "exhibits": 3,
+    "forms": [
+      "10-K"
+    ],
+    "queries": [
+      "GS OpenAI exposure",
+      "private credit funds OpenAI marks"
+    ],
+    "relationships_found": 2,
+    "relationships_skipped": 0,
+    "searches": 2,
+    "stop_reason": "complete:wave1",
+    "unresolved": [
+      "OpenAI private loan covenants"
+    ]
+  },
+  "tool_calls": [
+    "find_sec_entities",
+    "search_sec_filings",
+    "research_read_search",
+    "get_sec_document"
+  ],
+  "trace": {
+    "branches_covered": [
+      "private-credit-funds",
+      "blue-owl"
+    ],
+    "claims": [
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "GS files disclose OpenAI-linked exposure inside its investing-and-lending marks"
+      },
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "The fund/private-credit branch carries the same exposure through fund-level marks"
+      },
+      {
+        "claim_type": "inference",
+        "rendered_as": "inference",
+        "text": "A bankruptcy would force marks down and lift GS counterparty-credit provisions"
+      },
+      {
+        "claim_type": "unknown",
+        "rendered_as": "unknown",
+        "text": "OpenAI's private loan covenants and their seniority versus the GS marks"
+      }
+    ],
+    "claims_by_type": {
+      "contradicted": 0,
+      "inference": 1,
+      "observed_fact": 2,
+      "unknown": 1
+    },
+    "committee_freeze_ids": [
+      "rs:gs-openai-2026-08-14:1:freeze",
+      "rs:gs-openai-2026-08-14:1:freeze",
+      "rs:gs-openai-2026-08-14:1:freeze"
+    ],
+    "coverage_complete": false,
+    "documents_opened": [
+      "0000886982-26-000001|gs-20251231.htm",
+      "0001838615-26-000014|owl-20251231.htm"
+    ],
+    "filings_opened": [
+      "0000886982-26-000001",
+      "0001838615-26-000014"
+    ],
+    "limitations": [
+      "SEC-only policy: private loan covenants behind the GS marks are not filed; no disclosure was located within the searched SEC scope."
+    ],
+    "material_channels": [
+      "investment",
+      "credit"
+    ],
+    "navigation_evidence_ids": [
+      "sec-search:gs-openai:1"
+    ],
+    "passages_opened": [
+      "0000886982-26-000001|gs-20251231.htm|note-3-investments-p88",
+      "0000886982-26-000001|gs-20251231.htm|item-1a-risk-factors-p29",
+      "0001838615-26-000014|owl-20251231.htm|note-5-fair-value-p64"
+    ],
+    "raw_evidence_ids": [
+      "rs:gs-openai-2026-08-14:ev:1",
+      "rs:gs-openai-2026-08-14:ev:2",
+      "rs:gs-openai-2026-08-14:ev:3"
+    ],
+    "roles_completed": [
+      "stockbot",
+      "bullbot",
+      "bearbot"
+    ],
+    "searches": [
+      "sec-search:gs-openai:1",
+      "sec-search:gs-openai:2"
+    ],
+    "universal_absence_claims": [],
+    "waves": [
+      "rs:gs-openai-2026-08-14:1:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "find_sec_entities",
+      "list_sec_filings",
+      "get_sec_document",
+      "search_sec_filings"
+    ],
+    "pit_as_of": null,
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze",
+      "timeout_resume_requires_failed"
+    ]
+  }
+}

@@ -579,9 +579,17 @@ import {
 import {
 	advanceOnAgentEnd,
 	resumeResearch,
+	roleSpawnCommand,
 	setResearchBridge,
+	setRoleSpawn,
 	startResearch,
+	type RoleSpawn,
 } from "../.pi/lib/research-director.ts";
+// A real `pi` process must never start from the unit suite: the default role-spawn
+// seam reports an unavailable context (the driver's in-context fallback). Spawn-path
+// tests override the seam explicitly and restore this stub in `finally`.
+const unavailableRoleSpawn: RoleSpawn = async () => "";
+setRoleSpawn(unavailableRoleSpawn);
 
 const YT_MARKER = "ZxqUniqueTitleMarker";
 const YT_SECRET = "ZxqSecretKeyMaterial";
@@ -1396,7 +1404,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	let freezes: string[] = [];
 	let freezeRecords: Record<string, Json> = {};
 	let committee: { freeze_id: string; wave_id: number; jobs: string[] }[] = [];
-	let spawned: { job_id: string; job_type: string }[] = [];
+	let spawned: { job_id: string; job_type: string; wave_id: number }[] = [];
 	let spawnN = 0;
 	let finalized = false;
 	let decided = false;
@@ -1418,7 +1426,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 								: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
 						jobs: [
 							{ job_id: "job:src", session_id: SID, status: srcStatus, wave_id: 1, job_type: "source_agent" },
-							...spawned.map((s) => ({ job_id: s.job_id, session_id: SID, status: committee.some((c) => c.jobs.includes(s.job_id)) ? "completed" : "running", wave_id: 1, job_type: s.job_type })),
+							...spawned.map((s) => ({ job_id: s.job_id, session_id: SID, status: committee.some((c) => c.jobs.includes(s.job_id)) ? "completed" : "running", wave_id: s.wave_id, job_type: s.job_type })),
 						],
 						pending_next_action: null,
 						latest_freeze: freezes.length > 0 ? (freezeRecords[freezes[freezes.length - 1]] ?? null) : null,
@@ -1431,15 +1439,32 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 				freezes = [FID];
 				freezeRecords = { [FID]: { freeze_id: FID, session_id: SID, wave_id: 1, evidence_ids: [...evidence] } };
 				return { result: { freeze_id: FID } };
+			case "research.committee.create": {
+				// Atomic trio: all missing roles are created RUNNING in one call.
+				const wave = Number(req.wave_id);
+				const created: string[] = [];
+				for (const role of ["stockbot", "bullbot", "bearbot"]) {
+					const found = spawned.find((s) => s.job_type === role && s.wave_id === wave);
+					if (found) {
+						created.push(found.job_id);
+						continue;
+					}
+					spawnN += 1;
+					const jid = `job:auto-${spawnN}`;
+					spawned.push({ job_id: jid, job_type: role, wave_id: wave });
+					created.push(jid);
+				}
+				return { result: { session_id: SID, wave_id: wave, jobs: created } };
+			}
 			case "research.job.start":
 				spawnN += 1;
 				const jid = `job:auto-${spawnN}`;
-				const jtype = String(req.type ?? "stockbot");
-				spawned.push({ job_id: jid, job_type: jtype });
-				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: 1, job_type: jtype } };
-			case "research.wave2.decide":
+				const jtype = String(req.type ?? "source_agent");
+				spawned.push({ job_id: jid, job_type: jtype, wave_id: Number(req.wave_id) });
+				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: Number(req.wave_id), job_type: jtype } };
+			case "research.wave.decide":
 				decided = true;
-				return { result: { authorized: false, stop_reason: "no_disagreement", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
+				return { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
 			case "research.session.finalize": {
 				const claims = (req as Json).claims;
 				if (!Array.isArray(claims) || claims.length === 0) return { error: "claims_required" };
@@ -1479,27 +1504,33 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	}
 	expect(transitions()).toEqual(["research.session.create"]);
 	// Source ends via research.source.submit (submit-completed), then wave 1
-	// freezes and the driver seeds the first committee job on the freeze.
+	// freezes and the whole trio is created atomically before authoring.
 	await bridgeFn({ op: "research.source.submit", job_id: "job:src" });
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
 		expect(adv.prompt).toContain("research_add_analysis");
-		expect(adv.prompt).toContain("job:auto-1");
 		expect(adv.prompt).toContain('"role": "stockbot"');
+		expect(adv.prompt).toContain('"role": "bullbot"');
+		expect(adv.prompt).toContain('"role": "bearbot"');
+		for (const jid of ["job:auto-1", "job:auto-2", "job:auto-3"]) expect(adv.prompt).toContain(jid);
 		expect(adv.prompt).not.toContain("source_agent");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start"]);
-	// Running committee work is reused, never re-seeded: each recorded role lets
-	// the driver start exactly the next missing one.
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke"]);
+	// Recorded roles drop out of the prompt; the surviving running roles keep
+	// their ids and no role is ever started one after another.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1"] }];
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
 		expect(adv.prompt).toContain("job:auto-2");
+		expect(adv.prompt).toContain("job:auto-3");
+		expect(adv.prompt).not.toContain("job:auto-1\"");
 		expect(adv.prompt).toContain('"role": "bullbot"');
+		expect(adv.prompt).toContain('"role": "bearbot"');
+		expect(adv.prompt).not.toContain('"role": "stockbot"');
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
@@ -1512,9 +1543,9 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start"]);
-	// Full trio recorded: the gate decides wave-2 (declined here), then the
-	// driver prompts canonical finalization on the freeze.
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke"]);
+	// Full trio recorded: the gate decides the next wave (declined here), then
+	// the driver prompts canonical finalization on the freeze.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2", "job:auto-3"] }];
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
@@ -1524,13 +1555,13 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.wave.decide"]);
 	// Declined wave-2 finalizes without further RPC; Pi finalizes through the
 	// canonical tool while the dotted bridge op keeps its kernel claims guard.
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_finalize");
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.job.start", "research.job.start", "research.job.start", "research.wave2.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.wave.decide"]);
 	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
 	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
 	expect(rejected.error).toBe("claims_required");
@@ -1571,7 +1602,7 @@ function resumeSession(sid: string, over: Json = {}): Json {
 		...over,
 	};
 }
-function resumeBridge(state: ResumeState, ops: ResumeOp[]): (req: Json) => Promise<Json> {
+function resumeBridge(state: ResumeState, ops: ResumeOp[], gate?: Json): (req: Json) => Promise<Json> {
 	let n = 0;
 	return async (req: Json) => {
 		ops.push({ op: String(req.op), type: req.type, wave_id: req.wave_id, job_id: req.job_id });
@@ -1596,14 +1627,32 @@ function resumeBridge(state: ResumeState, ops: ResumeOp[]): (req: Json) => Promi
 				state.session = { ...state.session, freeze_ids: [...(Array.isArray(state.session.freeze_ids) ? (state.session.freeze_ids as string[]) : []), fid] };
 				return { result: { freeze_id: fid } };
 			}
+			case "research.committee.create": {
+				// Mirrors service.create_committee_jobs: every missing role job is
+				// created RUNNING together, existing ids reused, role order preserved.
+				const wave = Number(req.wave_id);
+				const ids: string[] = [];
+				for (const role of ["stockbot", "bullbot", "bearbot"]) {
+					const found = state.jobs.find((j) => j.wave_id === wave && j.job_type === role);
+					if (found) {
+						ids.push(found.job_id);
+						continue;
+					}
+					n += 1;
+					const jid = `job:auto-${n}`;
+					state.jobs.push({ job_id: jid, job_type: role, wave_id: wave, status: "running" });
+					ids.push(jid);
+				}
+				return { result: { session_id: String(state.session.session_id), wave_id: wave, jobs: ids } };
+			}
 			case "research.job.start": {
 				n += 1;
 				const jid = `job:auto-${n}`;
 				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running" });
 				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type) } };
 			}
-			case "research.wave2.decide":
-				return { result: { authorized: false, stop_reason: "no_disagreement", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
+			case "research.wave.decide":
+				return gate ?? { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
 			default:
 				return { error: "unknown_op" };
 		}
@@ -1636,16 +1685,20 @@ test("research director restart: evidence before E1 freezes wave-1 source and se
 	expect(resumeTransitions(probing)).toEqual([]);
 	expect(probingResumed.prompt).toContain("research_submit_source_result");
 	expect(probingResumed.prompt).toContain("job:src");
-	// Model ends source work via research.source.submit; resume then freezes.
+	// Model ends source work via research.source.submit; resume then freezes and
+	// creates the whole trio atomically, before any authoring prompt.
 	state.jobs.find((j) => j.job_id === "job:src")!.status = "completed";
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e1");
 	expect(resumed.sessionId).toBe(SID);
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.job.start"]);
-	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "stockbot", wave_id: 1 });
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create", "tool.invoke"]);
+	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
+	expect(ops.filter((o) => o.op === "research.job.start").length).toBe(0);
 	expect(resumed.prompt).toContain("research_add_analysis");
 	expect(resumed.prompt).toContain('"role": "stockbot"');
-	expect(resumed.prompt).toContain("job:auto-1");
+	expect(resumed.prompt).toContain('"role": "bullbot"');
+	expect(resumed.prompt).toContain('"role": "bearbot"');
+	for (const jid of ["job:auto-1", "job:auto-2", "job:auto-3"]) expect(resumed.prompt).toContain(jid);
 	expectFreezeIds(resumed.prompt, F1, [E1]);
 });
 
@@ -1662,20 +1715,24 @@ test("research director restart: E1 resumes committee on F1 reusing the running 
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-trio1");
-	expect(resumeTransitions(ops)).toEqual([]);
+	// The whole trio is (re)created atomically; the running role keeps its id and
+	// is never restarted.
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(state.jobs.filter((j) => j.job_id === "job:trio-s" && j.status === "running").length).toBe(1);
 	expect(resumed.prompt).toContain("research_add_analysis");
 	expect(resumed.prompt).toContain("job:trio-s");
 	// Committee prompts carry the freeze's ids, never the session's wider list.
 	expectFreezeIds(resumed.prompt, F1, [E1], [EX]);
 });
 
-test("research director restart: 1/3 trio starts only bull, then reuses a running bull", async () => {
+test("research director restart: 1/3 trio creates the remaining roles together, then reuses a running bull", async () => {
 	const SID = "rs:resume-trio13";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
 	const run = [{ freeze_id: F1, wave_id: 1, jobs: ["job:stock"] }];
 	const frozen: Record<string, Json> = { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } };
-	// No running successor: exactly one start, the next missing role.
+	// No running successor: one atomic create supplies bull and bear together —
+	// never one role started, awaited, then the next.
 	const opsA: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
 		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: run }),
@@ -1683,29 +1740,33 @@ test("research director restart: 1/3 trio starts only bull, then reuses a runnin
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio13a");
-	expect(resumeTransitions(opsA)).toEqual(["research.job.start"]);
-	expect(opsA.find((o) => o.op === "research.job.start")).toMatchObject({ type: "bullbot", wave_id: 1 });
+	expect(resumeTransitions(opsA)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(opsA.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
+	expect(opsA.filter((o) => o.op === "research.job.start").length).toBe(0);
 	expect(resumedA.prompt).toContain('"role": "bullbot"');
+	expect(resumedA.prompt).toContain('"role": "bearbot"');
+	expect(resumedA.prompt).toContain("job:auto-1");
+	expect(resumedA.prompt).toContain("job:auto-2");
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
-	// Running bull: reused with no further start (bear must not spawn yet).
+	// Running bull: reused with its own id and never restarted.
 	const opsB: ResumeOp[] = [];
-	setResearchBridge(resumeBridge({
+	const stateB: ResumeState = {
 		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: run }),
 		jobs: [
 			{ job_id: "job:stock", job_type: "stockbot", wave_id: 1, status: "completed" },
 			{ job_id: "job:bull-run", job_type: "bullbot", wave_id: 1, status: "running" },
 		],
 		freezes: { ...frozen },
-	}, opsB));
+	};
+	setResearchBridge(resumeBridge(stateB, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio13b");
-	expect(resumeTransitions(opsB)).toEqual([]);
+	expect(resumeTransitions(opsB)).toEqual(["research.committee.create", "tool.invoke"]);
 	expect(resumedB.prompt).toContain("job:bull-run");
 	expect(resumedB.prompt).toContain('"role": "bullbot"');
-	expect(resumedB.prompt).not.toContain("bearbot");
 	expectFreezeIds(resumedB.prompt, F1, [E1]);
 });
 
-test("research director restart: 2/3 trio starts only bear, then reuses a running bear", async () => {
+test("research director restart: 2/3 trio creates the last role and prompts only the missing one", async () => {
 	const SID = "rs:resume-trio23";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
@@ -1722,9 +1783,10 @@ test("research director restart: 2/3 trio starts only bear, then reuses a runnin
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio23a");
-	expect(resumeTransitions(opsA)).toEqual(["research.job.start"]);
-	expect(opsA.find((o) => o.op === "research.job.start")).toMatchObject({ type: "bearbot", wave_id: 1 });
+	expect(resumeTransitions(opsA)).toEqual(["research.committee.create", "tool.invoke"]);
 	expect(resumedA.prompt).toContain('"role": "bearbot"');
+	expect(resumedA.prompt).not.toContain('"role": "stockbot"');
+	expect(resumedA.prompt).not.toContain('"role": "bullbot"');
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
 	const opsB: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
@@ -1733,7 +1795,7 @@ test("research director restart: 2/3 trio starts only bear, then reuses a runnin
 		freezes: { ...frozen },
 	}, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio23b");
-	expect(resumeTransitions(opsB)).toEqual([]);
+	expect(resumeTransitions(opsB)).toEqual(["research.committee.create", "tool.invoke"]);
 	expect(resumedB.prompt).toContain("job:bear-run");
 	expect(resumedB.prompt).toContain('"role": "bearbot"');
 	expectFreezeIds(resumedB.prompt, F1, [E1]);
@@ -1765,10 +1827,13 @@ test("research director restart: stale wave-1 running role never covers wave-2 t
 		freezes: { ...frozen },
 	}, ops));
 	const resumed = await resumeResearch(SID, "run-resume-stale-wave");
-	expect(resumeTransitions(ops)).toEqual(["research.job.start"]);
-	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "bullbot", wave_id: 2 });
+	// Wave-2 jobs only: the stale wave-1 runner is neither reused nor prompted,
+	// and the missing wave-2 roles are created together.
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
 	expect(resumed.prompt).toContain('"role": "bullbot"');
 	expect(resumed.prompt).not.toContain("job:stale-bull");
+	expect(resumed.prompt).not.toContain("job:s1");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2]);
 });
 
@@ -1804,9 +1869,9 @@ test("research director restart: authorized wave-2 reuses running source until n
 	state.session = { ...state.session, evidence_ids: [E1, E2] };
 	state.jobs.find((j) => j.job_id === "job:w2src")!.status = "completed";
 	const resumedB = await resumeResearch(SID, "run-resume-w2b");
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.job.start"]);
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create", "tool.invoke"]);
 	expect(ops.find((o) => o.op === "research.freeze.create")).toMatchObject({ wave_id: 2 });
-	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "stockbot", wave_id: 2 });
+	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
 	expect(resumedB.prompt).toContain("research_add_analysis");
 	expect(resumedB.prompt).toContain('"role": "stockbot"');
 	expectFreezeIds(resumedB.prompt, F2, [E1, E2]);
@@ -1842,13 +1907,14 @@ test("research director restart: E2 resumes committee on F2 without source work"
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e2");
-	expect(resumeTransitions(ops)).toEqual([]);
+	// One atomic create completes the trio; the running bull keeps its id.
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
 	expect(resumed.prompt).toContain("research_add_analysis");
 	expect(resumed.prompt).toContain("job:w2b");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2], [F1]);
 });
 
-test("research director restart: E2 trio complete on a non-synthesized freeze id finalizes", async () => {
+test("research director restart: E2 trio complete on a non-synthesized freeze id asks the gate, then finalizes", async () => {
 	const SID = "rs:resume-e2done";
 	const F1 = `${SID}:1:freeze`;
 	const FC = "freeze:custom-wave2";
@@ -1879,8 +1945,9 @@ test("research director restart: E2 trio complete on a non-synthesized freeze id
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e2done");
-	// No source-start, freeze, or decide RPC: the wave-2 freeze record decides.
-	expect(resumeTransitions(ops)).toEqual([]);
+	// The completed trio only reaches the gate: no source-start and no freeze,
+	// and a declined gate finalizes on the freeze the trio just closed.
+	expect(resumeTransitions(ops)).toEqual(["research.wave.decide"]);
 	expect(resumed.prompt).toContain("research_finalize");
 	expect(resumed.prompt).not.toContain("research.session.finalize");
 	expectFreezeIds(resumed.prompt, FC, [E1, E2], [F1]);
@@ -2072,19 +2139,19 @@ test("research director provisions wave-2 source job on authorization", async ()
 						latest_freeze: freezeRecords[freezes[freezes.length - 1]] ?? null,
 					},
 				};
-			case "research.wave2.decide":
+			case "research.wave.decide":
 				status = "targeted_research";
 				targeted_question = "How did Q3 go?";
 				targeted_domain = "SEC";
 				return { result: { authorized: true, stop_reason: "continue", reason_detail: "follow-up requested", targeted_question, targeted_domain } };
+			case "research.committee.create":
+				// Atomic trio: all three RUNNING together, reused on repeat calls.
+				if (trio2.length === 0) trio2 = ["job:trio2-1", "job:trio2-2", "job:trio2-3"];
+				return { result: { session_id: SID, wave_id: Number(req.wave_id), jobs: trio2 } };
 			case "research.job.start":
-				if (Number(req.wave_id) === 2 && String((req as Json).type) === "source_agent") {
-					w2job = "job:w2";
-					w2status = "running";
-					return { result: { job_id: w2job, session_id: SID, status: "running", wave_id: 2, job_type: "source_agent" } };
-				}
-				trio2 = [...trio2, `job:trio2-${trio2.length + 1}`];
-				return { result: { job_id: trio2[trio2.length - 1], session_id: SID, status: "running", wave_id: 2, job_type: String((req as Json).type) } };
+				w2job = "job:w2";
+				w2status = "running";
+				return { result: { job_id: w2job, session_id: SID, status: "running", wave_id: Number(req.wave_id), job_type: String((req as Json).type) } };
 			case "research.source.submit":
 				if (String((req as Json).job_id) === w2job) w2status = "completed";
 				return { result: { job_id: String((req as Json).job_id), status: "completed" } };
@@ -2110,8 +2177,8 @@ test("research director provisions wave-2 source job on authorization", async ()
 	// Source-start is followed by a refreshed inspect so the staged run
 	// context rebinds before the fetch prompt goes out.
 	const seq = ops.map((o) => o.op);
-	expect(seq.indexOf("research.wave2.decide")).toBeGreaterThan(-1);
-	expect(seq.indexOf("research.job.start")).toBeGreaterThan(seq.indexOf("research.wave2.decide"));
+	expect(seq.indexOf("research.wave.decide")).toBeGreaterThan(-1);
+	expect(seq.indexOf("research.job.start")).toBeGreaterThan(seq.indexOf("research.wave.decide"));
 	expect(seq.lastIndexOf("research.session.inspect")).toBeGreaterThan(seq.indexOf("research.job.start"));
 	// E2 stays unfrozen while the freeze already covers every session id.
 	adv = await advanceOnAgentEnd(runId, "");
@@ -2132,11 +2199,13 @@ test("research director provisions wave-2 source job on authorization", async ()
 	const frozen = ops.filter((o) => o.op === "research.freeze.create");
 	expect(frozen.length).toBe(1);
 	expect(frozen[0].wave_id).toBe(2);
-	const trioStarts = ops.filter((o) => o.op === "research.job.start" && o.job_type !== "source_agent");
-	expect(trioStarts.length).toBe(1);
-	expect(trioStarts[0]).toMatchObject({ job_type: "stockbot", wave_id: 2 });
+	const creates = ops.filter((o) => o.op === "research.committee.create");
+	expect(creates.length).toBe(1);
+	expect(creates[0].wave_id).toBe(2);
 	if (adv && !adv.done) {
 		expect(adv.prompt).toContain("research_add_analysis");
+		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(`"role": "${role}"`);
+		for (const jid of ["job:trio2-1", "job:trio2-2", "job:trio2-3"]) expect(adv.prompt).toContain(jid);
 		expect(adv.prompt).toContain(FID2);
 		expect(adv.prompt).toContain(ev1);
 		expect(adv.prompt).toContain(ev2);
@@ -2214,5 +2283,485 @@ test("research command writes isolated data root, default db untouched", async (
 	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+	}
+});
+// --- wave gate: no ceiling, every freeze decides continue vs finalize ---
+
+// N frozen waves with a completed trio on each, so the only remaining decision
+// is the gate for the latest freeze.
+function waveState(sid: string, wave: number): ResumeState {
+	const freezeIds = Array.from({ length: wave }, (_, i) => `${sid}:${i + 1}:freeze`);
+	const evidenceIds = Array.from({ length: wave }, (_, i) => `${sid}:ev:${i + 1}`);
+	const freezes: Record<string, Json> = {};
+	const committee_runs: { freeze_id: string; wave_id: number; jobs: string[] }[] = [];
+	const jobs: ResumeJob[] = [];
+	for (let i = 0; i < wave; i++) {
+		const w = i + 1;
+		const fid = freezeIds[i];
+		freezes[fid] = { freeze_id: fid, session_id: sid, wave_id: w, evidence_ids: evidenceIds.slice(0, w) };
+		const trio = ["stockbot", "bullbot", "bearbot"].map((role) => `${sid}:w${w}:${role}`);
+		committee_runs.push({ freeze_id: fid, wave_id: w, jobs: trio });
+		trio.forEach((jid, role) => jobs.push({ job_id: jid, job_type: ["stockbot", "bullbot", "bearbot"][role], wave_id: w, status: "completed" }));
+		jobs.push({ job_id: `${sid}:w${w}:src`, job_type: "source_agent", wave_id: w, status: "completed" });
+	}
+	return {
+		session: resumeSession(sid, { status: "analyzing", evidence_ids: evidenceIds, freeze_ids: freezeIds, committee_runs, current_wave: wave }),
+		jobs,
+		freezes,
+	};
+}
+
+const AUTHORIZED_GATE: Json = {
+	result: { authorized: true, stop_reason: "continue", reason_detail: "open branch", targeted_question: "Who supplies the fab?", targeted_domain: "SEC" },
+};
+
+test("research director waves on while the gate authorizes: wave 4 after wave 3, no ceiling", async () => {
+	const SID = "rs:waves";
+	const state = waveState(SID, 3);
+	const ops: ResumeOp[] = [];
+	setResearchBridge(resumeBridge(state, ops, AUTHORIZED_GATE));
+	const resumed = await resumeResearch(SID, "run-waves-4a");
+	expect(resumeTransitions(ops)).toEqual(["research.wave.decide", "research.job.start"]);
+	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "source_agent", wave_id: 4 });
+	expect(resumed.prompt).toContain("Wave-4");
+	expect(resumed.prompt).toContain("Who supplies the fab?");
+	expect(resumed.prompt).toContain("research_add_evidence");
+	expect(resumed.prompt).not.toContain("research_finalize");
+	expect(state.jobs.some((j) => j.job_type === "source_agent" && j.wave_id === 4 && j.status === "running")).toBe(true);
+	// Wave-4 source still fetching with nothing past the freeze: keep fetching on
+	// the same authorization, never a second gate call for freeze 3.
+	const resumedB = await resumeResearch(SID, "run-waves-4b");
+	expect(resumeTransitions(ops)).toEqual(["research.wave.decide", "research.job.start"]);
+	expect(resumedB.prompt).toContain("Wave-4");
+	expect(resumedB.prompt).toContain("research_add_evidence");
+	expect(resumedB.prompt).not.toContain("research_finalize");
+});
+
+test("research director finalizes when the gate declines a late wave", async () => {
+	const SID = "rs:waves-stop";
+	const state = waveState(SID, 4);
+	const ops: ResumeOp[] = [];
+	setResearchBridge(resumeBridge(state, ops));
+	const resumed = await resumeResearch(SID, "run-waves-stop");
+	expect(resumeTransitions(ops)).toEqual(["research.wave.decide"]);
+	expect(ops.filter((o) => o.op === "research.job.start").length).toBe(0);
+	expect(resumed.prompt).toContain("research_finalize");
+	expect(resumed.prompt).toContain("no_questions");
+	expect(resumed.prompt).not.toContain("research_add_evidence");
+	expectFreezeIds(resumed.prompt, `${SID}:4:freeze`, [`${SID}:ev:1`, `${SID}:ev:4`], [`${SID}:3:freeze`]);
+});
+
+test("director prompts carry the raw-source item shape and the rich analysis envelope", async () => {
+	const fetchSID = "rs:prompt-fetch";
+	const fetchOps: ResumeOp[] = [];
+	setResearchBridge(resumeBridge({
+		session: resumeSession(fetchSID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+		jobs: [{ job_id: "job:src", job_type: "source_agent", wave_id: 1, status: "running" }],
+		freezes: {},
+	}, fetchOps));
+	const fetching = await resumeResearch(fetchSID, "run-prompt-fetch");
+	expect(fetching.prompt).toContain("research_add_evidence");
+	// Accession + document name + raw passage: search hits alone are not evidence.
+	expect(fetching.prompt).toContain("source_record_id");
+	expect(fetching.prompt).toContain("document_name");
+	expect(fetching.prompt).toContain("matching_passage");
+	expect(fetching.prompt).toContain("claim_kind");
+	expect(fetching.prompt).toContain("absence_observation");
+	expect(fetching.prompt).toContain("navigation artifacts");
+	// No-limits workflow, stated for the model rather than assumed by it.
+	expect(fetching.prompt).toContain("no maximum number of searches");
+	expect(fetching.prompt).toContain("branch map");
+	expect(fetching.prompt).toContain("research_submit_source_result");
+	expect(fetching.prompt).not.toContain("research_add_analysis");
+
+	const trioSID = "rs:prompt-trio";
+	const F1 = `${trioSID}:1:freeze`;
+	const E1 = `${trioSID}:ev:1`;
+	const trioOps: ResumeOp[] = [];
+	setResearchBridge(resumeBridge({
+		session: resumeSession(trioSID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
+		jobs: [],
+		freezes: { [F1]: { freeze_id: F1, session_id: trioSID, wave_id: 1, evidence_ids: [E1] } },
+	}, trioOps));
+	const trio = await resumeResearch(trioSID, "run-prompt-trio");
+	// Rich envelope, not a claims-only shape.
+	for (const key of ["executive_view", "impact_channels", "materiality", "uncertainties", "what_would_change", "follow_ups"]) {
+		expect(trio.prompt).toContain(key);
+	}
+	expect(trio.prompt).toContain("claim_type");
+	expect(trio.prompt).toContain("observed_fact");
+	// Factual claims must cite the frozen evidence ids; nothing else is allowed.
+	expect(trio.prompt).toContain("must cite the frozen evidence ids");
+	expect(trio.prompt).toContain(E1);
+	expect(trio.prompt).not.toContain("research_add_evidence");
+});
+
+test("finalize tool results stay a short confirmation, never a second answer", () => {
+	const confirmation = "Finalized session rs:x:1:freeze (12 claims, 4 channels).";
+	const bridge: Json = {
+		result: {
+			content: confirmation,
+			final_result: { executive_summary: "Long rendered answer", claims: [{ text: "claim one", evidence_ids: ["rs:x:ev:1"] }] },
+		},
+	};
+	expect(bridgeModelText(bridge)).toBe(confirmation);
+	// A final_result with no prose content stays raw: nothing re-renders it here.
+	const bare: Json = { result: { final_result: { executive_summary: "Long rendered answer" } } };
+	expect(bridgeModelText(bare)).toBe(JSON.stringify(bare));
+});
+
+test("agent_end renders the persisted answer once and resume repeats that same answer", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-render-"));
+	const donePath = join(dir, "done.json");
+	const SID = "rs:render1";
+	const E1 = `${SID}:ev:1`;
+	const rendered = "Bottom line: Demand held up.";
+	const finalResult: Json = {
+		executive_summary: "Demand held up.",
+		claims: [{ text: "Revenue rose on volume", claim_type: "observed_fact", evidence_ids: [E1] }],
+		what_would_change: ["A guidance cut would change the view"],
+		research_scope: { allowed_sources: ["SEC"] },
+	};
+	const prevDone = process.env.STOCKBOT_DONE_FILE;
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	process.env.STOCKBOT_DONE_FILE = donePath;
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = "run-render";
+	try {
+		const { handlers, pi, commands } = fakePiHost();
+		await stockbotExtension(pi);
+		setResearchBridge(async (req: Json) => {
+			switch (req.op) {
+				case "research.session.create":
+					return { result: { session_id: SID } };
+				case "research.session.inspect":
+					return {
+						result: {
+							session: { session_id: SID, status: "completed", evidence_ids: [E1], freeze_ids: [`${SID}:1:freeze`], committee_runs: [], final_result: finalResult, current_wave: 1 },
+							jobs: [],
+							pending_next_action: null,
+							latest_freeze: { freeze_id: `${SID}:1:freeze`, session_id: SID, wave_id: 1, evidence_ids: [E1] },
+						},
+					};
+				default:
+					return { ok: true };
+			}
+		});
+		await commands["research"].handler("Did demand hold?", {});
+		await handlers["agent_start"]({});
+		await handlers["agent_end"]({
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Finalized session rs:render1:1:freeze." }] }],
+		});
+		const written = JSON.parse(readFileSync(donePath, "utf8")) as Json;
+		const answer = String(written.answer);
+		expect(answer).toContain(rendered);
+		expect(answer).toContain("Revenue rose on volume");
+		expect(answer).toContain("[rs:render1:ev:1]");
+		// Claim types survive the render: an inference is never shown as a fact.
+		expect(answer).toContain("Revenue rose on volume (observed_fact)");
+		expect(answer).toContain("What would change the view");
+		expect(answer).toContain("A guidance cut would change the view");
+		expect(answer).toContain("Scope: SEC filings only");
+		// Exactly one render: the finalize note is never prepended to the answer.
+		expect(answer).not.toContain("Finalized session");
+		expect(answer.split(rendered).length - 1).toBe(1);
+		// Resume repeats that same single answer instead of rendering a new one.
+		const resumed = await resumeResearch(SID, "run-render-resume");
+		expect(resumed.prompt).toContain(rendered);
+		expect(resumed.prompt).toContain("Revenue rose on volume");
+		expect(resumed.prompt).not.toContain("Finalized session");
+	} finally {
+		if (prevDone === undefined) delete process.env.STOCKBOT_DONE_FILE;
+		else process.env.STOCKBOT_DONE_FILE = prevDone;
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+	}
+});
+
+// --- committee roles: one fresh model context per role (one-shot spawn seam) ---
+
+async function withRoleEnv<T>(fn: () => Promise<T>): Promise<T> {
+	const saved: [string, string | undefined][] = [
+		["STOCKBOT_PI_PROVIDER", process.env.STOCKBOT_PI_PROVIDER],
+		["STOCKBOT_PI_MODEL", process.env.STOCKBOT_PI_MODEL],
+	];
+	process.env.STOCKBOT_PI_PROVIDER = "granite-local";
+	process.env.STOCKBOT_PI_MODEL = "test-model";
+	try {
+		return await fn();
+	} finally {
+		for (const [key, value] of saved) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+// The role instruction wording routes each prompt back to its role, so a prompt
+// missing its role's orders cannot pass through as another role's analysis.
+function roleOfPrompt(prompt: string): string {
+	if (prompt.includes("balanced base case")) return "stockbot";
+	if (prompt.includes("resilience case")) return "bullbot";
+	return "bearbot";
+}
+
+function roleEnvelope(role: string, evidenceId: string): Json {
+	return {
+		executive_view: `view-${role}`,
+		claims: [{ text: `claim-${role}`, claim_type: "inference", evidence_ids: [evidenceId] }],
+		impact_channels: [{ text: `channel-${role}`, direction: "mixed", evidence_ids: [evidenceId] }],
+		materiality: { overall: "medium", reasoning: `${role} read` },
+		uncertainties: [`uncertainty-${role}`],
+		what_would_change: [`change-${role}`],
+		follow_ups: [`Does the evidence support the ${role} read?`],
+	};
+}
+
+function roleState(sid: string, evidenceIds: string[]): ResumeState {
+	const fid = `${sid}:1:freeze`;
+	return {
+		session: resumeSession(sid, { status: "analyzing", evidence_ids: evidenceIds, freeze_ids: [fid], committee_runs: [], current_wave: 1 }),
+		jobs: [],
+		freezes: { [fid]: { freeze_id: fid, session_id: sid, wave_id: 1, evidence_ids: evidenceIds } },
+	};
+}
+
+// resumeBridge plus the two wire ops the spawn path uses: the research_read
+// passthrough that supplies the frozen evidence text and the analysis record
+// that completes each role job (recorded exactly as the kernel would).
+function roleBridge(state: ResumeState, ops: ResumeOp[], records: Json[], gate?: Json): (req: Json) => Promise<Json> {
+	const base = resumeBridge(state, ops, gate);
+	return async (req: Json) => {
+		const op = String(req.op);
+		if (op === "tool.invoke") {
+			const args = (req.arguments ?? {}) as Json;
+			const kind = String(args.kind);
+			const rid = String(args.resource_id);
+			ops.push({ op: `tool.invoke:${kind}` });
+			const record = kind === "freeze" ? state.freezes[rid] : kind === "evidence" ? { evidence_id: rid, content: `EVIDENCE-MARKER-${rid}` } : undefined;
+			if (!record) return { error: "unknown_resource" };
+			return { result: { content: `kind: ${kind}\nresource_id: ${rid}\nrecord: ${JSON.stringify(record)}`, meta: { record } } };
+		}
+		if (op === "research.analysis.record") {
+			ops.push({ op });
+			records.push(req);
+			const jobId = String(req.job_id);
+			const job = state.jobs.find((j) => j.job_id === jobId);
+			if (!job) return { error: "unknown_job" };
+			job.status = "completed";
+			const fids = (state.session.freeze_ids ?? []) as string[];
+			const fid = fids[fids.length - 1];
+			const runs = state.session.committee_runs as { freeze_id: string; wave_id: number; jobs: string[] }[];
+			const run = runs.find((r) => r.freeze_id === fid);
+			if (run) run.jobs.push(jobId);
+			else runs.push({ freeze_id: fid, wave_id: job.wave_id, jobs: [jobId] });
+			return { result: { job_id: jobId, role: req.role, status: "completed" } };
+		}
+		return base(req);
+	};
+}
+
+test("committee roles spawn three fresh contexts in parallel and record each envelope", async () => {
+	const SID = "rs:roles";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const E2 = `${SID}:ev:2`;
+	const ops: ResumeOp[] = [];
+	const records: Json[] = [];
+	const state = roleState(SID, [E1, E2]);
+	const order: string[] = [];
+	const prompts: string[] = [];
+	setResearchBridge(roleBridge(state, ops, records, AUTHORIZED_GATE));
+	try {
+		const resumed = await withRoleEnv(async () => {
+			setRoleSpawn(async (prompt) => {
+				const role = roleOfPrompt(prompt);
+				order.push(`start:${role}`);
+				prompts.push(prompt);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				order.push(`end:${role}`);
+				return `Here you go:\n\`\`\`json\n${JSON.stringify(roleEnvelope(role, E1))}\n\`\`\``;
+			});
+			return resumeResearch(SID, "run-roles");
+		});
+		// Three spawned role processes read the frozen evidence, one per role.
+		expect(prompts.length).toBe(3);
+		expect(prompts.map(roleOfPrompt).sort()).toEqual(["bearbot", "bullbot", "stockbot"]);
+		// The frozen evidence text itself (not just ids) and the question reach each role.
+		for (const prompt of prompts) {
+			expect(prompt).toContain(`EVIDENCE-MARKER-${E1}`);
+			expect(prompt).toContain(`EVIDENCE-MARKER-${E2}`);
+			expect(prompt).toContain(F1);
+			expect(prompt).toContain("Question under research: Will NVDA beat earnings?");
+			expect(prompt).toContain("raw JSON only");
+		}
+		// Every spawn starts before any resolves: three contexts run at once.
+		const started = order.map((e, i) => (e.startsWith("start:") ? i : -1)).filter((i) => i >= 0);
+		const ended = order.map((e, i) => (e.startsWith("end:") ? i : -1)).filter((i) => i >= 0);
+		expect(started.length).toBe(3);
+		expect(ended.length).toBe(3);
+		expect(Math.max(...started)).toBeLessThan(Math.min(...ended));
+		// Each role's own job id carries its own parsed envelope (fences and all).
+		expect(records.length).toBe(3);
+		for (const role of ["stockbot", "bullbot", "bearbot"]) {
+			const record = records.find((r) => String(r.role) === role);
+			expect(record).toBeDefined();
+			const job = state.jobs.find((j) => j.job_id === String(record?.job_id));
+			expect(job?.job_type).toBe(role);
+			const analysis = (record?.analysis ?? {}) as Json;
+			expect(analysis.executive_view).toBe(`view-${role}`);
+			expect((analysis.claims as Json[])[0]).toEqual({ text: `claim-${role}`, claim_type: "inference", evidence_ids: [E1] });
+		}
+		// The trio is closed kernel-side, so this same advance runs the wave gate
+		// and authorizes the next wave: the model is never asked to author a role.
+		expect(resumeTransitions(ops)).toEqual([
+			"research.committee.create",
+			"tool.invoke:freeze",
+			"tool.invoke:evidence",
+			"tool.invoke:evidence",
+			"research.analysis.record",
+			"research.analysis.record",
+			"research.analysis.record",
+			"research.wave.decide",
+			"research.job.start",
+		]);
+		expect(resumed.prompt).toContain("Wave-2");
+		expect(resumed.prompt).toContain("fresh per-role contexts");
+		expect(resumed.prompt).not.toContain("research_add_analysis");
+	} finally {
+		setRoleSpawn(unavailableRoleSpawn);
+	}
+});
+
+test("committee roles spawn with pi's own provider defaults when no override is set", async () => {
+	const SID = "rs:roles-unset";
+	const E1 = `${SID}:ev:1`;
+	const ops: ResumeOp[] = [];
+	const records: Json[] = [];
+	const state = roleState(SID, [E1]);
+	setResearchBridge(roleBridge(state, ops, records));
+	const prompts: string[] = [];
+	setRoleSpawn(async (prompt) => {
+		prompts.push(prompt);
+		return JSON.stringify(roleEnvelope(roleOfPrompt(prompt), E1));
+	});
+	const savedProvider = process.env.STOCKBOT_PI_PROVIDER;
+	const savedModel = process.env.STOCKBOT_PI_MODEL;
+	try {
+		delete process.env.STOCKBOT_PI_PROVIDER;
+		delete process.env.STOCKBOT_PI_MODEL;
+		// No override: argv carries pi's own defaults (no --provider/--model flags).
+		const argv = roleSpawnCommand("Q?");
+		expect(argv).not.toContain("--provider");
+		expect(argv).not.toContain("--model");
+		const resumed = await resumeResearch(SID, "run-roles-unset");
+		expect(prompts.length).toBe(3);
+		expect(records.length).toBe(3);
+		expect(resumeTransitions(ops)).toContain("research.analysis.record");
+		expect(resumed.prompt).toContain("fresh per-role contexts");
+	} finally {
+		if (savedProvider === undefined) delete process.env.STOCKBOT_PI_PROVIDER;
+		else process.env.STOCKBOT_PI_PROVIDER = savedProvider;
+		if (savedModel === undefined) delete process.env.STOCKBOT_PI_MODEL;
+		else process.env.STOCKBOT_PI_MODEL = savedModel;
+		setRoleSpawn(unavailableRoleSpawn);
+	}
+});
+
+test("role context spawn failure or unparseable envelope falls back without crashing", async () => {
+	const cases: [string, RoleSpawn, string][] = [
+		["spawn error", async () => {
+			throw new Error("spawn blew up");
+		}, "spawn blew up"],
+		["prose output", async () => "I could not produce JSON.", "no JSON envelope"],
+		["empty output", async () => "", "no JSON envelope"],
+	];
+	for (const [name, seam, reason] of cases) {
+		const SID = `rs:roles-fail-${name.replace(/\s+/g, "-")}`;
+		const E1 = `${SID}:ev:1`;
+		const ops: ResumeOp[] = [];
+		const records: Json[] = [];
+		const state = roleState(SID, [E1]);
+		setResearchBridge(roleBridge(state, ops, records));
+		setRoleSpawn(seam);
+		try {
+			const resumed = await withRoleEnv(() => resumeResearch(SID, `run-${SID}`));
+			// The spawn failed, so nothing was recorded and the prompt authors in context.
+			expect(records.length).toBe(0);
+			expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
+			expect(resumed.prompt).toContain("Role contexts unavailable");
+			expect(resumed.prompt).toContain(reason);
+			expect(resumed.prompt).toContain("research_add_analysis");
+			for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(`"role": "${role}"`);
+		} finally {
+			setRoleSpawn(unavailableRoleSpawn);
+		}
+	}
+});
+
+test("null role seam keeps authoring in context without reading evidence or spawning", async () => {
+	const SID = "rs:roles-null";
+	const E1 = `${SID}:ev:1`;
+	const ops: ResumeOp[] = [];
+	const records: Json[] = [];
+	const state = roleState(SID, [E1]);
+	setResearchBridge(roleBridge(state, ops, records));
+	setRoleSpawn(null);
+	try {
+		// Env is configured, so only the null seam can keep contexts unavailable:
+		// the advance goes straight to the in-context trio call with no spawn and
+		// therefore no frozen-evidence read (a spawn attempt would have to read it).
+		const resumed = await withRoleEnv(() => resumeResearch(SID, "run-roles-null"));
+		expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+		expect(records.length).toBe(0);
+		expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
+		expect(resumed.prompt).toContain("Role contexts unavailable");
+		expect(resumed.prompt).toContain("role spawns are disabled");
+		expect(resumed.prompt).toContain("research_add_analysis");
+		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(`"role": "${role}"`);
+	} finally {
+		setRoleSpawn(unavailableRoleSpawn);
+	}
+});
+
+test("role spawn command is the frozen one-shot pi argv", async () => {
+	const savedProvider = process.env.STOCKBOT_PI_PROVIDER;
+	const savedModel = process.env.STOCKBOT_PI_MODEL;
+	try {
+		delete process.env.STOCKBOT_PI_PROVIDER;
+		delete process.env.STOCKBOT_PI_MODEL;
+		// No override: pi resolves its own provider/model.
+		expect(roleSpawnCommand("Q?")).toEqual([
+			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files", "--", "Q?",
+		]);
+		await withRoleEnv(async () => {
+			expect(roleSpawnCommand("Q?")).toEqual([
+				"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+				"--no-prompt-templates", "--no-context-files", "--provider", "granite-local",
+				"--model", "test-model", "--", "Q?",
+			]);
+		});
+		// One override emits only its own flag (mirrors pi_runner._pi_cmd): a
+		// configured provider is never dropped because the model env is unset.
+		process.env.STOCKBOT_PI_PROVIDER = "granite-local";
+		expect(roleSpawnCommand("Q?")).toEqual([
+			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files", "--provider", "granite-local", "--", "Q?",
+		]);
+		delete process.env.STOCKBOT_PI_PROVIDER;
+		process.env.STOCKBOT_PI_MODEL = "test-model";
+		expect(roleSpawnCommand("Q?")).toEqual([
+			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files", "--model", "test-model", "--", "Q?",
+		]);
+	} finally {
+		if (savedProvider === undefined) delete process.env.STOCKBOT_PI_PROVIDER;
+		else process.env.STOCKBOT_PI_PROVIDER = savedProvider;
+		if (savedModel === undefined) delete process.env.STOCKBOT_PI_MODEL;
+		else process.env.STOCKBOT_PI_MODEL = savedModel;
 	}
 });

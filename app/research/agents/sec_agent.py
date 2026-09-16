@@ -1,4 +1,4 @@
-"""SEC source agent: bounded scout fan-out -> validated dossier.
+"""SEC source agent: scout fan-out -> validated dossier.
 
 Fake-model sketch (no live calls): inject ``spawn`` returning canned
 ``ScoutResult``s, ``dispatch`` returning ``{"evidence_ids": [...]}`` for the
@@ -94,8 +94,12 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
         if callable(validator):
             validator(dossier, supporting)
         return dossier
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return fallback
+    except Exception as exc:  # the canonical shape is required downstream
+        # Never degrade to the local shape silently: the runner needs a canonical
+        # SECDossier and a hidden fallback reports the wrong cause. Name the real one.
+        raise ValueError(
+            f"source dossier could not be canonicalised: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def run_sec_assignment(

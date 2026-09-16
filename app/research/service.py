@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,13 +17,18 @@ from typing import TYPE_CHECKING
 from . import jobs as _jobs
 from . import session as _session
 from .evidence import (
+    CLAIM_KINDS,
     Evidence,
     evidence_content_hash,
     evidence_to_dict,
     ingest_evidence,
+    normalize_accession,
+    search_run_ref,
+    sec_source_ref,
 )
 from .freeze import EvidenceFreeze
 from .models import (
+    FailureCategory,
     JSONValue,
     ResearchSession,
     default_policy,
@@ -50,6 +55,7 @@ __all__ = [
     "complete_job",
     "create_committee_jobs",
     "create_research",
+    "decide_next_wave",
     "decide_wave2",
     "finalize_session",
     "freeze_session",
@@ -419,156 +425,156 @@ def _norm_lower(value: object) -> str:
     return str(value or "").strip().lower()
 
 
-def _evidence_identity(data: Mapping[str, object], ev_type: str, claim: object,
-                       subject: str) -> str:
-    """Identity key for dedupe: search ids vs filing refs."""
-    tail: object = data.get("observation_type", claim[:80] if isinstance(claim, str) else "")
-    if ev_type == "search_coverage":
-        return "|".join(("sec", _norm_lower(data.get("operation", "search")), _norm_lower(data.get("search_id")),
+def _evidence_identity(data: Mapping[str, object], claim_kind: str, claim: object, subject: str,
+                       provenance: Mapping[str, object]) -> str:
+    """Identity key for dedupe: the SearchRun for an absence, the document+passage for a fact."""
+    if claim_kind == "absence_observation":
+        return "|".join(("sec", "search", _norm_lower(data.get("search_id")),
                          _norm_lower(data.get("query")), _norm_lower(subject)))
-    return "|".join(("sec", _norm_lower(data.get("operation", "filing")), _norm_lower(data.get("source_record_id")),
-                     _norm_lower(subject), _norm_lower(tail)))
+    tail: object = data.get("observation_type", claim[:80] if isinstance(claim, str) else "")
+    return "|".join(("sec", "filing", _norm_lower(provenance.get("accession_no")),
+                     _norm_lower(provenance.get("document_name")), _norm_lower(subject), _norm_lower(tail)))
 
 
-def _positive_claim_text(data: Mapping[str, object]) -> str:
-    """Claim text for provenance routing; non-strings stay positive."""
-    claim = data.get("claim_text", data.get("claim", ""))
-    return claim if isinstance(claim, str) else ""
+# Closed claim vocabulary; legacy field names/values are aliases, wording is never the signal.
+_CLAIM_KIND_ALIASES: dict[str, str] = {
+    "filing_observation": "observed_fact",
+    "search_coverage": "absence_observation",
+}
+_CLAIM_KIND_KEYS: tuple[str, ...] = ("claim_kind", "evidence_type", "ev_type", "type")
+_ACCESSION_KEYS: tuple[str, ...] = ("source_record_id", "accession_no", "accession")
+_DOCUMENT_KEYS: tuple[str, ...] = ("document_name", "document")
+_PASSAGE_KEYS: tuple[str, ...] = ("matching_passage", "passage", "section", "fact")
+_ABSENCE_COVERAGE_LISTS: tuple[str, ...] = ("forms", "dates", "partitions", "entities", "docs", "gaps")
+_ABSENCE_COVERAGE_BOOLS: tuple[str, ...] = ("pagination_complete", "complete")
+_RAW_SOURCE_RULE = ("SEC search results are navigation artifacts. Open the underlying "
+                    "filing/document and cite a raw passage before recording evidence.")
 
 
-def _positive_accession(data: Mapping[str, object]) -> object:
-    """First accession candidate; None when absent."""
-    for key in ("source_record_id", "accession_no", "accession"):
+def _first_text(data: Mapping[str, object], keys: Sequence[str]) -> str | None:
+    """First non-blank string under any of the keys, in key order."""
+    for key in keys:
         value = data.get(key)
-        if value:
-            return value
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
-def _positive_has_passage(data: Mapping[str, object]) -> bool:
-    """True when a document/section/passage citation is present."""
-    for key in ("matching_passage", "passage", "fact", "section", "document"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
+def _claim_kind(data: Mapping[str, object]) -> str:
+    """Closed claim kind from claim_kind/evidence_type/ev_type/type; absent means observed_fact.
+
+    Legacy values are aliases; anything else, or disagreeing fields, fail closed.
+    """
+    kinds: set[str] = set()
+    for key in _CLAIM_KIND_KEYS:
+        raw = data.get(key)
+        if raw is None:
+            continue
+        name = str(raw)
+        kind = name if name in CLAIM_KINDS else _CLAIM_KIND_ALIASES.get(name)
+        if kind is None:
+            raise ValueError(f"record_evidence: ERR_UNKNOWN_EVIDENCE_TYPE ({key}={raw!r})")
+        kinds.add(kind)
+    if len(kinds) > 1:
+        raise ValueError(f"record_evidence: ERR_UNKNOWN_EVIDENCE_TYPE (claim kind fields disagree: {sorted(kinds)})")
+    return next(iter(kinds)) if kinds else "observed_fact"
 
 
-def _positive_is_search_hit(data: Mapping[str, object]) -> bool:
-    """True when the item carries search-run provenance."""
-    return data.get("search_id") is not None or data.get("query") is not None
+def _navigational_ids(data: Mapping[str, object]) -> set[str]:
+    """search_id/query values of a search hit: navigation, never an accession."""
+    return {v.strip() for v in (data.get("search_id"), data.get("query")) if isinstance(v, str) and v.strip()}
 
 
-def _require_positive_accession(accession: object) -> None:
-    """Positives need a document-hit accession."""
-    if isinstance(accession, str) and accession.strip():
-        return
-    raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (positive claim needs accession)")
+def _required_text(data: Mapping[str, object], keys: Sequence[str], message: str) -> str:
+    """First non-blank text under ``keys``, else the caller's pinned error (code included)."""
+    value = _first_text(data, keys)
+    if value is None:
+        raise ValueError(message)
+    return value
 
 
-def _require_positive_provenance(ev_type: str, data: Mapping[str, object]) -> None:
-    """Positives need a document hit: accession + passage/section/fact + known_at."""
-    if ev_type != "filing_observation":
-        return
-    if _is_negative_claim(_positive_claim_text(data)):
-        return
-    if not _positive_has_passage(data) and _positive_is_search_hit(data):
-        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (search hit without passage is not evidence; cite document/section/passage)")
-    _require_positive_accession(_positive_accession(data))
+def _observed_accession(data: Mapping[str, object]) -> str:
+    """Canonical accession of the filing that was read; absent or search-shaped refs fail closed."""
+    raw = next((data[k] for k in _ACCESSION_KEYS if data.get(k)), None)
+    navigational = _navigational_ids(data)
+    if raw is None and navigational:
+        # A search hit carries no raw document: it stays navigation, never evidence.
+        raise ValueError(f"record_evidence: ERR_RAW_SOURCE_REQUIRED ({_RAW_SOURCE_RULE})")
+    if isinstance(raw, str) and raw.strip() in navigational:
+        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (a search id is navigation, not an accession)")
+    try:
+        return normalize_accession(raw)
+    except ValueError:
+        raise ValueError("record_evidence: ERR_ACCESSION_FORMAT "
+                         f"(accession {raw!r} must be the NNNNNNNNNN-NN-NNNNNN of the filing you read)") from None
 
 
-def _require_search_coverage(data: Mapping[str, object]) -> None:
-    """search_coverage items must name the query and search id."""
-    for req in ("query", "search_id"):
-        raw = data.get(req)
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError(f"record_evidence: search_coverage requires '{req}'")
+def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
+    """SECSourceRef for an observed fact: accession + document + raw passage; a search hit never qualifies."""
+    accession = _observed_accession(data)
+    document = _required_text(data, _DOCUMENT_KEYS,
+                              "record_evidence: ERR_PROVENANCE_MISMATCH (observed fact needs document_name)")
+    passage = _required_text(data, _PASSAGE_KEYS,
+                             f"record_evidence: ERR_RAW_SOURCE_REQUIRED ({_RAW_SOURCE_RULE})")
+    return sec_source_ref(accession_no=accession, document_name=document, passage=passage,
+                          source_uri=data.get("source_uri"))
 
 
-def _is_negative_claim(text: str) -> bool:
-    """Negative phrasing: explicit absence framing, never a bare mention."""
-    lowered = text.strip().lower()
-    return lowered.startswith(("no ", "not found", "none ", "absent", "does not exist", "no evidence of", "no such "))
-    # ponytail: prefix list covers absence framing; bare "unknown ticker" style text stays positive.
+# Coverage envelope schema: every key with the kind of value it must carry.
+_COVERAGE_FIELD_KINDS: tuple[tuple[str, str], ...] = (
+    *((key, "list of strings") for key in _ABSENCE_COVERAGE_LISTS),
+    *((key, "bool") for key in _ABSENCE_COVERAGE_BOOLS),
+)
 
 
-NEGATIVE_COVERAGE_KEYS = ("forms", "dates", "partitions", "docs", "gaps", "complete")
+def _coverage_field_ok(kind: str, value: object) -> bool:
+    """Type predicate per coverage field kind (one table-driven check)."""
+    if kind == "bool":
+        return isinstance(value, bool)
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
-def _negative_coverage_lists(cov: dict[str, object]) -> None:
-    """Every coverage partition list must be a list; complete must be a bool."""
-    for key in ("forms", "dates", "partitions", "docs", "gaps"):
-        if not isinstance(cov.get(key), list):
-            raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (negative coverage[{key!r}] must be a list)")
-    if not isinstance(cov.get("complete"), bool):
-        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (negative coverage['complete'] must be a bool)")
+def _require_coverage_envelope(cov: Mapping[str, object]) -> None:
+    """Fail closed unless every coverage key is present and typed; the code stays ERR_COVERAGE_REQUIRED."""
+    missing = [key for key, _ in _COVERAGE_FIELD_KINDS if key not in cov]
+    if missing:
+        raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (coverage missing {missing})")
+    for key, kind in _COVERAGE_FIELD_KINDS:
+        if not _coverage_field_ok(kind, cov[key]):
+            raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (coverage[{key!r}] must be a {kind})")
 
-def _negative_coverage(data: Mapping[str, object]) -> dict[str, object]:
-    """Negative-evidence coverage envelope ({forms,dates,partitions,docs,gaps,complete})."""
+
+def _absence_coverage(data: Mapping[str, object]) -> dict[str, JSONValue]:
+    """Validated coverage envelope: what was searched, where, and whether the paging was exhausted."""
     raw = data.get("coverage", data.get("search_coverage"))
     if not isinstance(raw, Mapping):
-        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (negative claim needs coverage {forms,dates,partitions,docs,gaps,complete})")
+        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (absence observation needs coverage "  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+                         "{forms,dates,partitions,entities,docs,gaps,pagination_complete,complete})")
     cov = dict(raw)
-    missing = [k for k in NEGATIVE_COVERAGE_KEYS if k not in cov]
-    if missing:
-        raise ValueError(f"record_evidence: ERR_COVERAGE_REQUIRED (negative coverage missing {missing})")
-    _negative_coverage_lists(cov)
-    return cov
+    _require_coverage_envelope(cov)
+    return validate_json_mapping(cov, "<record_evidence>: 'coverage'")
 
 
-def _require_negative_scope(text: str, cov: dict[str, object]) -> None:
-    """Non-exhaustive no-hit stays scoped: universal absence needs complete:true."""
-    if cov.get("complete") is True:
-        return
-    lowered = text.strip().lower()
-    universal = lowered.startswith(("no ", "none ", "absent", "does not exist", "no evidence of", "no such "))
-    if universal:
-        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED (universal negative needs coverage complete:true; else scope the claim)")
-
-def _negative_claim_text(data: Mapping[str, object]) -> str:
-    """Claim text for negative routing; non-strings stay positive."""
-    claim = data.get("claim_text", data.get("claim", ""))
-    return claim if isinstance(claim, str) else ""
-
-
-def _require_negative_search_run(data: Mapping[str, object]) -> None:
-    """Negatives cite the executed SearchRun (search_id + query)."""
-    search_id = data.get("search_id")
-    if not isinstance(search_id, str) or not search_id.strip():
-        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative claim needs search_id of the executed SearchRun)")
-    query = data.get("query")
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative claim needs query of the executed SearchRun)")
+def _absence_provenance(data: Mapping[str, object]) -> tuple[dict[str, JSONValue], dict[str, JSONValue]]:
+    """SearchRunRef + coverage for an absence observation; an accession disproves nothing (fail closed)."""
+    search_id = _first_text(data, ("search_id",))
+    query = _first_text(data, ("query",))
+    if search_id is None or query is None:
+        raise ValueError("record_evidence: ERR_COVERAGE_REQUIRED "
+                         "(absence observation needs search_id + query of the executed SearchRun)")
+    coverage = _absence_coverage(data)
+    refs = [data.get(k) for k in _ACCESSION_KEYS]
+    if any(isinstance(ref, str) and ref.strip() for ref in refs):
+        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH "
+                         "(absence observation cites the SearchRun only; a filing accession proves no absence)")
+    return search_run_ref(search_id=search_id, query=query), coverage
 
 
-def _require_negative_no_filing_ref(data: Mapping[str, object]) -> None:
-    """A negative cites the SearchRun id only; a filing ref proves no absence."""
-    for key in ("accession_no", "accession"):
-        ref = data.get(key)
-        if isinstance(ref, str) and ref.strip():
-            raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (negative cites SearchRun ID only; arbitrary filing proves no absence)")
-
-
-def _require_negative_provenance(ev_type: str, data: Mapping[str, object]) -> None:
-    """Negatives cite the executed SearchRun; an arbitrary filing never proves absence."""
-    if ev_type != "filing_observation":
-        return
-    text = _negative_claim_text(data)
-    if not _is_negative_claim(text):
-        return
-    _require_negative_search_run(data)
-    _require_negative_no_filing_ref(data)
-    _require_negative_scope(text, _negative_coverage(data))
-
-
-def _require_filing_provenance(ev_type: str, data: Mapping[str, object], subject: str) -> None:
-    """Reject an OpenAI claim filed against an unrelated source record."""
-    if ev_type != "filing_observation" or subject.strip().lower() != "openai":
-        _require_negative_provenance(ev_type, data)
-        return
-    blob = f"{data.get('source_record_id') or ''} {data.get('source_uri') or ''}".lower()
-    if "openai" not in blob:
-        raise ValueError("record_evidence: ERR_PROVENANCE_MISMATCH (OpenAI claim off unrelated filing)")
+def _claim_provenance(data: Mapping[str, object], claim_kind: str) -> tuple[dict[str, JSONValue], dict[str, JSONValue]]:
+    """(provenance, search coverage) for the declared claim kind; never routed by claim wording."""
+    if claim_kind == "absence_observation":
+        return _absence_provenance(data)
+    return _observed_provenance(data), {}
 
 
 def _live_evidence_job(store: ResearchRepository, session_id: str, job_id: str):
@@ -619,20 +625,18 @@ def _svc_explicit_kind(data: Mapping[str, object]) -> object:
     return meta.get("record_kind") if isinstance(meta, dict) else None
 
 
-def _svc_record_kind(data: Mapping[str, object], ev_type: str) -> str:
-    """discovery for search_coverage or an explicit discovery marker; else evidence."""
+def _svc_record_kind(data: Mapping[str, object]) -> str:
+    """Explicit record_kind (item or metadata) wins; everything recorded here is evidence."""
     kind_raw = _svc_explicit_kind(data)
-    if isinstance(kind_raw, str) and kind_raw in ("discovery", "evidence"):
-        return kind_raw
-    return "discovery" if ev_type == "search_coverage" else "evidence"
+    return kind_raw if isinstance(kind_raw, str) and kind_raw in ("discovery", "evidence") else "evidence"
 
 
-def _svc_claim_text(claim: object, kind: str, ev_type: str, evidence_id: str, content: str) -> str:
+def _svc_claim_text(claim: object, kind: str, claim_kind: str, evidence_id: str, content: str) -> str:
     """Claim text: the claim when non-blank, else a discovery label or content lead."""
     if isinstance(claim, str) and claim.strip():
         return claim[:2000]
     if kind == "discovery":
-        return f"{ev_type} {evidence_id}"
+        return f"{claim_kind} {evidence_id}"
     return content[:500]
 
 
@@ -650,9 +654,10 @@ def _svc_opt_float(data: Mapping[str, object], key: str) -> float | None:
 def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_id: str, wave: int,
                            evidence_id: str, source_name: str, subject: str, claim: object,
                            content: str, supports: tuple[str, ...], contradicts: tuple[str, ...],
-                           metadata: dict[str, JSONValue], identity_key: str, ev_type: str) -> Evidence:
+                           metadata: dict[str, JSONValue], identity_key: str, claim_kind: str,
+                           provenance: dict[str, JSONValue]) -> Evidence:
     """Assemble the Evidence row from coerced fields (no I/O)."""
-    kind = _svc_record_kind(data, ev_type)
+    kind = _svc_record_kind(data)
     return Evidence(
         evidence_id=evidence_id,
         session_id=session_id,
@@ -660,12 +665,12 @@ def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_i
         source_type=str(data.get("source_type", "pi")),
         source_name=source_name,
         subject=subject,
-        claim_text=_svc_claim_text(claim, kind, ev_type, evidence_id, content),
+        claim_text=_svc_claim_text(claim, kind, claim_kind, evidence_id, content),
         content=content,
         content_hash=evidence_content_hash(content),
         retrieved_at=_coerce_dt(data.get("retrieved_at")) or utcnow(),
         source_uri=_svc_opt_str(data, "source_uri"),
-        source_record_id=_svc_opt_str(data, "source_record_id"),
+        source_record_id=provenance.get("accession_no") if isinstance(provenance.get("accession_no"), str) else _svc_opt_str(data, "source_record_id"),
         published_at=_coerce_dt(data.get("published_at")),
         known_at=_coerce_dt(data.get("known_at")),
         effective_at=_coerce_dt(data.get("effective_at")),
@@ -675,9 +680,11 @@ def _build_evidence_record(data: Mapping[str, object], *, session_id: str, job_i
         contradicts=contradicts,
         confidence=_svc_opt_float(data, "confidence"),
         quality=_svc_opt_str(data, "quality"),
-        metadata={**metadata, "identity_key": identity_key, "evidence_type": ev_type},
+        metadata={**metadata, "identity_key": identity_key, "claim_kind": claim_kind},
         superseded_by=_svc_opt_str(data, "superseded_by"),
         record_kind=kind,
+        claim_kind=claim_kind,
+        provenance=provenance,
     )
 
 def _persist_evidence_record(store: ResearchRepository, session_id: str, job_id: str,
@@ -719,25 +726,23 @@ def _evidence_live_wave(found: ResearchSession, job: Job, session_id: str) -> No
         raise ValueError(f"record_evidence: wave {job.wave_id} already frozen for {session_id!r}")
 
 
-def _evidence_typed(data: dict[str, object], found: ResearchSession) -> tuple[dict[str, JSONValue], str, str]:
-    """Validate metadata + route the type gate; return (metadata, ev_type, subject)."""
+def _evidence_typed(data: dict[str, object], found: ResearchSession) -> tuple[dict[str, JSONValue], str, dict[str, JSONValue], str]:
+    """Validate metadata + the closed claim contract; return (metadata, claim_kind, provenance, subject)."""
     metadata: dict[str, JSONValue] = validate_json_mapping(data.get("metadata", {}), "record_evidence: 'metadata'")
-    ev_type = str(data.get("type", "filing_observation"))
-    if ev_type == "search_coverage":
-        _require_search_coverage(data)
+    claim_kind = _claim_kind(data)
+    provenance, coverage = _claim_provenance(data, claim_kind)
     subject = str(data.get("subject", found.query[:120]))
-    _require_filing_provenance(ev_type, data, subject)
-    _require_positive_provenance(ev_type, data)
-    return metadata, ev_type, subject
+    if coverage:
+        # An absence observation's scope is part of its provenance: keep it with the record.
+        metadata["search_coverage"] = coverage
+    return metadata, claim_kind, provenance, subject
 
 
-def _evidence_dedupe_cap(prior: list[dict[str, JSONValue]], job_id: str, identity_key: str):
-    """Return the duplicate row when the identity key repeats, else enforce the per-job cap."""
+def _evidence_duplicate(prior: list[dict[str, JSONValue]], identity_key: str):
+    """The prior row when this identity key repeats, else None (no per-job evidence cap)."""
     for row in prior:
         if isinstance(row.get("metadata"), dict) and row["metadata"].get("identity_key") == identity_key:
             return {"evidence_id": row.get("evidence_id"), "accepted": False, "duplicate_of": row.get("evidence_id")}
-    if sum(1 for r in prior if r.get("job_id") == job_id) >= 8:
-        raise ValueError("record_evidence: ERR_EVIDENCE_CAP (max 8 per source job; submit result)")
     return None
 
 
@@ -748,7 +753,7 @@ def record_evidence(
     *,
     repo: ResearchRepository | Path | str | None = None,
 ) -> dict[str, JSONValue]:
-    """Validate (PIT/provenance/IDs) + persist one finding. Returns the record."""
+    """Validate (PIT/claim-kind/provenance/IDs) + persist one finding. Returns the record."""
     if not isinstance(item, Mapping):
         raise ValueError("record_evidence: 'item' must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     store = _repo(repo)
@@ -758,17 +763,18 @@ def record_evidence(
     wave = _evidence_wave(data, job.wave_id)
     _evidence_live_wave(found, job, session_id)
     evidence_id, source_name, supports, contradicts = _evidence_ids_names(data, session_id, job)
-    metadata, ev_type, subject = _evidence_typed(data, found)
-    identity_key = _evidence_identity(data, ev_type, claim, subject)
+    metadata, claim_kind, provenance, subject = _evidence_typed(data, found)
+    identity_key = _evidence_identity(data, claim_kind, claim, subject, provenance)
     prior = store.list_evidence(session_id)
-    dup = _evidence_dedupe_cap(prior, job_id, identity_key)
+    dup = _evidence_duplicate(prior, identity_key)
     if dup is not None:
         return dup
     record = _build_evidence_record(data, session_id=session_id, job_id=job_id, wave=wave,
                                     evidence_id=evidence_id, source_name=source_name, subject=subject,
                                     claim=claim, content=content, supports=supports,
                                     contradicts=contradicts, metadata=metadata,
-                                    identity_key=identity_key, ev_type=ev_type)
+                                    identity_key=identity_key, claim_kind=claim_kind,
+                                    provenance=provenance)
     return _persist_evidence_record(store, session_id, job_id, found, record, metadata)
 
 def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool = False) -> list[str]:
@@ -784,50 +790,46 @@ def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool =
 
 _SUFFICIENCY_REQUIRED_KEYS: tuple[str, ...] = ("major_entities_investigated", "relationship_types_checked", "forms_examined", "exhibits_examined", "material_open_questions")
 _SUFFICIENCY_RESIDUAL_KEYS: tuple[str, ...] = ("material_open_questions", "major_entities_missing", "remaining_branches", "routes_unsearched")
+_SUFFICIENCY_BRANCH_KEYS: tuple[str, ...] = ("search_runs", "covered_branches")
 
 
-def _sufficient_remaining(cov: dict[str, object]) -> list[str]:
-    """Non-blank residual questions/branches/routes across the sufficiency keys."""
-    remaining: list[str] = []
-    for key in _SUFFICIENCY_RESIDUAL_KEYS:
-        remaining.extend(q for q in _submit_str_list_field(cov, key) if q.strip())
+def _sufficient_residuals(cov: dict[str, object], unresolved: list[str] | None) -> list[str]:
+    """Non-blank residual questions/branches/routes across the sufficiency keys + the argument."""
+    remaining = [q for key in _SUFFICIENCY_RESIDUAL_KEYS for q in _submit_str_list_field(cov, key) if q.strip()]
+    remaining.extend(q for q in (unresolved or []) if isinstance(q, str) and q.strip())
     return remaining
 
 
 def _sufficient_required(cov: dict[str, object]) -> None:
-    """Require non-empty investigated entities/relationships/forms/exhibits for the new contract."""
-    filled = {key: _submit_str_list_field(cov, key, required=True) for key in _SUFFICIENCY_REQUIRED_KEYS}
-    missing = [key for key in _SUFFICIENCY_REQUIRED_KEYS[:4] if not filled[key]]
+    """The full structured envelope: entities/relationships/forms/exhibits + the searches and branches spent."""
+    missing = [key for key in (*_SUFFICIENCY_REQUIRED_KEYS, *_SUFFICIENCY_BRANCH_KEYS) if not isinstance(cov.get(key), list)]
     if missing:
-        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty {missing})")
-    remaining = _sufficient_remaining(cov)
-    if remaining:
-        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient with remaining branches/questions: {remaining[:5]})")
+        raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient coverage missing {missing})")
+    for key in _SUFFICIENCY_REQUIRED_KEYS:
+        _submit_str_list_field(cov, key, required=True)
+    if not _submit_str_list_field(cov, "search_runs", required=True):
+        raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty search_runs)")
+    if not [b for b in _submit_str_list_field(cov, "covered_branches", required=True) if b.strip()]:
+        raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty covered_branches)")
 
 
-def _submit_sufficient_gate(cov: dict[str, object], ids: list[str]) -> None:
-    """sufficient claims major material channels + counterparties or they fail closed.
+def _submit_sufficient_gate(cov: dict[str, object], unresolved: list[str] | None) -> None:
+    """sufficient claims a fully covered SEC slice or it fails closed.
 
-    A sufficient result needs investigated major entities, checked relationship
-    types, examined forms + exhibits, and no material open questions left —
-    never just N evidence rows. Residuals must be unlikely to change the SEC
-    answer (no remaining major branches, unsearched routes, or material opens).
-
-    Backward compat: legacy callers that send none of the new sufficiency keys
-    keep the old envelope-only behavior so existing lifecycle/freeze/committee
-    tests stay green without test edits. Once a caller opts into the new
-    contract (any sufficiency key present), the full gate applies. Director
-    coverage challenge remains the second layer for incomplete dossiers.
+    A sufficient result needs the whole structured envelope — investigated
+    entities, checked relationship types, examined forms + exhibits, the
+    search runs and covered branches — with every residual (material open
+    questions, missing major entities, remaining branches, unsearched routes,
+    unresolved questions) empty. There is no envelope-shape bypass: evidence
+    row count is never sufficiency. The Director coverage challenge stays the
+    second layer for incomplete dossiers.
     """
     if cov.get("useful_for_question") != "sufficient":
         return
-    if not any(k in cov for k in _SUFFICIENCY_REQUIRED_KEYS):
-        if not ids:
-            raise ValueError("submit_source_result: ERR_EMPTY_RESULT (no evidence with sufficient coverage)")
-        return
     _sufficient_required(cov)
-    if not ids:
-        raise ValueError("submit_source_result: ERR_EMPTY_RESULT (no evidence with sufficient coverage)")
+    remaining = _sufficient_residuals(cov, unresolved)
+    if remaining:
+        raise ValueError(f"submit_source_result: ERR_COVERAGE_INCOMPLETE (sufficient with remaining branches/questions: {remaining[:5]})")
 
 
 def _submit_coverage_ids(coverage: dict[str, object] | None,
@@ -866,12 +868,14 @@ _SUBMIT_COVERAGE_KEYS = ("resolved", "partially_resolved", "unresolved", "source
                          "dates", "partitions", "docs", "gaps",
                          "major_entities_investigated", "major_entities_missing",
                          "relationship_types_checked", "forms_examined", "exhibits_examined",
-                         "material_open_questions", "remaining_branches", "routes_unsearched")
+                         "material_open_questions", "remaining_branches", "routes_unsearched",
+                         "search_runs", "covered_branches")
 
 
 def _submit_ledger_ids(store: ResearchRepository, job: Job) -> set[str]:
-    """Evidence ids persisted for this session."""
-    return {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id)}
+    """Substantive evidence ids persisted for this session (discovery rows are never citable)."""
+    return {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id)
+            if _freeze_row_kind(r) == "evidence"}
 
 
 def _submit_require_refs(ledger_ids: set[str], ids: list[str]) -> None:
@@ -888,37 +892,261 @@ def _submit_coverage_merge(coverage: dict[str, object], cov: dict[str, object] |
         coverage[key] = list(values)
 
 
+def _sec_search_ledger(search_ids: Sequence[str]) -> tuple[dict[str, str], bool]:
+    """search_id -> persisted query from the SEC search ledger; (rows, readable).
+
+    Unknown ids are simply absent from the mapping; an unreadable ledger returns
+    ``({}, False)`` so callers can report a gap instead of guessing.
+    """
+    if not search_ids:
+        return {}, True
+    try:
+        from app.sec.store import query_search
+    except Exception:  # noqa: BLE001 - the SEC ledger is optional for research persistence
+        return {}, False
+    found: dict[str, str] = {}
+    for search_id in search_ids:
+        try:
+            row = query_search(search_id)
+        except Exception:  # noqa: BLE001 - an unreadable ledger degrades to "unknown", never a failed write
+            return {}, False
+        if not isinstance(row, Mapping):
+            continue
+        query = row.get("query")
+        found[search_id] = query.strip() if isinstance(query, str) else ""
+    return found, True
+
+
+def _submit_search_run_warnings(cov: dict[str, object]) -> list[str]:
+    """Unknown search_run ids against the persisted SEC ledger; advisory only, never a failure."""
+    runs = _submit_str_list_field(cov, "search_runs")
+    known, readable = _sec_search_ledger(runs)
+    if not readable:
+        return []
+    return [f"search_runs id not found in the persisted SEC search ledger: {sid!r}"
+            for sid in runs if sid not in known]
+
+
 def _submit_coverage_dict(cov: dict[str, object] | None, useful: object) -> dict[str, object]:
     """Coverage envelope: default coverage plus caller-supplied string lists.
 
     New sufficiency keys (major_entities_investigated, relationship_types_checked,
-    forms_examined, exhibits_examined, material_open_questions + remaining-branch
-    lists) ride alongside the existing resolution/negative-scope keys. The
-    useful_for_question verdict persists so the director challenge + freeze
-    telemetry can read it back from the stored dossier.
+    forms_examined, exhibits_examined, material_open_questions, search_runs,
+    covered_branches + remaining-branch lists) ride alongside the existing
+    resolution/negative-scope keys. ``source_domain``/``source_sufficiency``
+    scope the verdict to this source (global completion belongs to the Director);
+    ``useful_for_question`` persists so the director challenge + freeze telemetry
+    can read it back from the stored dossier.
     """
     from .dossiers import default_coverage
 
     coverage = {**default_coverage(), "complete": useful == "sufficient",
-                "useful_for_question": useful}
+                "useful_for_question": useful,
+                "source_domain": "SEC", "source_sufficiency": useful}
     for key in _SUBMIT_COVERAGE_KEYS:
         _submit_coverage_merge(coverage, cov, key)
     return coverage
 
 
-def _evidence_field_values(rows: list[dict[str, JSONValue]], key: str) -> list[str]:
-    """Sorted non-blank evidence field values for one key."""
-    return sorted({str(r.get(key)) for r in rows if isinstance(r.get(key), str) and str(r.get(key)).strip()})
+def _distinct_values(rows: Sequence[object], key: str) -> list[str]:
+    """Sorted distinct non-blank ``key`` values across each row's top level, metadata, and provenance."""
+    found: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        for source in (row, row.get("metadata"), row.get("provenance")):
+            value = source.get(key) if isinstance(source, Mapping) else None
+            if isinstance(value, str) and value.strip():
+                found.add(value.strip())
+    return sorted(found)
 
 
-def _submit_telemetry(store: ResearchRepository, job: Job, cov: dict[str, object] | None,
-                      ids: list[str], unresolved: list[str] | None) -> dict[str, JSONValue]:
-    """Coverage/job telemetry merged into the completed job result (deterministic, persisted)."""
-    rows = store.list_evidence(job.session_id)
-    caller = dict(cov or {})
-    coverage = _submit_coverage_dict(cov, caller.get("useful_for_question"))
-    raw_q = coverage.get("sources_examined")
-    return validate_json_mapping({"searches_count": len(rows), "queries_attempted": [q for q in raw_q if isinstance(q, str)] if isinstance(raw_q, list) else [], "forms_searched": _evidence_field_values(rows, "form") or _submit_str_list_field(caller, "forms_examined"), "entities_investigated": _evidence_field_values(rows, "subject") or _submit_str_list_field(caller, "major_entities_investigated"), "exhibits_inspected": _submit_str_list_field(caller, "exhibits_examined"), "material_relationships_found": len(ids), "material_relationships_skipped": len(_submit_str_list_field(caller, "remaining_branches")), "coverage_state": caller.get("useful_for_question"), "remaining_questions": list(unresolved or [])}, "<submit:telemetry>")
+def _coverage_strs(cov: Mapping[str, object], *keys: str) -> list[str]:
+    """Sorted distinct strings across several persisted coverage list keys."""
+    values: set[str] = set()
+    for key in keys:
+        raw = cov.get(key)
+        if isinstance(raw, list):
+            values.update(v.strip() for v in raw if isinstance(v, str) and v.strip())
+    return sorted(values)
+
+
+def _telemetry_coverage(store: ResearchRepository, session_id: str,
+                        extra: Mapping[str, object] | None, unresolved: Sequence[str]) -> dict[str, object]:
+    """Persisted dossier coverage overlaid with an in-flight submission (+ its unresolved argument)."""
+    raw = _latest_dossier(store, session_id).get("coverage")
+    cov = dict(raw) if isinstance(raw, Mapping) else {}
+    if extra:
+        cov.update({k: v for k, v in extra.items() if v is not None})
+    pending = [q.strip() for q in unresolved if isinstance(q, str) and q.strip()]
+    if pending:
+        prior = cov.get("unresolved")
+        cov["unresolved"] = [*(prior if isinstance(prior, list) else []), *pending]
+    return cov
+
+
+def _journal_search_activity(store: ResearchRepository, session_id: str) -> tuple[int, list[str]]:
+    """(search-tool calls, query strings) from persisted journal tool events."""
+    calls = 0
+    queries: list[str] = []
+    for event in store.list_events(session_id):
+        if event.event_type not in ("tool.completed", "tool.skipped"):
+            continue
+        raw_payload = event.payload
+        payload: Mapping[str, object] = raw_payload if isinstance(raw_payload, Mapping) else {}
+        if payload.get("tool") != "search_sec_filings":
+            continue
+        calls += 1
+        raw_args = payload.get("args")
+        args: Mapping[str, object] = raw_args if isinstance(raw_args, Mapping) else {}
+        query = args.get("query")
+        if isinstance(query, str) and query.strip():
+            queries.append(query.strip())
+    return calls, queries
+
+
+def _journal_blocked_novelty(store: ResearchRepository, session_id: str) -> tuple[int, int]:
+    """(duplicate_actions_blocked, zero_novelty_actions) from persisted loop/novelty journal events."""
+    blocked = 0
+    zero_novelty = 0
+    for event in store.list_events(session_id):
+        if event.event_type == "research_loop_detected":
+            blocked += 1
+            continue
+        if event.event_type != "wave.novelty":
+            continue
+        action = event.payload.get("zero_novelty_actions") if isinstance(event.payload, Mapping) else None
+        zero_novelty += action if isinstance(action, int) and not isinstance(action, bool) else 0
+    return blocked, zero_novelty
+
+
+# Coverage keys that still hold open branches; everything here must be empty for a sufficient slice.
+_TELEMETRY_RESIDUAL_KEYS: tuple[str, ...] = (*_SUFFICIENCY_RESIDUAL_KEYS, "unresolved")
+
+
+def _ledger_queries(ledger: Mapping[str, str], search_ids: Sequence[str], readable: bool) -> set[str]:
+    """Persisted query text for the coverage's search ids (empty when the ledger is unreadable)."""
+    if not (search_ids and readable):
+        return set()
+    return {ledger[sid].strip() for sid in search_ids if ledger.get(sid, "").strip()}
+
+
+def _telemetry_search_signals(store: ResearchRepository, session_id: str,
+                              cov: Mapping[str, object]) -> tuple[object, object, list[str]]:
+    """(searches_count, queries_attempted, gaps) from the persisted SEC ledger + journal.
+
+    Journal search events are persisted activity too: they fold into the query
+    set whenever they exist, and back the count when the coverage carries no
+    search ids. A key with no persisted source anywhere is ``None`` + a gap.
+    """
+    search_ids = _coverage_strs(cov, "search_runs")
+    ledger, readable = _sec_search_ledger(search_ids)
+    journal_calls, journal_queries = _journal_search_activity(store, session_id)
+    resolved_queries = _ledger_queries(ledger, search_ids, readable) | set(journal_queries)
+    queries: object = sorted(resolved_queries) if resolved_queries else None
+    searches: object = len(search_ids) if search_ids else (journal_calls if journal_calls else None)
+    gaps = [name for name, value in (("queries_attempted", queries), ("searches_count", searches)) if value is None]
+    return searches, queries, gaps
+
+
+def _sec_source_documents(rows: Sequence[Mapping[str, object]]) -> set[tuple[str, str]]:
+    """(accession, document) pairs held by the rows' raw SEC provenance."""
+    return {
+        (str(prov.get("accession_no")), str(prov.get("document_name")))
+        for prov in (row.get("provenance") for row in rows)
+        if isinstance(prov, Mapping) and prov.get("kind") == "sec_source"
+    }
+
+
+def _telemetry_document_signals(rows: Sequence[Mapping[str, object]]) -> tuple[object, object, list[str]]:
+    """(filings_opened, documents_opened, gaps) from the raw-source rows.
+
+    Zero rows is a true zero; rows that carry no usable identity are a gap, and
+    ``raw_documents_used`` shares the document count (one opened document, one
+    raw document used).
+    """
+    accessions = _distinct_values(rows, "accession_no") or _distinct_values(rows, "source_record_id")
+    documents = _sec_source_documents(rows)
+    gaps: list[str] = []
+    filings: object = len(accessions)
+    if rows and not accessions:
+        filings = None
+        gaps.append("filings_opened")
+    opened: object = len(documents)
+    if rows and not documents:
+        opened = None
+        gaps.extend(("documents_opened", "raw_documents_used"))
+    return filings, opened, gaps
+
+
+def _telemetry_branch_signals(cov: Mapping[str, object]) -> tuple[object, object, list[str]]:
+    """(covered_branches, branches_remaining, gaps); no persisted coverage is a gap, never a zero."""
+    if not cov:
+        return None, None, ["branches_covered", "branches_remaining"]
+    return _coverage_strs(cov, "covered_branches"), _coverage_strs(cov, *_TELEMETRY_RESIDUAL_KEYS), []
+
+
+def _telemetry_relationship_count(store: ResearchRepository, session_id: str) -> int:
+    """Persisted dossier relationships; unreadable storage reads as none, never a guessed count."""
+    relationships: list[object] = []
+    try:
+        for dossier in store.list_dossiers(session_id):
+            rels = dossier.get("relationships")
+            if isinstance(rels, list):
+                relationships.extend(r for r in rels if isinstance(r, Mapping))
+    except Exception:  # noqa: BLE001 - storage degradation omits the key, never fabricates a count
+        return 0
+    return len(relationships)
+
+
+def _derive_telemetry(store: ResearchRepository, session_id: str,
+                      extra: Mapping[str, object] | None = None,
+                      unresolved: Sequence[str] = ()) -> dict[str, object]:
+    """Coverage telemetry derived only from persisted rows/journal; nothing model-reported.
+
+    Every key is counted from the evidence rows, the persisted coverage, the
+    session row, or the journal. A key whose source is missing (no provenance
+    on any row, an unresolvable SEC search ledger entry, no persisted coverage)
+    is reported as ``null`` and named in ``telemetry_gaps`` — never invented as
+    a zero.
+    """
+    found = store.get_session(session_id)
+    rows = [r for r in store.list_evidence(session_id) if _freeze_row_kind(r) != "discovery"]
+    cov = _telemetry_coverage(store, session_id, extra, unresolved)
+    searches, queries, search_gaps = _telemetry_search_signals(store, session_id, cov)
+    filings, opened, document_gaps = _telemetry_document_signals(rows)
+    covered, remaining, branch_gaps = _telemetry_branch_signals(cov)
+    gaps: list[str] = [*search_gaps, *document_gaps, *branch_gaps]
+
+    blocked, zero_novelty = _journal_blocked_novelty(store, session_id)
+    telemetry: dict[str, object] = {
+        "searches_count": searches,
+        "queries_attempted": queries,
+        "forms_examined": sorted(set(_distinct_values(rows, "form")) | set(_coverage_strs(cov, "forms_examined", "forms"))),
+        "entities_investigated": sorted(set(_distinct_values(rows, "subject")) | set(_coverage_strs(cov, "major_entities_investigated", "entities"))),
+        "filings_opened": filings,
+        "documents_opened": opened,
+        "raw_documents_used": opened,
+        "evidence_records": len(rows),
+        "branches_covered": covered,
+        "branches_remaining": remaining,
+        "waves": len(found.freeze_ids),
+        "committee_rounds": len(found.committee_runs),
+        "duplicate_actions_blocked": blocked,
+        "zero_novelty_actions": zero_novelty,
+    }
+    material_relationships = _telemetry_relationship_count(store, session_id)
+    if material_relationships:
+        telemetry["material_relationships_found"] = material_relationships
+    telemetry["telemetry_gaps"] = sorted(set(gaps))
+    return telemetry
+
+
+def _submit_telemetry(store: ResearchRepository, session_id: str, cov: dict[str, object] | None,
+                      unresolved: list[str] | None) -> dict[str, JSONValue]:
+    """Telemetry merged into the completed job result: this submission's envelope + persisted rows."""
+    return validate_json_mapping(
+        _derive_telemetry(store, session_id, cov, unresolved or ()), "<submit:telemetry>")
 
 
 def _submit_persist_dossier(store: ResearchRepository, job: Job, found: ResearchSession,
@@ -962,28 +1190,32 @@ def submit_source_result(
 ) -> dict[str, JSONValue]:
     """Complete one running source job with validated coverage; evidence stays mutation-only.
 
-    sufficient requires major material EDGAR-visible channels + counterparties
-    investigated and residuals unlikely to change the SEC answer — never just N
-    evidence rows. Validates job open + deadline live, every evidence id exists
-    in this session, then completes the job with a coverage/result payload.
-    Returns {job_status: completed, dossier-ish refs, telemetry}. Terminal
-    reuse fails closed.
+    sufficient requires the full structured envelope (entities/relationships/
+    forms/exhibits/search_runs/covered_branches) and no residual branches or
+    questions — never just N evidence rows. Validates job open + deadline live,
+    every evidence id exists in this session, then completes the job with a
+    coverage/result payload. Returns {job_status: completed, dossier-ish refs,
+    telemetry, warnings}. Terminal reuse fails closed.
     """
     store = _repo(repo)
     job, found = _submit_live_job(store, job_id)
     cov, _, ids = _submit_coverage_ids(coverage, evidence_ids)
     _submit_require_refs(_submit_ledger_ids(store, job), ids)
-    _submit_sufficient_gate(cov, ids)
+    _submit_sufficient_gate(cov, unresolved_questions)
+    warnings = _submit_search_run_warnings(cov)
     dossier_id, _ = _submit_dossier(store, job, found,
                                     cov.get("useful_for_question"), ids, unresolved_questions, cov)
-    telemetry = _submit_telemetry(store, job, cov, ids, unresolved_questions)
+    telemetry = _submit_telemetry(store, job.session_id, cov, unresolved_questions)
     done = _jobs.complete_job(job, result={"coverage": cov, "evidence_ids": ids, "telemetry": telemetry})
     store.save_job(done)
-    _emit(store, job.session_id, "job.completed", {"job_id": job.job_id, "telemetry": dict(telemetry)})
+    _emit(store, job.session_id, "job.completed", {"job_id": job.job_id, "telemetry": dict(telemetry), "warnings": warnings})
+    if warnings:
+        _emit(store, job.session_id, "coverage.warning", {"job_id": job.job_id, "warnings": warnings})
     transition_job_completed(job.session_id, job.job_id, repo=store)
     out: dict[str, JSONValue] = {"job_status": done.status, "job_id": done.job_id, "dossier_id": dossier_id,
             "evidence_ids": validate_json_value(ids, "<submit>"),
-            "telemetry": telemetry}
+            "telemetry": telemetry,
+            "warnings": validate_json_value(warnings, "<submit>")}
     return out
 
 
@@ -1020,7 +1252,7 @@ def retry_job(
         model=job.model,
         token_budget=job.token_budget,
         tool_budget=job.tool_budget,
-        child_budget=job.child_budget,
+        child_budget=None,  # re-derive from current policy; the stored echo is not an override
     )
     store.save_session(updated)
     store.save_job(replacement)
@@ -1161,12 +1393,12 @@ def _wave1_state(
 
 
 def _freeze_wave_cap(found: ResearchSession, session_id: str, wave_id: int) -> None:
-    """Enforce the int>=1 wave id and the policy max_waves runaway-test budget guard (never completeness proof)."""
+    """Enforce the int>=1 wave id; a ceiling applies only when policy sets a finite int."""
     if isinstance(wave_id, bool) or not isinstance(wave_id, int) or wave_id < 1:
         raise ValueError(f"freeze_session: 'wave_id' must be an int >= 1, got {wave_id!r}")
     raw_section: object = found.policy.get("research", {})
     research: dict[str, object] = raw_section if isinstance(raw_section, dict) else {}
-    max_waves = research.get("max_waves", 2)
+    max_waves = research.get("max_waves")
     if isinstance(max_waves, int) and not isinstance(max_waves, bool) and wave_id > max_waves:
         raise ValueError(f"freeze_session: wave {wave_id} exceeds max_waves {max_waves}")
 
@@ -1232,39 +1464,14 @@ def _freeze_coverage_note(store: ResearchRepository, session_id: str) -> str:
     return ""
 
 
-_FREEZE_EXHIBIT_KEYS: tuple[str, ...] = ("exhibits_examined",)
-_FREEZE_REMAINING_KEYS: tuple[str, ...] = ("material_open_questions", "major_entities_missing", "remaining_branches", "routes_unsearched", "unresolved")
+def _freeze_wave_telemetry(store: ResearchRepository, session_id: str) -> dict[str, object]:
+    """Persisted wave telemetry, derived from evidence rows/coverage/journal — never model counts.
 
-
-def _freeze_coverage_lists(raw_cov: dict[str, object], keys: tuple[str, ...], *, strip: bool) -> list[str]:
-    """String values across coverage lists for the given keys (in key order)."""
-    out: list[str] = []
-    for key in keys:
-        raw = raw_cov.get(key)
-        if isinstance(raw, list):
-            out.extend(v for v in raw if isinstance(v, str) and (v.strip() if strip else True))
-    return out
-
-
-def _freeze_coverage_select(store: ResearchRepository, session_id: str) -> tuple[dict[str, object] | None, dict[str, object], object]:
-    """Latest freeze coverage triple: (copied coverage or None, raw mapping, relationships)."""
-    latest = _latest_dossier(store, session_id)
-    raw_cov = latest.get("coverage")
-    coverage = dict(raw_cov) if isinstance(raw_cov, dict) else None
-    return coverage, raw_cov if isinstance(raw_cov, dict) else {}, latest.get("relationships")
-
-
-def _freeze_wave_telemetry(store: ResearchRepository, session_id: str, wave_id: int, found: ResearchSession) -> dict[str, object]:
-    """Persisted wave telemetry: searches/queries/forms/entities/exhibits/relationships/coverage/remaining.
-
-    Coverage state + remaining questions persist here (freeze payload) and on
-    the submit job telemetry; the stop reason persists via the wave.stopped /
-    wave.authorized journal events. Nothing here is invented.
+    Coverage state + remaining branches persist here (freeze payload) and on the
+    submit job telemetry; the stop reason persists via the wave.stopped /
+    wave.authorized journal events. Underivable keys are null + telemetry_gaps.
     """
-    rows = store.list_evidence(session_id)
-    coverage, cov, rels = _freeze_coverage_select(store, session_id)
-    raw_q = cov.get("sources_examined")
-    return {"searches_count": len(rows), "queries_attempted": [q for q in raw_q if isinstance(q, str)] if isinstance(raw_q, list) else [], "forms_searched": _evidence_field_values(rows, "form"), "entities_investigated": _evidence_field_values(rows, "subject"), "exhibits_inspected": _freeze_coverage_lists(cov, _FREEZE_EXHIBIT_KEYS, strip=False), "material_relationships_found": len([r for r in rels if isinstance(r, dict)]) if isinstance(rels, list) else 0, "coverage_state": coverage.get("useful_for_question") if coverage is not None else None, "remaining_questions": list(dict.fromkeys(_freeze_coverage_lists(cov, _FREEZE_REMAINING_KEYS, strip=True)))}
+    return _derive_telemetry(store, session_id)
 
 
 def _freeze_save_idempotent(store: ResearchRepository, frozen: EvidenceFreeze) -> None:
@@ -1341,7 +1548,7 @@ def freeze_session(
     _freeze_track_session(store, found, fid, wave_id)
     _emit(store, session_id, "freeze.created", {"freeze_id": fid, "wave_id": wave_id})
     note = _freeze_empty_note(wave_recs, _freeze_coverage_note(store, session_id))
-    telemetry = _freeze_wave_telemetry(store, session_id, wave_id, found)
+    telemetry = _freeze_wave_telemetry(store, session_id)
     _emit(store, session_id, "wave.telemetry", {"freeze_id": fid, **telemetry})
     # Committee creation stays caller-driven: freeze returns the verb + roles and
     # reuses pre-existing committee job ids when present, never auto-creating.
@@ -1349,28 +1556,58 @@ def freeze_session(
 
 
 
+def _committee_roles_by_wave(store: ResearchRepository, session_id: str, wave_id: int) -> dict[str, str]:
+    """Existing committee job id per role for this wave (first row per role wins)."""
+    by_role: dict[str, str] = {}
+    for j in store.list_jobs(session_id):
+        if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot"):
+            by_role.setdefault(j.job_type, j.job_id)
+    return by_role
+
+
+def _fail_partial_trio(store: ResearchRepository, started_ids: Sequence[str], exc: Exception) -> None:
+    """Fail the jobs this call started so a failed trio never stays RUNNING."""
+    reason = f"partial trio: {type(exc).__name__}"[:2000]
+    for jid in started_ids:
+        try:
+            leftover = store.get_job(jid)
+            if leftover.status in ("queued", "running"):
+                store.save_job(_jobs.fail_job(leftover, FailureCategory.COMMITTEE_DEADLOCK, reason))
+        except KeyError:
+            continue
+
+
+def _ensure_committee_roles(store: ResearchRepository, session_id: str, wave_id: int,
+                            by_role: Mapping[str, str]) -> list[str]:
+    """Reuse or create+start one job per committee role, in order; rolls the started ones back on failure."""
+    created: list[str] = []
+    started_ids: list[str] = []
+    cur = store.get_session(session_id)
+    try:
+        for role in ("stockbot", "bullbot", "bearbot"):
+            if role in by_role:
+                created.append(by_role[role])
+                continue
+            cur, job = _jobs.create_job(cur, store.list_jobs(session_id), job_type=role, owner="pi", wave_id=wave_id)
+            store.save_session(cur)
+            started = _jobs.start_job(job)
+            store.save_job(started)
+            created.append(started.job_id)
+            started_ids.append(started.job_id)
+            _emit(store, session_id, "committee.created", {"job_id": started.job_id, "role": role})
+    except Exception as exc:
+        # Never leave a half-created trio RUNNING: fail the jobs this call started.
+        _fail_partial_trio(store, started_ids, exc)
+        raise
+    return created
+
+
 def create_committee_jobs(session_id: str, wave_id: int = 1, *, repo: ResearchRepository | Path | str | None = None) -> dict[str, object]:
     """Opt-in atomic trio creation: 3 distinct pi-owned committee jobs, ids returned together."""
     store = _repo(repo)
     found = _require_session(store, session_id)
     fid = f"{session_id}:{wave_id}:freeze"
-    jobs = store.list_jobs(session_id)
-    by_role: dict[str, str] = {}
-    for j in jobs:
-        if j.wave_id == wave_id and j.job_type in ("stockbot", "bullbot", "bearbot"):
-            by_role.setdefault(j.job_type, j.job_id)
-    created: list[str] = []
-    cur = store.get_session(session_id)
-    for role in ("stockbot", "bullbot", "bearbot"):
-        if role in by_role:
-            created.append(by_role[role])
-            continue
-        cur, job = _jobs.create_job(cur, store.list_jobs(session_id), job_type=role, owner="pi", wave_id=wave_id)
-        store.save_session(cur)
-        started = _jobs.start_job(job)
-        store.save_job(started)
-        created.append(started.job_id)
-        _emit(store, session_id, "committee.created", {"job_id": started.job_id, "role": role})
+    created = _ensure_committee_roles(store, session_id, wave_id, _committee_roles_by_wave(store, session_id, wave_id))
     pending: dict[str, object] = {"verb": "EXECUTE_COMMITTEE", "jobs": created, "wave_id": wave_id, "freeze_id": fid}
     if fid not in found.freeze_ids:
         pending["freeze_pending"] = fid
@@ -1492,24 +1729,166 @@ def record_committee_analysis(
 
 
 def _no_create_session(_question: str, _as_of: str) -> str:
-    raise AssertionError("decide_wave2: create_session is not sequenced in service")
+    raise AssertionError("decide_next_wave: create_session is not sequenced in service")
 
 
 def _no_fetch(_sid: str) -> list[str]:
-    raise AssertionError("decide_wave2: fetch_wave_evidence is not sequenced in service")
+    raise AssertionError("decide_next_wave: fetch_wave_evidence is not sequenced in service")
 
 
 def _no_freeze(_sid: str) -> str:
-    raise AssertionError("decide_wave2: create_freeze is not sequenced in service")
+    raise AssertionError("decide_next_wave: create_freeze is not sequenced in service")
 
 
 def _no_committee(_sid: str):
-    raise AssertionError("decide_wave2: run_committee is not sequenced in service")
+    raise AssertionError("decide_next_wave: run_committee is not sequenced in service")
+
+
+def _text(value: object) -> str:
+    """Stripped string of one optional value ("" when absent)."""
+    return str(value or "").strip()
+
+
+def _raw_doc_identity(row: Mapping[str, object]) -> tuple[str, str] | None:
+    """(accession, document) identity of one raw-source evidence row; None when absent."""
+    prov = row.get("provenance")
+    if isinstance(prov, Mapping) and prov.get("kind") == "sec_source":
+        accession = _text(prov.get("accession_no"))
+        if accession:
+            return (accession, _text(prov.get("document_name")))
+    record = _text(row.get("source_record_id"))
+    return (record, _text(row.get("source_name"))) if record else None
+
+
+def _novelty_wave(row: Mapping[str, object]) -> int:
+    """Persisted wave of one evidence row (0 when absent or mistyped)."""
+    value = row.get("wave_id")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _row_novelty_key(row: Mapping[str, object]) -> tuple[object, str]:
+    """(raw-document identity, content hash): a re-read of a held document is not new evidence."""
+    return (_raw_doc_identity(row), str(row.get("content_hash") or ""))
+
+
+def _split_wave_rows(rows: Sequence[Mapping[str, object]], wave_id: int) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
+    """(rows from earlier waves, rows of ``wave_id``)."""
+    return ([r for r in rows if _novelty_wave(r) != wave_id],
+            [r for r in rows if _novelty_wave(r) == wave_id])
+
+
+def _rows_new_versus_prior(prior: Sequence[Mapping[str, object]], current: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Current rows whose (document, content-hash) key the prior waves did not already hold."""
+    prior_keys = {_row_novelty_key(r) for r in prior}
+    return [r for r in current if _row_novelty_key(r) not in prior_keys]
+
+
+def _doc_identities(items: Iterable[Mapping[str, object]]) -> set[tuple[str, str]]:
+    """Distinct raw-document identities across a row set (unnamed rows contribute none)."""
+    return {d for d in (_raw_doc_identity(r) for r in items) if d}
+
+
+def _novelty_subjects(items: Iterable[Mapping[str, object]]) -> set[str]:
+    """Lower-cased non-blank subjects of a row set (one entity counts once)."""
+    return {str(r.get("subject") or "").strip().lower() for r in items if str(r.get("subject") or "").strip()}
+
+
+def _novelty_row_deltas(rows: Sequence[Mapping[str, object]], wave_id: int) -> dict[str, int]:
+    """New raw documents / evidence records / entities in the current wave versus everything prior."""
+    prior, current = _split_wave_rows(rows, wave_id)
+    new_rows = _rows_new_versus_prior(prior, current)
+    return {
+        "new_raw_documents": len(_doc_identities(new_rows) - _doc_identities(prior)),
+        "new_evidence_records": len(new_rows),
+        "new_entities": len(_novelty_subjects(new_rows) - _novelty_subjects(prior)),
+    }
+
+
+def _productive_waves(rows: Iterable[Mapping[str, object]]) -> dict[int, bool]:
+    """Per-wave productivity: productive means the wave contributed a row the run did not already hold."""
+    productive: dict[int, bool] = {}
+    seen_rows: set[tuple[object, str]] = set()
+    for row in rows:
+        wave = _novelty_wave(row)
+        productive.setdefault(wave, False)
+        key = _row_novelty_key(row)
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        productive[wave] = True
+    return productive
+
+
+def _relationship_keys_by_wave(store: ResearchRepository, session_id: str) -> dict[int, set[str]]:
+    """Persisted dossier relationships per wave as JSON keys; {} when storage is unreadable."""
+    out: dict[int, set[str]] = {}
+    try:
+        dossiers = store.list_dossiers(session_id)
+    except Exception:  # noqa: BLE001 - storage degradation means no relationship signal, never a guess
+        return out
+    for dossier in dossiers:
+        wave = dossier.get("wave_id")
+        wave_int = wave if isinstance(wave, int) and not isinstance(wave, bool) else 0
+        rels = dossier.get("relationships")
+        if isinstance(rels, list):
+            out.setdefault(wave_int, set()).update(
+                json.dumps(r, sort_keys=True, default=str) for r in rels if isinstance(r, Mapping)
+            )
+    return out
+
+
+def _relationship_novelty(store: ResearchRepository, session_id: str, wave_id: int,
+                          productive: dict[int, bool]) -> int:
+    """Mark relationship-bearing waves productive; return the current wave's fresh relationships."""
+    rels_by_wave = _relationship_keys_by_wave(store, session_id)
+    prior_rels: set[str] = set()
+    for wave in sorted(rels_by_wave):
+        fresh = rels_by_wave[wave] - prior_rels
+        prior_rels |= fresh
+        if fresh:
+            productive[wave] = True
+    elsewhere = {r for wave, rels in rels_by_wave.items() if wave != wave_id for r in rels}
+    return len(rels_by_wave.get(wave_id, set()) - elsewhere)
+
+
+def _zero_novelty_streak(productive: Mapping[int, bool], wave_id: int) -> int:
+    """Consecutive unproductive waves counting back from ``wave_id``."""
+    streak = 0
+    for wave in range(wave_id, 0, -1):
+        if productive.get(wave, False):
+            break
+        streak += 1
+    return streak
+
+
+def _gate_novelty(store: ResearchRepository, found: ResearchSession) -> dict[str, object]:
+    """Persisted novelty for the director gate: doc/evidence/entity deltas + loop counters.
+
+    Derived from evidence rows and journal events only; never model-reported.
+    A re-read of a document the run already holds is a record, not new evidence.
+    """
+    rows = [r for r in store.list_evidence(found.session_id) if _freeze_row_kind(r) != "discovery"]
+    wave_id = found.current_wave if isinstance(found.current_wave, int) else 1
+    productive = _productive_waves(rows)
+    new_relationships = _relationship_novelty(store, found.session_id, wave_id, productive)
+    blocked, zero_actions = _journal_blocked_novelty(store, found.session_id)
+    raw_unresolved: object = found.unresolved_questions
+    unresolved: list[object] = list(raw_unresolved) if isinstance(raw_unresolved, list) else []
+    return {
+        **_novelty_row_deltas(rows, wave_id),
+        "new_relationships": new_relationships,
+        "new_material_claims": 0,
+        "resolved_questions": 0,
+        "new_questions": len([q for q in unresolved if isinstance(q, str) and q.strip()]),
+        "zero_novelty_waves": _zero_novelty_streak(productive, wave_id),
+        "duplicate_actions_blocked": blocked,
+        "zero_novelty_actions": zero_actions,
+    }
 
 
 def _decide_inputs(store: ResearchRepository, session_id: str, found: ResearchSession):
     """Build the director inputs: wave1 (empty when no freeze), budgets, counters."""
-    from .director import DirectorBudgets, DirectorDeps, Wave1Result
+    from .director import DirectorDeps, Wave1Result
 
     jobs = store.list_jobs(session_id)
     try:
@@ -1538,7 +1917,30 @@ def _decide_inputs(store: ResearchRepository, session_id: str, found: ResearchSe
         run_committee=_no_committee,
         record_stop=_record_stop,
     )
-    return wave1, deps, DirectorBudgets(), waves_used, len(jobs), tool_used, elapsed
+    return wave1, deps, _configured_budgets(found), waves_used, len(jobs), tool_used, elapsed
+
+
+def _configured_budgets(found: ResearchSession):
+    """Explicitly configured policy budgets (None everywhere when unlimited)."""
+    from .director import DirectorBudgets
+
+    research = found.policy.get("research") if isinstance(found.policy, Mapping) else None
+    section: Mapping[str, object] = research if isinstance(research, Mapping) else {}
+
+    def _int_cfg(key: str) -> int | None:
+        value = section.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+    def _float_cfg(key: str) -> float | None:
+        value = section.get(key)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else None
+
+    return DirectorBudgets(
+        max_waves=_int_cfg("max_waves"),
+        max_jobs=_int_cfg("max_total_jobs"),
+        max_tool_calls=_int_cfg("max_tool_calls"),
+        runtime_budget_s=_float_cfg("max_runtime"),
+    )
 
 
 def _decide_settle(store: ResearchRepository, session_id: str, decision: WaveDecision) -> None:
@@ -1570,7 +1972,7 @@ def _decide_settle(store: ResearchRepository, session_id: str, decision: WaveDec
             store.save_session(_session.transition_session(cur, SessionStatus.SYNTHESIZING))
 
 
-def decide_wave2(
+def decide_next_wave(
     session_id: str,
     *,
     repo: ResearchRepository | Path | str | None = None,
@@ -1580,15 +1982,16 @@ def decide_wave2(
     Targeted follow-up resolves one uncertainty then a new freeze + rerun
     analysis; it never redefines the objective (original question + covered vs
     remaining branches ride the decision detail). Coverage state + remaining
-    questions persist via the wave.stopped/wave.authorized journal events and
-    the job telemetry, not the return shape (stable contract).
+    branches persist via the wave.stopped/wave.authorized journal events and
+    the telemetry, not the return shape (stable contract).
     """
-    from .director import decide_wave2 as _decide
+    from .director import decide_next_wave as _decide
 
     store = _repo(repo)
     found = _require_session(store, session_id)
     wave1, deps, budgets, waves_used, jobs_used, tool_used, elapsed = _decide_inputs(store, session_id, found)
-    decision = _decide(wave1, deps=deps, budgets=budgets, waves_used=waves_used, jobs_used=jobs_used, tool_calls_used=tool_used, elapsed_s=elapsed)
+    novelty = _gate_novelty(store, found)
+    decision = _decide(wave1, deps=deps, budgets=budgets, waves_used=waves_used, jobs_used=jobs_used, tool_calls_used=tool_used, elapsed_s=elapsed, novelty=novelty)
     _decide_settle(store, session_id, decision)
     return {
         "authorized": decision.authorized,
@@ -1597,6 +2000,15 @@ def decide_wave2(
         "targeted_question": decision.targeted_question,
         "targeted_domain": decision.targeted_domain,
     }
+
+
+def decide_wave2(
+    session_id: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, object]:
+    """Wire-name alias for decide_next_wave; scripts/pi_bridge.py dispatch only."""
+    return decide_next_wave(session_id, repo=repo)
 
 
 def _finalize_trio(store: ResearchRepository, session_id: str, found: ResearchSession):
@@ -1614,7 +2026,38 @@ def _finalize_trio(store: ResearchRepository, session_id: str, found: ResearchSe
     return wave1, meta, fid, disagreement
 
 
-def _finalize_claims(session_id: str, claims: list[object], freeze_ids: list[str]):
+def _first_present(data: Mapping[str, object], *keys: str) -> object:
+    """First present value under any of the keys, in order; absent keys fall back to ``""``."""
+    for key in keys:
+        if key in data:
+            return data[key]
+    return ""
+
+
+def _claim_mappings(claims: Sequence[object]) -> list[Mapping[str, object]]:
+    """Every claim must be a mapping (the public error contract pins ValueError)."""
+    out: list[Mapping[str, object]] = []
+    for item in claims:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"finalize_session: each claim must be a mapping, got {type(item).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        out.append(item)
+    return out
+
+
+def _shaped_claim(item: Mapping[str, object]) -> dict[str, object]:
+    """One caller claim narrowed to the grounded envelope: text + evidence_ids (+ explicit claim_type)."""
+    refs = item.get("evidence_ids", [])
+    shaped: dict[str, object] = {
+        "text": _first_present(item, "text", "claim_text", "claim"),
+        "evidence_ids": list(refs) if isinstance(refs, (list, tuple)) else [],
+    }
+    if item.get("claim_type") is not None:
+        # Explicit claim_type survives; an absent one stays absent (parsers default to inference).
+        shaped["claim_type"] = item.get("claim_type")
+    return shaped
+
+
+def _finalize_claims(session_id: str, claims: object, freeze_ids: list[str]):
     """Shape caller claims and ground every citation against the freeze."""
     from .agents import parse_grounded_claims
 
@@ -1622,12 +2065,7 @@ def _finalize_claims(session_id: str, claims: list[object], freeze_ids: list[str
         raise ValueError(f"finalize_session: 'claims' must be a list, got {type(claims).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if not claims:
         raise ValueError("finalize_session: 'claims' must be a non-empty grounded list")
-    narrowed: list[dict[str, object]] = []
-    for item in claims:
-        if not isinstance(item, Mapping):
-            raise ValueError(f"finalize_session: each claim must be a mapping, got {type(item).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-        refs = item.get("evidence_ids", [])
-        narrowed.append({"text": item.get("text", item.get("claim_text", item.get("claim", ""))), "evidence_ids": [e for e in refs] if isinstance(refs, (list, tuple)) else []})
+    narrowed = [_shaped_claim(item) for item in _claim_mappings(claims)]
     try:
         envelope = json.dumps(narrowed)
     except TypeError as exc:
@@ -1712,7 +2150,7 @@ def _finalize_persist(store: ResearchRepository, session_id: str, fid: str,
         from .models import validate_json_value
 
         for claim in grounded:
-            row: dict[str, object] = {"text": claim.text, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
+            row: dict[str, object] = {"text": claim.text, "claim_type": claim.claim_type, "evidence_ids": validate_json_value(list(claim.evidence_ids), "<service>")}
             claims_json.append(row)
         final["claims"] = claims_json
         final["grounded_claims"] = list(claims_json)
@@ -1745,7 +2183,7 @@ def _finalize_synth(found: ResearchSession, wave1: Wave1Result, meta: dict[str, 
     wave_raw = meta["wave_id"]
     as_of_raw = meta["as_of"]
     assert isinstance(wave_raw, int) and isinstance(as_of_raw, str)
-    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=model, extra_claims=[{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in grounded], evidence_limitations=_finalize_limitations(store, session_id), research_scope=_finalize_scope(found))
+    synth = synthesize_final(found.query, session_id=session_id, wave_id=wave_raw, freeze_id=fid, as_of=as_of_raw, stock=wave1.stock, bull=wave1.bull, bear=wave1.bear, disagreement=disagreement, model=model, extra_claims=[{"text": c.text, "claim_type": c.claim_type, "evidence_ids": list(c.evidence_ids)} for c in grounded], evidence_limitations=_finalize_limitations(store, session_id), research_scope=_finalize_scope(found))
     if not synth.answer.strip():
         raise ValueError("finalize_session: synthesis produced an empty answer")
     return synth, grounded

@@ -7,6 +7,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app.research.models import NO_CUTOFF_AS_OF
+
 __all__ = [
     "ALIAS_SOURCES",
     "COMMERCIAL_RELATIONSHIP_TYPES",
@@ -167,6 +169,8 @@ def _coerce_wave(wave_id: int | str) -> int:
 def _coerce_as_of(value: datetime | str | None) -> datetime | None:
     if value is None or isinstance(value, datetime):
         return value
+    if isinstance(value, str) and value.strip().lower() in NO_CUTOFF_AS_OF:
+        return None  # the unbounded sentinel means "no PIT cutoff", not an ISO instant
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:

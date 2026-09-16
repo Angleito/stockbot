@@ -3,9 +3,12 @@
 Three role templates (filings/material-event, financial/XBRL trend,
 risk-factor/language-diff) driven by a generic research context. Each scout
 runs an as_of-filtered latest-filing baseline, its assigned context query
-families, role tools, then iterative finding-fed expansion. Stops are
-info-based (no new material queries, repeats yield nothing new, baseline
-reviewed, explicit tool limit) -- never count-based.
+families, and role tools; search/navigation results are never evidence, so the
+documents those hits name are opened (``get_sec_document``) and findings are
+drafted only from the raw passages that come back. Stops are info-based (no
+new material queries, repeats yield nothing new, baseline reviewed, explicit
+tool limit) -- never count-based; there is no cap on searches, filing reads,
+document reads, exhibit reads, or waves.
 
 Fake-model sketch (no live calls): fake ``dispatch(name, args)`` returns
 ``{"evidence_id": ..., "known_at": ...}`` dicts; fake ``model(prompt)``
@@ -19,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from . import GroundedClaim, ResearchRequest, parse_grounded_claims
+from . import GroundedClaim, ResearchRequest, parse_grounded_claims_tolerant
 
 ScoutRole = Literal["filings", "financials", "risk"]
 
@@ -74,7 +77,11 @@ def _role_arguments(tool: str, ticker: str, as_of: str) -> dict[str, object]:
     bounded = bool(text) and text.lower() != "unbounded"
     if bounded:
         args["as_of"] = as_of
-    if tool == "get_material_events" and bounded:
+    if tool == "get_material_events":
+        # `since` is required by the tool schema (app/tools.py: "required": ["ticker", "since"]),
+        # so it goes out on every call: the one-year window for a bounded as_of, else
+        # `_window_start`'s documented floor (2024-01-01) because an unbounded session has no
+        # cutoff to measure a lookback back from.
         args["since"] = _window_start(as_of)
     if tool == "get_xbrl_facts":
         args["concept"] = "Revenues"
@@ -82,7 +89,12 @@ def _role_arguments(tool: str, ticker: str, as_of: str) -> dict[str, object]:
 
 
 def _window_start(as_of: str) -> str:
-    """One-year lookback window start (YYYY-MM-DD) for since-gated tools."""
+    """One-year lookback window start (YYYY-MM-DD) for since-gated tools.
+
+    No bounded as_of (unbounded sentinel, blank, non-ISO) leaves nothing to measure a
+    year back from, and since-gated callers still need a date, so the window floors at
+    2024-01-01 -- the default `since` the routing harnesses and evals already use.
+    """
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     try:
@@ -107,10 +119,11 @@ class ScoutAssignment:
     question: str
     tickers: list[str] = field(default_factory=list)
     max_tool_calls: int | None = None
-    time_budget_s: float = 120.0
+    time_budget_s: float | None = None
     allowed_domain: str = ALLOWED_DOMAIN
     context: dict[str, object] = field(default_factory=dict)
     queries: list[str] = field(default_factory=list)
+    unscoped_queries: list[str] = field(default_factory=list)
     baseline: list[str] = field(default_factory=list)
 
 @dataclass
@@ -155,8 +168,21 @@ def _context_lines(context: Mapping[str, object]) -> list[str]:
     return out
 
 
+SOURCE_WORKFLOW = (
+    "Workflow: build a material branch map (entities, relationship types, forms, exhibits, open "
+    "questions) -> search SEC (search results are navigation artifacts, never evidence) -> open the "
+    "underlying filings -> inspect documents, exhibits, and passages -> record only raw-document-backed "
+    "evidence -> continue with materially new searches -> submit structured coverage (entities, "
+    "relationship types, forms, exhibits, open questions) once the material branches are covered. "
+    "There is no maximum number of searches, filing reads, document reads, exhibit reads, or waves; "
+    "continue while the searches stay materially new. Only exact no-progress repeats (same query, "
+    "same filing, same passage) are wasteful."
+)
+"""Research workflow: navigation is not evidence; only raw documents are, and volume is unbounded."""
+
+
 def build_scout_prompt(assignment: ScoutAssignment) -> str:
-    """Deterministic prompt: role template + context + baseline + scope."""
+    """Deterministic prompt: role template + context + baseline + scope + research workflow."""
     template = ROLE_PROMPTS[assignment.role]
     tickers = ", ".join(assignment.tickers) if assignment.tickers else "scope tickers TBD"
     prompt = (
@@ -170,20 +196,42 @@ def build_scout_prompt(assignment: ScoutAssignment) -> str:
     if assignment.baseline:
         prompt += "Latest-filing baseline (as_of-filtered, target searches with its terms):\n"
         prompt += "".join(f"- {line}\n" for line in assignment.baseline[:12])
+    if assignment.unscoped_queries:
+        prompt += ("Counterparty branch first - for each query below call search_sec_filings with NO ticker "
+                   "and NO cik (a scoped search shows only the scope issuer's own disclosures), then open "
+                   "the top two hits with get_sec_document and read the passage: these hits are other filers "
+                   "disclosing the counterparty, and they are the branch a scope-only search cannot reach.\n")
+        prompt += "".join(f"- {q}\n" for q in assignment.unscoped_queries[:12])
+        prompt += ("Cite what those filings state; never conclude a relationship is absent from a scoped "
+                   "search, and do not end the assignment with every counterparty query unopened.\n")
     if assignment.queries:
         prompt += "Assigned queries (search each; skip exact repeats already executed):\n"
         prompt += "".join(f"- {q}\n" for q in assignment.queries[:24])
-        prompt += "If a candidate issuer is not in scope tickers, search it as a concept (customer/supplier/fund/risk-factor/8-K/proxy/N-PX/agreement mentions), never dead-end.\n"
+        prompt += ("If a candidate issuer is not in scope tickers, search it as a concept "
+                   "(customer/supplier/fund/risk-factor/8-K/proxy/N-PX/agreement mentions), never dead-end.\n")
     return (
         prompt
-        + 'Respond with JSON only: [{"text": "<finding>", "evidence_ids": ["<id>", ...]}, ...]. '
-        + "Cite only the acquired ids listed below, one or more per claim; gaps as UNKNOWN: <text> (no citation needed)."
+        + SOURCE_WORKFLOW
+        + "\n"
+        + 'Respond with JSON only: [{"text": "<finding>", "claim_type": '
+        + '"observed_fact|inference", "evidence_ids": ["<id>", ...]}, ...]. '
+        + "Cite only the acquired ids listed below, one or more per claim: observed_fact when the "
+        + "passage states it directly, inference when reasoned from cited passages. "
+        + "Findings without a raw-document citation are not findings."
     )
 
 
-def _is_pit_eligible(known_at: object, as_of: str) -> bool:
-    """Shared PIT rule (parsed): historical as_of + unknown known_at is ineligible."""
-    from app.research.models import pit_unverified, pit_violated
+def _is_pit_eligible(known_at: object, as_of: str | None) -> bool:
+    """Shared PIT rule: historical as_of + unknown known_at is ineligible.
+
+    A non-bounded as_of (None, blank, or the `unbounded` sentinel) is no cutoff at all,
+    so every candidate is eligible and `pit_violated` is never consulted: only this
+    caller hands the sentinel down (the ledger gate receives None instead), and a
+    non-ISO as_of would otherwise raise inside the gate and read as a violation.
+    """
+    from app.research.models import _as_of_bounded, pit_unverified, pit_violated
+    if not _as_of_bounded(as_of):
+        return True
     if known_at is None:
         return not pit_unverified(as_of, None)
     if isinstance(known_at, str):
@@ -208,6 +256,7 @@ class _ScoutStore:
     rejected: list[str] = field(default_factory=list)
     seen_queries: set[str] = field(default_factory=set)
     acquired: list[str] = field(default_factory=list)
+    documents: list[tuple[str, str]] = field(default_factory=list)
 
     def candidate_id(self, candidate: object) -> str | None:
         """Evidence id when the candidate is a dict with a non-blank id."""
@@ -236,8 +285,10 @@ class _ScoutStore:
             self.journal("evidence.rejected", {"session_id": self.assignment.session_id, "evidence_id": eid})
 
     def collect(self, resp: object) -> None:
-        """Fold one dispatch response's candidates into eligible/rejected sets."""
+        """Fold one dispatch response into eligible/rejected ids and document candidates."""
         raw_ids = resp.get("evidence_ids") if isinstance(resp, dict) else None
+        if isinstance(resp, dict):
+            self.harvest_documents(resp)
         candidates: Sequence[object] = raw_ids if isinstance(raw_ids, list) else []
         for candidate in candidates:
             eid = self.candidate_id(candidate)
@@ -248,6 +299,22 @@ class _ScoutStore:
                 self.accept(eid, candidate)
             else:
                 self.reject(eid)
+
+    def harvest_documents(self, resp: Mapping[str, object]) -> None:
+        """Queue the display-window hits of one result packet for document opening (deduped)."""
+        raw_hits = resp.get("top_hits")
+        if not isinstance(raw_hits, list):
+            return
+        for hit in raw_hits:
+            if not isinstance(hit, dict):
+                continue
+            accession = hit.get("accession")
+            if not isinstance(accession, str) or not accession.strip():
+                continue
+            document = hit.get("document")
+            pair = (accession.strip(), document.strip() if isinstance(document, str) else "")
+            if pair not in self.documents:
+                self.documents.append(pair)
 
 
 def _search_args(query: str, as_of: str) -> dict[str, object]:
@@ -295,6 +362,32 @@ def _fan_out(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]]
     if not store.evidence_ids:
         store.collect(guarded_call("call_tool", {"name": "get_sec_search_coverage", "arguments": {}}))
 
+def _document_args(accession: str, document: str, as_of: str) -> dict[str, object]:
+    """get_sec_document args: the exact filing/document a hit named, as_of PIT when bounded."""
+    args: dict[str, object] = {"accession_no": accession}
+    if document:
+        args["document_name"] = document
+    text = as_of.strip() if isinstance(as_of, str) else ""
+    if text and text.lower() != "unbounded":
+        args["as_of"] = as_of
+    return args
+
+
+def _open_documents(store: _ScoutStore, guarded_call: Callable[[str, dict[str, object]], dict[str, object]]) -> None:
+    """Open every document the searches surfaced: only raw documents become evidence.
+
+    Navigation results (search/list/diff/xbrl) carry no citable ids; the display
+    window is what was retrieved, so each distinct (accession, document) is read
+    once. Deeper paging of the persisted hit set stays with ``research_read_search``
+    on the model-driven path, never a count cap here.
+    """
+    for accession, document in list(store.documents):
+        store.collect(guarded_call("call_tool", {
+            "name": "get_sec_document",
+            "arguments": _document_args(accession, document, store.assignment.as_of),
+        }))
+
+
 def _snippet_text(line: str) -> str:
     """Snippet payload after the `id :: text` separator, else empty."""
     return line.split("::", 1)[1] if "::" in line else ""
@@ -331,8 +424,22 @@ def _finish(assignment: ScoutAssignment, store: _ScoutStore, tools_used: int, mo
     if store.acquired:
         prompt += "\nAcquired evidence (cite only these ids):\n" + "\n".join(f"- {line}" for line in store.acquired)
     text = model(prompt)
-    findings: list[GroundedClaim] = parse_grounded_claims(text, frozen=store.evidence_ids)
+    dropped: list[str] = []
+
+    def _report_rejected(item: str, reason: str) -> None:
+        dropped.append(f"{reason} :: {item}")
+
+    findings: list[GroundedClaim] = parse_grounded_claims_tolerant(
+        text, frozen=store.evidence_ids, on_reject=_report_rejected
+    )
     unknowns: list[str] = []
+    limitations: list[str] = list(store.rejected)
+    if dropped:
+        # Fail closed per claim (never accepted), reported so the loss is visible.
+        if store.journal is not None:
+            for line in dropped:
+                store.journal("claim.rejected", {"session_id": assignment.session_id, "detail": line[:300]})
+        limitations.append(f"{len(dropped)} claim(s) dropped: cited ids outside the acquired evidence")
     if not store.evidence_ids:
         unknowns.insert(0, "no PIT-eligible SEC evidence returned")
     return ScoutResult(
@@ -341,7 +448,7 @@ def _finish(assignment: ScoutAssignment, store: _ScoutStore, tools_used: int, mo
         coverage=f"role={assignment.role} tickers={len(assignment.tickers)} tool_calls={tools_used}",
         findings=findings,
         unknowns=unknowns,
-        limitations=store.rejected,
+        limitations=limitations,
         follow_up_requests=[],
     )
 
@@ -353,12 +460,15 @@ def run_scout(
     model: ModelFn,
     journal: Callable[[str, dict[str, object]], None] | None = None,
 ) -> ScoutResult:
-    """Run one scout: baseline + queries + role tools + finding-fed expansion.
+    """Run one scout: baseline + queries + role tools + document opening + finding draft.
 
-    ``max_children = 0``: this function never spawns child jobs. PIT: evidence
-    with ``known_at > as_of`` is rejected and journalled as ``evidence.rejected``.
-    Expansion stops on marginal information (repeats yield nothing new) or an
-    explicit tool limit -- never on evidence counts. Unlimited by default.
+    ``max_children = 0``: this function never spawns child jobs. Search and
+    navigation results are never evidence; the documents their hits name are
+    opened (``get_sec_document``) so findings can cite raw filing passages.
+    PIT: evidence with ``known_at > as_of`` is rejected and journalled as
+    ``evidence.rejected``. Expansion stops on marginal information (repeats
+    yield nothing new) or an explicit tool limit -- never on evidence counts.
+    Unlimited by default.
     """
     tools_used = 0
 
@@ -373,6 +483,7 @@ def run_scout(
     _ = catalog  # discovery hint only; the query plan below decides calls.
     store = _ScoutStore(assignment=assignment, journal=journal)
     _fan_out(store, guarded_call)
+    _open_documents(store, guarded_call)
     _expand(store, guarded_call)
     return _finish(assignment, store, tools_used, model)
 
@@ -381,6 +492,7 @@ __all__ = [
     "ALLOWED_DOMAIN",
     "MAX_CHILDREN",
     "ROLE_PROMPTS",
+    "SOURCE_WORKFLOW",
     "DispatchFn",
     "ModelFn",
     "ScoutAssignment",

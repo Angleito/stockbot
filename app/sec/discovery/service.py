@@ -4862,7 +4862,8 @@ def _warn_display_capped(state: _SearchState, display: int,
     if request.exhaustive and request.max_results is not None and capped:
         state.warnings.append(
             f"exhaustive retrieval kept {state.full_hits} hit(s); "
-            f"packet shows the top {display} (see resource_uri for the rest)")
+            f"packet shows the top {display} "
+            f"(page the rest with research_read_search)")
 
 
 def _warn_capped(state: _SearchState, result_limit: int,
@@ -4941,11 +4942,11 @@ def _search_local_disabled(state: _SearchState) -> None:
 
 def _search_coverage_status(state: _SearchState,
                             active: list[SearchAttempt],
-                            capped: bool, limits: tuple[str, ...]
+                            limits: tuple[str, ...]
                             ) -> _CoverageStatus:
     if _search_is_failed(active):
         return "failed"
-    if _search_is_partial(state, active, capped):
+    if _search_is_partial(state, active):
         # Missing partitions queued as bounded backfill jobs: the call
         # returns partial immediately with job IDs, never waits.
         return "partial"
@@ -4989,7 +4990,10 @@ def _search_persist_ledger(state: _SearchState, request: SECSearchRequest,
                            limits: tuple[str, ...],
                            status: _CoverageStatus,
                            forms_seen: set[str],
-                           date_coverage: str | None) -> None:
+                           date_coverage: str | None,
+                           pagination_complete: bool,
+                           source_exhausted: bool) -> None:
+    """Persist the FULL ranked hit set (display capping never trims the ledger)."""
     try:
         from ..store import persist_search_ledger
         persist_search_ledger(
@@ -5007,6 +5011,8 @@ def _search_persist_ledger(state: _SearchState, request: SECSearchRequest,
             forms_covered=tuple(sorted(forms_seen)),
             pages=sum(a.pages_retrieved for a in active),
             date_coverage=date_coverage,
+            pagination_complete=pagination_complete,
+            source_exhausted=source_exhausted,
             warnings=tuple(state.warnings), errors=tuple(state.errors),
         )
     except Exception as exc:  # noqa: BLE001 - ledger persistence failure degrades to a warning, never raises
@@ -5022,15 +5028,15 @@ def _search_adopted_failed(state: _SearchState) -> bool:
                for s in state.adopted_not_complete)
 
 
-def _search_queued_partial(state: _SearchState, capped: bool) -> bool:
-    return bool(state.pending or capped or state.caller_capped)
+def _search_queued_partial(state: _SearchState) -> bool:
+    return bool(state.pending or state.caller_capped)
 
 
 def _search_is_partial(state: _SearchState,
-                         active: list[SearchAttempt], capped: bool) -> bool:
-    return bool(_search_queued_partial(state, capped)
-                or _search_attempt_failed(active)
-                or _search_adopted_failed(state))
+                         active: list[SearchAttempt]) -> bool:
+    return (_search_queued_partial(state)
+            or _search_attempt_failed(active)
+            or _search_adopted_failed(state))
 
 
 def _search_adopted_limited(state: _SearchState) -> bool:
@@ -5080,7 +5086,7 @@ def _search_finalize(state: _SearchState, request: SECSearchRequest,
     search_id = state.search_id
     _search_warn_pit_gaps(state, as_of)
     ranked_full = _search_rank(state, request, _search_final_verified(state), global_forms)
-    ranked, capped = _search_cap_results(state, ranked_full, request, display_limit)
+    ranked, _capped = _search_cap_results(state, ranked_full, request, display_limit)
     packet = build_evidence_packet(
         search_id, entities=tuple(state.entities.values()),
         filings=tuple(state.filings.values()), text_hits=ranked,
@@ -5088,12 +5094,16 @@ def _search_finalize(state: _SearchState, request: SECSearchRequest,
     active = [a for a in state.attempts if a.status != "not_applicable"]
     completed, failed = _search_attempt_sets(state)
     limits = _search_coverage_limits(state, active)
-    status = _search_coverage_status(state, active, capped, limits)
+    # Display cap is a context saver, never retrieval completeness: coverage
+    # and both retrieval flags read paging/route state only.
+    status = _search_coverage_status(state, active, limits)
     forms_seen = _search_forms_seen(state, ranked_full, global_forms)
     date_coverage = _search_date_coverage(request)
-    _search_persist_ledger(state, request, search_id, ranked, active,
+    _search_persist_ledger(state, request, search_id, ranked_full, active,
                            completed, failed, limits, status, forms_seen,
-                           date_coverage)
+                           date_coverage,
+                           pagination_complete=not _search_is_partial(state, active),
+                           source_exhausted=status == "complete")
     return _search_result_packet(
         state, request, search_id, ranked, active, completed, failed,
         limits, status, forms_seen, date_coverage, packet, as_of)

@@ -154,13 +154,13 @@ class FailureCategory(StrEnum):
 # Budgets are session/tool/token/cost totals only; no per-source numeric gate.
 SOURCE_RUNTIME_BUDGET_S = 600
 HEARTBEAT_STALE_S = 120
-MAX_SOURCE_EVIDENCE_N = 8
 # ponytail: single nested defaults dict; per-job overrides only via explicit
 # create_job kwargs. Add sections when a new job type needs children/tools.
+# None = no limit; only an explicit int (policy override) is ever a ceiling.
 DEFAULT_BUDGETS: dict[str, JSONValue] = {
-    "research": {"max_runtime": 600, "max_total_jobs": 20, "max_parallel": 6, "max_waves": 2, "max_tool_calls": None},
-    "source": {"max_children": 4, "max_tool": None},
-    "scout": {"max_children": 0, "max_tool": None, "max_runtime": 120},
+    "research": {"max_runtime": None, "max_total_jobs": None, "max_parallel": 6, "max_waves": None, "max_tool_calls": None},
+    "source": {"max_children": None, "max_tool": None},
+    "scout": {"max_children": 0, "max_tool": None, "max_runtime": None},
     "committee": {"max_parallel": 3},
 }
 
@@ -175,7 +175,7 @@ def default_budget() -> dict[str, JSONValue]:
     """Fresh copy of the session budget (research section + dispatch totals)."""
     out = validate_json_value(DEFAULT_BUDGETS["research"], "<defaults>")
     assert isinstance(out, dict)
-    out["deadline_seconds"] = SOURCE_RUNTIME_BUDGET_S
+    out["deadline_seconds"] = None  # unlimited unless policy configures an int
     out["total_tool_budget"] = None  # unlimited by default; explicit int only
     out["total_token_budget"] = None
     out["total_cost_budget"] = None
@@ -687,6 +687,8 @@ def _req_list_str(d: Mapping[str, object], key: str, where: str) -> list[str]:
 
 def pit_violated(as_of: datetime | str | None, known_at: datetime | str | None) -> bool:
     """True when known_at > as_of. None on either side never violates."""
+    if isinstance(as_of, str) and as_of.strip().lower() in NO_CUTOFF_AS_OF:
+        return False
     start = _coerce_time(as_of, "as_of", "<pit>")
     known = _coerce_time(known_at, "known_at", "<pit>")
     if start is None or known is None:
@@ -694,12 +696,17 @@ def pit_violated(as_of: datetime | str | None, known_at: datetime | str | None) 
     return known > start
 
 
+# The sentinel an unbounded session carries: no PIT cutoff exists, so no known_at
+# can be after it and no known_at is unverified. One definition, used by every gate.
+NO_CUTOFF_AS_OF: frozenset[str] = frozenset({"unbounded"})
+
+
 def _as_of_bounded(as_of: datetime | str | None) -> bool:
     if as_of is None:
         return False
     if isinstance(as_of, str):
         text = as_of.strip().lower()
-        return bool(text) and text != "unbounded"
+        return bool(text) and text not in NO_CUTOFF_AS_OF
     return isinstance(as_of, datetime)
 
 
