@@ -1,19 +1,22 @@
 """Final synthesis: rich FinalResearchResult + legacy answer, no recommendation.
 
 The synthesizer never issues a forced buy/sell/hold call. ``to_dict`` carries
-the deep sections (bottom line, direct evidence, first/second-order impact,
-base/bull/bear, critical disagreements, unknowns, what would change the view,
-source limitations, filing references) with every claim's declared
-``claim_type`` preserved, so an inference is never rendered as direct fact.
-
+the deep sections (bottom line, base case, major evidence, first/second-order
+impact, bull/bear, disagreements, positioning, catalysts, uncertainties, what
+would change the view, limitations, coverage, sources) with every claim's
+declared ``claim_type`` preserved, so an inference is never rendered as direct
+fact. Every claim resolves to freeze-contained evidence ids; unknown claims
+may cite none.
 Epistemic typing is deterministic: the direct-evidence section is built only
 from the caller's canonical EvidenceLedger observations (raw documents), while
 committee claims are interpretations over those observations wherever they are
 rendered. An absence observation comes only from the session's coverage
 artifacts — a generic unknown claim stays an unknown and is never rewritten as
-"no disclosure was located". Absence stays scoped ("No disclosure located
-within the searched SEC scope"), never a real-world nonexistence claim, and
-depth follows the researched material (no fixed word count, no caps).
+"no disclosure was located". Absence stays scoped to the searched sources,
+never a real-world nonexistence claim, and depth follows the researched
+material (no fixed word count, no caps). Per-source coverage (SEC
+filings/forms/gaps, FINRA datasets/periods/gaps, WEB queries/domains/gaps)
+rides in ``coverage``; ``sources`` lists the evidence behind the claims.
 
 Fake-model sketch (no live calls): canned trio of analyses -> canned
 ``CommitteeDisagreement`` -> ``synthesize_final``; assert claims stay
@@ -35,14 +38,20 @@ from app.research.agents.bearbot import BearAnalysis
 from app.research.agents.bullbot import BullAnalysis
 from app.research.agents.stockbot import StockbotAnalysis
 
+from app.research.evidence import evidence_domain, evidence_integrity
+
 from .committee import CommitteeDisagreement, _coerce_wave_id
 
-SEC_SCOPE_ABSENCE = "No disclosure located within the searched SEC scope"
+SCOPE_ABSENCE = "No disclosure located within the searched scope"
 """Scoped-absence phrasing: a searched-scope observation, never nonexistence."""
+SEC_SCOPE_ABSENCE = "No disclosure located within the searched SEC scope"
+"""Legacy SEC-scoped alias (kept for pinned readers); prefer SCOPE_ABSENCE."""
 
+SCOPE_LIMITATION = "Searched-source scope: only the allowed sources were searched; unsearched sources carry no finding."
 SEC_ONLY_LIMITATION = (
     "SEC-only scope: no non-SEC source (news, transcripts, private documents, market data) was searched."
 )
+"""Legacy SEC-only limitation (kept for pinned readers); prefer SCOPE_LIMITATION."""
 
 _CLAIM_SEVERITY = {
     "observed_fact": "direct",
@@ -80,6 +89,10 @@ class FinalSynthesis:
     direct_evidence: list[dict[str, object]] = field(default_factory=list)
     absence_observations: list[str] = field(default_factory=list)
     filing_references: list[str] = field(default_factory=list)
+    positioning: list[str] = field(default_factory=list)
+    catalysts: list[str] = field(default_factory=list)
+    coverage: dict[str, object] = field(default_factory=dict)
+    sources: list[dict[str, object]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave_id(self.wave_id)
@@ -94,35 +107,47 @@ class FinalSynthesis:
             "executive_summary": self.executive_summary or self.answer,
             "consensus": self.consensus,
             "base_case": self.base_case,
+            "major_evidence": [dict(row) for row in self.direct_evidence],
             "direct_evidence": [dict(row) for row in self.direct_evidence],
             "bull_case": {"summary": self.bull_case, "evidence_ids": list(self.bull_evidence_ids)},
             "bear_case": {"summary": self.bear_case, "evidence_ids": list(self.bear_evidence_ids)},
             "impact_channels": [dict(ch) for ch in self.impact_channels],
             "first_order_effects": [dict(e) for e in self.first_order_effects],
             "second_order_effects": [dict(e) for e in self.second_order_effects],
+            "disagreements": list(self.critical_disagreements),
             "critical_disagreements": list(self.critical_disagreements),
+            "positioning": list(self.positioning),
+            "catalysts": list(self.catalysts),
             "uncertainties": _union_texts((list(self.unknowns), list(self.absence_observations))),
             "absence_observations": list(self.absence_observations),
             "what_would_change": list(self.what_would_change),
+            "what_changes_the_view": list(self.what_would_change),
+            "limitations": list(self.evidence_limitations),
             "evidence_limitations": list(self.evidence_limitations),
+            "coverage": {k: list(v) if isinstance(v, list) else v for k, v in self.coverage.items()},
+            "sources": [dict(s) for s in self.sources],
             "grounded_claims": [dict(r) for r in claim_rows],
             "claims": [dict(r) for r in claim_rows],
             "filing_references": list(self.filing_references),
+            "evidence_refs": list(self.filing_references),
             "research_scope": dict(self.research_scope),
             "freeze_id": self.freeze_id,
             "as_of": self.as_of,
         }
 
-
-def scoped_absence(text: str) -> str:
+def scoped_absence(text: str, domain: str | None = None) -> str:
     """Scoped absence phrasing: what a searched scope located, never real-world nonexistence."""
     clean = text.strip()[:2000]
+    scope = SCOPE_ABSENCE
+    if domain is None or domain.strip().upper() == "SEC":
+        scope = SEC_SCOPE_ABSENCE
+    elif domain.strip().upper() in ("FINRA", "WEB"):
+        scope = f"No disclosure located within the searched {domain.strip().upper()} scope"
     if not clean:
-        return f"{SEC_SCOPE_ABSENCE}."
+        return f"{scope}."
     if clean.lower().startswith("no disclosure"):
         return clean
-    return f"{SEC_SCOPE_ABSENCE}: {clean}"
-
+    return f"{scope}: {clean}"
 
 def _union_texts(groups: tuple[Sequence[str], ...]) -> list[str]:
     out: list[str] = []
@@ -381,11 +406,13 @@ def _merge_claims(*groups: Sequence[GroundedClaim]) -> list[GroundedClaim]:
 
 
 def _normalize_scope(scope: Mapping[str, object] | None) -> dict[str, object]:
-    """Research scope in spec shape; SEC-only default carries its explicit limitation."""
+    """Research scope in spec shape; the searched-source boundary carries its explicit limitation."""
     candidates = (scope.get("allowed_sources"), scope.get("allowed")) if isinstance(scope, Mapping) else ()
     sources = next((_strs(raw) for raw in candidates if isinstance(raw, (list, tuple))), None) or ["SEC"]
-    sec_only = [s.upper() for s in sources] == ["SEC"]
-    return {"allowed_sources": sources, "sec_only": sec_only, "limitation": SEC_ONLY_LIMITATION if sec_only else ""}
+    upper = [s.upper() for s in sources]
+    sec_only = upper == ["SEC"]
+    limitation = SEC_ONLY_LIMITATION if sec_only else SCOPE_LIMITATION
+    return {"allowed_sources": sources, "sec_only": sec_only, "limitation": limitation}
 
 
 def _synth_unknowns(
@@ -417,13 +444,12 @@ def _synth_changes(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalys
             list(getattr(bear, "what_would_change", []) or []),
         )
     )
-
-
 def _synth_limitations(evidence_limitations: Sequence[str] | None, scope: Mapping[str, object]) -> list[str]:
-    """Caller limitations plus the explicit SEC-only boundary when the policy is SEC-only."""
+    """Caller limitations plus the explicit searched-source boundary."""
     lims = [v.strip() for v in (evidence_limitations or []) if isinstance(v, str) and v.strip()]
-    if scope.get("sec_only") is True:
-        lims = _union_texts((lims, [SEC_ONLY_LIMITATION]))
+    limitation = _as_text(scope.get("limitation"))
+    if limitation:
+        lims = _union_texts((lims, [limitation]))
     return lims
 
 
@@ -440,24 +466,192 @@ def _section(title: str, lines: Sequence[str]) -> list[str]:
     """One rendered section ([] when it has no lines)."""
     return [f"{title}:", *(f"- {line}" for line in lines if line)] if any(lines) else []
 
+_COVERAGE_VERDICT_KEYS: frozenset[str] = frozenset(
+    {"source_domain", "source_sufficiency", "useful_for_question", "complete"}
+)
+"""Dossier verdict keys: routing state, never searched scope; dropped from the render."""
+
+
+def _coverage_scope_items(section: Mapping[str, object]) -> list[tuple[str, list[str]]]:
+    """(key, scope strings) for every non-empty string-list field except verdict keys (sorted, stable)."""
+    out: list[tuple[str, list[str]]] = []
+    for key in sorted(section):
+        if key in _COVERAGE_VERDICT_KEYS or key in ("detail", "summary"):
+            continue
+        items = _strs(section.get(key))
+        if items:
+            out.append((key, items))
+    return out
+
+
+def _coverage_lines(coverage: Mapping[str, object]) -> list[str]:
+    """Per-source coverage lines: every surviving scope key renders under its own name."""
+    lines: list[str] = []
+    for key in ("sec", "finra", "web"):
+        section = coverage.get(key)
+        if not isinstance(section, Mapping):
+            continue
+        parts = [f"{name}: {', '.join(items)}" for name, items in _coverage_scope_items(section)]
+        detail = _as_text(section.get("detail") or section.get("summary"))
+        head = f"{key.upper()}"
+        lines.append(f"{head} — {'; '.join(parts)}{(' — ' + detail) if detail and not parts else (detail if detail else '')}" if (parts or detail) else head)
+    extra = _strs(coverage.get("gaps"))
+    if extra:
+        lines.append(f"gaps: {', '.join(extra)}")
+    return lines
+
+
+def _source_line(row: Mapping[str, object]) -> str:
+    """One source line: evidence id + domain + integrity class + document identity."""
+    evidence_id = _as_text(row.get("evidence_id"))
+    domain = _as_text(row.get("domain")).upper() or "SOURCE"
+    integrity = _as_text(row.get("integrity_class") or row.get("integrity")).upper()
+    document = _as_text(row.get("document") or row.get("source_name"))
+    label = f"{domain} [{integrity}]" if integrity else domain
+    head = " ".join(part for part in (label, document) if part) or evidence_id or "source"
+    return f"{head} [{evidence_id}]" if evidence_id and head != evidence_id else head
+
+
+def _normalize_coverage(coverage: Mapping[str, object] | None) -> dict[str, object]:
+    """Per-source coverage in render shape (SEC/FINRA/WEB sections; string lists only).
+
+    Keeps every non-empty string-list field except the dossier verdict keys,
+    so desk keys survive under their own names (datasets_queried,
+    tickers_covered, queries_executed, ...) instead of dropping.
+    """
+    out: dict[str, object] = {}
+    if not isinstance(coverage, Mapping):
+        return out
+    for key in ("sec", "finra", "web"):
+        section = coverage.get(key)
+        if not isinstance(section, Mapping):
+            continue
+        kept: dict[str, object] = dict(_coverage_scope_items(section))
+        detail = _as_text(section.get("detail") or section.get("summary"))
+        if detail:
+            kept["detail"] = detail
+        if kept:
+            out[key] = kept
+    gaps = _strs(coverage.get("gaps"))
+    if gaps:
+        out["gaps"] = gaps
+    return out
+
+
+def _observation_integrity(row: Mapping[str, object]) -> str:
+    """Integrity class of one ledger row: explicit kernel field wins, else the kernel mapping."""
+    direct = _as_text(row.get("integrity_class") or row.get("integrity")).upper()
+    if direct in ("PRIMARY_DOCUMENT", "CANONICAL_STRUCTURED", "EXTERNAL_SOURCE"):
+        return direct
+    return evidence_integrity(_observation_provenance(row))
+
+
+def _normalize_sources(
+    sources: Sequence[Mapping[str, object]] | None,
+    claims: Sequence[GroundedClaim],
+    observations: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Sources behind the claims: caller rows win; else one row per cited evidence id.
+
+    Domain/integrity come from the observations via the kernel mapping, never
+    the caller: explicit caller integrity wins only when it names the closed
+    vocabulary, so §6/§10 labels survive to the report.
+    """
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    by_id: dict[str, Mapping[str, object]] = {}
+    for row in observations or []:
+        if not isinstance(row, Mapping):
+            continue
+        evidence_id = _as_text(row.get("evidence_id"))
+        if evidence_id and evidence_id not in by_id:
+            by_id[evidence_id] = row
+    for item in sources or []:
+        if not isinstance(item, Mapping):
+            continue
+        evidence_id = _as_text(item.get("evidence_id"))
+        if not evidence_id or evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        obs = by_id.get(evidence_id)
+        domain = _as_text(item.get("domain")).upper()
+        if not domain or domain == "SOURCE":
+            domain = _observation_domain(obs) if obs is not None else "SOURCE"
+        integrity = _as_text(item.get("integrity_class") or item.get("integrity")).upper()
+        if integrity not in ("PRIMARY_DOCUMENT", "CANONICAL_STRUCTURED", "EXTERNAL_SOURCE"):
+            integrity = _observation_integrity(obs) if obs is not None else "EXTERNAL_SOURCE"
+        rows.append(
+            {
+                "evidence_id": evidence_id,
+                "domain": domain,
+                "document": _as_text(item.get("document") or item.get("source_name")),
+                "integrity_class": integrity,
+            }
+        )
+    if rows:
+        return rows
+    domains: dict[str, str] = {}
+    integrity_by_id: dict[str, str] = {}
+    for row in observations or []:
+        if not isinstance(row, Mapping):
+            continue
+        evidence_id = _as_text(row.get("evidence_id"))
+        if evidence_id and evidence_id not in domains:
+            domains[evidence_id] = _observation_domain(row)
+            integrity_by_id[evidence_id] = _observation_integrity(row)
+    for claim in claims:
+        for evidence_id in claim.evidence_ids:
+            clean = evidence_id.strip() if isinstance(evidence_id, str) else ""
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            obs = by_id.get(clean)
+            document = _as_text(obs.get("document") or obs.get("source_name")) if obs is not None else ""
+            rows.append(
+                {
+                    "evidence_id": clean,
+                    "domain": domains.get(clean, "SOURCE"),
+                    "document": document,
+                    "integrity_class": integrity_by_id.get(clean, "EXTERNAL_SOURCE"),
+                }
+            )
+    return rows
+
+
+def _observation_domain(row: Mapping[str, object]) -> str:
+    """Source domain of one ledger row: explicit caller field wins, else the kernel mapping.
+
+    FINRA/WEB rows are admitted only by persisted-result replay (bare rows
+    still fail closed with ERR_RAW_SOURCE_REQUIRED).
+    """
+    direct = _as_text(row.get("domain") or row.get("source_domain")).upper()
+    if direct in ("SEC", "FINRA", "WEB"):
+        return direct
+    return evidence_domain(_observation_provenance(row))
+
 
 def _deep_answer(synth: FinalSynthesis) -> str:
     """Deterministic deep answer: every required section, depth taken from the researched material."""
     out: list[str] = [f"Bottom line: {synth.executive_summary}"]
     if synth.consensus and synth.consensus.lower() != "none stated":
         out.append(f"Consensus: {synth.consensus}")
-    out += _section("What the evidence directly shows", [_effect_line(row) for row in synth.direct_evidence])
-    out += _section("First-order impact", [_effect_line(row) for row in synth.first_order_effects])
-    out += _section("Second-order impact", [_effect_line(row) for row in synth.second_order_effects])
-    out += _section("Base case (stockbot)", [synth.base_case])
-    out += _section("Bull case (bullbot)", [synth.bull_case])
-    out += _section("Bear case (bearbot)", [synth.bear_case])
-    out += _section("Critical disagreements", synth.critical_disagreements)
-    out += _section("Unknowns / unresolved", _union_texts((synth.unknowns, synth.absence_observations)))
-    out += _section("What would change the view", synth.what_would_change)
-    out += _section("Source limitations", synth.evidence_limitations)
+    if synth.base_case:
+        out += _section("Base case: Base case (stockbot)", [synth.base_case])
+    out += _section("Major evidence \u2014 What the evidence directly shows", [_effect_line(row) for row in synth.direct_evidence])
+    out += _section("First-order effects \u2014 First-order impact", [_effect_line(row) for row in synth.first_order_effects])
+    out += _section("Second-order effects \u2014 Second-order impact", [_effect_line(row) for row in synth.second_order_effects])
+    out += _section("Bull case \u2014 Bull case (bullbot)", [synth.bull_case])
+    out += _section("Bear case \u2014 Bear case (bearbot)", [synth.bear_case])
+    out += _section("Disagreements \u2014 Critical disagreements", synth.critical_disagreements)
+    out += _section("Positioning", synth.positioning)
+    out += _section("Catalysts", synth.catalysts)
+    out += _section("Uncertainties \u2014 Unknowns / unresolved", _union_texts((synth.unknowns, synth.absence_observations)))
+    out += _section("What changes the view \u2014 What would change the view", synth.what_would_change)
+    out += _section("Limitations \u2014 Source limitations", synth.evidence_limitations)
+    out += _section("Coverage", _coverage_lines(synth.coverage))
+    out += _section("Sources", [_source_line(row) for row in synth.sources])
     if synth.filing_references:
-        out.append(f"Filing references: {', '.join(synth.filing_references)}")
+        out.append(f"Evidence references: {', '.join(synth.filing_references)}")
     return "\n".join(out)
 
 
@@ -478,6 +672,10 @@ def synthesize_final(
     research_scope: Mapping[str, object] | None = None,
     observations: Sequence[Mapping[str, object]] | None = None,
     absence_observations: Sequence[str] | None = None,
+    coverage: Mapping[str, object] | None = None,
+    positioning: Sequence[str] | None = None,
+    catalysts: Sequence[str] | None = None,
+    sources: Sequence[Mapping[str, object]] | None = None,
 ) -> FinalSynthesis:
     """Package the trio + disagreement + caller claims into the final record (no live calls).
 
@@ -491,6 +689,10 @@ def synthesize_final(
     committee claim (committee statements are interpretations over these rows).
     ``absence_observations`` are the session's coverage artifacts' texts: a
     generic unknown stays an unknown and never becomes an absence claim.
+    ``coverage`` is per-source searched scope (SEC filings/forms/gaps, FINRA
+    datasets/periods/gaps, WEB queries/domains/gaps); ``positioning`` and
+    ``catalysts`` are caller-supplied grounded lines; ``sources`` lists the
+    evidence behind the claims (derived from cited ids when omitted).
     """
     claims = _merge_claims(
         list(getattr(stock, "claims", []) or []),
@@ -500,6 +702,8 @@ def synthesize_final(
     )
     scope = _normalize_scope(research_scope)
     first_order, second_order = _split_effects(claims)
+    observations_list = [row for row in (observations or []) if isinstance(row, Mapping)]
+    coverage_norm = _normalize_coverage(coverage)
     synth = FinalSynthesis(
         session_id=session_id,
         wave_id=_coerce_wave_id(wave_id),
@@ -519,9 +723,9 @@ def synthesize_final(
                 )
             )
         ),
-        what_would_change=_synth_changes(stock, bull, bear),
         claims=claims,
-        executive_summary=stock.executive_view or stock.base_case or "No grounded SEC findings.",
+        what_would_change=_synth_changes(stock, bull, bear),
+        executive_summary=stock.executive_view or stock.base_case or "No grounded findings.",
         consensus=_consensus_text(disagreement),
         impact_channels=_channels_from_analyses(stock, bull, bear) or _channels_from_claims(claims),
         first_order_effects=first_order,
@@ -531,12 +735,24 @@ def synthesize_final(
         critical_disagreements=_critical_disagreements(disagreement),
         evidence_limitations=_synth_limitations(evidence_limitations, scope),
         research_scope=scope,
-        direct_evidence=_observation_rows(observations),
+        direct_evidence=_observation_rows(observations_list),
         absence_observations=[scoped_absence(text) for text in _strs(absence_observations)],
         filing_references=claims_refs(claims),
+        positioning=_strs(positioning),
+        catalysts=_strs(catalysts),
+        coverage=coverage_norm,
+        sources=_normalize_sources(sources, claims, observations_list),
     )
     synth.answer = _deep_answer(synth) if model is None else str(model)
     return synth
 
 
-__all__ = ["SEC_ONLY_LIMITATION", "SEC_SCOPE_ABSENCE", "FinalSynthesis", "scoped_absence", "synthesize_final"]
+__all__ = [
+    "SCOPE_ABSENCE",
+    "SCOPE_LIMITATION",
+    "SEC_ONLY_LIMITATION",
+    "SEC_SCOPE_ABSENCE",
+    "FinalSynthesis",
+    "scoped_absence",
+    "synthesize_final",
+]

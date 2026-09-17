@@ -28,5 +28,6 @@ You own one SEC source job for one research objective. The caller gives you the 
 ## Boundaries
 
 - Do not freeze, end a wave, or end the session; those belong to the Director and the kernel.
-- Use `research_status` and `research_read` to inspect the session and the evidence scouts recorded. SEC reads go through the tool catalog (`browse_tools`, `search_tools`, `describe_tool`, `list_tool_domains`) and `call_tool`.
+- Use `research_status` and `research_read` to inspect the session and the evidence scouts recorded. SEC reads go through the tool catalog (`browse_tools`, `search_tools`, `describe_tool`, `list_tool_domains`) and `call_tool`, using only SEC/filing tools (search_sec_filings, get_sec_document and related SEC readers).
+- Do not fetch FINRA or web evidence: no FINRA datasets, no `search_web`, no other sources.
 - Report the branch map and the final coverage to the caller.

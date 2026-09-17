@@ -679,4 +679,26 @@ def test_final_answer_card_delivers_the_grounded_answer_instead_of_a_count():
     assert "## Major direct exposures" in text
     assert "- AI capex (direct) [rs:1:ev:1]" in text
     assert "- AI demand (observed_fact) [rs:1:ev:1]" in text
-    assert "Scope: SEC filings only; nothing here draws on non-SEC sources." in text
+    assert "Scope: SEC sources only." in text
+
+
+def test_final_answer_card_renders_coverage_and_sources():
+    """render_final_result carries Coverage + Sources like deep_answer (verbatim scope keys)."""
+    text = render_tool_result(
+        {
+            "executive_summary": "answer",
+            "coverage": {"finra": {"datasets_queried": ["short-interest"]}},
+            "sources": [
+                {
+                    "evidence_id": "rs:1:ev:1",
+                    "domain": "FINRA",
+                    "document": "FINRA",
+                    "integrity_class": "CANONICAL_STRUCTURED",
+                }
+            ],
+            "research_scope": {"allowed_sources": ["SEC", "FINRA"]},
+        }
+    )
+    assert "## Coverage" in text and "datasets_queried: short-interest" in text
+    assert "## Sources" in text and "FINRA" in text and "rs:1:ev:1" in text
+    assert "CANONICAL_STRUCTURED" in text

@@ -21,11 +21,14 @@ from .evidence import (
     CLAIM_KINDS,
     Evidence,
     evidence_content_hash,
+    evidence_domain,
     evidence_to_dict,
+    finra_record_ref,
     ingest_evidence,
     normalize_accession,
     search_run_ref,
     sec_source_ref,
+    web_source_ref,
 )
 from .freeze import EvidenceFreeze
 from .models import (
@@ -63,10 +66,12 @@ __all__ = [
     "fail_job",
     "finalize_session",
     "freeze_session",
+    "get_tool_result",
     "heartbeat_job",
     "inspect_research",
     "job_diagnostics",
     "list_research",
+    "persist_tool_result",
     "record_committee_analysis",
     "record_evidence",
     "research_events",
@@ -495,6 +500,7 @@ def _coerce_dt(value: object) -> datetime | None:
     return None
 
 
+
 def _evidence_content(data: Mapping[str, object]) -> tuple[str, object]:
     """Resolve content with claim/JSON fallbacks. Returns (content, claim)."""
     content_raw = data.get("content")
@@ -528,8 +534,17 @@ def _evidence_identity(
     subject: str,
     provenance: Mapping[str, object],
 ) -> str:
-    """Identity key for dedupe: the document+passage identity of one observed fact."""
+    """Identity key for dedupe: the source-backed identity of one observed fact."""
     tail: object = data.get("observation_type", claim[:80] if isinstance(claim, str) else "")
+    kind = str(provenance.get("kind") or "")
+    if kind == "finra_record":
+        return "|".join(
+            ("finra", "record", _norm_lower(provenance.get("tool_name")), _norm_lower(provenance.get("record_identity")), _norm_lower(subject), _norm_lower(tail))
+        )
+    if kind == "web_source":
+        return "|".join(
+            ("web", "source", _norm_lower(provenance.get("url")), _norm_lower(provenance.get("excerpt"))[:200], _norm_lower(subject), _norm_lower(tail))
+        )
     return "|".join(
         (
             "sec",
@@ -627,14 +642,32 @@ def _declared_accession(data: Mapping[str, object]) -> str | None:
         ) from None
 
 
-def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
-    """SECSourceRef for an observed fact: the KERNEL-materialized passage of a canonical handle.
+def _observed_provenance(
+    data: Mapping[str, object],
+    job: Job | None = None,
+    *,
+    store: ResearchRepository | None = None,
+    session_id: str | None = None,
+) -> dict[str, JSONValue]:
+    """Kernel-materialized provenance for an observed fact, routed by the owning job's domain.
 
-    The model supplies a locator (which passage it means) and the handle
-    ``get_sec_document`` returned for the window it read; the kernel reloads that
-    window from the SEC archive, verifies it, and stores its own bytes. A search
-    hit, a missing handle, or a hallucinated passage never qualifies.
+    SEC jobs reload a get_sec_document handle from the archive. FINRA/WEB jobs
+    replay a persisted staged tool result the kernel stored at dispatch time; a
+    citation naming no persisted result fails ERR_RAW_SOURCE_REQUIRED, and one
+    naming bytes the persisted result does not reproduce fails
+    ERR_PASSAGE_NOT_IN_SOURCE. A bare row/URL with no persisted result is
+    navigation at best, never evidence.
     """
+    domain = (job.source_domain or "SEC").upper() if job is not None else "SEC"
+    if domain == "FINRA":
+        return _finra_provenance(data, store=store, session_id=session_id)
+    if domain == "WEB":
+        return _web_provenance(data, store=store, session_id=session_id)
+    return _sec_provenance(data)
+
+
+def _sec_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
+    """SECSourceRef for an observed fact: the KERNEL-materialized passage of a canonical handle."""
     locator = _required_text(
         data,
         _PASSAGE_KEYS,
@@ -652,6 +685,192 @@ def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
     provenance = materialize_sec_passage(handle, locator)
     _check_declared_ref(provenance, accession=declared_accession, document=declared_document)
     return provenance
+
+
+_FINRA_EVIDENCE_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_finra_datapoints",
+        "query_finra",
+        "get_short_interest",
+        "get_short_pressure_profile",
+        "get_reg_sho_volume",
+        "get_threshold_securities",
+        "get_short_interest_leaderboard",
+    }
+)
+"""FINRA tools whose persisted results can ground a finra_record (catalog reads excluded)."""
+
+
+def _tool_result_ref(data: Mapping[str, object], domain: str) -> str:
+    """Persisted tool_result_id a FINRA/WEB citation names; bare rows fail closed."""
+    for key in ("tool_result_id", "source_handle_id", "result_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise ValueError(
+        f"record_evidence: ERR_RAW_SOURCE_REQUIRED ({domain} rows are navigation artifacts. "
+        "Cite the persisted tool result id of the tool response you read, not a copied number.)"
+    )
+
+
+def _normalize_record_text(value: object) -> str:
+    """Whitespace-normalized comparison text for persisted-result replay."""
+    return " ".join(str(value).split()) if isinstance(value, str) else ""
+
+
+def _finra_record_texts(result: Mapping[str, object]) -> list[str]:
+    """Citable texts of one persisted FINRA result: raw rows + briefing + metrics JSON."""
+    texts: list[str] = []
+    payload = result.get("result")
+    payload = payload if isinstance(payload, Mapping) else result
+    records = payload.get("records")
+    if isinstance(records, list):
+        for row in records:
+            if isinstance(row, Mapping):
+                texts.append(_normalize_record_text(json.dumps(row, sort_keys=True, default=str)))
+    for key in ("briefing", "briefing_source"):
+        texts.append(_normalize_record_text(payload.get(key)))
+    metrics = payload.get("metrics")
+    if isinstance(metrics, Mapping):
+        texts.append(_normalize_record_text(json.dumps(metrics, sort_keys=True, default=str)))
+    return [text for text in texts if text]
+
+
+def _finra_known_at(result: Mapping[str, object]) -> str | None:
+    """Dataset authoritative date of one persisted FINRA result; None when unknown."""
+    payload = result.get("result")
+    payload = payload if isinstance(payload, Mapping) else result
+    as_of = payload.get("as_of_date")
+    return as_of.strip() if isinstance(as_of, str) and as_of.strip() else None
+
+
+def _finra_provenance(
+    data: Mapping[str, object], *, store: ResearchRepository | None = None, session_id: str | None = None
+) -> dict[str, JSONValue]:
+    """FinraRecordRef replayed against the persisted FINRA tool result."""
+    from .repository import ResearchRepository as _RR
+
+    ref_id = _tool_result_ref(data, "FINRA")
+    locator = _normalize_record_text(_first_text(data, (*_PASSAGE_KEYS, "record_identity")))
+    if not locator:
+        raise ValueError(
+            "record_evidence: ERR_RAW_SOURCE_REQUIRED (a FINRA citation names the persisted "
+            "tool result id plus the record values you are citing.)"
+        )
+    try:
+        repo = store if store is not None else _RR()
+        result = repo.get_tool_result(ref_id)
+    except KeyError:
+        raise ValueError(
+            "record_evidence: ERR_RAW_SOURCE_REQUIRED (unknown persisted FINRA tool result; "
+            "cite the tool_result_id the kernel returned for the response you read.)"
+        ) from None
+    other = result.get("session_id")
+    if isinstance(session_id, str) and session_id and isinstance(other, str) and other and other != session_id:
+        raise ValueError(
+            f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} belongs to session {other!r}, not {session_id!r})"
+        )
+    tool_name = str(result.get("tool_name") or "")
+    if tool_name not in _FINRA_EVIDENCE_TOOLS:
+        raise ValueError(
+            f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} is {tool_name!r}, not FINRA records)"
+        )
+    texts = _finra_record_texts(result)
+    if not any(locator in text for text in texts):
+        raise ValueError(
+            "record_evidence: ERR_PASSAGE_NOT_IN_SOURCE (the cited record values do not appear "
+            "in the persisted FINRA tool result)"
+        )
+    payload = result.get("result")
+    payload = payload if isinstance(payload, Mapping) else result
+    dataset = payload.get("dataset_id") or payload.get("dataset")
+    return finra_record_ref(
+        tool_name=tool_name,
+        record_identity=locator[:2000],
+        dataset=dataset if isinstance(dataset, str) else None,
+        source_uri=_svc_opt_str(data, "source_uri"),
+        known_at=_finra_known_at(result),
+        tool_result_id=ref_id,
+    )
+
+
+def _web_result_texts(result: Mapping[str, object]) -> list[tuple[str, str, str, str, str, str]]:
+    """(url, domain, title, published_at, retrieved_at, highlight) of persisted web results."""
+    payload = result.get("result")
+    payload = payload if isinstance(payload, Mapping) else result
+    rows = payload.get("evidence")
+    out: list[tuple[str, str, str, str, str, str]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            url = row.get("url")
+            highlight = row.get("highlight")
+            if not (isinstance(url, str) and url.strip() and isinstance(highlight, str) and highlight.strip()):
+                continue
+            out.append(
+                (
+                    url.strip(),
+                    str(row.get("source_domain") or "").strip(),
+                    str(row.get("title") or "").strip(),
+                    str(row.get("published_at") or "").strip(),
+                    str(row.get("retrieved_at") or "").strip(),
+                    highlight.strip(),
+                )
+            )
+    return out
+
+
+def _web_provenance(
+    data: Mapping[str, object], *, store: ResearchRepository | None = None, session_id: str | None = None
+) -> dict[str, JSONValue]:
+    """WebSourceRef replayed against the persisted search_web result."""
+    from .repository import ResearchRepository as _RR
+
+    ref_id = _tool_result_ref(data, "WEB")
+    locator = _normalize_record_text(_first_text(data, (*_PASSAGE_KEYS, "excerpt")))
+    if not locator:
+        raise ValueError(
+            "record_evidence: ERR_RAW_SOURCE_REQUIRED (a web citation names the persisted "
+            "search_web result id plus the highlight text you are citing.)"
+        )
+    try:
+        repo = store if store is not None else _RR()
+        result = repo.get_tool_result(ref_id)
+    except KeyError:
+        raise ValueError(
+            "record_evidence: ERR_RAW_SOURCE_REQUIRED (unknown persisted web tool result; "
+            "cite the tool_result_id the kernel returned for the response you read.)"
+        ) from None
+    other = result.get("session_id")
+    if isinstance(session_id, str) and session_id and isinstance(other, str) and other and other != session_id:
+        raise ValueError(
+            f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} belongs to session {other!r}, not {session_id!r})"
+        )
+    if str(result.get("tool_name") or "") != "search_web":
+        raise ValueError(
+            f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} is not a search_web result)"
+        )
+    rows = _web_result_texts(result)
+    url = data.get("source_record_id") or data.get("url") or data.get("source_uri")
+    for row_url, domain, title, published_at, retrieved_at, highlight in rows:
+        if url is not None and url != row_url:
+            continue
+        norm = _normalize_record_text(highlight)
+        if locator and locator in norm:
+            return web_source_ref(
+                url=row_url,
+                excerpt=highlight[:2000],
+                title=title or None,
+                domain=domain or None,
+                published_at=published_at or None,
+                retrieved_at=retrieved_at or None,
+                tool_result_id=ref_id,
+            )
+    raise ValueError(
+        "record_evidence: ERR_PASSAGE_NOT_IN_SOURCE (the cited excerpt does not appear "
+        "in the persisted search_web result)"
+    )
 
 
 def _check_declared_ref(provenance: Mapping[str, object], *, accession: str | None, document: str | None) -> None:
@@ -977,6 +1196,37 @@ def _svc_opt_float(data: Mapping[str, object], key: str) -> float | None:
     return float(raw) if isinstance(raw, (int, float)) else None
 
 
+def _provenance_uri(provenance: Mapping[str, object], data: Mapping[str, object]) -> str | None:
+    """Ingest source_ref: the kernel-materialized URI (SEC archive URL, FINRA source, web URL)."""
+    for key in ("source_uri", "url"):
+        value = provenance.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _svc_opt_str(data, "source_uri")
+
+
+def _provenance_record_id(provenance: Mapping[str, object], data: Mapping[str, object]) -> str | None:
+    """Ingest source_ref: the kernel-materialized record id (accession, FINRA identity, web URL)."""
+    for key in ("accession_no", "record_identity", "url"):
+        value = provenance.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _svc_opt_str(data, "source_record_id")
+
+
+def _provenance_time(caller: object, authoritative: object, *, kind: str = "") -> datetime | None:
+    """Source time: FINRA/WEB rows use the kernel-replayed result time only; SEC uses caller time.
+
+    A model-asserted known_at must never backdate a persisted result past PIT:
+    FINRA known_at is the persisted as_of_date, WEB known_at is the persisted
+    published_at (never retrieval time, never caller time). Missing result time
+    stays None so bounded sessions fail PIT_UNVERIFIED instead of inventing it.
+    """
+    if kind in ("finra_record", "web_source"):
+        return _coerce_dt(authoritative)
+    return _coerce_dt(authoritative) if authoritative is not None else _coerce_dt(caller)
+
+
 def _build_evidence_record(
     data: Mapping[str, object],
     *,
@@ -1008,12 +1258,10 @@ def _build_evidence_record(
         content=content,
         content_hash=evidence_content_hash(content),
         retrieved_at=_coerce_dt(data.get("retrieved_at")) or utcnow(),
-        source_uri=_svc_opt_str(data, "source_uri"),
-        source_record_id=provenance.get("accession_no")
-        if isinstance(provenance.get("accession_no"), str)
-        else _svc_opt_str(data, "source_record_id"),
-        published_at=_coerce_dt(data.get("published_at")),
-        known_at=_coerce_dt(data.get("known_at")),
+        source_uri=_provenance_uri(provenance, data),
+        source_record_id=_provenance_record_id(provenance, data),
+        published_at=_provenance_time(data.get("published_at"), provenance.get("published_at"), kind=str(provenance.get("kind") or "")),
+        known_at=_provenance_time(data.get("known_at"), provenance.get("published_at") if str(provenance.get("kind") or "") == "web_source" else provenance.get("known_at"), kind=str(provenance.get("kind") or "")),
         effective_at=_coerce_dt(data.get("effective_at")),
         job_id=job_id,
         agent_id=str(data.get("agent_id", "pi")),
@@ -1048,10 +1296,10 @@ def _persist_evidence_record(
             ledger.append(evidence_from_dict(existing))
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
-    ingest_evidence(ledger, record, as_of=found.as_of)
+    ingest_evidence(ledger, record, as_of=found.as_of, on_reject=lambda event, payload: _emit(store, session_id, event, payload))
     stored = evidence_to_dict(record)
     store.save_evidence(stored)
-    _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
+    _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id, "wave_id": record.wave_id, "source_domain": evidence_domain(record.provenance), "tool_name": record.provenance.get("tool_name"), "tool_result_id": record.provenance.get("tool_result_id")})
     stored = dict(stored)
     stored["metadata"] = {k: v for k, v in metadata.items()}
     if record.evidence_id not in found.evidence_ids:
@@ -1063,6 +1311,73 @@ def _persist_evidence_record(
             )
         )
     return stored
+
+
+def persist_tool_result(
+    session_id: str,
+    job_id: str,
+    tool_name: str,
+    tool_result_id: str | None,
+    result: Mapping[str, object],
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Persist one staged tool result for FINRA/WEB evidence replay; returns its id.
+
+    Only staged source/scout jobs persist results, and only the tool the job's
+    domain owns (FINRA tools on FINRA jobs, search_web on WEB jobs). SEC jobs
+    never persist tool results: their evidence replays the archive instead.
+    Resume is idempotent: a repeated persist of the same id keeps the first
+    bytes and returns the same id.
+    """
+    from .agents.source_agent import is_finra_tool, is_web_tool
+
+    store = _repo(repo)
+    found, job = _live_evidence_job(store, session_id, job_id)
+    domain = (job.source_domain or "").upper()
+    if domain == "FINRA":
+        if not is_finra_tool(tool_name) or tool_name not in _FINRA_EVIDENCE_TOOLS:
+            raise ValueError(
+                f"persist_tool_result: tool {tool_name!r} cannot ground FINRA evidence for job {job_id!r}"
+            )
+    elif domain == "WEB":
+        if not is_web_tool(tool_name):
+            raise ValueError(
+                f"persist_tool_result: tool {tool_name!r} cannot ground WEB evidence for job {job_id!r}"
+            )
+    else:
+        raise ValueError(
+            f"persist_tool_result: job {job_id!r} domain {job.source_domain!r} persists no tool results"
+        )
+    rid = tool_result_id.strip() if isinstance(tool_result_id, str) and tool_result_id.strip() else f"{session_id}:tr:{uuid.uuid4().hex[:8]}"
+    record: dict[str, JSONValue] = {
+        "tool_result_id": rid,
+        "session_id": session_id,
+        "job_id": job_id,
+        "tool_name": tool_name,
+        "created_at": utcnow().isoformat(),
+        "result": validate_json_mapping(dict(result), "<persist_tool_result>: 'result'"),
+    }
+    try:
+        store.save_tool_result(record)
+    except ValueError as exc:
+        if "duplicate tool_result_id" not in str(exc):
+            raise
+    _emit(store, session_id, "tool_result.persisted", {"job_id": job_id, "tool_result_id": rid, "tool": tool_name})
+    return {"tool_result_id": rid, "session_id": session_id, "job_id": job_id, "tool_name": tool_name}
+
+
+def get_tool_result(
+    tool_result_id: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Load one persisted staged tool result; raises ResearchNotFound when absent."""
+    store = _repo(repo)
+    try:
+        return store.get_tool_result(tool_result_id)
+    except KeyError:
+        raise ResearchNotFound(f"unknown tool_result_id: {tool_result_id!r}") from None
 
 
 def _evidence_live_wave(found: ResearchSession, job: Job, session_id: str) -> None:
@@ -1187,7 +1502,7 @@ def record_evidence(
     _evidence_live_wave(found, job, session_id)
     evidence_id, source_name, supports, contradicts = _evidence_ids_names(data, session_id, job)
     metadata, subject = _evidence_typed(data, found)
-    provenance = _observed_provenance(data)
+    provenance = _observed_provenance(data, job, store=store, session_id=session_id)
     identity_key = _evidence_identity(data, claim, subject, provenance)
     prior = store.list_evidence(session_id)
     dup = _evidence_duplicate(prior, identity_key)
@@ -1239,6 +1554,21 @@ _SUFFICIENCY_RESIDUAL_KEYS: tuple[str, ...] = (
     "routes_unsearched",
 )
 _SUFFICIENCY_BRANCH_KEYS: tuple[str, ...] = ("search_runs", "covered_branches")
+# Per-domain work keys: the FINRA/WEB desks prove scope with their own
+# artifacts (datasets/tickers/windows, queries/results), not SEC filings.
+_SUFFICIENCY_FINRA_KEYS: tuple[str, ...] = (
+    "datasets_queried",
+    "tickers_covered",
+    "settlement_windows_covered",
+    "dataset_reads",
+    "covered_branches",
+)
+_SUFFICIENCY_WEB_KEYS: tuple[str, ...] = (
+    "semantic_branches_covered",
+    "queries_executed",
+    "results_inspected",
+    "covered_branches",
+)
 
 
 def _sufficient_residuals(cov: dict[str, object], unresolved: list[str] | None) -> list[str]:
@@ -1248,35 +1578,43 @@ def _sufficient_residuals(cov: dict[str, object], unresolved: list[str] | None) 
     return remaining
 
 
-def _sufficient_required(cov: dict[str, object]) -> None:
-    """The full structured envelope: entities/relationships/forms/exhibits + the searches and branches spent."""
-    missing = [
-        key for key in (*_SUFFICIENCY_REQUIRED_KEYS, *_SUFFICIENCY_BRANCH_KEYS) if not isinstance(cov.get(key), list)
-    ]
+def _sufficient_required(cov: dict[str, object], domain: str = "SEC") -> None:
+    """The full structured envelope for one source domain's slice."""
+    work = (
+        _SUFFICIENCY_FINRA_KEYS
+        if domain == "FINRA"
+        else _SUFFICIENCY_WEB_KEYS
+        if domain == "WEB"
+        else (*_SUFFICIENCY_REQUIRED_KEYS, *_SUFFICIENCY_BRANCH_KEYS)
+    )
+    missing = [key for key in work if not isinstance(cov.get(key), list)]
     if missing:
         raise ValueError(f"submit_source_result: ERR_COVERAGE_REQUIRED (sufficient coverage missing {missing})")
-    for key in _SUFFICIENCY_REQUIRED_KEYS:
+    for key in work if domain in ("FINRA", "WEB") else _SUFFICIENCY_REQUIRED_KEYS:
         _submit_str_list_field(cov, key, required=True)
+    if domain in ("FINRA", "WEB"):
+        if not [b for b in _submit_str_list_field(cov, "covered_branches", required=True) if b.strip()]:
+            raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty covered_branches)")
+        return
     if not _submit_str_list_field(cov, "search_runs", required=True):
         raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty search_runs)")
     if not [b for b in _submit_str_list_field(cov, "covered_branches", required=True) if b.strip()]:
         raise ValueError("submit_source_result: ERR_COVERAGE_REQUIRED (sufficient needs non-empty covered_branches)")
 
 
-def _submit_sufficient_gate(cov: dict[str, object], unresolved: list[str] | None) -> None:
-    """sufficient claims a fully covered SEC slice or it fails closed.
+def _submit_sufficient_gate(cov: dict[str, object], unresolved: list[str] | None, domain: str = "SEC") -> None:
+    """sufficient claims a fully covered slice of its own source domain or it fails closed.
 
-    A sufficient result needs the whole structured envelope — investigated
-    entities, checked relationship types, examined forms + exhibits, the
-    search runs and covered branches — with every residual (material open
-    questions, missing major entities, remaining branches, unsearched routes,
-    unresolved questions) empty. There is no envelope-shape bypass: evidence
-    row count is never sufficiency. The Director coverage challenge stays the
-    second layer for incomplete dossiers.
+    SEC needs the filing envelope (entities/relationships/forms/exhibits/search
+    runs/covered branches); FINRA needs datasets/tickers/windows/reads/branches;
+    WEB needs semantic branches/queries/results/branches — each with every
+    residual empty. There is no envelope-shape bypass: evidence row count is
+    never sufficiency. The Director coverage challenge stays the second layer
+    for incomplete dossiers.
     """
     if cov.get("useful_for_question") != "sufficient":
         return
-    _sufficient_required(cov)
+    _sufficient_required(cov, domain)
     remaining = _sufficient_residuals(cov, unresolved)
     if remaining:
         raise ValueError(
@@ -1340,16 +1678,35 @@ _SUBMIT_COVERAGE_KEYS = (
     "routes_unsearched",
     "search_runs",
     "covered_branches",
+    "datasets_queried",
+    "tickers_covered",
+    "settlement_windows_covered",
+    "dataset_reads",
+    "semantic_branches_covered",
+    "queries_executed",
+    "results_inspected",
 )
 
 
+def _submit_subtree_job_ids(store: ResearchRepository, job: Job) -> set[str]:
+    """Job ids in the submitting wave-domain subtree: same wave + same source domain.
+
+    OMP scouts run as sibling source jobs under the Director's context block
+    (no parent threading), so the ledger must span the wave/domain lane, not a
+    parent chain. Cross-domain isolation holds because the domain must match.
+    """
+    domain = (job.source_domain or "SEC").upper()
+    return {other.job_id for other in store.list_jobs(job.session_id) if other.wave_id == job.wave_id and (other.source_domain or "SEC").upper() == domain and other.job_type in ("source_agent", "scout")}
+
+
 def _submit_ledger_ids(store: ResearchRepository, job: Job) -> set[str]:
-    """Substantive evidence ids persisted for this session (discovery rows are never citable)."""
-    return {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id) if _freeze_row_kind(r) == "evidence"}
+    """Substantive evidence ids in this wave-domain subtree (discovery rows are never citable)."""
+    allowed = _submit_subtree_job_ids(store, job)
+    return {str(r.get("evidence_id")) for r in store.list_evidence(job.session_id) if _freeze_row_kind(r) == "evidence" and r.get("job_id") in allowed}
 
 
 def _submit_require_refs(ledger_ids: set[str], ids: list[str]) -> None:
-    """Every cited evidence id must already be persisted."""
+    """Every cited evidence id must already be persisted in this source subtree."""
     missing = [e for e in ids if e not in ledger_ids]
     if missing:
         raise ValueError(f"submit_source_result: ERR_EVIDENCE_NOT_FOUND {missing[:3]}")
@@ -1396,7 +1753,9 @@ def _submit_search_run_warnings(cov: dict[str, object]) -> list[str]:
     return [f"search_runs id not found in the persisted SEC search ledger: {sid!r}" for sid in runs if sid not in known]
 
 
-def _submit_coverage_dict(cov: dict[str, object] | None, useful: object) -> dict[str, object]:
+def _submit_coverage_dict(
+    cov: dict[str, object] | None, useful: object, job: Job | None = None
+) -> dict[str, object]:
     """Coverage envelope: default coverage plus caller-supplied string lists.
 
     New sufficiency keys (major_entities_investigated, relationship_types_checked,
@@ -1413,7 +1772,7 @@ def _submit_coverage_dict(cov: dict[str, object] | None, useful: object) -> dict
         **default_coverage(),
         "complete": useful == "sufficient",
         "useful_for_question": useful,
-        "source_domain": "SEC",
+        "source_domain": (job.source_domain or "SEC").upper() if job is not None else "SEC",
         "source_sufficiency": useful,
     }
     for key in _SUBMIT_COVERAGE_KEYS:
@@ -1671,11 +2030,12 @@ def _submit_dossier(
     unresolved: list[str] | None,
     cov: dict[str, object] | None = None,
 ) -> tuple[str, set[str]]:
-    """Validate refs + persist the SEC dossier (idempotent); return (dossier_id, ledger_ids)."""
+    """Validate refs + persist the source dossier (idempotent); return (dossier_id, ledger_ids)."""
     ledger_ids = _submit_ledger_ids(store, job)
     _submit_require_refs(ledger_ids, ids)
-    dossier_id = f"{job.session_id}:{job.wave_id}:sec"
-    _submit_persist_dossier(store, job, found, dossier_id, _submit_coverage_dict(cov, useful), ids, unresolved)
+    domain = (job.source_domain or "SEC").lower()
+    dossier_id = f"{job.session_id}:{job.wave_id}:{domain}"
+    _submit_persist_dossier(store, job, found, dossier_id, _submit_coverage_dict(cov, useful, job), ids, unresolved)
     return dossier_id, ledger_ids
 
 
@@ -1689,18 +2049,18 @@ def submit_source_result(
 ) -> dict[str, JSONValue]:
     """Complete one running source job with validated coverage; evidence stays mutation-only.
 
-    sufficient requires the full structured envelope (entities/relationships/
-    forms/exhibits/search_runs/covered_branches) and no residual branches or
-    questions — never just N evidence rows. Validates job open + deadline live,
-    every evidence id exists in this session, then completes the job with a
-    coverage/result payload. Returns {job_status: completed, dossier-ish refs,
-    telemetry, warnings}. Terminal reuse fails closed.
+    sufficient requires its own domain's full envelope (SEC filings, FINRA
+    datasets, WEB queries) and no residual branches or questions — never just
+    N evidence rows. Validates job open + deadline live, every evidence id
+    exists in this session, then completes the job with a coverage/result
+    payload. Returns {job_status: completed, dossier-ish refs, telemetry,
+    warnings}. Terminal reuse fails closed.
     """
     store = _repo(repo)
     job, found = _submit_live_job(store, job_id)
     cov, _, ids = _submit_coverage_ids(coverage, evidence_ids)
     _submit_require_refs(_submit_ledger_ids(store, job), ids)
-    _submit_sufficient_gate(cov, unresolved_questions)
+    _submit_sufficient_gate(cov, unresolved_questions, (job.source_domain or "SEC").upper())
     warnings = _submit_search_run_warnings(cov)
     dossier_id, _ = _submit_dossier(store, job, found, cov.get("useful_for_question"), ids, unresolved_questions, cov)
     telemetry = _submit_telemetry(store, job.session_id, cov, unresolved_questions)
@@ -1913,27 +2273,74 @@ def _build_bear(
 
 
 def _latest_dossier(store: ResearchRepository, session_id: str) -> dict[str, object]:
-    """Latest SEC dossier mapping ({} when none stored)."""
+    """Latest dossier mapping ({} when none stored)."""
     dossiers = store.list_dossiers(session_id)
     latest = dossiers[-1] if dossiers else None
     return dict(latest) if isinstance(latest, dict) else {}
 
 
+def _wave_dossiers(store: ResearchRepository, session_id: str) -> list[dict[str, object]]:
+    """Dossier mappings for the latest frozen wave, across every source domain.
+
+    Dossiers persist per domain ({sid}:{wave}:{domain}), so the coverage gate
+    must read the whole wave's set: a FINRA residual is invisible when only
+    the latest single dossier is consulted. Falls back to the latest dossier
+    when no freeze exists yet (pre-freeze submits still gate on their own row).
+    """
+    dossiers = [d for d in store.list_dossiers(session_id) if isinstance(d, dict)]
+    if not dossiers:
+        return []
+    rows: list[dict[str, object]] = [dict(d) for d in dossiers]
+    try:
+        found = store.get_session(session_id)
+        wave = max(len(found.freeze_ids), found.current_wave, 1)
+    except KeyError:
+        return [rows[-1]]
+    wave_rows = [dict(d) for d in rows if d.get("wave_id") == wave]
+    return wave_rows or [rows[-1]]
+
+
 def _wave1_coverage(
     store: ResearchRepository, session_id: str
 ) -> tuple[dict[str, object] | None, list[dict[str, object]], list[str]]:
-    """Latest SEC dossier coverage + relationships + open questions for the director challenge."""
-    latest = _latest_dossier(store, session_id)
-    if not latest:
+    """Wave dossiers' merged coverage + relationships + open questions for the director challenge.
+
+    Residuals union across the wave's per-domain dossiers (FINRA/WEB rows are
+    first-class); each dossier's source_domain rides alongside its coverage so
+    the challenge can route the follow-up to the residual's own domain.
+    """
+    rows = _wave_dossiers(store, session_id)
+    if not rows:
         return None, [], []
-    coverage = latest.get("coverage")
-    rels = latest.get("relationships")
-    open_q = latest.get("open_questions")
-    return (
-        dict(coverage) if isinstance(coverage, dict) else None,
-        [dict(r) for r in rels if isinstance(r, dict)] if isinstance(rels, list) else [],
-        [q for q in open_q if isinstance(q, str)] if isinstance(open_q, list) else [],
-    )
+    merged: dict[str, object] = {}
+    rels: list[dict[str, object]] = []
+    open_q: list[str] = []
+    for row in rows:
+        coverage = row.get("coverage")
+        if isinstance(coverage, dict):
+            domain = str(coverage.get("source_domain") or "").upper()
+            for key, value in coverage.items():
+                if not isinstance(value, list) or not value:
+                    continue
+                prior = merged.get(key)
+                tagged = [f"[{domain}] {v}" if domain and isinstance(v, str) else v for v in value]
+                merged[key] = [*prior, *tagged] if isinstance(prior, list) else list(tagged)
+            verdict = coverage.get("useful_for_question")
+            if isinstance(verdict, str) and verdict in ("sufficient", "insufficient"):
+                if merged.get("useful_for_question") != "insufficient":
+                    merged["useful_for_question"] = verdict
+    for row in rows:
+        raw_rels = row.get("relationships")
+        if isinstance(raw_rels, list):
+            for r in raw_rels:
+                if isinstance(r, dict):
+                    rels.append(dict(r))
+        raw_open = row.get("open_questions")
+        if isinstance(raw_open, list):
+            for q in raw_open:
+                if isinstance(q, str) and q:
+                    open_q.append(q)
+    return (merged or None), rels, open_q
 
 
 def _wave1_state(
@@ -2096,7 +2503,7 @@ def _freeze_empty_note(wave_recs: Sequence[object], note: str) -> str:
     """Empty waves freeze with a limitations note; non-empty waves keep the gate note."""
     if note or wave_recs:
         return note
-    return "no PIT-eligible SEC evidence for this wave; proceeding with limitations"
+    return "no PIT-eligible evidence for this wave; proceeding with limitations"
 
 
 def _freeze_committee_jobs(store: ResearchRepository, session_id: str, wave_id: int) -> list[str]:
@@ -2636,7 +3043,9 @@ def decide_next_wave(
     branches persist via the wave.stopped/wave.authorized journal events and
     the telemetry, not the return shape (stable contract).
     """
+    from .director import WaveDecision
     from .director import decide_next_wave as _decide
+    from .models import source_domain_allowed
 
     store = _repo(repo)
     found = _require_session(store, session_id)
@@ -2652,6 +3061,15 @@ def decide_next_wave(
         elapsed_s=elapsed,
         novelty=novelty,
     )
+    if decision.authorized and decision.targeted_domain.strip():
+        if not source_domain_allowed(found.source_policy, decision.targeted_domain, "<wave>"):
+            decision = WaveDecision(
+                False,
+                "not_actionable",
+                f"targeted domain {decision.targeted_domain!r} denied by session source_policy",
+                targeted_question=decision.targeted_question,
+                targeted_domain=decision.targeted_domain,
+            )
     _decide_settle(store, session_id, decision)
     return {
         "authorized": decision.authorized,
@@ -2762,11 +3180,12 @@ def _dossier_limitations(lims: list[str], dossier: Mapping[str, object]) -> None
             for item in raw:
                 _append_unique(lims, item)
     if coverage.get("complete") is False:
-        _append_unique(lims, "SEC coverage incomplete for this session")
+        domain = str(coverage.get("source_domain") or "").upper()
+        _append_unique(lims, f"{domain or 'Source'} coverage incomplete for this session")
 
 
 def _finalize_limitations(store: ResearchRepository, session_id: str) -> list[str]:
-    """SEC-only evidence limitations from dossier coverage + unresolved questions."""
+    """Evidence limitations from dossier coverage + unresolved questions."""
     lims: list[str] = []
     dossiers: list[Mapping[str, object]]
     try:
@@ -2877,6 +3296,36 @@ def _finalize_absence_texts(store: ResearchRepository, session_id: str) -> list[
     return texts
 
 
+def _finalize_coverage(store: ResearchRepository, session_id: str) -> dict[str, object]:
+    """Per-source searched scope for the final render: one section per dossier domain.
+
+    Each completed source job persists its own dossier coverage ({sid}:{wave}:
+    {domain}); the fold carries submit-shaped keys forward verbatim and
+    final.py keeps every non-empty string-list field except verdict keys, so
+    desk keys (docs, datasets_queried, queries_executed, ...) survive under
+    their own names to the rendered Coverage block.
+    """
+    out: dict[str, dict[str, list[str]]] = {"sec": {}, "finra": {}, "web": {}}
+    try:
+        dossiers = [d for d in store.list_dossiers(session_id) if isinstance(d, dict)]
+    except Exception:  # noqa: BLE001 - best-effort read; synthesis never fails on coverage
+        return {}
+    for dossier in dossiers:
+        coverage = dossier.get("coverage")
+        if not isinstance(coverage, dict):
+            continue
+        domain = str(coverage.get("source_domain") or "").upper()
+        section = out.get(domain.lower()) if domain.lower() in out else None
+        if section is None:
+            continue
+        for key, value in coverage.items():
+            if not isinstance(value, list) or not value:
+                continue
+            items = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+            if items:
+                section[key] = sorted(set(section.get(key, []) + items))
+    return {k: v for k, v in out.items() if v}
+
 def _finalize_synth(
     found: ResearchSession,
     wave1: Wave1Result,
@@ -2921,6 +3370,7 @@ def _finalize_synth(
         research_scope=_finalize_scope(found),
         observations=_finalize_observations(store, session_id, ids_raw),
         absence_observations=_finalize_absence_texts(store, session_id),
+        coverage=_finalize_coverage(store, session_id),
     )
     if not synth.answer.strip():
         raise ValueError("finalize_session: synthesis produced an empty answer")
@@ -2958,19 +3408,28 @@ def _dispatch_live_job(store: ResearchRepository, session_id: str, job_id: str):
 
 
 def _dispatch_check_domain(job: Job, job_id: str, tool_name: str) -> None:
-    """Committee jobs never fetch: SEC-scoped source jobs accept SEC tools only."""
+    """Committee jobs never fetch; source jobs accept only their domain's tools."""
     if job.job_type in ("stockbot", "bullbot", "bearbot"):
         raise ValueError(
             f"dispatch: committee job {job_id!r} ({job.job_type}) cannot dispatch tools (frozen evidence only)"
         )
     if job.source_domain is None or tool_name.startswith("research"):
         return
-    if job.source_domain.upper() != "SEC":
-        return
-    from .agents.source_agent import is_sec_tool
+    from .agents.source_agent import is_finra_tool, is_sec_tool, is_web_tool
 
-    if not is_sec_tool(tool_name):
-        raise ValueError(f"dispatch: tool {tool_name!r} outside SEC domain for job {job_id!r}")
+    domain = job.source_domain.upper()
+    allowed = (
+        is_sec_tool(tool_name)
+        if domain == "SEC"
+        else is_finra_tool(tool_name)
+        if domain == "FINRA"
+        else is_web_tool(tool_name)
+        if domain == "WEB"
+        else False
+    )
+    if not allowed:
+        scope = "SEC" if domain == "SEC" else domain
+        raise ValueError(f"dispatch: tool {tool_name!r} outside {scope} domain for job {job_id!r}")
 
 
 # Job-diagnostics slot: normalized dispatch action key -> session evidence count when it ran.

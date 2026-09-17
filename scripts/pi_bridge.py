@@ -732,17 +732,29 @@ def _op_research_session_create(request: Mapping[str, object], protocol_id: str)
     objective = request.get("objective")
     as_of = request.get("as_of")
     ctx = _bridge_ctx(request)
+    policy = _session_create_policy(request)
     try:
         session_id = _kernel.create_research(
             question if isinstance(question, str) else "",
             objective if isinstance(objective, str) and objective.strip() else None,
             as_of=as_of if isinstance(as_of, str) else None,
-            policy=default_policy(),
+            policy=policy if policy is not None else default_policy(),
             repo=ResearchRepository(data_root=ctx.data_root),
         )
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": {"session_id": session_id}}
+
+
+def _session_create_policy(request: Mapping[str, object]) -> dict[str, JSONValue] | None:
+    """Optional session policy from the wire; None stays the SEC-only default."""
+    policy = request.get("policy")
+    if isinstance(policy, dict):
+        return {str(k): v for k, v in policy.items()}  # type: ignore[misc]
+    research_sources = request.get("research_sources")
+    if isinstance(research_sources, dict):
+        return {"research_sources": dict(research_sources)}  # type: ignore[misc]
+    return None
 
 
 def _job_start_session_id(request: Mapping[str, object], protocol_id: str) -> str | dict[str, object]:

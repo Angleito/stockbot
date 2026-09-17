@@ -1815,7 +1815,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 
 // --- ResearchDirector restart snapshots: every E1/E2 boundary resumes from the
 // persisted freeze via resumeResearch on a fresh run, never the older runner. ---
-type ResumeJob = { job_id: string; job_type: string; wave_id: number; status: string };
+type ResumeJob = { job_id: string; job_type: string; wave_id: number; status: string; source_domain?: string };
 interface ResumeState {
 	session: Json;
 	jobs: ResumeJob[];
@@ -1883,8 +1883,8 @@ function resumeBridge(state: ResumeState, ops: ResumeOp[], gate?: Json): (req: J
 			case "research.job.start": {
 				n += 1;
 				const jid = `job:auto-${n}`;
-				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running" });
-				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type) } };
+				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running", source_domain: String(req.source ?? "") });
+				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type), source_domain: String(req.source ?? "") } };
 			}
 			case "research.wave.decide":
 				return gate ?? { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
@@ -2702,7 +2702,7 @@ test("agent_end renders the persisted answer once and resume repeats that same a
 		expect(answer).toContain("Revenue rose on volume (observed_fact)");
 		expect(answer).toContain("What would change the view");
 		expect(answer).toContain("A guidance cut would change the view");
-		expect(answer).toContain("Scope: SEC filings only");
+		expect(answer).toContain("Scope: SEC sources only");
 		// Exactly one render: the finalize note is never prepended to the answer.
 		expect(answer).not.toContain("Finalized session");
 		expect(answer.split(rendered).length - 1).toBe(1);
@@ -2867,6 +2867,56 @@ test("director refuses sec-scout: nested fan-out runs inside sec-agent's own ses
 	expect(plan.block).toBe(true);
 	expect(String(plan.reason)).toContain("Director may not spawn 'sec-scout'");
 });
+test("wave-1 plans one task batch with all three desks when allowed", async () => {
+	const SID = "rs:task-wave1-3";
+	const ops: ResumeOp[] = [];
+	const inner = resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1, source_policy: { allowed: ["SEC", "FINRA", "WEB"] } }),
+		jobs: [],
+		freezes: {},
+	}, ops);
+	setResearchBridge(async (req: Json) => inner(req));
+	await resumeResearch(SID, "run-task-wave1-3");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-wave1-3", toolCallId: "call-wave1-3" },
+		{ context: "wave1 ctx", tasks: [{ agent: "sec-agent", task: "sec work" }, { agent: "finra-agent", task: "finra work" }, { agent: "exa-agent", task: "web work" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const tasks = (plan.input as Json).tasks as Json[];
+	expect(tasks.length).toBe(3);
+	const names = tasks.map((t) => String(t.name));
+	expect(names.some((n) => n.startsWith("sec-agent-"))).toBe(true);
+	expect(names.some((n) => n.startsWith("finra-agent-"))).toBe(true);
+	expect(names.some((n) => n.startsWith("exa-agent-"))).toBe(true);
+	const bodies = tasks.map((t) => String(t.task));
+	expect(bodies.some((b) => b.includes("source_domain=SEC"))).toBe(true);
+	expect(bodies.some((b) => b.includes("source_domain=FINRA"))).toBe(true);
+	expect(bodies.some((b) => b.includes("source_domain=WEB"))).toBe(true);
+});
+test("targeted finra wave plans only the requested desk", async () => {
+	const SID = "rs:task-finra-only";
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 2, targeted_domain: "FINRA", source_policy: { allowed: ["SEC", "FINRA", "WEB"] } }),
+		jobs: [],
+		freezes: {},
+	}, []));
+	await resumeResearch(SID, "run-task-finra-only");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-finra-only", toolCallId: "call-finra-1" },
+		{ tasks: [{ agent: "finra-agent", task: "short interest follow-up" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const tasks = (plan.input as Json).tasks as Json[];
+	expect(tasks.length).toBe(1);
+	expect(String(tasks[0].name).startsWith("finra-agent-")).toBe(true);
+	expect(String(tasks[0].task)).toContain("source_domain=FINRA");
+	const refused = await planTaskCall(
+		{ researchKey: "run-task-finra-only", toolCallId: "call-finra-2" },
+		{ tasks: [{ agent: "sec-agent", task: "x" }, { agent: "finra-agent", task: "y" }] },
+	);
+	expect(refused.block).toBe(true);
+	expect(String(refused.reason)).toContain("finra-agent");
+});
 test("UX stage gate mirrors kernel allowlists", () => {
 	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_add_evidence")).toBeUndefined();
 	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_read_search")).toBeUndefined();
@@ -2929,6 +2979,10 @@ test("Provenance parity mirrors kernel shape validation", () => {
 	expect(validateProvenance({ kind: "search_run", search_id: "s1", query: "NVDA filings" })).toEqual({ kind: "search_run", search_id: "s1", query: "NVDA filings" });
 	const sec = validateProvenance({ kind: "sec_source", accession_no: "000032019325000079", document_name: "10-K", passage: "revenue rose" });
 	expect(sec).toEqual({ kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "10-K", passage: "revenue rose", source_uri: null });
+	expect(validateProvenance({ kind: "finra_record", tool_name: "get_short_interest", record_identity: "NVDA|2026-08-14" })).toEqual({ kind: "finra_record", tool_name: "get_short_interest", record_identity: "NVDA|2026-08-14" });
+	expect(validateProvenance({ kind: "web_source", url: "https://example.com/x", excerpt: "NVDA launched X" })).toEqual({ kind: "web_source", url: "https://example.com/x", excerpt: "NVDA launched X" });
+	expect(validateProvenance({ kind: "finra_record", tool_name: "", record_identity: "x" })).toBeNull();
+	expect(validateProvenance({ kind: "web_source", url: "https://example.com/x", excerpt: "" })).toBeNull();
 	for (const bad of [null, undefined, 42, "x", [], { kind: "bogus" }, { kind: "search_run", search_id: "", query: "q" }, { kind: "search_run", search_id: "s" }, { kind: "sec_source", accession_no: "bad", document_name: "d", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "d" }]) {
 		expect(validateProvenance(bad)).toBeNull();
 	}
@@ -2949,8 +3003,8 @@ test("Freeze parity mirrors kernel hash and drift", async () => {
 	expect(checkFreezeDrift("E1", ["ev:a"], recs)).toContain("drifted");
 	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], [...recs, recs[0]])).toContain("duplicate");
 });
-	// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
-	// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
+// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
+// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
 test("committee results record three analyses", async () => {
 	const SID = "rs:task-record";
 	const F1 = `${SID}:1:freeze`;
@@ -3128,17 +3182,23 @@ test("tool_result handler records planned task outcomes", async () => {
 		// Deferred seam: main session_start claims identity + bridge before stub.
 		await handlers["session_start"]({}, main);
 		// Stub after session_start (session_start claims the real seam first).
+		const stubJobs: Json[] = [];
+		let stubN = 0;
 		setResearchBridge(async (req: Json) => {
 			kinds.push(String(req.op));
 			if (req.op === "research.session.inspect")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: stubJobs, pending_next_action: null, latest_freeze: null } };
 			if (req.op === "research.session.create")
 				return { result: { session_id: SID } };
-			if (req.op === "research.job.start")
-				return { result: { job_id: "job:handler-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+			if (req.op === "research.job.start") {
+				stubN += 1;
+				const jid = stubN === 1 ? "job:handler-1" : `job:handler-${stubN}`;
+				stubJobs.push({ job_id: jid, job_type: "source_agent", wave_id: 1, status: "running", source_domain: "SEC" });
+				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: 1, job_type: "source_agent", source_domain: "SEC" } };
+			}
 			if (req.op === "research.job.runtime") return { result: { job_id: "job:handler-1" } };
 			if (req.op === "research.session.resume")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: stubJobs, pending_next_action: null, latest_freeze: null } };
 			return { error: "unknown_op" };
 		});
 		await commands["research"].handler("handler record probe", {});
@@ -3154,6 +3214,8 @@ test("tool_result handler records planned task outcomes", async () => {
 		);
 		// Director RPCs via the stub seam; task_planned/task_result traces ride
 		// the per-binding callBridge, not this seam, so they are not in kinds.
+		// The stateful stub persists the advance start (SEC domain), so the
+		// plan step reuses that lane instead of starting a second job.
 		expect(kinds.filter((k) => k === "research.job.start").length).toBe(1);
 		expect(kinds.filter((k) => k === "research.job.runtime").length).toBe(1);
 	} finally {

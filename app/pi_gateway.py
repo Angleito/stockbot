@@ -690,6 +690,51 @@ def _heartbeat_staged_job(name: str, staged: _StagedContext) -> None:
         pass
 
 
+_REPLAYABLE_TOOL_RESULTS: frozenset[str] = frozenset(
+    {
+        "get_finra_datapoints",
+        "query_finra",
+        "get_short_interest",
+        "get_short_pressure_profile",
+        "get_reg_sho_volume",
+        "get_threshold_securities",
+        "get_short_interest_leaderboard",
+        "search_web",
+    }
+)
+"""Staged tools whose success payloads persist for kernel evidence replay."""
+
+
+def _persist_staged_tool_result(
+    name: str, result: dict[str, object], staged: _StagedContext, tool_call_id: str
+) -> str | None:
+    """Persist one staged FINRA/WEB result; returns its id for the citation path.
+
+    Best-effort observability, never a gate: persistence failures keep the tool
+    result (evidence admission re-checks the persisted row and fails closed
+    when it is absent). The id rides in the result payload so the desk can cite
+    the exact bytes the kernel stored.
+    """
+    if name not in _REPLAYABLE_TOOL_RESULTS or staged.store is None:
+        return None
+    if not isinstance(staged.session_id, str) or not staged.session_id:
+        return None
+    if not isinstance(staged.job_id, str) or not staged.job_id:
+        return None
+    tool_result_id = f"{staged.session_id}:tr:{tool_call_id}" if tool_call_id else None
+    try:
+        from app.research import service as _svc
+
+        out = _svc.persist_tool_result(
+            staged.session_id, staged.job_id, name, tool_result_id, result, repo=staged.store
+        )
+        rid = out.get("tool_result_id")
+        if isinstance(rid, str) and rid and isinstance(result, dict):
+            result["tool_result_id"] = rid
+        return rid if isinstance(rid, str) else None
+    except Exception:  # noqa: BLE001, S110 - persistence never breaks the tool result
+        return None
+
 def _run_budget_refusal(name: str, session: PiSessionContext) -> dict[str, object]:
     """Distinct Pi run-budget refusal: runtime exhaustion vs call-count exhaustion."""
     with session._lock:
@@ -1359,6 +1404,7 @@ def _execute_pi_tool(
             "error": _unavailable_data_response([(name, {"error": "empty tool result"})]),
             "error_type": "tool_error",
         }
+    _persist_staged_tool_result(name, result, staged, resolved_tc_id)
 
     # Gate 5: ingress scan on the rendered evidence; quarantined or blocked
     # results are withheld from Pi with a fixed placeholder.

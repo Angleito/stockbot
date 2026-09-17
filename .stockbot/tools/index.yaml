@@ -522,7 +522,7 @@ tools:
     time_mode: current
     summary: "Persist the trio-joined synthesis and complete a research session with frozen-evidence claims."
     version: 2
-    keywords: [answer, bare, bottom, claim, complete, completion, delivering, evidence, filing, finalize, finalized, finalizing, frozen, grounded, joined, line, not, note, only, persist, plu, ref, research, same, scope, sec, session, statu, structured, substantive, synthesi, through, trio, turn]
+    keywords: [answer, bare, bottom, claim, complete, completion, delivering, evidence, finalize, finalized, finalizing, frozen, grounded, joined, line, not, note, persist, plu, ref, research, same, scope, searched, session, source, statu, structured, substantive, synthesi, through, trio, turn]
   - name: research_read
     domain: research
     family: session

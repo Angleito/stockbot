@@ -257,7 +257,7 @@ def _is_material(request: ResearchRequest) -> bool:
 
 
 def _is_actionable(request: ResearchRequest) -> bool:
-    return request.requested_source_domain.strip().upper() == "SEC"
+    return request.requested_source_domain.strip().upper() in ("SEC", "FINRA", "WEB")
 
 
 def _budget_stop(
@@ -300,8 +300,17 @@ def _coverage_questions(coverage: Mapping[str, object] | None, extra: Sequence[s
     return list(dict.fromkeys(out))
 
 
+def _challenge_domain(target: str) -> tuple[str, str]:
+    """(domain, item) of one merged residual: its [DOMAIN] tag routes, else SEC."""
+    text = target.strip()
+    if text.startswith("[") and "]" in text:
+        tag, rest = text[1:].split("]", 1)
+        if tag.strip().upper() in ("SEC", "FINRA", "WEB"):
+            return tag.strip().upper(), rest.strip() or text
+    return "SEC", text
+
+
 def _coverage_branches(coverage: Mapping[str, object] | None) -> tuple[list[str], list[str]]:
-    """(covered branches, remaining branches) from the coverage envelope."""
     covered = _coverage_str_list(coverage, "major_entities_investigated")
     remaining: list[str] = []
     for key in ("major_entities_missing", "remaining_branches"):
@@ -314,17 +323,18 @@ def _coverage_branches(coverage: Mapping[str, object] | None) -> tuple[list[str]
 
 
 def _coverage_challenge(wave1: Wave1Result) -> WaveDecision | None:
-    """Continue on the dossier's own coverage state: a sufficient claim with missing branches / material open questions / unsearched routes, and equally an honest insufficient dossier whose SEC coverage still carries actionable residuals.
+    """Continue on the wave dossiers' own coverage state: residuals in any domain.
 
     Coverage drives continuation independently of the committee remembering to
-    ask. An insufficient dossier with no actionable SEC residual (SEC drained,
-    or the question needs a source that is not available) returns None so the
-    run settles with its explicit unknowns/limitations.
+    ask. A wave with no residual anywhere (every domain drained) returns None
+    so the run settles with its explicit unknowns/limitations.
 
     Targeted wave resolves one uncertainty (first remaining/material item);
-    the original question + covered-vs-remaining branches (+ relationship
-    count as impact-channel proxy) ride the decision detail so the next wave
-    keeps its objective and never redefines it.
+    the residual's own [DOMAIN] tag routes targeted_domain (stripped before
+    display), defaulting to SEC for untagged legacy rows. The original
+    question + covered-vs-remaining branches (+ relationship count as
+    impact-channel proxy) ride the decision detail so the next wave keeps its
+    objective and never redefines it.
     """
     coverage = wave1.coverage if isinstance(wave1.coverage, Mapping) else None
     verdict = coverage.get("useful_for_question") if coverage is not None else None
@@ -336,14 +346,15 @@ def _coverage_challenge(wave1: Wave1Result) -> WaveDecision | None:
     target = (missing + open_q)[:1]
     if not target:
         return None
-    question = wave1.question.strip() or target[0]
-    detail = f"coverage challenge: {len(missing)} branch(es) remaining, {len(open_q)} material open question(s), {len(wave1.relationships)} relationship(s); targeted follow-up on {target[0]!r} (original question: {question[:160]!r}; covered: {covered[:5]}; remaining: {missing[:5]})"
+    domain, item = _challenge_domain(target[0])
+    question = wave1.question.strip() or item
+    detail = f"coverage challenge: {len(missing)} branch(es) remaining, {len(open_q)} material open question(s), {len(wave1.relationships)} relationship(s); targeted follow-up on {item!r} (original question: {question[:160]!r}; covered: {covered[:5]}; remaining: {missing[:5]})"
     return WaveDecision(
         True,
         "continue",
         detail,
-        targeted_question=f"{question} :: targeted follow-up: {target[0]}",
-        targeted_domain="SEC",
+        targeted_question=f"{question} :: targeted follow-up: {item}",
+        targeted_domain=domain,
     )
 
 
@@ -356,7 +367,7 @@ def _research_stop(wave1: Wave1Result) -> WaveDecision:
         return WaveDecision(False, "low_gain", "no material follow-up (all low-gain or unmotivated)")
     actionable = [r for r in material if _is_actionable(r)]
     if not actionable:
-        return WaveDecision(False, "not_actionable", "material requests need non-SEC domains")
+        return WaveDecision(False, "not_actionable", "material requests need unavailable source domains")
     actionable.sort(key=_decision_key, reverse=True)
     top = actionable[0]
     return WaveDecision(

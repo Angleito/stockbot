@@ -30,7 +30,7 @@
     "verify-strict": "venv/bin/python scripts/strict_routing_harness.py",
     "verify-harness": "venv/bin/python -m pytest tests/test_research_harness.py tests/test_research_timeout_resume.py -q",
     "verify-agent": "venv/bin/python scripts/verify_agent_scenarios.py --model \"${STOCKBOT_MODEL}\" --provider \"${STOCKBOT_PROVIDER}\"",
-    "verify:live": "bun run verify-agent",
+    "verify:hedgefund-live": "HEDGEFUND_LIVE=1 venv/bin/python scripts/verify_hedgefund_live.py",
     "eval:routing": "venv/bin/python scripts/verify_pi_tools.py --routing && venv/bin/python scripts/strict_routing_harness.py",
     "eval:confusion": "venv/bin/python scripts/verify_pi_tools.py --confusion",
     "eval:holdout": "venv/bin/python scripts/verify_pi_tools.py --holdout",

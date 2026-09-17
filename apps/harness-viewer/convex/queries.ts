@@ -21,11 +21,14 @@ export function listResearchRuns(): ResearchRun[] {
     provider: row.provider,
     model: row.model,
     jobs: [...row.jobs],
+    waves: [...(row.waves ?? [])],
     events: [...row.events],
     claims: [...row.claims],
     evidence: [...row.evidence],
     freezes: [...row.freezes],
     dossiers: [...row.dossiers],
+    coverageArtifacts: [...(row.coverageArtifacts ?? [])],
+    finalResult: row.finalResult ?? null,
     committeeRuns: [...row.committeeRuns],
   }));
 }
@@ -35,26 +38,7 @@ export function getResearchRun(sessionId: string): ResearchRun | null {
   if (found === undefined) {
     return null;
   }
-  return {
-    sessionId: found.sessionId,
-    waveId: found.waveId,
-    question: found.question,
-    status: found.status,
-    asOf: found.asOf,
-    updatedAt: found.updatedAt,
-    traceId: found.traceId,
-    conclusion: found.conclusion,
-    traceStatus: found.traceStatus,
-    provider: found.provider,
-    model: found.model,
-    jobs: [...found.jobs],
-    events: [...found.events],
-    claims: [...found.claims],
-    evidence: [...found.evidence],
-    freezes: [...found.freezes],
-    dossiers: [...found.dossiers],
-    committeeRuns: [...found.committeeRuns],
-  };
+  return listResearchRuns().find((row) => row.sessionId === sessionId) ?? null;
 }
 
 export function listEvalRuns(): EvalRun[] {

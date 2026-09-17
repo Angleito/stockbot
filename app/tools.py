@@ -1463,6 +1463,19 @@ TOOLS: list[dict[str, object]] = [
                         "type": "string",
                         "description": "Point-in-time cutoff (ISO-8601); omit for current state.",
                     },
+                    "policy": {
+                        "type": "object",
+                        "description": "Optional session policy ({research_sources: {mode, sources}}); omit for SEC-only default.",
+                    },
+                    "research_sources": {
+                        "type": "object",
+                        "description": "Optional source allowlist ({mode: allowlist, sources}); omit for SEC-only default.",
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional source allowlist shorthand (e.g. [SEC, FINRA, WEB]); omit for SEC-only default.",
+                    },
                 },
                 "required": ["question"],
             },
@@ -1591,7 +1604,7 @@ TOOLS: list[dict[str, object]] = [
                     },
                     "item": {
                         "type": "object",
-                        "description": "Finding whose provenance must match its claim_kind: the get_sec_document source_handle + cited passage for observed_fact, search scope for absence_observation.",
+                        "description": "Finding whose provenance must match its claim_kind and the owning job's domain: SEC jobs cite the get_sec_document source_handle + cited passage for observed_fact; FINRA/WEB jobs cite the persisted tool_result_id of the FINRA/search_web response they read plus the cited record values/highlight (the kernel replays the persisted result itself); search scope for absence_observation.",
                         "properties": {
                             "claim_kind": {
                                 "type": "string",
@@ -1621,6 +1634,22 @@ TOOLS: list[dict[str, object]] = [
                             "source_handle": {
                                 "type": "object",
                                 "description": "The source_handle get_sec_document returned for the window you read (accession_no, document_name, basis, offset, max_chars, text_hash). The kernel reloads it and materializes the passage itself.",
+                            },
+                            "tool_result_id": {
+                                "type": "string",
+                                "description": "FINRA/WEB jobs only: the persisted tool_result_id the kernel stored for the FINRA/search_web response you read (returned in that response). The kernel replays it; a copied number without it fails closed.",
+                            },
+                            "url": {
+                                "type": "string",
+                                "description": "WEB jobs only: the result URL of the persisted search_web row you are citing (also source_record_id/source_uri).",
+                            },
+                            "excerpt": {
+                                "type": "string",
+                                "description": "WEB jobs only: the highlight text of the persisted search_web row you are citing (also matching_passage/passage).",
+                            },
+                            "record_identity": {
+                                "type": "string",
+                                "description": "FINRA jobs only: the record values of the persisted FINRA row you are citing (also matching_passage/passage).",
                             },
                             "source_uri": {
                                 "type": "string",
@@ -1668,7 +1697,7 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "research_submit_source_result",
-            "description": "Complete one running source job with validated coverage; evidence stays mutation-only. coverage requires useful_for_question. sufficient additionally requires major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, search_runs (persisted search ids), and covered_branches, and must leave material_open_questions, major_entities_missing, remaining_branches, routes_unsearched, and the unresolved_questions argument empty (else ERR_COVERAGE_REQUIRED / ERR_COVERAGE_INCOMPLETE). insufficient keeps evidence optional and residuals allowed.",
+            "description": "Complete one running source job with validated coverage; evidence stays mutation-only. coverage requires useful_for_question. SEC sufficient additionally requires major_entities_investigated, relationship_types_checked, forms_examined, exhibits_examined, material_open_questions, search_runs (persisted search ids), and covered_branches; FINRA sufficient requires datasets_queried, tickers_covered, settlement_windows_covered, dataset_reads, and covered_branches; WEB sufficient requires semantic_branches_covered, queries_executed, results_inspected, and covered_branches; every domain must leave material_open_questions, major_entities_missing, remaining_branches, routes_unsearched, and the unresolved_questions argument empty (else ERR_COVERAGE_REQUIRED / ERR_COVERAGE_INCOMPLETE). insufficient keeps evidence optional and residuals allowed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1743,6 +1772,41 @@ TOOLS: list[dict[str, object]] = [
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "Optional existing envelope: resolved questions (also partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps).",
+                            },
+                            "datasets_queried": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "FINRA sufficient: non-empty — datasets queried.",
+                            },
+                            "tickers_covered": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "FINRA sufficient: non-empty — tickers covered.",
+                            },
+                            "settlement_windows_covered": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "FINRA sufficient: non-empty — settlement/date windows covered.",
+                            },
+                            "dataset_reads": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "FINRA sufficient: non-empty — dataset reads backing the coverage.",
+                            },
+                            "semantic_branches_covered": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "WEB sufficient: non-empty — semantic branches covered.",
+                            },
+                            "queries_executed": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "WEB sufficient: non-empty — queries executed.",
+                            },
+                            "results_inspected": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "WEB sufficient: non-empty — results inspected.",
                             },
                         },
                         "required": ["useful_for_question"],
@@ -4406,7 +4470,7 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         summary="Persist the trio-joined synthesis and complete a research session with frozen-evidence claims.",
         choose_when=(
             "Finalizing a trio-complete research session with grounded claims.",
-            "Delivering the substantive structured answer in the same turn — Bottom line through filing refs plus the SEC-only scope line; a bare finalized-status note is not a completion.",
+            "Delivering the substantive structured answer in the same turn — Bottom line through evidence refs plus the searched-source scope line; a bare finalized-status note is not a completion.",
         ),
         reject_when=("Not for session state overviews (research_status).",),
         conflicts_with=(),
@@ -6646,6 +6710,18 @@ def _start_as_of(arguments: dict[str, object]) -> str | None:
     as_of = arguments.get("as_of")
     return as_of if isinstance(as_of, str) and as_of else None
 
+def _start_policy(arguments: dict[str, object]) -> object:
+    """Optional session policy passthrough; None stays the SEC-only default."""
+    policy = arguments.get("policy")
+    if isinstance(policy, dict):
+        return {str(k): v for k, v in policy.items()}
+    research_sources = arguments.get("research_sources")
+    sources = arguments.get("sources")
+    if isinstance(research_sources, dict):
+        return {"research_sources": dict(research_sources)}
+    if isinstance(sources, list) and all(isinstance(s, str) and s.strip() for s in sources):
+        return {"research_sources": {"mode": "allowlist", "sources": [s.strip() for s in sources if isinstance(s, str)]}}
+    return None
 
 def _inspect_research_snapshot(research_service: object, session_id: str, repo: object) -> dict[str, object]:
     """inspect_research without static service typing."""
@@ -6679,10 +6755,11 @@ def _research_start(arguments: dict[str, object], context: RequestContext) -> di
     from app.research import service as research_service
 
     repo = _research_repo_for(context)
-    session_id = research_service.create_research(
+    session_id = research_service.create_research(  # type: ignore[arg-type]
         _start_question(arguments),
         _start_objective(arguments),
         as_of=_start_as_of(arguments),
+        policy=_start_policy(arguments),  # type: ignore[arg-type]
         repo=repo,
     )
     return _started_packet(research_service, repo, session_id)
@@ -6791,7 +6868,17 @@ def _research_read(arguments: dict[str, object], context: RequestContext) -> dic
                                  arguments.get("freeze_id"), stores.get("freeze", {}))
     if scoped is not None:
         return scoped
-    return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
+    record: object = store[resource_id]
+    if kind == "evidence" and isinstance(record, Mapping):
+        from app.research.evidence import evidence_domain, evidence_integrity
+
+        prov = record.get("provenance")
+        prov_map = prov if isinstance(prov, Mapping) else None
+        filled = dict(record)
+        filled["source_domain"] = evidence_domain(prov_map)
+        filled["integrity_class"] = evidence_integrity(prov_map)
+        record = filled
+    return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": record}
 
 
 _READ_SEARCH_DEFAULT_LIMIT = 50

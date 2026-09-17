@@ -218,6 +218,17 @@ SCENARIOS: tuple[Scenario, ...] = (
         notes="Scoped-absence regression: SpaceX has no SEC issuer record, so the answer stays a scoped absence observation within the searched SEC corpus — never a universal claim that no relationship exists; filings opened for the OpenAI-linked chain still back every observed fact in the trace.",
         requires_trace=True,
     ),
+    Scenario(
+        name="hedgefund-growth-thesis-multisource",
+        family=ScenarioFamily.MULTI_STEP,
+        question="Map NVDA's growth thesis: SEC fundamentals plus FINRA positioning plus recent web developments for NVDA.",
+        ticker="NVDA",
+        as_of=None,
+        expected_tools=("list_sec_filings", "get_sec_document", "get_short_interest", "search_web"),
+        requires_evidence=True,
+        notes="Multisource golden: one company, three source domains (SEC filings, FINRA positioning, web developments); Wave-1 runs one task batch with sec-agent + finra-agent + exa-agent, the freeze holds multi-source evidence, the trio shares that one freeze, and the final answer stays substantive.",
+        requires_trace=True,
+    ),
 )
 
 

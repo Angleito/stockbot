@@ -23,6 +23,7 @@ from app.research.evals.traces import (
     get_trace_events,
     list_traces,
 )
+from app.research.evidence import evidence_domain
 from app.research.models import Job, ResearchSession
 from app.research.repository import (
     ResearchRepository,
@@ -50,6 +51,18 @@ def _all_session_ids(research_db: Path) -> list[str]:
 
 def _ts(value: object) -> str | None:
     return str(value) if isinstance(value, str) and value else None
+
+
+def _evidence_domain(rec: object) -> str:
+    """Source domain of one evidence record: explicit field wins, else the kernel mapping."""
+    get = rec.get if isinstance(rec, dict) else getattr(rec, "get", None)
+    raw = get("domain", get("source_domain", None)) if callable(get) else None
+    if isinstance(raw, str) and raw.strip().upper() in ("SEC", "FINRA", "WEB"):
+        return raw.strip().upper()
+    raw_prov: object = get("provenance", {}) if callable(get) else {}
+    prov: dict[str, object] = raw_prov if isinstance(raw_prov, dict) else {}
+    domain = evidence_domain(prov if isinstance(prov, dict) else None)
+    return domain
 
 
 def _event_seq(event: dict[str, object]) -> int:
@@ -122,6 +135,7 @@ def _collect_evidence(repo: ResearchRepository, sid: str) -> list[dict[str, obje
                     "knownAt": _ts(rec.get("known_at")),
                     "sourceName": str(rec.get("source_name", "")),
                     "sourceUri": _ts(rec.get("source_uri")),
+                    "domain": _evidence_domain(rec),
                 }
             )
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -195,6 +209,65 @@ def _collect_claims(sess: object) -> list[dict[str, object]]:
         return []
 
 
+def _clean_str_list(raw: object) -> list[str]:
+    """Non-empty strings from a list payload ([] for anything else)."""
+    return [v.strip() for v in raw if isinstance(v, str) and v.strip()] if isinstance(raw, list) else []
+
+
+def _collect_coverage(repo: ResearchRepository, sid: str) -> list[dict[str, object]]:
+    """Coverage artifacts: search scope + absence text per artifact (never evidence)."""
+    artifacts: list[dict[str, object]] = []
+    try:
+        for row in repo.list_coverage_artifacts(sid):
+            artifacts.append(
+                {
+                    "artifactId": str(row.get("artifact_id", "")),
+                    "waveId": row.get("wave_id") if isinstance(row.get("wave_id"), int) else 0,
+                    "claimText": str(row.get("claim_text", "")),
+                    "searchId": str(row.get("search_id", "")),
+                    "query": str(row.get("query", "")),
+                }
+            )
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        artifacts = []
+    return artifacts
+
+
+def _collect_final(sess: object) -> dict[str, object] | None:
+    """Persisted final_result in viewer shape (None when absent/mistyped)."""
+    try:
+        final = getattr(sess, "final_result", None)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    if not isinstance(final, dict):
+        return None
+    claims = _clean_text_items(final.get("claims") or final.get("grounded_claims"))
+    scope = final.get("research_scope")
+    allowed: list[str] = _clean_str_list(scope.get("allowed_sources")) if isinstance(scope, dict) else []
+    coverage = final.get("coverage")
+    coverage_out: dict[str, object] = dict(coverage) if isinstance(coverage, dict) else {}
+    return {
+        "answer": str(final.get("content") or final.get("answer") or final.get("executive_summary") or ""),
+        "executiveSummary": str(final.get("executive_summary") or final.get("answer") or ""),
+        "consensus": str(final.get("consensus") or ""),
+        "baseCase": str(final.get("base_case") or ""),
+        "bullCase": str((final.get("bull_case") or {}).get("summary") if isinstance(final.get("bull_case"), dict) else final.get("bull_case") or ""),
+        "bearCase": str((final.get("bear_case") or {}).get("summary") if isinstance(final.get("bear_case"), dict) else final.get("bear_case") or ""),
+        "disagreements": _clean_str_list(final.get("critical_disagreements") or final.get("disagreements")),
+        "positioning": _clean_str_list(final.get("positioning")),
+        "catalysts": _clean_str_list(final.get("catalysts")),
+        "uncertainties": _clean_str_list(final.get("uncertainties")),
+        "whatChangesTheView": _clean_str_list(final.get("what_would_change") or final.get("what_changes_the_view")),
+        "limitations": _clean_str_list(final.get("evidence_limitations") or final.get("limitations")),
+        "claims": claims,
+        "sources": [dict(s) for s in final["sources"]] if isinstance(final.get("sources"), list) else [],
+        "coverage": coverage_out,
+        "allowedSources": allowed,
+        "freezeId": str(final.get("freeze_id") or ""),
+        "asOf": str(final.get("as_of") or ""),
+    }
+
+
 def _job_row(job: Job) -> dict[str, object]:
     diag = job.diagnostics or {}
     if job.failure is None:
@@ -220,6 +293,7 @@ def _job_row(job: Job) -> dict[str, object]:
         "failureMessage": failure_message,
         "assignmentId": assignment,
         "role": role,
+        "sourceDomain": job.source_domain,
     }
 
 
@@ -251,7 +325,6 @@ def _session_str_list(sess: object, name: str) -> list[object]:
     value = getattr(sess, name, None)
     return value if isinstance(value, list) else []
 
-
 def _session_row(
     sid: str,
     sess: ResearchSession,
@@ -261,9 +334,13 @@ def _session_row(
     freezes: list[dict[str, object]],
     dossiers: list[dict[str, object]],
     claims: list[dict[str, object]],
+    coverage_artifacts: list[dict[str, object]],
+    final_result: dict[str, object] | None,
 ) -> dict[str, object]:
     events = trace["events"]
     assert isinstance(events, list)
+    job_rows = _job_rows(jobs)
+    waves = sorted({row["waveId"] for row in job_rows if isinstance(row.get("waveId"), int)})
     return {
         "sessionId": sid,
         "waveId": sess.current_wave,
@@ -276,12 +353,15 @@ def _session_row(
         "traceStatus": trace["status"],
         "provider": trace["provider"],
         "model": trace["model"],
-        "jobs": _job_rows(jobs),
+        "jobs": job_rows,
+        "waves": waves,
         "events": sorted(events, key=_event_seq),
         "claims": claims,
         "evidence": evidence,
         "freezes": freezes,
         "dossiers": dossiers,
+        "coverageArtifacts": coverage_artifacts,
+        "finalResult": final_result,
         "committeeRuns": list(_session_str_list(sess, "committee_runs")),
     }
 
@@ -299,7 +379,9 @@ def build_session_run(sid: str, repo: ResearchRepository | None = None) -> dict[
     freezes = _collect_freezes(repo, sess)
     dossiers = _collect_dossiers(repo, sid)
     claims = _collect_claims(sess)
-    return _session_row(sid, sess, jobs, trace, evidence, freezes, dossiers, claims)
+    coverage_artifacts = _collect_coverage(repo, sid)
+    final_result = _collect_final(sess)
+    return _session_row(sid, sess, jobs, trace, evidence, freezes, dossiers, claims, coverage_artifacts, final_result)
 
 
 def _parse_violations(raw: object) -> list[object]:

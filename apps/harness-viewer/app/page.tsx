@@ -15,7 +15,9 @@ export default function RunsPage(): JSX.Element {
       <ul>
         {runs.map((run) => (
           <li key={run.sessionId}>
-            <a href={`research://${run.sessionId}`}>{run.sessionId}</a> wave {run.waveId} [{run.status}] {run.question}
+            <a href={`research://${run.sessionId}`}>{run.sessionId}</a> wave {run.waveId} [{run.status}] {run.question} —{" "}
+            {run.evidence.length} evidence, {run.freezes.length} freezes, {run.dossiers.length} dossiers, waves [
+            {(run.waves ?? []).join(", ")}]
           </li>
         ))}
       </ul>

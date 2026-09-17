@@ -24,14 +24,18 @@ __all__ = [
     "EvidenceRejectedError",
     "discovery_only",
     "evidence_content_hash",
+    "evidence_domain",
     "evidence_from_dict",
+    "evidence_integrity",
     "evidence_to_dict",
+    "finra_record_ref",
     "ingest_evidence",
     "normalize_accession",
     "search_run_ref",
     "sec_source_ref",
     "substantive_records",
     "validate_provenance",
+    "web_source_ref",
 ]
 
 ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
@@ -46,8 +50,39 @@ ledger row: evidence is what a human/source document states, coverage is what a
 search did or did not reach.
 """
 
-PROVENANCE_KINDS = ("sec_source", "search_run", "none")
-"""Closed provenance vocabulary: a raw document passage, the executed search, or nothing recorded."""
+PROVENANCE_KINDS = ("sec_source", "finra_record", "web_source", "search_run", "none")
+"""Closed provenance vocabulary: a reloaded SEC passage, a persisted FINRA tool
+result, a persisted web-search result, the executed search, or nothing recorded."""
+
+PROVENANCE_DOMAINS: dict[str, str] = {
+    "sec_source": "SEC",
+    "finra_record": "FINRA",
+    "web_source": "WEB",
+    "search_run": "WEB",
+    "none": "SOURCE",
+}
+"""Kernel-owned provenance -> source-domain mapping (committee labels read this, never re-derive)."""
+
+PROVENANCE_INTEGRITY: dict[str, str] = {
+    "sec_source": "PRIMARY_DOCUMENT",
+    "finra_record": "CANONICAL_STRUCTURED",
+    "web_source": "EXTERNAL_SOURCE",
+    "search_run": "EXTERNAL_SOURCE",
+    "none": "EXTERNAL_SOURCE",
+}
+"""Kernel-owned provenance -> integrity-class mapping (same owner, same rule)."""
+
+
+def evidence_domain(provenance: Mapping[str, object] | None) -> str:
+    """Source domain for one provenance mapping (SEC|FINRA|WEB|SOURCE; unknown kinds stay SOURCE)."""
+    kind = provenance.get("kind") if isinstance(provenance, Mapping) else None
+    return PROVENANCE_DOMAINS.get(kind, "SOURCE") if isinstance(kind, str) else "SOURCE"
+
+
+def evidence_integrity(provenance: Mapping[str, object] | None) -> str:
+    """Integrity class for one provenance mapping (closed vocabulary, never model-assigned)."""
+    kind = provenance.get("kind") if isinstance(provenance, Mapping) else None
+    return PROVENANCE_INTEGRITY.get(kind, "EXTERNAL_SOURCE") if isinstance(kind, str) else "EXTERNAL_SOURCE"
 
 
 class EvidenceIntegrityError(ValueError):
@@ -160,7 +195,6 @@ def _ref_window(offset: object, end: object) -> tuple[int, int]:
         raise ValueError(f"sec_source_ref: end ({stop}) must be greater than offset ({start})")
     return start, stop
 
-
 def search_run_ref(*, search_id: object, query: object) -> dict[str, JSONValue]:
     """SearchRunRef: the executed search a navigation (discovery) row records; never evidence of a claim."""
     sid = search_id.strip() if isinstance(search_id, str) else ""
@@ -168,6 +202,69 @@ def search_run_ref(*, search_id: object, query: object) -> dict[str, JSONValue]:
     if not sid or not text:
         raise ValueError("search_run_ref: search_id and query must be non-empty strings")
     return {"kind": "search_run", "search_id": sid, "query": text}
+
+
+def _provenance_opt(prov: object, key: str) -> str | None:
+    """Optional non-blank string of one tool-result ref; absent stays None."""
+    value = prov.get(key) if isinstance(prov, Mapping) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def finra_record_ref(
+    *,
+    tool_name: object,
+    record_identity: object,
+    dataset: object = None,
+    source_uri: object = None,
+    known_at: object = None,
+    tool_result_id: object = None,
+) -> dict[str, JSONValue]:
+    """FinraRecordRef: one persisted FINRA tool result an observed fact is read off.
+
+    ``tool_name`` is the FINRA tool that produced it, ``record_identity`` the
+    dataset row/briefing it names. The kernel, never the model, reloads that
+    persisted result and stores its bytes; a model-authored row never qualifies.
+    ``tool_result_id`` is the persisted kernel tool result this ref replays (None for legacy rows).
+    """
+    tool = tool_name.strip() if isinstance(tool_name, str) else ""
+    identity = record_identity.strip() if isinstance(record_identity, str) else ""
+    if not tool or not identity:
+        raise ValueError("finra_record_ref: tool_name and record_identity must be non-empty strings")
+    ref: dict[str, JSONValue] = {"kind": "finra_record", "tool_name": tool, "record_identity": identity}
+    for key, value in (("dataset", dataset), ("source_uri", source_uri), ("known_at", known_at), ("tool_result_id", tool_result_id)):
+        text = _provenance_opt({key: value}, key)
+        if text is not None:
+            ref[key] = text
+    return ref
+
+
+def web_source_ref(
+    *,
+    url: object,
+    excerpt: object,
+    title: object = None,
+    domain: object = None,
+    published_at: object = None,
+    retrieved_at: object = None,
+    tool_result_id: object = None,
+) -> dict[str, JSONValue]:
+    """WebSourceRef: one persisted search_web result an observed fact is read off.
+
+    ``url`` is the result URL, ``excerpt`` the highlight text behind the claim.
+    The kernel, never the model, reloads that persisted result and stores its
+    bytes; a model-authored URL/quote never qualifies.
+    ``tool_result_id`` is the persisted kernel tool result this ref replays (None for legacy rows).
+    """
+    link = url.strip() if isinstance(url, str) else ""
+    quote = excerpt.strip() if isinstance(excerpt, str) else ""
+    if not link or not quote:
+        raise ValueError("web_source_ref: url and excerpt must be non-empty strings")
+    ref: dict[str, JSONValue] = {"kind": "web_source", "url": link, "excerpt": quote}
+    for key, value in (("title", title), ("domain", domain), ("published_at", published_at), ("retrieved_at", retrieved_at), ("tool_result_id", tool_result_id)):
+        text = _provenance_opt({key: value}, key)
+        if text is not None:
+            ref[key] = text
+    return ref
 
 
 def _provenance_str(prov: Mapping[str, object], key: str, where: str) -> str:
@@ -208,8 +305,26 @@ def validate_provenance(value: object, where: str = "<evidence>: 'provenance'") 
             search_id=_provenance_str(value, "search_id", where),
             query=_provenance_str(value, "query", where),
         )
+    if kind == "finra_record":
+        return finra_record_ref(
+            tool_name=_provenance_str(value, "tool_name", where),
+            record_identity=_provenance_str(value, "record_identity", where),
+            dataset=value.get("dataset"),
+            source_uri=value.get("source_uri"),
+            known_at=value.get("known_at"),
+            tool_result_id=value.get("tool_result_id"),
+        )
+    if kind == "web_source":
+        return web_source_ref(
+            url=_provenance_str(value, "url", where),
+            excerpt=_provenance_str(value, "excerpt", where),
+            title=value.get("title"),
+            domain=value.get("domain"),
+            published_at=value.get("published_at"),
+            retrieved_at=value.get("retrieved_at"),
+            tool_result_id=value.get("tool_result_id"),
+        )
     return _sec_source_provenance(value, where)
-
 
 def _sec_source_provenance(value: Mapping[str, object], where: str) -> dict[str, JSONValue]:
     """Canonical SEC ref when the row holds kernel coordinates, else the legacy un-canonical ref."""
@@ -531,6 +646,8 @@ def evidence_to_dict(evidence: Evidence) -> dict[str, JSONValue]:
         "record_kind": evidence.record_kind,
         "claim_kind": evidence.claim_kind,
         "provenance": dict(evidence.provenance),
+        "source_domain": evidence_domain(evidence.provenance),
+        "integrity_class": evidence_integrity(evidence.provenance),
     }
 
 
@@ -631,6 +748,11 @@ def _evidence_claim_kind(d: dict[str, object]) -> str:
 def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
     """Rebuild validated Evidence (constructor re-checks hash/confidence)."""
     d = dict(data)
+    provenance = validate_provenance(d.get("provenance", {}), "<evidence>: 'provenance'")
+    for key, expected in (("source_domain", evidence_domain(provenance)), ("integrity_class", evidence_integrity(provenance))):
+        raw = d.get(key)
+        if raw is not None and raw != expected:
+            raise EvidenceIntegrityError(f"evidence: '{key}' must match provenance-derived {expected!r}, got {raw!r}")
     return Evidence(
         evidence_id=_req_str(d, "evidence_id"),
         session_id=_req_str(d, "session_id"),
@@ -656,5 +778,5 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         superseded_by=_opt_str(d, "superseded_by"),
         record_kind=_evidence_record_kind(d),
         claim_kind=_evidence_claim_kind(d),
-        provenance=validate_provenance(d.get("provenance", {}), "<evidence>: 'provenance'"),
+        provenance=provenance,
     )

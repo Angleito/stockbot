@@ -16,8 +16,8 @@ export default function EvidenceDrillPage(): JSX.Element {
       <ul>
         {rows.map(({ run, ev }) => (
           <li key={`${run.sessionId}:${ev.evidenceId}`}>
-            <a href={`evidence://${ev.evidenceId}`}>{ev.evidenceId}</a> {ev.subject} [{ev.knownAt ?? "known_at unknown"}]{" "}
-            <a href={`research://${run.sessionId}`}>{run.sessionId}</a>
+            <a href={`evidence://${ev.evidenceId}`}>{ev.evidenceId}</a> [{ev.domain ?? "SEC"}] {ev.subject} [
+            {ev.knownAt ?? "known_at unknown"}] {ev.sourceName} <a href={`research://${run.sessionId}`}>{run.sessionId}</a>
           </li>
         ))}
       </ul>

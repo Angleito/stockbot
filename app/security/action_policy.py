@@ -156,12 +156,24 @@ def _allowlist_set(raw_allowed: object) -> set[str] | None:
 
 
 def _allowlist_match(name: str, allowed: set[str]) -> bool:
-    """True when the allowlist covers this tool (SEC tools via SEC_TOOLS only)."""
-    # ponytail: "sec" matches the SEC_TOOLS allowlist only; substring would also
-    # match "securities" (a FINRA tool) so it never falls through to substring.
-    if "sec" in allowed and is_sec_tool_name(name):
+    """True when the allowlist covers this tool (per-domain allowlists, never substrings)."""
+    # ponytail: exact per-domain membership for the research domains; any other
+    # entry keeps the legacy substring behavior (custom allowlists stay working).
+    try:
+        from app.research.agents.source_agent import FINRA_TOOLS, SEC_TOOLS, WEB_TOOLS
+    except ImportError:
+        SEC_TOOLS = frozenset()
+        FINRA_TOOLS = frozenset()
+        WEB_TOOLS = frozenset()
+    lowered = {a.strip().lower() for a in allowed if isinstance(a, str)}
+    if "sec" in lowered and name in SEC_TOOLS:
         return True
-    return any(a and a in name.strip().lower() for a in allowed - {"sec"})
+    if "finra" in lowered and name in FINRA_TOOLS:
+        return True
+    if "web" in lowered and name in WEB_TOOLS:
+        return True
+    custom = lowered - {"sec", "finra", "web"}
+    return any(a and a in name.strip().lower() for a in custom)
 
 
 def _allowlist_verdict(name: str, raw_allowed: object) -> str | None:
