@@ -1,13 +1,18 @@
 import asyncio
-import json
-from pathlib import Path
 import urllib.parse
 import urllib.request
+from pathlib import Path
+from typing import Self
 
 import pytest
 from mcp.server import MCPServer
 
-from app.robinhood.auth import LoopbackCallback, load_tokens, parse_callback_url, save_tokens
+from app.robinhood.auth import (
+    LoopbackCallback,
+    load_tokens,
+    parse_callback_url,
+    save_tokens,
+)
 from app.robinhood.client import (
     RobinhoodClient,
     RobinhoodToolError,
@@ -37,18 +42,14 @@ def test_normalize_result_handles_structured_models() -> None:
 
 
 def test_parse_callback_url_requires_code_and_preserves_issuer() -> None:
-    result = parse_callback_url(
-        "http://127.0.0.1/callback?code=abc&state=xyz&iss=https%3A%2F%2Fissuer"
-    )
+    result = parse_callback_url("http://127.0.0.1/callback?code=abc&state=xyz&iss=https%3A%2F%2Fissuer")
     assert result == ("abc", "xyz", "https://issuer")
 
 
 def test_loopback_callback_receives_browser_redirect() -> None:
     callback = LoopbackCallback("http://127.0.0.1:0/callback")
     callback.start()
-    url = callback.redirect_uri + "?" + urllib.parse.urlencode(
-        {"code": "abc", "state": "xyz"}
-    )
+    url = callback.redirect_uri + "?" + urllib.parse.urlencode({"code": "abc", "state": "xyz"})
     with urllib.request.urlopen(url, timeout=2) as response:
         assert response.status == 200
     assert asyncio.run(callback.callback_handler()) == ("abc", "xyz", None)
@@ -100,7 +101,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
     seen: dict[str, object] = {}
 
     class FakeHttpClient:
-        async def __aenter__(self) -> FakeHttpClient:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -113,7 +114,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
             return FakeHttpClient()
 
     class FakeTransport:
-        async def __aenter__(self) -> FakeTransport:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -123,7 +124,7 @@ def test_authenticated_mcp_transport_does_not_follow_redirects() -> None:
         def __init__(self, transport: object) -> None:
             self.transport = transport
 
-        async def __aenter__(self) -> FakeClient:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *args: object) -> None:

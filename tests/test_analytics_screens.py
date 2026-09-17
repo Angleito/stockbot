@@ -11,49 +11,65 @@ The acceptance criteria under test:
 """
 
 import json
-from datetime import tzinfo
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 
-import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from app.analytics import screens
 from app.normalization import (
-    normalize_sec_tickers,
-    normalize_sec_company_facts,
     normalize_finra_short_interest,
+    normalize_sec_company_facts,
+    normalize_sec_tickers,
 )
 from app.storage import duckdb, parquet
 
-from datetime import date, datetime, timezone
-
 SETTLEMENT = "2026-08-14"
+
 
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
-def _seed_tickers(data_root: Path, tickers: tuple[str, ...] = ("AAA", "BBB", "CCC"), retrieved_at: str = "2026-08-10T12:00:00Z", cik_start: int = 1) -> None:
+def _seed_tickers(
+    data_root: Path,
+    tickers: tuple[str, ...] = ("AAA", "BBB", "CCC"),
+    retrieved_at: str = "2026-08-10T12:00:00Z",
+    cik_start: int = 1,
+) -> None:
     payload = {
         str(i): {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}
         for i, (ticker, cik) in enumerate(zip(tickers, range(cik_start, cik_start + len(tickers))), start=0)
     }
     datasets = normalize_sec_tickers(
-        payload, retrieved_at=retrieved_at, content_hash="tickers-hash",
+        payload,
+        retrieved_at=retrieved_at,
+        content_hash="tickers-hash",
     )
     for name, rows in datasets.items():
         parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_facts(data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]], retrieved_at: str = "2026-08-10T12:00:00Z") -> None:
+def _seed_facts(
+    data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]], retrieved_at: str = "2026-08-10T12:00:00Z"
+) -> None:
     for cik, facts in facts_by_cik.items():
-        payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {"dei": {
-            "EntityCommonStockSharesOutstanding": {"units": {"shares": facts}},
-        }}}
+        payload = {
+            "cik": cik,
+            "entityName": f"CIK{cik}",
+            "facts": {
+                "dei": {
+                    "EntityCommonStockSharesOutstanding": {"units": {"shares": facts}},
+                }
+            },
+        }
         datasets = normalize_sec_company_facts(
-            payload, retrieved_at=retrieved_at, content_hash=f"facts-{cik}",
+            payload,
+            retrieved_at=retrieved_at,
+            content_hash=f"facts-{cik}",
             source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
             source_record_id=f"cik{cik:010d}",
         )
@@ -61,10 +77,17 @@ def _seed_facts(data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]
             parquet.write_rows(name, rows, root=data_root / "parquet")
 
 
-def _seed_short_interest(data_root: Path, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z", content_hash: str = "snapshot-hash") -> None:
+def _seed_short_interest(
+    data_root: Path,
+    rows: list[dict[str, object]],
+    retrieved_at: str = "2026-08-10T12:00:00Z",
+    content_hash: str = "snapshot-hash",
+) -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=SETTLEMENT,
-        retrieved_at=retrieved_at, content_hash=content_hash,
+        rows,
+        settlement_date=SETTLEMENT,
+        retrieved_at=retrieved_at,
+        content_hash=content_hash,
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
     )
@@ -109,17 +132,25 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> No
     assert [entry["ticker"] for entry in entries] == ["CCC", "AAA", "BBB"]
     assert entries[0]["short_interest_percent"] == 50
     assert result["coverage"] == {
-        "finra_rows": 3, "eligible_rows": 3,
-        "valid_short_interest_rows": 3, "mapped_rows": 3,
-        "unambiguous_rows": 3, "common_equity_rows": 3,
+        "finra_rows": 3,
+        "eligible_rows": 3,
+        "valid_short_interest_rows": 3,
+        "mapped_rows": 3,
+        "unambiguous_rows": 3,
+        "common_equity_rows": 3,
         "shares_outstanding_rows": 3,
-        "exclusions": {"unmapped_symbol": 0, "ambiguous_ticker_mapping": 0,
-                       "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
-                       "invalid_short_interest": 0, "conflicting_versions": 0},
+        "exclusions": {
+            "unmapped_symbol": 0,
+            "ambiguous_ticker_mapping": 0,
+            "not_classified_common_equity": 0,
+            "missing_shares_outstanding": 0,
+            "invalid_short_interest": 0,
+            "conflicting_versions": 0,
+        },
     }
     assert result["calculation_version"] == screens.SCREEN_CALC_VERSION
     # Default as_of is the live horizon (UTC today), not the settlement date.
-    assert result["as_of_date"] == datetime.now(timezone.utc).date().isoformat()
+    assert result["as_of_date"] == datetime.now(UTC).date().isoformat()
     assert result["source_records"]
     assert entries[0]["sec_accession"] == "c1"
     assert entries[0]["sec_source_url"].endswith("CIK0000000003.json")
@@ -143,8 +174,7 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
     being deduplicated away; the old version stays immutable."""
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
     extra_ddd: list[dict[str, object]] = [
-        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
-         "currentShortPositionQuantity": 20},
+        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
     ]
     _seed_short_interest(data_root, _default_rows() + extra_ddd)
     _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
@@ -168,11 +198,18 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
     assert len(runs) == 2 and runs[0]["run_id"] != runs[1]["run_id"]
     versions = set()
     for r in runs:
-        versions.add(tuple(row["ticker"] for row in duckdb.query(
-            "SELECT ticker FROM screen_entries WHERE run_id = ? ORDER BY rank",
-            params=[r["run_id"]], data_root=data_root)))
-    assert ("CCC", "DDD", "AAA", "BBB") in versions   # enriched version published
-    assert ("CCC", "AAA", "BBB") in versions          # old version immutable
+        versions.add(
+            tuple(
+                row["ticker"]
+                for row in duckdb.query(
+                    "SELECT ticker FROM screen_entries WHERE run_id = ? ORDER BY rank",
+                    params=[r["run_id"]],
+                    data_root=data_root,
+                )
+            )
+        )
+    assert ("CCC", "DDD", "AAA", "BBB") in versions  # enriched version published
+    assert ("CCC", "AAA", "BBB") in versions  # old version immutable
     # Reader serves the latest applicable version
     latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     latest_entries = latest["entries"]
@@ -183,10 +220,11 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
 def test_created_at_has_sub_second_precision(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Same-second publications get distinct created_at values, so the reader
     orders by publication time instead of the run_id hash tie-breaker."""
+
     class FrozenClock:
         @staticmethod
         def now(tz: tzinfo | None = None) -> datetime:
-            return datetime(2026, 8, 14, 12, 0, 0, 250000, tzinfo=timezone.utc)
+            return datetime(2026, 8, 14, 12, 0, 0, 250000, tzinfo=UTC)
 
     monkeypatch.setattr(screens, "datetime", FrozenClock)
     assert screens._utc_now() == "2026-08-14T12:00:00.250000+00:00"
@@ -196,15 +234,16 @@ def test_same_second_versions_ordered_by_publication(data_root: Path, monkeypatc
     """The later of two same-second publications wins, regardless of run_id."""
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
     extra_ddd: list[dict[str, object]] = [
-        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT,
-         "currentShortPositionQuantity": 20},
+        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
     ]
     _seed_short_interest(data_root, _default_rows() + extra_ddd)
     _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
-    times = iter([
-        "2026-08-14T12:00:00.250000+00:00",  # first version
-        "2026-08-14T12:00:00.800000+00:00",  # enriched version, later same second
-    ])
+    times = iter(
+        [
+            "2026-08-14T12:00:00.250000+00:00",  # first version
+            "2026-08-14T12:00:00.800000+00:00",  # enriched version, later same second
+        ]
+    )
     monkeypatch.setattr(screens, "_utc_now", lambda: next(times))
     screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
@@ -223,61 +262,97 @@ def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) ->
     old_dir = data_root / "parquet" / "screen_runs" / "settlement_date_year=2026"
     old_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.table({
-            "run_id": [f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14"],
-            "screen": [screens.SCREEN_NAME],
-            "settlement_date": [SETTLEMENT],
-            "as_of": ["2026-08-14"],
-            "created_at": ["2026-08-14T00:00:00Z"],
-            "calc_version": [screens.SCREEN_CALC_VERSION],
-            "finra_rows": [6],
-            "eligible_rows": [3],
-            "exclusions_json": [json.dumps({
-                "unmapped_symbol": 1, "ambiguous_ticker_mapping": 1,
-                "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
-                "invalid_short_interest": 1,
-            })],
-            "environment": ["test"],
-            "parser_version": ["pre-counter"],
-        }, schema=pa.schema([
-            pa.field("run_id", pa.string()), pa.field("screen", pa.string()),
-            pa.field("settlement_date", pa.string()), pa.field("as_of", pa.string()),
-            pa.field("created_at", pa.string()), pa.field("calc_version", pa.string()),
-            pa.field("finra_rows", pa.int64()), pa.field("eligible_rows", pa.int64()),
-            pa.field("exclusions_json", pa.string()), pa.field("environment", pa.string()),
-            pa.field("parser_version", pa.string()),
-        ])),
+        pa.table(
+            {
+                "run_id": [f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14"],
+                "screen": [screens.SCREEN_NAME],
+                "settlement_date": [SETTLEMENT],
+                "as_of": ["2026-08-14"],
+                "created_at": ["2026-08-14T00:00:00Z"],
+                "calc_version": [screens.SCREEN_CALC_VERSION],
+                "finra_rows": [6],
+                "eligible_rows": [3],
+                "exclusions_json": [
+                    json.dumps(
+                        {
+                            "unmapped_symbol": 1,
+                            "ambiguous_ticker_mapping": 1,
+                            "not_classified_common_equity": 0,
+                            "missing_shares_outstanding": 0,
+                            "invalid_short_interest": 1,
+                        }
+                    )
+                ],
+                "environment": ["test"],
+                "parser_version": ["pre-counter"],
+            },
+            schema=pa.schema(
+                [
+                    pa.field("run_id", pa.string()),
+                    pa.field("screen", pa.string()),
+                    pa.field("settlement_date", pa.string()),
+                    pa.field("as_of", pa.string()),
+                    pa.field("created_at", pa.string()),
+                    pa.field("calc_version", pa.string()),
+                    pa.field("finra_rows", pa.int64()),
+                    pa.field("eligible_rows", pa.int64()),
+                    pa.field("exclusions_json", pa.string()),
+                    pa.field("environment", pa.string()),
+                    pa.field("parser_version", pa.string()),
+                ]
+            ),
+        ),
         str(old_dir / "part-old.parquet"),
     )
     result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert result["coverage"] == {
-        "finra_rows": 6, "eligible_rows": 3,
-        "valid_short_interest_rows": 5, "mapped_rows": 4,
-        "unambiguous_rows": 3, "common_equity_rows": 3,
+        "finra_rows": 6,
+        "eligible_rows": 3,
+        "valid_short_interest_rows": 5,
+        "mapped_rows": 4,
+        "unambiguous_rows": 3,
+        "common_equity_rows": 3,
         "shares_outstanding_rows": 3,
-        "exclusions": {"unmapped_symbol": 1, "ambiguous_ticker_mapping": 1,
-                       "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
-                       "invalid_short_interest": 1},
+        "exclusions": {
+            "unmapped_symbol": 1,
+            "ambiguous_ticker_mapping": 1,
+            "not_classified_common_equity": 0,
+            "missing_shares_outstanding": 0,
+            "invalid_short_interest": 1,
+        },
     }
-    parquet.write_rows("screen_runs", [{
-        "run_id": f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-21",
-        "screen": screens.SCREEN_NAME,
-        "settlement_date": SETTLEMENT,
-        "as_of": "2026-08-21",
-        "created_at": "2026-08-21T00:00:00Z",
-        "calc_version": screens.SCREEN_CALC_VERSION,
-        "finra_rows": 3, "eligible_rows": 2,
-        "valid_short_interest_rows": 3, "mapped_rows": 2,
-        "unambiguous_rows": 2, "common_equity_rows": 2,
-        "shares_outstanding_rows": 2,
-        "exclusions_json": json.dumps({
-            "unmapped_symbol": 1, "ambiguous_ticker_mapping": 0,
-            "not_classified_common_equity": 0, "missing_shares_outstanding": 0,
-            "invalid_short_interest": 0,
-        }),
-        "environment": "test",
-        "parser_version": screens.SCREEN_CALC_VERSION,
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "screen_runs",
+        [
+            {
+                "run_id": f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-21",
+                "screen": screens.SCREEN_NAME,
+                "settlement_date": SETTLEMENT,
+                "as_of": "2026-08-21",
+                "created_at": "2026-08-21T00:00:00Z",
+                "calc_version": screens.SCREEN_CALC_VERSION,
+                "finra_rows": 3,
+                "eligible_rows": 2,
+                "valid_short_interest_rows": 3,
+                "mapped_rows": 2,
+                "unambiguous_rows": 2,
+                "common_equity_rows": 2,
+                "shares_outstanding_rows": 2,
+                "exclusions_json": json.dumps(
+                    {
+                        "unmapped_symbol": 1,
+                        "ambiguous_ticker_mapping": 0,
+                        "not_classified_common_equity": 0,
+                        "missing_shares_outstanding": 0,
+                        "invalid_short_interest": 0,
+                    }
+                ),
+                "environment": "test",
+                "parser_version": screens.SCREEN_CALC_VERSION,
+            }
+        ],
+        root=data_root / "parquet",
+    )
     old_again = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     old_again_coverage = old_again["coverage"]
     assert isinstance(old_again_coverage, dict)
@@ -322,11 +397,14 @@ def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
 
 def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root: Path) -> None:
     _seed_tickers(data_root)
-    _seed_facts(data_root, {
-        1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
-        2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
-        3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
-    })
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
+            2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
+            3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
+        },
+    )
     _seed_short_interest(data_root, _default_rows())
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
@@ -336,9 +414,12 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
     assert early_entries[1]["short_interest_percent"] == 20  # AAA: 20/100
 
     # A later filing (known_at after 2026-08-14) restates AAA's shares to 400.
-    _seed_facts(data_root, {
-        1: [{"end": "2026-08-01", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
-    })
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2026-08-01", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
+        },
+    )
 
     # The earlier as-of ranking must be byte-identical after the later filing.
     rerun = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
@@ -363,11 +444,14 @@ def test_fact_with_period_after_settlement_is_never_used(data_root: Path) -> Non
     date; a fact with a later period end is not eligible — even when it is
     already knowable at the as_of."""
     _seed_tickers(data_root)
-    _seed_facts(data_root, {
-        1: [{"end": "2026-09-01", "val": 100, "accn": "a1", "filed": "2026-08-20"}],
-        2: [{"end": "2026-06-30", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
-        3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
-    })
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2026-09-01", "val": 100, "accn": "a1", "filed": "2026-08-20"}],
+            2: [{"end": "2026-06-30", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
+            3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
+        },
+    )
     _seed_short_interest(data_root, _default_rows())
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
@@ -412,12 +496,25 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) 
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, rows)
     # EEE also appears under a second CIK -> ambiguous.
-    parquet.write_rows("entity_aliases", [{
-        "alias_type": "ticker", "alias_value": "EEE", "entity_id": "sec:cik:0000000099",
-        "security_id": "sec:equity:0000000099", "source": "sec:company_tickers",
-        "valid_from": None, "valid_to": None, "known_at": "2026-08-21T12:00:00Z",
-        "retrieved_at": "2026-08-21T12:00:00Z", "content_hash": "x", "parser_version": "t",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            {
+                "alias_type": "ticker",
+                "alias_value": "EEE",
+                "entity_id": "sec:cik:0000000099",
+                "security_id": "sec:equity:0000000099",
+                "source": "sec:company_tickers",
+                "valid_from": None,
+                "valid_to": None,
+                "known_at": "2026-08-21T12:00:00Z",
+                "retrieved_at": "2026-08-21T12:00:00Z",
+                "content_hash": "x",
+                "parser_version": "t",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     coverage = result["coverage"]
@@ -428,11 +525,11 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) 
     assert coverage["finra_rows"] == 6
     assert coverage["eligible_rows"] == 3
     assert coverage["exclusions"] == {
-        "unmapped_symbol": 1,            # DDD
-        "ambiguous_ticker_mapping": 1,   # EEE
+        "unmapped_symbol": 1,  # DDD
+        "ambiguous_ticker_mapping": 1,  # EEE
         "not_classified_common_equity": 0,
         "missing_shares_outstanding": 0,
-        "invalid_short_interest": 1,     # FFF
+        "invalid_short_interest": 1,  # FFF
         "conflicting_versions": 0,
     }
     assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
@@ -443,8 +540,10 @@ def test_stale_settlement_is_surfaced(data_root: Path) -> None:
     _seed_facts(data_root, _default_facts())
     stale_date = "2025-01-15"
     datasets = normalize_finra_short_interest(
-        _default_rows(), settlement_date=stale_date,
-        retrieved_at="2025-01-20T12:00:00Z", content_hash="snapshot-hash-2",
+        _default_rows(),
+        settlement_date=stale_date,
+        retrieved_at="2025-01-20T12:00:00Z",
+        content_hash="snapshot-hash-2",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{stale_date}",
     )
@@ -493,14 +592,19 @@ def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> N
     pre = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-10", data_root=data_root)
     assert "error" in pre
 
+
 def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
     """FINRA Dec-15-2025 settlement published Dec-24: invisible at 12-20, visible at 12-24."""
     _seed_tickers(data_root, retrieved_at="2025-12-01T12:00:00Z")
-    _seed_facts(data_root, {
-        1: [{"end": "2025-09-30", "val": 100, "accn": "a1", "filed": "2025-11-01"}],
-        2: [{"end": "2025-09-30", "val": 200, "accn": "b1", "filed": "2025-11-01"}],
-        3: [{"end": "2025-09-30", "val": 10, "accn": "c1", "filed": "2025-11-01"}],
-    }, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2025-09-30", "val": 100, "accn": "a1", "filed": "2025-11-01"}],
+            2: [{"end": "2025-09-30", "val": 200, "accn": "b1", "filed": "2025-11-01"}],
+            3: [{"end": "2025-09-30", "val": 10, "accn": "c1", "filed": "2025-11-01"}],
+        },
+        retrieved_at="2025-12-01T12:00:00Z",
+    )
     _seed_cycle(data_root, "2025-12-15", _default_rows(), retrieved_at="2025-12-24T12:00:00Z")
 
     hidden = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-20", data_root=data_root)
@@ -573,21 +677,35 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
     import pyarrow.parquet as pq
 
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "ETF"))
-    _seed_facts(data_root, {
-        **{cik: facts for cik, facts in _default_facts().items()},
-        4: [{"end": "2026-08-01", "val": 50, "accn": "e1", "filed": "2026-08-02"}],
-    })
+    _seed_facts(
+        data_root,
+        {
+            **{cik: facts for cik, facts in _default_facts().items()},
+            4: [{"end": "2026-08-01", "val": 50, "accn": "e1", "filed": "2026-08-02"}],
+        },
+    )
     extra_etf: list[dict[str, object]] = [
-        {"symbolCode": "ETF", "issueName": "Index Fund", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+        {
+            "symbolCode": "ETF",
+            "issueName": "Index Fund",
+            "settlementDate": SETTLEMENT,
+            "currentShortPositionQuantity": 5,
+        },
     ]
     rows: list[dict[str, object]] = _default_rows() + extra_etf
     _seed_short_interest(data_root, rows)
     # A later classification row reclassifies the ETF as not common equity.
     reclassified = {
-        "security_id": "sec:equity:0000000004", "entity_id": "sec:cik:0000000004",
-        "security_type": "unknown", "ticker": None, "exchange": None,
-        "source": "provider-test", "known_at": "2026-08-25T12:00:00Z",
-        "retrieved_at": "2026-08-25T12:00:00Z", "content_hash": "x", "parser_version": "t",
+        "security_id": "sec:equity:0000000004",
+        "entity_id": "sec:cik:0000000004",
+        "security_type": "unknown",
+        "ticker": None,
+        "exchange": None,
+        "source": "provider-test",
+        "known_at": "2026-08-25T12:00:00Z",
+        "retrieved_at": "2026-08-25T12:00:00Z",
+        "content_hash": "x",
+        "parser_version": "t",
     }
     directory = data_root / "parquet" / "securities" / "partition=none"
     directory.mkdir(parents=True, exist_ok=True)
@@ -643,20 +761,35 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
     directory = data_root / "parquet" / "securities" / "partition=none"
     directory.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.Table.from_pylist([
-            {
-                "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
-                "security_type": "unknown", "ticker": "AAA", "exchange": None,
-                "source": "provider-test", "known_at": "2026-08-10T13:00:00+01:00",
-                "retrieved_at": "2026-08-10T13:00:00+01:00", "content_hash": "reclass-old", "parser_version": "t",
-            },
-            {
-                "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
-                "security_type": "equity-common", "ticker": "AAA", "exchange": "NASDAQ",
-                "source": "provider-test", "known_at": "2026-08-10T12:30:00Z",
-                "retrieved_at": "2026-08-10T12:30:00Z", "content_hash": "reclass-new", "parser_version": "t",
-            },
-        ], schema=parquet.dataset("securities").schema),
+        pa.Table.from_pylist(
+            [
+                {
+                    "security_id": "sec:equity:0000000001",
+                    "entity_id": "sec:cik:0000000001",
+                    "security_type": "unknown",
+                    "ticker": "AAA",
+                    "exchange": None,
+                    "source": "provider-test",
+                    "known_at": "2026-08-10T13:00:00+01:00",
+                    "retrieved_at": "2026-08-10T13:00:00+01:00",
+                    "content_hash": "reclass-old",
+                    "parser_version": "t",
+                },
+                {
+                    "security_id": "sec:equity:0000000001",
+                    "entity_id": "sec:cik:0000000001",
+                    "security_type": "equity-common",
+                    "ticker": "AAA",
+                    "exchange": "NASDAQ",
+                    "source": "provider-test",
+                    "known_at": "2026-08-10T12:30:00Z",
+                    "retrieved_at": "2026-08-10T12:30:00Z",
+                    "content_hash": "reclass-new",
+                    "parser_version": "t",
+                },
+            ],
+            schema=parquet.dataset("securities").schema,
+        ),
         str(directory / "part-reclass-mixed-offset.parquet"),
     )
 
@@ -673,7 +806,8 @@ def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> No
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z",
+        content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -682,6 +816,7 @@ def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> No
     assert isinstance(coverage, dict)
     assert [e["ticker"] for e in entries] == ["CCC", "BBB"]
     assert coverage["exclusions"]["conflicting_versions"] == 1
+
 
 def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> None:
     _seed_short_interest(
@@ -692,7 +827,8 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> No
     _seed_short_interest(
         data_root,
         [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        retrieved_at="2026-08-10T12:00:00Z", content_hash="conflict-hash",
+        retrieved_at="2026-08-10T12:00:00Z",
+        content_hash="conflict-hash",
     )
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert "error" in result
@@ -711,12 +847,23 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path
     directory = data_root / "parquet" / "securities" / "partition=none"
     directory.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.Table.from_pylist([{
-            "security_id": "sec:equity:0000000001", "entity_id": "sec:cik:0000000001",
-            "security_type": "unknown", "ticker": "AAA", "exchange": None,
-            "source": "provider-test", "known_at": "2026-08-10T12:00:00Z",
-            "retrieved_at": "2026-08-10T12:00:00Z", "content_hash": "reclass-conflict", "parser_version": "t",
-        }], schema=parquet.dataset("securities").schema),
+        pa.Table.from_pylist(
+            [
+                {
+                    "security_id": "sec:equity:0000000001",
+                    "entity_id": "sec:cik:0000000001",
+                    "security_type": "unknown",
+                    "ticker": "AAA",
+                    "exchange": None,
+                    "source": "provider-test",
+                    "known_at": "2026-08-10T12:00:00Z",
+                    "retrieved_at": "2026-08-10T12:00:00Z",
+                    "content_hash": "reclass-conflict",
+                    "parser_version": "t",
+                }
+            ],
+            schema=parquet.dataset("securities").schema,
+        ),
         str(directory / "part-reclass-conflict.parquet"),
     )
 
@@ -734,10 +881,14 @@ def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z") -> None:
+def _seed_cycle(
+    data_root: Path, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z"
+) -> None:
     datasets = normalize_finra_short_interest(
-        rows, settlement_date=settlement_date,
-        retrieved_at=retrieved_at, content_hash=f"snapshot-{settlement_date}",
+        rows,
+        settlement_date=settlement_date,
+        retrieved_at=retrieved_at,
+        content_hash=f"snapshot-{settlement_date}",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
     )
@@ -748,11 +899,30 @@ def _seed_cycle(data_root: Path, settlement_date: str, rows: list[dict[str, obje
 def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, "2026-08-07", [
-        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
-    ])
+    _seed_cycle(
+        data_root,
+        "2026-08-07",
+        [
+            {
+                "symbolCode": "AAA",
+                "issueName": "Alpha",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "BBB",
+                "issueName": "Beta",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "CCC",
+                "issueName": "Gamma",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 5,
+            },
+        ],
+    )
     _seed_cycle(data_root, SETTLEMENT, _default_rows())
 
     result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
@@ -794,16 +964,39 @@ def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Pa
 def test_change_slice_as_of_regression(data_root: Path) -> None:
     """A later filing cannot alter a slice computed at an earlier as_of."""
     _seed_tickers(data_root)
-    _seed_facts(data_root, {
-        1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
-        2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
-        3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
-    })
-    _seed_cycle(data_root, "2026-08-07", [
-        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
-    ], retrieved_at="2026-08-10T12:00:00Z")
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
+            2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
+            3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
+        },
+    )
+    _seed_cycle(
+        data_root,
+        "2026-08-07",
+        [
+            {
+                "symbolCode": "AAA",
+                "issueName": "Alpha",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "BBB",
+                "issueName": "Beta",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "CCC",
+                "issueName": "Gamma",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 5,
+            },
+        ],
+        retrieved_at="2026-08-10T12:00:00Z",
+    )
     _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
 
     early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
@@ -814,9 +1007,12 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
 
     # A filing known only after 2026-08-14 restates AAA's shares for a
     # period between the two settlements (end 2026-08-10, filed 2026-08-20).
-    _seed_facts(data_root, {
-        1: [{"end": "2026-08-10", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
-    })
+    _seed_facts(
+        data_root,
+        {
+            1: [{"end": "2026-08-10", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
+        },
+    )
 
     rerun = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     assert rerun["entries"] == early["entries"]
@@ -848,15 +1044,35 @@ def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) 
     once as_of reaches retrieval."""
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, "2026-08-07", [
-        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 10},
-        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": "2026-08-07", "currentShortPositionQuantity": 5},
-    ])
+    _seed_cycle(
+        data_root,
+        "2026-08-07",
+        [
+            {
+                "symbolCode": "AAA",
+                "issueName": "Alpha",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "BBB",
+                "issueName": "Beta",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 10,
+            },
+            {
+                "symbolCode": "CCC",
+                "issueName": "Gamma",
+                "settlementDate": "2026-08-07",
+                "currentShortPositionQuantity": 5,
+            },
+        ],
+    )
     _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
 
     result = screens.short_interest_change_screen("2026-08-30", data_root=data_root)
     assert result["settlement_current"] == SETTLEMENT
+
 
 # ---------------------------------------------------------------------------
 # Fetch-on-empty: live screens fetch from FINRA, historical screens never do
@@ -878,23 +1094,24 @@ def _install_finra_fetch_fake(monkeypatch: pytest.MonkeyPatch, calls: list[dict[
         calls.append(payload)
         raw_filters = payload.get("compareFilters", [])
         assert isinstance(raw_filters, list)
-        filters = {
-            f.get("fieldName"): f.get("fieldValue")
-            for f in raw_filters
-            if isinstance(f, dict)
-        }
+        filters = {f.get("fieldName"): f.get("fieldValue") for f in raw_filters if isinstance(f, dict)}
         settlement = str(filters.get("settlementDate"))
         if payload.get("limit") == 1:  # discovery probe: existence only
             probed["count"] += 1
             total = 3 if probed["count"] > 1 else 0
             return b"[]", [], {"record-total": str(total)}
         rows: list[dict[str, object]] = [
-            {"symbolCode": symbol, "issueName": symbol, "settlementDate": settlement,
-             "currentShortPositionQuantity": position}
+            {
+                "symbolCode": symbol,
+                "issueName": symbol,
+                "settlementDate": settlement,
+                "currentShortPositionQuantity": position,
+            }
             for symbol, position in (("AAA", 20), ("BBB", 20), ("CCC", 5))
         ]
         return (
-            json.dumps(rows).encode(), rows,
+            json.dumps(rows).encode(),
+            rows,
             {"record-total": str(len(rows))},
         )
 
@@ -951,9 +1168,7 @@ def test_live_leaderboard_explicit_date_fetches_exactly_that_date(
     assert first["fieldValue"] == SETTLEMENT
 
 
-def test_historical_leaderboard_empty_store_never_fetches(
-    data_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_historical_leaderboard_empty_store_never_fetches(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
     _install_finra_fetch_fake(monkeypatch, calls)
 
@@ -983,9 +1198,7 @@ def test_discovery_probe_uses_mock_dataset_in_mock_mode(monkeypatch: pytest.Monk
     assert all(name == "consolidatedShortInterestMock" for name in names)
 
 
-def test_live_fetch_failure_returns_error_not_raise(
-    data_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_live_fetch_failure_returns_error_not_raise(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_tickers(data_root)
     _seed_facts(data_root, _default_facts())
 

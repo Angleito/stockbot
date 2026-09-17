@@ -7,7 +7,6 @@ edgartools identity configuration lives behind the edgar boundary in
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -26,10 +25,8 @@ def get_data_root() -> Path:
         p = REPO_ROOT / p
     return p
 
-FINRA_TOKEN_URL = (
-    "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token"
-    "?grant_type=client_credentials"
-)
+
+FINRA_TOKEN_URL = "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token?grant_type=client_credentials"
 FINRA_API_BASE = "https://api.finra.org"
 EXA_API_BASE = "https://api.exa.ai"
 
@@ -102,9 +99,7 @@ def get_robinhood_mcp_url() -> str:
     # paths cannot accidentally direct Robinhood credentials to another host.
     from .robinhood.auth import validate_robinhood_server_url
 
-    return validate_robinhood_server_url(os.getenv(
-        "ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"
-    ))
+    return validate_robinhood_server_url(os.getenv("ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"))
 
 
 def broker_enabled() -> bool:
@@ -118,13 +113,13 @@ def exa_enabled() -> bool:
     return _env_bool("EXA_ENABLED")
 
 
-def get_exa_api_key() -> Optional[str]:
+def get_exa_api_key() -> str | None:
     """Exa API key, or None when unset (integration is optional)."""
     value = (os.getenv("EXA_API_KEY") or "").strip()
     return value or None
 
 
-def _env_optional(name: str) -> Optional[str]:
+def _env_optional(name: str) -> str | None:
     """Optional env value: stripped string, or None when unset/blank."""
     value = (os.getenv(name) or "").strip()
     return value or None
@@ -146,17 +141,17 @@ def google_data_enabled() -> bool:
     return _env_bool("GOOGLE_DATA_ENABLED")
 
 
-def get_google_cloud_project() -> Optional[str]:
+def get_google_cloud_project() -> str | None:
     """GCP project for BigQuery, or None when unset (source stays disabled)."""
     return _env_optional("GOOGLE_CLOUD_PROJECT")
 
 
-def get_datacommons_api_key() -> Optional[str]:
+def get_datacommons_api_key() -> str | None:
     """Data Commons API key, or None when unset (required by Data Commons)."""
     return _env_optional("DATACOMMONS_API_KEY")
 
 
-def get_google_cloud_api_key() -> Optional[str]:
+def get_google_cloud_api_key() -> str | None:
     """Google Cloud API key (YouTube Data API v3), or None when unset."""
     return _env_optional("GOOGLE_CLOUD_API_KEY")
 
@@ -206,11 +201,23 @@ def get_youtube_search_daily_limit() -> int:
         return 80
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"invalid YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}") from None
     if value <= 0:
         raise ValueError(f"non-positive YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}")
     return value
+
+
+def _youtube_gate() -> bool:
+    try:
+        limit = get_youtube_search_daily_limit()
+    except ValueError:
+        return False
+    return bool(get_google_cloud_api_key()) and limit > 0
+
+
+def _bigquery_gate() -> bool:
+    return bool(get_google_cloud_project()) and get_bq_max_bytes_per_query() > 0 and get_bq_monthly_bytes_limit() > 0
 
 
 def google_source_enabled(name: str) -> bool:
@@ -225,15 +232,7 @@ def google_source_enabled(name: str) -> bool:
         return False
     n = (name or "").strip().lower()
     if n == "youtube":
-        try:
-            limit = get_youtube_search_daily_limit()
-        except ValueError:
-            return False
-        return bool(get_google_cloud_api_key()) and limit > 0
+        return _youtube_gate()
     if n in ("datacommons", "data_commons", "data-commons", "macro", "macro_context"):
         return bool(get_datacommons_api_key())
-    return (
-        bool(get_google_cloud_project())
-        and get_bq_max_bytes_per_query() > 0
-        and get_bq_monthly_bytes_limit() > 0
-    )
+    return _bigquery_gate()

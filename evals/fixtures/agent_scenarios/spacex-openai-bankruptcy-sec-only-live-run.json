@@ -1,0 +1,168 @@
+{
+  "answer_excerpt": "Bottom line: SEC evidence shows no direct transmission channel from an OpenAI bankruptcy to SpaceX operations or balance sheet \u2014 both are private with no EDGAR issuer corpus, joint mentions are only parallel pre-IPO fund exposures, agreement/exhibit searches return only fund-level documents, and event feeds show no SpaceX-OpenAI link.\n\nMajor direct exposures (SEC-visible): None disclosed. SpaceX has no EDGAR issuer record (4349 third-party mentions only) and OpenAI has no EDGAR issuer record (3622 third-party mentions only), so no 10-K/10-Q/S-1 debt, guarantee or counterparty obligation is observable. Targeted agreement (376 hits) and contract-exhibit (277 hits) searches return only fund administration servicing agreements and ETF Trust exhibits (D)(1)(VII)-(XI), not a bilateral SpaceX-OpenAI operating contract.\n\nSecond-order: Co-holding contagion only. Genius 6-K groups SpaceX, Anthropic, OpenAI as the largest IPO calendar anchored names with exposure via ARK Venture, Destiny Tech100 and Fundrise; Kurv files separate SPAX and OPAI single-stock ETFs as distinct series. An OpenAI failure could therefore hit shared pre-IPO fund NAVs and IPO-window sentiment without impairing SpaceX standalone operations. Tesla filings treat SpaceX as a separate Musk-affiliated entity in proxy context, while Microsoft 8-Ks concentrate OpenAI exposure with no SpaceX link, and MSFT events since 2025 are only earnings/management changes.\n\nBull: Insulation plus surviving-asset rotation. Separate SPAX/OPAI vehicles and absence of bilateral exhibits support continuity; OpenAI distress could concentrate pre-IPO demand on SpaceX.\n\nBear: Opacity plus funding-sentiment spill. Private status means SEC cannot exclude undisclosed private contracts; shared fund complex and systemic AI-capex reliance via Microsoft imply funding-tightening risk.\n\nUncertainties: Whether any non-EDGAR private SpaceX-OpenAI contract, service, or financing exists outside disclosure scope.\n\nSEC-only limitations: This synthesis uses only EDGAR filing text, exhibits and 8-K event feeds; private company operations, launch/Starlink revenues, and non-filed contracts are outside SEC scope by definition.\n\nFiling refs: Genius 6-K 0001493152-26-027417 (2026-06-05 Ex99.2); Kurv N-1A 0001999371-26-003965 (2026-02-23 SPAX/OPAI); Tesla 8-K 0001628280-26-049213 (2026-07-22); Microsoft 8-Ks 0001193125-25-256310, 0001193125-26-027198, 0001193125-26-323632.",
+  "as_of": null,
+  "budget_cap": null,
+  "budget_used": 13,
+  "evidence_ids": [
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:1341c35d",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:ffd354b5",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:e3213af2",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:c5662d02",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:21fe16a8",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:f53c14e6",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:c5019e96",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:89e3cb79",
+    "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:f52b62d1"
+  ],
+  "family": "missing",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze",
+  "freeze_before": "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze",
+  "known_ats": [
+    "2026-02-23",
+    "2026-06-05",
+    "2026-07-22",
+    "2026-07-29",
+    "2026-09-16"
+  ],
+  "question": "What would happen to SpaceX were openai go bankrupt",
+  "scenario_name": "spacex-openai-bankruptcy-sec-only-live-run",
+  "session_id": "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2",
+  "tool_calls": [],
+  "trace": {
+    "branches_covered": [],
+    "claims": [
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Targeted EDGAR agreement and contract-exhibit searches return only fund-level documents \u2014 administration servicing agreements and ETF Trust exhibits \u2014 with no bilateral SpaceX-OpenAI operating contract exhibit disclosed."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Kurv ETF Trust files SpaceX and OpenAI as separate single-stock ETF series SPAX and OPAI with independent exposures, confirming market treatment as distinct underlyings rather than counterparties."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Microsoft material events since 2025 are earnings and management changes with no SpaceX-linked event, and SpaceX has no EDGAR issuer corpus, so SEC shows no event-driven transmission channel while non-EDGAR private contracts remain outside SEC scope by definition."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "inference",
+        "text": "[INFERENCE] Kurv files SpaceX and OpenAI as separate SPAX and OPAI single-stock ETFs, so OpenAI failure does not impair the SpaceX vehicle and may concentrate demand on SpaceX as the surviving marquee pre-IPO asset."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Agreement and contract-exhibit searches surface only fund servicing and trust exhibits rather than a bilateral operating contract, supporting SpaceX operational and balance-sheet insulation from OpenAI bankruptcy."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Genius 6-K frames SpaceX alongside OpenAI only as parallel IPO-pipeline exposures via ARK Venture, Destiny Tech100 and Fundrise, implying no dependency write-down for SpaceX if OpenAI drops out."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Both SpaceX and OpenAI being private with no EDGAR issuer corpus means SEC cannot exclude undisclosed private contracts, leaving OpenAI bankruptcy exposure to SpaceX opaque rather than proven zero."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] SEC bundles SpaceX and OpenAI in the same pre-IPO fund complex and agreement-search universe, so an OpenAI failure could impair shared fund NAVs, freeze the joint IPO window, and tighten private funding for SpaceX."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Concentration of EDGAR-visible OpenAI exposure in Microsoft 8-Ks highlights systemic AI-capex reliance that could spill to private-market risk appetite on which SpaceX depends, even without a direct SpaceX-OpenAI filing link."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Both SpaceX and OpenAI have no direct SEC EDGAR issuer record and are private with only third-party mentions, so no public filing channel for direct bankruptcy transmission is observable."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Targeted agreement and contract-exhibit searches return only fund administration servicing agreements and ETF Trust exhibits, with no bilateral SpaceX-OpenAI operating contract exhibit disclosed."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] Joint SEC treatment is parallel pre-IPO exposure only \u2014 Genius 6-K via ARK Venture/Destiny Tech100/Fundrise and Kurv separate SPAX and OPAI single-stock ETF series \u2014 indicating no disclosed operational dependency."
+      },
+      {
+        "claim_type": "",
+        "rendered_as": "observed_fact",
+        "text": "[DIRECTLY_SUPPORTED] EDGAR-visible affiliations are separated: Tesla treats SpaceX as separate Musk-affiliated entity, Microsoft concentrates OpenAI disclosure in 8-Ks, and MSFT material events since 2025 are earnings/management only with no SpaceX-linked event."
+      }
+    ],
+    "claims_by_type": {},
+    "committee_freeze_ids": [
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:1:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:1:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:1:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze"
+    ],
+    "coverage_complete": true,
+    "documents_opened": [],
+    "filings_opened": [
+      "0001193125-26-323632",
+      "0001493152-26-027417",
+      "0001628280-26-049213",
+      "0001999371-26-003965"
+    ],
+    "limitations": [],
+    "material_channels": [],
+    "navigation_evidence_ids": [
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:1341c35d",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:21fe16a8",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:89e3cb79",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:c5019e96",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:c5662d02",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:e3213af2",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:f52b62d1",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:f53c14e6",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:ev:ffd354b5"
+    ],
+    "passages_opened": [],
+    "raw_evidence_ids": [],
+    "roles_completed": [
+      "stockbot",
+      "bullbot",
+      "bearbot"
+    ],
+    "searches": [
+      "1bd04a6e21bb",
+      "7768855a3f91",
+      "a07169afb3c6",
+      "ddcb735e0cf3"
+    ],
+    "universal_absence_claims": [
+      "Bottom line: SEC evidence shows no direct transmission channel from an OpenAI bankruptcy to SpaceX operations or balance sheet \u2014 both are private with no EDGAR issuer corpus, joint mentions are only parallel pre-IPO fund exposures, agreement/exhibit searches return only fund-level documents, and event feeds show no SpaceX-OpenAI link."
+    ],
+    "waves": [
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:1:freeze",
+      "rs:6099bbe0-e80f-4d04-a800-e3a49a85e6b2:2:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "find_sec_entities",
+      "search_sec_filings",
+      "get_sec_document"
+    ],
+    "pit_as_of": null,
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze"
+    ]
+  }
+}

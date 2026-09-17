@@ -18,7 +18,7 @@ _HIGH_TRUST = {
 def _host(url: str) -> str | None:
     try:
         netloc = urlparse(url).netloc.lower().split(":")[0].rstrip(".")
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     return netloc or None
 

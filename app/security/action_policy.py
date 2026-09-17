@@ -80,6 +80,17 @@ TOOL_DOMAINS: dict[str, str] = {
     "thesis_refine": "financial_research",
     "thesis_watch": "financial_research",
     "thesis_journal": "financial_research",
+    "thesis_status": "financial_research",
+    "research_start": "financial_research",
+    "research_resume": "financial_research",
+    "research_status": "financial_research",
+    "research_cancel": "financial_research",
+    "research_read": "financial_research",
+    "research_read_search": "financial_research",
+    "research_add_evidence": "financial_research",
+    "research_submit_source_result": "financial_research",
+    "research_add_analysis": "financial_research",
+    "research_finalize": "financial_research",
     # Robinhood portfolio data (private).
     "evaluate_mandate": "portfolio_read",
     "get_portfolio_snapshot": "portfolio_read",
@@ -102,9 +113,7 @@ _POSSESSIVE_OWN_RE = re.compile(
     r"\b(?:my|i|you|user|we)\s+(?:own\w*|have\w*|hold\w*|held)\b",
     re.IGNORECASE,
 )
-_PORTFOLIO_NOUN_RE = re.compile(
-    r"\b(?:portfolio|position|holdings|balance|account)\b", re.IGNORECASE
-)
+_PORTFOLIO_NOUN_RE = re.compile(r"\b(?:portfolio|position|holdings|balance|account)\b", re.IGNORECASE)
 # Digit-runs (4+) or "$" amounts — the numeric side of portfolio context.
 _AMOUNT_TOKEN_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d{4,}\b")
 
@@ -117,10 +126,104 @@ class EgressDecision:
     reason: str | None
 
 
-def authorize_tool_call(
-    name: str, arguments: dict[str, object], run_security: RunSecurityContext
-) -> tuple[bool, str]:
+def _source_policy_mode(source_policy: dict[str, object]) -> str | None:
+    """Allowlist/all mode; None when the mode is unknown (caller reports it)."""
+    raw_mode = source_policy.get("mode", "all")
+    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else "all"
+    return mode if mode in ("all", "allowlist") else None
+
+
+def _denied_set(raw_denied: object) -> set[str]:
+    """Denied entries as lowercase strings; non-lists and non-strings ignored."""
+    if not isinstance(raw_denied, list):
+        return set()
+    return {s.strip().lower() for s in raw_denied if isinstance(s, str)}
+
+
+def _source_denied_hit(name: str, raw_denied: object) -> str | None:
+    """Denied-list hit reason; None when no denied entry matches."""
+    lowered = name.strip().lower()
+    if any(d and d in lowered for d in _denied_set(raw_denied)):
+        return f"POLICY_DENIED: tool {name!r} denied by session source_policy"
+    return None
+
+
+def _allowlist_set(raw_allowed: object) -> set[str] | None:
+    """Allowlist entries as lowercase strings; None when not a list."""
+    if not isinstance(raw_allowed, list):
+        return None
+    return {s.strip().lower() for s in raw_allowed if isinstance(s, str)}
+
+
+def _allowlist_match(name: str, allowed: set[str]) -> bool:
+    """True when the allowlist covers this tool (SEC tools via SEC_TOOLS only)."""
+    # ponytail: "sec" matches the SEC_TOOLS allowlist only; substring would also
+    # match "securities" (a FINRA tool) so it never falls through to substring.
+    if "sec" in allowed and is_sec_tool_name(name):
+        return True
+    return any(a and a in name.strip().lower() for a in allowed - {"sec"})
+
+
+def _allowlist_verdict(name: str, raw_allowed: object) -> str | None:
+    """Allowlist verdict: None when allowed, else the outside-allowlist reason."""
+    allowed = _allowlist_set(raw_allowed)
+    if allowed is None:
+        return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+    if _allowlist_match(name, allowed):
+        return None
+    return f"POLICY_DENIED: tool {name!r} outside session source allowlist"
+
+
+def source_denied_reason(name: str, source_policy: object) -> str | None:
+    """Deny reason when a session source_policy excludes this tool; None when allowed."""
+    if source_policy is None:
+        return None
+    if not isinstance(source_policy, dict):
+        return "session source_policy must be a mapping"
+    mode = _source_policy_mode(source_policy)
+    if mode is None:
+        return f"unknown source_policy mode {source_policy.get('mode')!r}"
+    hit = _source_denied_hit(name, source_policy.get("denied", []))
+    if hit is not None:
+        return hit
+    if mode == "all":
+        return None
+    return _allowlist_verdict(name, source_policy.get("allowed", []))
+
+
+def is_sec_tool_name(name: str) -> bool:
+    """True for SEC/financial-statement discovery tools; FINRA/Web/Market/Analyst excluded."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    try:
+        from app.research.agents.source_agent import SEC_TOOLS
+    except ImportError:
+        sec_tools: frozenset[str] = frozenset()
+        return TOOL_DOMAINS.get(name, "") != "portfolio_read" and name in sec_tools
+    if name in SEC_TOOLS:
+        return TOOL_DOMAINS.get(name) != "portfolio_read"
+    return False
+
+
+def _call_tool_inner(arguments: object) -> str | None:
+    """Inner tool name for a call_tool wrapper; None when absent/not-a-string."""
+    if not isinstance(arguments, dict):
+        return None
+    inner = arguments.get("name")
+    return inner.strip() if isinstance(inner, str) and inner.strip() else None
+
+
+def authorize_tool_call(name: str, arguments: dict[str, object], run_security: RunSecurityContext) -> tuple[bool, str]:
     """Gate one tool call against intent plus the explicit session grant."""
+    denied = source_denied_reason(name, getattr(run_security, "source_policy", None))
+    if denied is not None:
+        return False, denied
+    if name == "call_tool":
+        inner = _call_tool_inner(arguments)
+        if inner is not None:
+            inner_denied = source_denied_reason(inner, getattr(run_security, "source_policy", None))
+            if inner_denied is not None:
+                return False, inner_denied
     domain = TOOL_DOMAINS.get(name)
     if domain == "portfolio_read":
         if run_security.authorization.portfolio_read:
@@ -129,6 +232,11 @@ def authorize_tool_call(
     if domain is not None and domain in run_security.original_intent.permitted_domains:
         return True, ""
     return False, "tool call exceeds original user intent"
+
+
+def filter_allowed_tools(names: list[str], source_policy: object) -> list[str]:
+    """Discovery-safe allowlist: browse/search results minus source-denied tools (never bypasses)."""
+    return [name for name in names if source_denied_reason(name, source_policy) is None]
 
 
 def _portfolio_context(query: str) -> bool:
@@ -140,9 +248,7 @@ def _portfolio_context(query: str) -> bool:
     nouns = [i for i, token in enumerate(tokens) if _PORTFOLIO_NOUN_RE.search(token)]
     amounts = [i for i, token in enumerate(tokens) if _AMOUNT_TOKEN_RE.search(token)]
     return any(
-        abs(noun_index - amount_index) <= _EGRESS_TOKEN_WINDOW
-        for noun_index in nouns
-        for amount_index in amounts
+        abs(noun_index - amount_index) <= _EGRESS_TOKEN_WINDOW for noun_index in nouns for amount_index in amounts
     )
 
 
@@ -157,9 +263,7 @@ def private_pattern_hit(text: str) -> str | None:
     return None
 
 
-def authorize_egress(
-    destination: str, payload: object, run_security: RunSecurityContext
-) -> EgressDecision:
+def authorize_egress(destination: str, payload: object, run_security: RunSecurityContext) -> EgressDecision:
     """Block private data from leaving Stockbot to external destinations.
 
     Ordering invariant: once ANY private tool result has been ALLOWED into

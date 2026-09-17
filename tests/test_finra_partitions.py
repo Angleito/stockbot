@@ -11,13 +11,11 @@ from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
-import requests
 
 from app import finra_client
+from app.policy import LOCAL_CONTEXT
 from app.tool_render import render_tool_result
 from app.tools import execute_tool
-from app.policy import LOCAL_CONTEXT
-
 from tests.test_finra import (
     FakeCache,
     _as_seq,
@@ -55,9 +53,7 @@ def http(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("app.finra_client.requests.get", get_mock)
     monkeypatch.setattr("app.finra_client.requests.post", post_mock)
     monkeypatch.setattr("app.finra_client.get_finra_client_id", lambda: "client")
-    monkeypatch.setattr(
-        "app.finra_client.get_finra_client_secret", lambda: "secret"
-    )
+    monkeypatch.setattr("app.finra_client.get_finra_client_secret", lambda: "secret")
     return {"get": get_mock, "post": post_mock}
 
 
@@ -70,11 +66,7 @@ def _data_posts(post_mock: MagicMock):
 
 
 def _partitions_get_calls(get_mock: MagicMock):
-    return [
-        c.args[0]
-        for c in get_mock.call_args_list
-        if "/partitions/group/" in c.args[0]
-    ]
+    return [c.args[0] for c in get_mock.call_args_list if "/partitions/group/" in c.args[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +86,7 @@ def test_datapoints_ascending_sort_via_partitions_oldest_first(http: dict[str, M
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        value = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "settlementDate"
-        )
+        value = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "settlementDate")
         return _response(partition_rows[value])
 
     http["post"].side_effect = _respond
@@ -111,7 +99,8 @@ def test_datapoints_ascending_sort_via_partitions_oldest_first(http: dict[str, M
             "limit": 3,
             "sort_order": "asc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
@@ -155,7 +144,8 @@ def test_datapoints_multi_partition_queries_only_published_tuples(http: dict[str
             "limit": 3,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
@@ -190,11 +180,7 @@ def test_datapoints_ascending_multi_partition_oldest_first(http: dict[str, Magic
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        week = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "weekStartDate"
-        )
+        week = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "weekStartDate")
         return _response(rows_by_week[week])
 
     http["post"].side_effect = _respond
@@ -207,19 +193,13 @@ def test_datapoints_ascending_multi_partition_oldest_first(http: dict[str, Magic
             "limit": 2,
             "sort_order": "asc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     posts = _data_posts(http["post"])
     assert len(posts) == 2
-    weeks = [
-        next(
-            f["fieldValue"]
-            for f in p["compareFilters"]
-            if f["fieldName"] == "weekStartDate"
-        )
-        for p in posts
-    ]
+    weeks = [next(f["fieldValue"] for f in p["compareFilters"] if f["fieldName"] == "weekStartDate") for p in posts]
     assert weeks == ["2026-08-03", "2026-08-10"]
     dates = [r["summaryStartDate"] for r in _as_seq(result["records"])]
     assert dates == sorted(dates)
@@ -243,11 +223,7 @@ def test_datapoints_partition_budget_exhausted_errors(http: dict[str, MagicMock]
                 return _token_response()
             payload = kw["json"]
             assert isinstance(payload, dict)
-            week = next(
-                f["fieldValue"]
-                for f in payload["compareFilters"]
-                if f["fieldName"] == "weekStartDate"
-            )
+            week = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "weekStartDate")
             return _response(rows_by_week[week])
 
         http["post"].side_effect = _respond
@@ -260,7 +236,8 @@ def test_datapoints_partition_budget_exhausted_errors(http: dict[str, MagicMock]
                 "limit": 5,
                 "sort_order": "desc",
             },
-            model="test", context=LOCAL_CONTEXT,
+            model="test",
+            context=LOCAL_CONTEXT,
         )
         assert "error" in result
         assert "Narrow" in _error(result) or "narrow" in _error(result)
@@ -270,7 +247,9 @@ def test_datapoints_partition_budget_exhausted_errors(http: dict[str, MagicMock]
         monkeypatch.undo()
 
 
-def test_datapoints_empty_partitions_budget_exhaustion_errors(http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_datapoints_empty_partitions_budget_exhaustion_errors(
+    http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """All checked partitions return empty data but the budget ends before
     every relevant partition was examined: the request fails with the
     budget/narrowing error — never an unproven 'No data found' claim."""
@@ -291,7 +270,8 @@ def test_datapoints_empty_partitions_budget_exhaustion_errors(http: dict[str, Ma
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     posts = _data_posts(http["post"])
     assert len(posts) == 2  # exactly the budget; more tuples remain unchecked
@@ -302,7 +282,9 @@ def test_datapoints_empty_partitions_budget_exhaustion_errors(http: dict[str, Ma
 
 
 @pytest.mark.parametrize("status", [400, 500])
-def test_datapoints_failed_partitions_count_toward_budget(http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+def test_datapoints_failed_partitions_count_toward_budget(
+    http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
     """Repeated HTTP failures count against the fixed budget; the walk never
     continues through unlimited failing partitions."""
     monkeypatch.setattr(finra_client, "_MAX_PARTITION_QUERIES", 3)
@@ -323,7 +305,8 @@ def test_datapoints_failed_partitions_count_toward_budget(http: dict[str, MagicM
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     posts = _data_posts(http["post"])
     assert len(posts) == 3  # exactly the budget, no unlimited retries
@@ -347,11 +330,7 @@ def test_datapoints_complete_short_result_warns(http: dict[str, MagicMock]) -> N
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        week = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "weekStartDate"
-        )
+        week = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "weekStartDate")
         return _response(rows_by_week[week])
 
     http["post"].side_effect = _respond
@@ -364,7 +343,8 @@ def test_datapoints_complete_short_result_warns(http: dict[str, MagicMock]) -> N
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert len(_as_seq(result["records"])) == 3
@@ -388,7 +368,8 @@ def test_datapoints_unpartitioned_date_sort_rejected_before_http(http: dict[str,
             "ticker": "AAPL",
             "sort_fields": ["-lastUpdateDate"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "EQUAL" in _error(result)
@@ -413,7 +394,8 @@ def test_datapoints_date_range_sort_rejected_when_mapped_date_field(http: dict[s
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Date-range" in _error(result)
@@ -450,7 +432,8 @@ def test_datapoints_date_range_sort_still_walks_partition_field_ranges(http: dic
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["sort_source"] == "partitions"
@@ -478,7 +461,8 @@ def test_datapoints_non_date_sort_rejected_before_http(http: dict[str, MagicMock
             "ticker": "AAPL",
             "sort_fields": ["-currentShortPositionQuantity"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "EQUAL" in _error(result)
@@ -497,7 +481,8 @@ def test_datapoints_multi_field_sort_rejected_when_unpartitioned(http: dict[str,
             "ticker": "AAPL",
             "sort_fields": ["-settlementDate", "+currentShortPositionQuantity"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Multi-field" in _error(result)
@@ -512,11 +497,7 @@ def test_datapoints_partitions_cached_across_calls(http: dict[str, MagicMock]) -
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        value = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "settlementDate"
-        )
+        value = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "settlementDate")
         return _response(rows[value])
 
     http["post"].side_effect = _respond
@@ -545,9 +526,7 @@ def test_parse_partitions_preserves_ordered_tuples() -> None:
             {"partitions": ["2026-08-03", "T1"]},
         ]
     }
-    parsed = finra_client._parse_partitions(
-        raw, ("weekStartDate", "tierIdentifier")
-    )
+    parsed = finra_client._parse_partitions(raw, ("weekStartDate", "tierIdentifier"))
     assert parsed == [
         ("2026-08-10", "T1"),
         ("2026-08-10", "T2"),
@@ -557,9 +536,7 @@ def test_parse_partitions_preserves_ordered_tuples() -> None:
 
 def test_parse_partitions_drops_ambiguous_scalar_for_multi_field() -> None:
     raw: dict[str, object] = {"availablePartitions": ["2026-08-10"]}
-    parsed = finra_client._parse_partitions(
-        raw, ("weekStartDate", "tierIdentifier")
-    )
+    parsed = finra_client._parse_partitions(raw, ("weekStartDate", "tierIdentifier"))
     assert parsed == []  # a single value cannot be placed safely
 
 
@@ -572,9 +549,7 @@ def test_parse_partitions_drops_tuples_with_unexpected_extra_values() -> None:
             {"partitions": ["2026-08-03", "T1"]},
         ]
     }
-    parsed = finra_client._parse_partitions(
-        raw, ("weekStartDate", "tierIdentifier")
-    )
+    parsed = finra_client._parse_partitions(raw, ("weekStartDate", "tierIdentifier"))
     assert parsed == [("2026-08-03", "T1")]
 
 
@@ -588,11 +563,7 @@ def test_partition_cache_old_flattened_shape_ignored(http: dict[str, MagicMock],
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        value = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "settlementDate"
-        )
+        value = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "settlementDate")
         return _response(rows[value])
 
     http["post"].side_effect = _respond
@@ -615,9 +586,11 @@ def test_partition_cache_old_flattened_shape_ignored(http: dict[str, MagicMock],
         ["2026-08-01"],
     ]
     assert len(_partitions_get_calls(http["get"])) == 1
-    assert finra_client._partitions_mem[
-        ("production", "otcmarket/consolidatedshortinterest")
-    ] == [("2026-08-14",), ("2026-08-07",), ("2026-08-01",)]
+    assert finra_client._partitions_mem[("production", "otcmarket/consolidatedshortinterest")] == [
+        ("2026-08-14",),
+        ("2026-08-07",),
+        ("2026-08-01",),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -641,7 +614,8 @@ def test_datapoints_http_400_structured_error(http: dict[str, MagicMock]) -> Non
             "fields": ["settlementDate", "currentShortPositionQuantity"],
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "400" in _error(result)
@@ -675,10 +649,7 @@ def test_error_render_preserves_context() -> None:
 
 
 def test_error_sanitization_strips_credentials() -> None:
-    raw = (
-        '{"message": "nope", "access_token": "abc123", '
-        '"client_secret": "shh", "note": "Bearer tok-999 x"}'
-    )
+    raw = '{"message": "nope", "access_token": "abc123", "client_secret": "shh", "note": "Bearer tok-999 x"}'
     sanitized = finra_client._sanitize_finra_body(raw)
     assert "abc123" not in sanitized
     assert "shh" not in sanitized
@@ -705,7 +676,8 @@ def test_briefing_fresh_current(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2026-08-14"
@@ -720,7 +692,8 @@ def test_briefing_fresh_stale(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2025-12-01"
@@ -739,7 +712,8 @@ def test_briefing_no_date_field_unknown(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "finra/industrySnapshotFirmsByRegistrationType", "limit": 1},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] is None
@@ -758,7 +732,8 @@ def test_datapoints_fresh_stale_warning(http: dict[str, MagicMock]) -> None:
             "ticker": "AAPL",
             "filters": [{"field": "settlementDate", "value": "2025-12-01"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["as_of_date"] == "2025-12-01"
@@ -783,7 +758,8 @@ def test_environment_marker_mock_mode(http: dict[str, MagicMock], monkeypatch: p
             "ticker": "AAPL",
             "filters": [{"field": "settlementDate", "value": "2026-08-14"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["environment"] == "mock"

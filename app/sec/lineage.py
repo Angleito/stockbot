@@ -4,8 +4,18 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-_KEYS = ("concept", "value", "period_start", "period_end", "fiscal_year",
-         "fiscal_period", "filed_at", "accession", "source_url", "known_at")
+_KEYS = (
+    "concept",
+    "value",
+    "period_start",
+    "period_end",
+    "fiscal_year",
+    "fiscal_period",
+    "filed_at",
+    "accession",
+    "source_url",
+    "known_at",
+)
 
 _AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -18,7 +28,7 @@ def fact_lineage(row: Mapping[str, object]) -> dict[str, object]:
     """
     try:
         items: dict[str, object] = dict(row) if isinstance(row, dict) else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         items = {}
     return {key: items.get(key) for key in _KEYS}
 
@@ -35,7 +45,7 @@ def period_lineage(
     for row in rows or []:
         try:
             end = row.get("period_end")
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
         if not isinstance(end, str) or not end:
             continue
@@ -45,8 +55,9 @@ def period_lineage(
         group = sorted(groups[end], key=_filed_known)
         original = fact_lineage(group[0])
         latest = fact_lineage(group[-1])
-        out.append({"period_end": end, "originally_reported": original,
-                    "latest": latest, "restated": latest != original})
+        out.append(
+            {"period_end": end, "originally_reported": original, "latest": latest, "restated": latest != original}
+        )
     return out
 
 
@@ -68,8 +79,7 @@ def xbrl_lineage(
     params: list[str] = [entity_id, concept]
     if as_of is not None:
         if not isinstance(as_of, str) or not _AS_OF_RE.match(as_of):
-            raise ValueError(
-                f"invalid as_of date: {as_of!r} (expected YYYY-MM-DD)")
+            raise ValueError(f"invalid as_of date: {as_of!r} (expected YYYY-MM-DD)")
         frag, param = duckdb.as_of_clause(as_of)
         clause = f" AND {frag}"
         params.append(param)
@@ -78,6 +88,7 @@ def xbrl_lineage(
         "fiscal_period, filed_at, accession, source_url, known_at "
         "FROM financial_facts WHERE entity_id = ? AND concept = ?"
         f"{clause} ORDER BY period_end DESC, filed_at DESC, accession DESC",
-        params=params, data_root=root or duckdb.DEFAULT_DATA_ROOT,
+        params=params,
+        data_root=root or duckdb.DEFAULT_DATA_ROOT,
     )
     return [fact_lineage(row) for row in rows]

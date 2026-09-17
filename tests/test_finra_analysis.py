@@ -11,12 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app import finra_analysis
-from app import finra_client
+from app import finra_analysis, finra_client
 from app import tools as tools_module
-from app.tools import execute_tool
 from app.policy import LOCAL_CONTEXT
-
+from app.tools import execute_tool
 from tests.test_finra import (
     FakeCache,
     _as_dict,
@@ -56,9 +54,7 @@ def http(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("app.finra_client.requests.get", get_mock)
     monkeypatch.setattr("app.finra_client.requests.post", post_mock)
     monkeypatch.setattr("app.finra_client.get_finra_client_id", lambda: "client")
-    monkeypatch.setattr(
-        "app.finra_client.get_finra_client_secret", lambda: "secret"
-    )
+    monkeypatch.setattr("app.finra_client.get_finra_client_secret", lambda: "secret")
     return {"get": get_mock, "post": post_mock}
 
 
@@ -98,7 +94,9 @@ def _short_interest_rows(n: int = 3):
         ("get_threshold_securities", {"ticker": "AAPL"}),
     ],
 )
-def test_analysis_tools_never_return_raw_records(http: dict[str, MagicMock], tool: str, args: dict[str, object]) -> None:
+def test_analysis_tools_never_return_raw_records(
+    http: dict[str, MagicMock], tool: str, args: dict[str, object]
+) -> None:
     rows = (
         [{"issueSymbolIdentifier": "AAPL", "tradeDate": "2026-08-14", "issueName": "RawCo Inc."}]
         if tool == "get_threshold_securities"
@@ -131,7 +129,8 @@ def test_numeric_summaries(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     stats = _as_dict(_as_dict(_as_dict(result["metrics"])["fields"])["currentShortPositionQuantity"])
@@ -150,7 +149,8 @@ def test_latest_vs_prior_change_and_percent(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     lvp = _as_dict(result["metrics"])["latest_vs_prior"]
@@ -170,7 +170,8 @@ def test_date_aware_ordering_and_coverage_dates(http: dict[str, MagicMock]) -> N
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     coverage = _as_dict(result["coverage"])
@@ -178,7 +179,8 @@ def test_date_aware_ordering_and_coverage_dates(http: dict[str, MagicMock]) -> N
     assert coverage["last_date"] == "2026-08-14"
     # Latest-vs-prior reflects the newest date even though input was unsorted.
     entry = next(
-        e for e in _as_seq(_as_dict(result["metrics"])["latest_vs_prior"])
+        e
+        for e in _as_seq(_as_dict(result["metrics"])["latest_vs_prior"])
         if e["field"] == "currentShortPositionQuantity"
     )
     assert entry["latest_date"] == "2026-08-14"
@@ -202,7 +204,8 @@ def test_categorical_breakdown(http: dict[str, MagicMock]) -> None:
             "start_date": "2026-08-14",
             "end_date": "2026-08-14",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _as_dict(_as_dict(_as_dict(result["metrics"])["categorical"])["productCategory"]) == {
@@ -220,21 +223,23 @@ def test_missing_value_warnings(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert any("currentShortPositionQuantity" in w and "2/2" in w for w in _as_seq(result["warnings"]))
 
 
 def test_partial_coverage_warning(http: dict[str, MagicMock]) -> None:
-    rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14"} for _ in range(
-        finra_analysis.ANALYSIS_MAX_RECORDS + 5
-    )]
+    rows = [
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-14"} for _ in range(finra_analysis.ANALYSIS_MAX_RECORDS + 5)
+    ]
     http["post"].side_effect = [_token_response(), _response(rows)]
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _as_dict(result["coverage"])["complete"] is False
@@ -257,7 +262,8 @@ def test_pagination_header_driven(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 17
@@ -271,7 +277,8 @@ def test_pagination_estimate_when_header_absent(http: dict[str, MagicMock]) -> N
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL", "limit": 2},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] is None
@@ -297,15 +304,16 @@ def test_coverage_query_incomplete_when_total_exceeds_page(http: dict[str, Magic
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = _as_dict(result["coverage"])
     assert cov["rows_matched"] == 3
     assert cov["rows_analyzed"] == 3
-    assert cov["page_complete"] is True          # all page rows analyzed
-    assert cov["query_complete"] is False        # 17 matches, page holds 3
-    assert cov["analysis_complete"] is False     # metrics miss 14 records
+    assert cov["page_complete"] is True  # all page rows analyzed
+    assert cov["query_complete"] is False  # 17 matches, page holds 3
+    assert cov["analysis_complete"] is False  # metrics miss 14 records
 
 
 def test_coverage_complete_single_page(http: dict[str, MagicMock]) -> None:
@@ -321,7 +329,8 @@ def test_coverage_complete_single_page(http: dict[str, MagicMock]) -> None:
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = _as_dict(result["coverage"])
@@ -333,8 +342,7 @@ def test_coverage_complete_single_page(http: dict[str, MagicMock]) -> None:
 
 def test_coverage_analysis_incomplete_at_internal_cap(http: dict[str, MagicMock]) -> None:
     rows = [
-        {"symbolCode": "AAPL", "settlementDate": "2026-08-14"}
-        for _ in range(finra_analysis.ANALYSIS_MAX_RECORDS + 5)
+        {"symbolCode": "AAPL", "settlementDate": "2026-08-14"} for _ in range(finra_analysis.ANALYSIS_MAX_RECORDS + 5)
     ]
     http["post"].side_effect = [
         _token_response(),
@@ -343,7 +351,8 @@ def test_coverage_analysis_incomplete_at_internal_cap(http: dict[str, MagicMock]
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = _as_dict(result["coverage"])
@@ -366,7 +375,8 @@ def test_coverage_unknown_when_record_total_missing(http: dict[str, MagicMock]) 
             "ticker": "AAPL",
             "limit": 3,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     cov = _as_dict(result["coverage"])
@@ -388,7 +398,8 @@ def test_datapoints_missing_fields_rejected(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "get_finra_datapoints",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "fields" in _error(result)
@@ -406,7 +417,8 @@ def test_datapoints_empty_fields_rejected(http: dict[str, MagicMock]) -> None:
             "fields": [],
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "fields" in _error(result)
@@ -420,7 +432,8 @@ def test_datapoints_unbounded_rejected(http: dict[str, MagicMock]) -> None:
             "dataset": "otcMarket/consolidatedShortInterest",
             "fields": ["settlementDate"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "narrowing" in _error(result)
@@ -436,7 +449,8 @@ def test_datapoints_unknown_field_rejected(http: dict[str, MagicMock]) -> None:
             "fields": ["notARealField"],
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in _error(result)
@@ -454,7 +468,8 @@ def test_datapoints_forwards_only_selected_fields(http: dict[str, MagicMock]) ->
             "ticker": "AAPL",
             "limit": 2,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -476,7 +491,8 @@ def test_datapoints_default_limit_ten_and_max_twenty_five(http: dict[str, MagicM
             "fields": ["settlementDate"],
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in default_result, default_result
     assert _data_body(http["post"])["limit"] == 10
@@ -490,7 +506,8 @@ def test_datapoints_default_limit_ten_and_max_twenty_five(http: dict[str, MagicM
             "ticker": "AAPL",
             "limit": 999,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in big_result, big_result
     assert _data_body(http["post"])["limit"] == 25
@@ -511,7 +528,8 @@ def test_datapoints_pagination_metadata(http: dict[str, MagicMock]) -> None:
             "ticker": "AAPL",
             "limit": 2,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 9
@@ -537,7 +555,8 @@ def test_datapoints_sort_fields_in_payload(http: dict[str, MagicMock]) -> None:
             "filters": [{"field": "settlementDate", "value": "2026-08-14"}],
             "sort_fields": ["-settlementDate"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -556,7 +575,8 @@ def test_datapoints_invalid_sort_field_rejected_before_http(http: dict[str, Magi
             "ticker": "AAPL",
             "sort_fields": ["-notARealField"],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in _error(result)
@@ -574,7 +594,8 @@ def test_datapoints_sort_order_requires_date_field(http: dict[str, MagicMock]) -
             "filters": [{"field": "registrationTypeCode", "value": "BD"}],
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "no date field" in _error(result)
@@ -593,7 +614,8 @@ def test_datapoints_sort_order_and_sort_fields_conflict(http: dict[str, MagicMoc
             "sort_fields": ["-settlementDate"],
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "not both" in _error(result)
@@ -628,11 +650,7 @@ def test_datapoints_latest_five_returns_descending_dates(http: dict[str, MagicMo
             return _token_response()
         payload = kw["json"]
         assert isinstance(payload, dict)
-        date_filter = next(
-            f["fieldValue"]
-            for f in payload["compareFilters"]
-            if f["fieldName"] == "settlementDate"
-        )
+        date_filter = next(f["fieldValue"] for f in payload["compareFilters"] if f["fieldName"] == "settlementDate")
         return _response(partition_rows[date_filter])
 
     http["post"].side_effect = _respond
@@ -645,7 +663,8 @@ def test_datapoints_latest_five_returns_descending_dates(http: dict[str, MagicMo
             "limit": 5,
             "sort_order": "desc",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     # Two partition queries (08-14 fills 2, 08-07 fills the remaining 3),
@@ -673,9 +692,16 @@ def test_datapoints_latest_five_returns_descending_dates(http: dict[str, MagicMo
 def test_datapoints_more_than_ten_fields_rejected(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [_token_response()]
     fields = [
-        "issueSymbolIdentifier", "issueName", "firmCRDNumber", "MPID",
-        "marketParticipantName", "tierIdentifier", "tierDescription",
-        "summaryStartDate", "totalWeeklyTradeCount", "totalWeeklyShareQuantity",
+        "issueSymbolIdentifier",
+        "issueName",
+        "firmCRDNumber",
+        "MPID",
+        "marketParticipantName",
+        "tierIdentifier",
+        "tierDescription",
+        "summaryStartDate",
+        "totalWeeklyTradeCount",
+        "totalWeeklyShareQuantity",
         "productTypeCode",  # 11th valid field on weeklySummary
     ]
     result = execute_tool(
@@ -685,7 +711,8 @@ def test_datapoints_more_than_ten_fields_rejected(http: dict[str, MagicMock]) ->
             "fields": fields,
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "10" in _error(result)
@@ -696,9 +723,13 @@ def test_datapoints_ten_fields_accepted(http: dict[str, MagicMock]) -> None:
     rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14"}]
     http["post"].side_effect = [_token_response(), _response(rows)]
     fields = [
-        "symbolCode", "issueName", "settlementDate",
-        "currentShortPositionQuantity", "previousShortPositionQuantity",
-        "averageDailyVolumeQuantity", "daysToCoverQuantity",
+        "symbolCode",
+        "issueName",
+        "settlementDate",
+        "currentShortPositionQuantity",
+        "previousShortPositionQuantity",
+        "averageDailyVolumeQuantity",
+        "daysToCoverQuantity",
         "shortInterestChangePercentage",
     ]
     result = execute_tool(
@@ -708,7 +739,8 @@ def test_datapoints_ten_fields_accepted(http: dict[str, MagicMock]) -> None:
             "fields": fields,
             "ticker": "AAPL",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
 
@@ -731,7 +763,5 @@ def test_finra_schema_dispatch_parity() -> None:
     }
     schema_names = _tool_names(tools_module.TOOLS)
     assert finra_names <= schema_names, "FINRA schema missing from TOOLS"
-    assert set(tools_module._FINRA_HANDLERS) == finra_names, (
-        "FINRA dispatch registry out of sync with schemas"
-    )
+    assert set(tools_module._FINRA_HANDLERS) == finra_names, "FINRA dispatch registry out of sync with schemas"
     assert all(callable(h) for h in tools_module._FINRA_HANDLERS.values())

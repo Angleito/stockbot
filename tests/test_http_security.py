@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app.robinhood.auth import OAuthConfig, OAuthStoreError, load_tokens_for_origin, save_tokens
+from app.robinhood.auth import (
+    OAuthConfig,
+    OAuthStoreError,
+    load_tokens_for_origin,
+    save_tokens,
+)
 from app.robinhood.client import RobinhoodClient
 
 

@@ -10,6 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
 import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -25,6 +26,7 @@ export function toolCallRequest(
  bridgeQueueMs = 0,
  dataRoot?: string,
  asOf?: string,
+ researchContext?: { sessionId: string; jobId?: string },
 ): Json {
  const req: Json = {
   id,
@@ -37,13 +39,19 @@ export function toolCallRequest(
  };
  if (dataRoot) req.data_root = dataRoot;
  if (asOf) req.as_of = asOf;
+ if (researchContext?.sessionId) req.active_research_session_id = researchContext.sessionId;
+ if (researchContext?.jobId) req.active_research_job_id = researchContext.jobId;
  return req;
 }
 
 export function bridgeModelText(bridge: Json): string {
  const result = bridge.result;
- if (result && typeof result === "object" && typeof (result as Json).content === "string") {
-  return (result as Json).content as string;
+ if (result && typeof result === "object") {
+  // Tool results carry prose only. The session's final answer is rendered once
+  // by the driver (renderFinalAnswer) at agent_end; the research_finalize card
+  // stays a short confirmation, never a second copy of the answer.
+  const content = (result as Json).content;
+  if (typeof content === "string" && content) return content;
  }
  return JSON.stringify(bridge);
 }
@@ -140,7 +148,7 @@ function spawnPythonBridge(): ChildProcessWithoutNullStreams {
 
 export function createBridgeClient(
  spawnBridge: () => ChildProcessWithoutNullStreams = spawnPythonBridge,
-): { callBridge: (req: Json, timeoutMs?: number, fatal?: boolean) => Promise<Json> } {
+): { callBridge: (req: Json, timeoutMs?: number, fatal?: boolean) => Promise<Json>; close: () => void } {
  // --- bridge process (JSONL stdio; ID-correlated, 4 concurrent tool calls) ---
  let proc: ChildProcessWithoutNullStreams | null = null;
  let buf = "";
@@ -150,6 +158,7 @@ export function createBridgeClient(
  const permitQueue: Array<() => void> = [];
  const terminatedRuns = new Map<string, Promise<void>>();
  const terminatedMessages = new Map<string, string>();
+ let closed = false;
 
  function acquire(): Promise<number> {
   if (permits > 0) {
@@ -203,6 +212,15 @@ export function createBridgeClient(
   }
   pending.clear();
  }
+ function close(): void {
+  if (closed) return;
+  closed = true;
+  const child = proc;
+  if (child) recycle(child);
+  permits = 4;
+  const queued = permitQueue.splice(0);
+  for (const resume of queued) resume();
+ }
 
  function pump(child: ChildProcessWithoutNullStreams) {
   child.stdout.on("data", (chunk) => {
@@ -237,8 +255,8 @@ export function createBridgeClient(
   child.on("close", dead);
   child.on("error", dead);
  }
-
  function ensureBridge(): boolean {
+  if (closed) return false;
   if (proc) return true;
   try {
    proc = spawnBridge();
@@ -381,12 +399,20 @@ export function createBridgeClient(
   }
  }
 
- return { callBridge };
+ return { callBridge, close };
 }
 
 export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: () => ChildProcessWithoutNullStreams) {
  registerYoutubeAnalytics(pi);
- const { callBridge } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
+ const { callBridge, close } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
+ setResearchBridge((req) => callBridge(req));
+ pi.on("session_shutdown", () => {
+  try {
+   close();
+  } catch {
+   // already closed
+  }
+ });
 
  // --- describe: prompt + RESEARCH tool registry ---
  const [describe, doctor] = await Promise.all([callBridge({ op: "describe" }, 30_000), callBridge({ op: "doctor" }, 30_000)]);
@@ -454,7 +480,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       routing.assistedSearchCalls++;
      }
     }
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId)));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId), researchContextForRun(runId)));
     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
     const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
     const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");
@@ -592,6 +618,21 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    blocks++;
    return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
   }
+  // Stage gate (UX-only; the kernel gate is authoritative): staged research runs
+  // may only use stage-appropriate tools. Unknown stages fail open.
+  try {
+   const rawArgs: unknown = (event as unknown as Json).args ?? (event as unknown as Json).params;
+   const inner: unknown = event.toolName === "call_tool" && rawArgs && typeof rawArgs === "object" ? (rawArgs as Json).name : undefined;
+   const target = typeof inner === "string" && inner ? inner : event.toolName;
+   const reason = blockReasonForRun(runId, target);
+   if (reason) {
+    emit({ event: "security_block", tool: target, reason });
+    blocks++;
+    return { block: true, reason };
+   }
+  } catch {
+   // fail open; the kernel gate still enforces.
+  }
  });
 
  // --- lifecycle forwarding (step 8) + status pane (step 9) ---
@@ -611,6 +652,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   return q.trim().split(/\s+/).length <= 2;
  }
  const dataRoots = new Map<string, string>();
+ const stagedResearchRuns = new Set<string>();
  const doneFiles = new Map<string, string>();
  const asOfs = new Map<string, string>();
  let seq = 0;
@@ -701,6 +743,120 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
   refreshStatus(lastCtx);
  });
+
+ // --- operator slash commands ---
+ // /research delegates to the staged ResearchDirector driver (internal create +
+ // follow-up prompts); /research-status only phrases the tool call and lets the
+ // agent run it. No policy or synthesis lives here.
+ pi.registerCommand("research", {
+  description: 'Start a persisted research session: /research <question> (staged driver: create, fetch, freeze, trio, finalize)',
+  handler: async (args) => {
+   const question = args.trim();
+   if (!question) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-command",
+      content: 'Ask the operator for a research question, then call call_tool with name="research_start" and arguments={"question": ...}.',
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+   }
+   // Establish the trusted run before staging: the follow-up turn's
+   // agent_start must preserve (not rotate) this id and its data root.
+   clearResearchRun(runId);
+   stagedResearchRuns.delete(runId);
+   const stagedId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = stagedId ? stagedId : crypto.randomUUID();
+   const stagedRoot = (process.env.STOCKBOT_DATA_DIR ?? "").trim();
+   if (stagedRoot) dataRoots.set(runId, stagedRoot);
+   else dataRoots.delete(runId);
+   const stagedAsOf = (process.env.STOCKBOT_AS_OF ?? "").trim();
+   if (stagedAsOf) asOfs.set(runId, stagedAsOf);
+   else asOfs.delete(runId);
+   stagedResearchRuns.add(runId);
+   try {
+    const { prompt } = await startResearch(question, runId, dataRoots.get(runId), asOfs.get(runId));
+    await pi.sendMessage(
+     { customType: "stockbot-research-command", content: prompt, display: true },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch (err) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-command",
+      content: `Research start failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only.`,
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   }
+  },
+ });
+ pi.registerCommand("research-status", {
+  description: 'Show a research session: /research-status <session_id> (Call call_tool with name="research_status")',
+  handler: async (args) => {
+   const sessionId = args.trim();
+   await pi.sendMessage(
+    {
+     customType: "stockbot-research-status-command",
+     content: sessionId
+      ? `Call call_tool with name="research_status" and arguments={"session_id": "${sessionId}"}.`
+      : 'Ask the operator for a research session id, then call call_tool with name="research_status" and arguments={"session_id": ...}.',
+     display: true,
+    },
+    { triggerTurn: true, deliverAs: "followUp" },
+   );
+  },
+ });
+ pi.registerCommand("research-resume", {
+  description: 'Re-attach to a persisted research session: /research-resume <session_id> (staged driver resumes: fetch, trio, or final prompt)',
+  handler: async (args) => {
+   const sessionId = args.trim();
+   if (!sessionId) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-resume-command",
+      content: 'Ask the operator for a research session id, then run /research-resume <session_id>.',
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return;
+   }
+   // Same trusted-run setup as /research: the follow-up turn's agent_start
+   // must preserve (not rotate) this id and its data root.
+   clearResearchRun(runId);
+   stagedResearchRuns.delete(runId);
+   const stagedId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = stagedId ? stagedId : crypto.randomUUID();
+   const stagedRoot = (process.env.STOCKBOT_DATA_DIR ?? "").trim();
+   if (stagedRoot) dataRoots.set(runId, stagedRoot);
+   else dataRoots.delete(runId);
+   const stagedAsOf = (process.env.STOCKBOT_AS_OF ?? "").trim();
+   if (stagedAsOf) asOfs.set(runId, stagedAsOf);
+   else asOfs.delete(runId);
+   stagedResearchRuns.add(runId);
+   try {
+    const { prompt } = await resumeResearch(sessionId, runId, dataRoots.get(runId), asOfs.get(runId));
+    await pi.sendMessage(
+     { customType: "stockbot-research-resume-command", content: prompt, display: true },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch (err) {
+    await pi.sendMessage(
+     {
+      customType: "stockbot-research-resume-command",
+      content: `Research resume failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only.`,
+      display: true,
+     },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   }
+  },
+ });
+
  pi.on("agent_start", () => {
   // A queued routing continuation reuses the same run, recorder/session,
   // active tools, and routing state instead of starting a second bridge run.
@@ -709,8 +865,11 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    return;
   }
   resetRouting();
-  const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
-  runId = trustedRunId ? trustedRunId : crypto.randomUUID();
+  if (!stagedResearchRuns.has(runId)) {
+   clearResearchRun(runId);
+   const trustedRunId = (process.env.STOCKBOT_RUN_ID ?? "").trim();
+   runId = trustedRunId ? trustedRunId : crypto.randomUUID();
+  }
   seq = 0;
   toolStartedAt.clear();
   // Routing/completion bind from process environment only. Prompt text
@@ -809,10 +968,37 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   const assistants = messages.filter((m) => m.role === "assistant");
   const last = assistants[assistants.length - 1] as Json | undefined;
   const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
-  const answer = blocks
+  let answer = blocks
    .filter((b) => b.type === "text" && typeof b.text === "string")
    .map((b) => b.text as string)
    .join("\n");
+  // Staged ResearchDirector: null when no /research run is staged for this
+  // run id, so non-driver turns fall through untouched. A stage prompt queues
+  // one follow-up turn (mirroring the routing continuation above); completion
+  // falls through with the authoritative kernel answer.
+  let driver: Advance = null;
+  try {
+   driver = await advanceOnAgentEnd(runId, answer, dataRoots.get(runId), asOfs.get(runId));
+  } catch (err) {
+   console.error(`[stockbot] research director advance failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (driver && !driver.done) {
+   try {
+    pi.sendMessage(
+     { customType: "stockbot-research-stage", content: driver.prompt, display: false },
+     { triggerTurn: true, deliverAs: "followUp" },
+    );
+   } catch {
+    // best-effort follow-up; the next turn re-drives the same stage
+   }
+   return;
+  }
+  // Single user-facing render: the staged driver renders the persisted
+  // final_result exactly once (renderFinalAnswer) and its answer replaces the
+  // model's chat text here. The finalize card is a short confirmation, so the
+  // answer reaches the user/bridge/done-file once — never as a second render
+  // alongside a "finalized" note. Non-research turns keep the model text.
+  if (driver && driver.done && driver.answer) answer = driver.answer;
   const hasEvidence = routing.successfulResearchToolNames.length > 0;
   await emit({
    event: "routing_metrics",
@@ -847,6 +1033,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     // observability never breaks research
    }
   }
+  stagedResearchRuns.delete(runId);
   doneFiles.delete(runId);
   dataRoots.delete(runId);
   asOfs.delete(runId);

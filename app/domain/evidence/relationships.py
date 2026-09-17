@@ -10,12 +10,19 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-STATUSES = frozenset({
-    "observed", "candidate", "verified", "rejected",
-    "expired", "superseded", "unknown",
-})
+STATUSES = frozenset(
+    {
+        "observed",
+        "candidate",
+        "verified",
+        "rejected",
+        "expired",
+        "superseded",
+        "unknown",
+    }
+)
 
 ACTORS = frozenset({"deterministic", "extractor", "human", "evaluation"})
 
@@ -25,17 +32,19 @@ AUTO_VERIFY_MIN_CONFIDENCE = 0.95
 
 #: Deterministic source-encoded roles verify directly, bypassing the
 #: two-source semantic rule. Everything else uses the conservative rule.
-DETERMINISTIC_TYPES = frozenset({
-    "beneficial_owner",
-    "insider_owner",
-    "holding_manager",
-    "transaction_party",
-    "offering_party",
-})
+DETERMINISTIC_TYPES = frozenset(
+    {
+        "beneficial_owner",
+        "insider_owner",
+        "holding_manager",
+        "transaction_party",
+        "offering_party",
+    }
+)
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_label(raw: object) -> str:
@@ -76,6 +85,8 @@ class RelationshipEvidence:
             "is_counterevidence": self.is_counterevidence,
             "known_at": self.known_at,
         }
+
+
 @dataclass(frozen=True)
 class RelationshipRevision:
     revision_id: str
@@ -126,10 +137,17 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}:{uuid.uuid4().hex[:12]}"
 
 
-def _record(rel: Relationship, prev: str | None, new: str, actor: str,
-            reason: str, *, known_at: str | None = None,
-            superseded: str | None = None,
-            recorded_at: str | None = None) -> RelationshipRevision:
+def _record(
+    rel: Relationship,
+    prev: str | None,
+    new: str,
+    actor: str,
+    reason: str,
+    *,
+    known_at: str | None = None,
+    superseded: str | None = None,
+    recorded_at: str | None = None,
+) -> RelationshipRevision:
     if actor not in ACTORS:
         raise ValueError(f"actor must be one of {sorted(ACTORS)}, got {actor!r}")
     if new not in STATUSES:
@@ -137,9 +155,13 @@ def _record(rel: Relationship, prev: str | None, new: str, actor: str,
     rev = RelationshipRevision(
         revision_id=f"{rel.relationship_id}:r{len(rel.revisions) + 1}",
         relationship_id=rel.relationship_id,
-        previous_status=prev, new_status=new, actor=actor, reason=reason,
+        previous_status=prev,
+        new_status=new,
+        actor=actor,
+        reason=reason,
         recorded_at=recorded_at or _utcnow(),
-        superseded_revision_id=superseded if superseded is not None
+        superseded_revision_id=superseded
+        if superseded is not None
         else (rel.current_revision_id if prev != new else None),
         known_at=known_at or rel.known_at,
     )
@@ -157,130 +179,269 @@ def _check_as_of(as_of: str | None) -> str | None:
     return as_of
 
 
-def validate_relationship(rel: Relationship, *, as_of: str | None = None,
-                           endpoints_verified: dict[str, bool] | None = None) -> list[str]:
-    """Generic validation -> error codes; empty means valid."""
-    errors: list[str] = []
+def _endpoint_errors(rel: Relationship) -> list[str]:
+    """Missing/self-loop endpoint arm (existing boundary)."""
     if not rel.from_entity_id or not rel.to_entity_id:
-        errors.append("unresolved-endpoint")
-    elif rel.from_entity_id == rel.to_entity_id:
-        errors.append("invalid-direction")
+        return ["unresolved-endpoint"]
+    if rel.from_entity_id == rel.to_entity_id:
+        return ["invalid-direction"]
+    return []
+
+
+def _span_errors(rel: Relationship) -> list[str]:
+    """Empty source-span arm (existing boundary)."""
     for ev in rel.supporting():
         if not (ev.source_span or "").strip():
-            errors.append(f"empty-span:{ev.evidence_id}")
-            break
-    if as_of is not None:
-        for ev in rel.supporting():
-            if not ev.known_at or ev.known_at[:10] > as_of:
-                errors.append("pit-unsafe-evidence")
-                break
-    if endpoints_verified is not None:
-        for eid in (rel.from_entity_id, rel.to_entity_id):
-            if eid is not None and endpoints_verified.get(eid) is False:
-                errors.append(f"endpoint-conflict:{eid}")
-                break
-    if rel.relationship_type in DETERMINISTIC_TYPES:
-        for ev in rel.supporting():
-            if not ev.accession or not ev.document_name:
-                errors.append(f"deterministic-missing-provenance:{ev.evidence_id}")
-                break
-    return errors
+            return [f"empty-span:{ev.evidence_id}"]
+    return []
 
 
-def _auto_verify_errors(rel: Relationship, *, as_of: str | None,
-                        endpoints_verified: dict[str, bool] | None) -> list[str]:
-    """Conservative rule -> blocking reasons; empty means verify."""
-    reasons = validate_relationship(
-        rel, as_of=as_of, endpoints_verified=endpoints_verified)
-    supporting = rel.supporting()
-    sources = {(e.accession, e.document_name) for e in supporting
-               if e.accession and e.document_name}
-    if len(sources) < 2:
-        reasons.append("needs-two-distinct-sources")
+def _pit_errors(rel: Relationship, as_of: str) -> list[str]:
+    """PIT-unsafe evidence arm (existing boundary)."""
+    for ev in rel.supporting():
+        if not ev.known_at or ev.known_at[:10] > as_of:
+            return ["pit-unsafe-evidence"]
+    return []
+
+
+def _conflict_errors(rel: Relationship, endpoints_verified: dict[str, bool]) -> list[str]:
+    """Endpoint-conflict arm (existing boundary)."""
+    for eid in (rel.from_entity_id, rel.to_entity_id):
+        if eid is not None and endpoints_verified.get(eid) is False:
+            return [f"endpoint-conflict:{eid}"]
+    return []
+
+
+def _provenance_errors(rel: Relationship) -> list[str]:
+    """Deterministic provenance arm (existing boundary)."""
+    for ev in rel.supporting():
+        if not ev.accession or not ev.document_name:
+            return [f"deterministic-missing-provenance:{ev.evidence_id}"]
+    return []
+
+
+def _sources_of(rel: Relationship) -> set[tuple[str | None, str | None]]:
+    """Distinct (accession, document) pairs (existing boundary)."""
+    return {(e.accession, e.document_name) for e in rel.supporting() if e.accession and e.document_name}
+
+
+def _endpoint_rule_errors(rel: Relationship, endpoints_verified: dict[str, bool] | None) -> list[str]:
+    """Unverified-endpoint arm of the conservative rule (existing boundary)."""
+    reasons: list[str] = []
     for eid in (rel.from_entity_id, rel.to_entity_id):
         if eid is None:
             continue
         if endpoints_verified is None or endpoints_verified.get(eid) is not True:
             reasons.append(f"endpoint-unverified:{eid}")
-    if supporting:
-        floor = min((e.confidence or 0.0) for e in supporting)
-        if floor < AUTO_VERIFY_MIN_CONFIDENCE:
-            reasons.append(f"min-confidence-{floor:.2f}-below-0.95")
-    else:
-        reasons.append("no-supporting-evidence")
+    return reasons
+
+
+def _confidence_error(rel: Relationship) -> list[str]:
+    """Minimum-confidence arm of the conservative rule (existing boundary)."""
+    supporting = rel.supporting()
+    if not supporting:
+        return ["no-supporting-evidence"]
+    floor = min((e.confidence or 0.0) for e in supporting)
+    if floor < AUTO_VERIFY_MIN_CONFIDENCE:
+        return [f"min-confidence-{floor:.2f}-below-0.95"]
+    return []
+
+
+def validate_relationship(
+    rel: Relationship, *, as_of: str | None = None, endpoints_verified: dict[str, bool] | None = None
+) -> list[str]:
+    """Generic validation -> error codes; empty means valid."""
+    errors: list[str] = []
+    errors.extend(_endpoint_errors(rel))
+    errors.extend(_span_errors(rel))
+    if as_of is not None:
+        errors.extend(_pit_errors(rel, as_of))
+    if endpoints_verified is not None:
+        errors.extend(_conflict_errors(rel, endpoints_verified))
+    if rel.relationship_type in DETERMINISTIC_TYPES:
+        errors.extend(_provenance_errors(rel))
+    return errors
+
+
+def _auto_verify_errors(
+    rel: Relationship, *, as_of: str | None, endpoints_verified: dict[str, bool] | None
+) -> list[str]:
+    """Conservative rule -> blocking reasons; empty means verify."""
+    reasons = validate_relationship(rel, as_of=as_of, endpoints_verified=endpoints_verified)
+    if len(_sources_of(rel)) < 2:
+        reasons.append("needs-two-distinct-sources")
+    reasons.extend(_endpoint_rule_errors(rel, endpoints_verified))
+    reasons.extend(_confidence_error(rel))
     if rel.counterevidence:
         reasons.append("unresolved-counterevidence")
     return reasons
 
 
-def observe_relationship(from_entity_id: str | None, to_entity_id: str | None,
-                         raw_label: object, *, span: object = None,
-                         accession: object = None, document_name: object = None,
-                         known_at: str | None = None,
-                         relationship_id: str | None = None) -> Relationship:
-    """Raw document/entity mention -> ``observed`` (never identity)."""
-    rel = Relationship(
+def _new_relationship(
+    from_entity_id: str | None,
+    to_entity_id: str | None,
+    raw_label: object,
+    known_at: str | None,
+    relationship_id: str | None,
+) -> Relationship:
+    """Unsaved relationship shell (existing boundary)."""
+    return Relationship(
         relationship_id=relationship_id or _new_id("rel"),
         relationship_type=normalize_label(raw_label),
         raw_label=str(raw_label or ""),
-        from_entity_id=from_entity_id, to_entity_id=to_entity_id,
+        from_entity_id=from_entity_id,
+        to_entity_id=to_entity_id,
         known_at=known_at or _utcnow(),
     )
-    if span is not None or accession is not None:
-        attach_relationship_evidence(
-            rel, source_span=str(span or ""), accession=accession,
-            document_name=document_name, extraction_method="mention",
-            confidence=0.0, known_at=known_at, actor="extractor",
-            reason="raw mention observed", initial_status="observed")
-    else:
-        _record(rel, None, "observed", "extractor", "raw mention observed",
-                known_at=known_at)
-    return rel
 
 
-def propose_relationship(from_entity_id: str | None, to_entity_id: str | None,
-                         raw_label: object, *, span: object = None,
-                         accession: object = None, document_name: object = None,
-                         extraction_method: str | None = None,
-                         confidence: float = 0.0, known_at: str | None = None,
-                         deterministic: bool = False,
-                         relationship_id: str | None = None) -> Relationship:
-    """Structured/LLM extraction -> ``candidate``; deterministic roles verify."""
-    rel = Relationship(
-        relationship_id=relationship_id or _new_id("rel"),
-        relationship_type=normalize_label(raw_label),
-        raw_label=str(raw_label or ""),
-        from_entity_id=from_entity_id, to_entity_id=to_entity_id,
-        known_at=known_at or _utcnow(),
-    )
+def _check_deterministic(rel: Relationship, deterministic: bool) -> None:
+    """Deterministic role guard (existing boundary)."""
     if deterministic and rel.relationship_type not in DETERMINISTIC_TYPES:
         raise ValueError(
             f"deterministic verification needs a source-encoded role in "
-            f"{sorted(DETERMINISTIC_TYPES)}, got {rel.relationship_type!r}")
-    target = "verified" if deterministic else "candidate"
-    actor = "deterministic" if deterministic else "extractor"
+            f"{sorted(DETERMINISTIC_TYPES)}, got {rel.relationship_type!r}"
+        )
+
+
+def _propose_target(deterministic: bool) -> tuple[str, str]:
+    """Target status/actor pair (existing boundary)."""
+    if deterministic:
+        return "verified", "deterministic"
+    return "candidate", "extractor"
+
+
+def _seed_proposal(
+    rel: Relationship,
+    target: str,
+    actor: str,
+    deterministic: bool,
+    span: object,
+    accession: object,
+    document_name: object,
+    extraction_method: str | None,
+    confidence: float,
+    known_at: str | None,
+) -> None:
+    """First evidence or bare record for a proposal (existing boundary)."""
     if span is not None or accession is not None or deterministic:
         attach_relationship_evidence(
-            rel, source_span=str(span or ""), accession=accession,
+            rel,
+            source_span=str(span or ""),
+            accession=accession,
             document_name=document_name,
             extraction_method=extraction_method or "structured",
-            confidence=confidence, known_at=known_at, actor=actor,
-            reason="deterministic source role" if deterministic
-            else "structured extraction proposed", initial_status=target)
+            confidence=confidence,
+            known_at=known_at,
+            actor=actor,
+            reason="deterministic source role" if deterministic else "structured extraction proposed",
+            initial_status=target,
+        )
     else:
-        _record(rel, None, target, actor, "extraction proposed",
-                known_at=known_at)
+        _record(rel, None, target, actor, "extraction proposed", known_at=known_at)
+
+
+def _cites_evidence(reason: str) -> bool:
+    """Reason-name citation check (existing boundary)."""
+    return ":e" in reason or "evidence" in reason.lower()
+
+
+def _check_supersede_reason(reason: str, evidence: list[RelationshipEvidence] | None) -> set[str]:
+    """Supersession citation guard (existing boundary)."""
+    if not reason.strip():
+        raise ValueError("supersession reason is required")
+    cited = {e.evidence_id for e in (evidence or [])}
+    if not cited and not _cites_evidence(reason):
+        raise ValueError("supersession must cite the new evidence")
+    return cited
+
+
+def _merge_one_evidence(rel: Relationship, ev: RelationshipEvidence, seen: set[str]) -> None:
+    """Append one unseen evidence item (existing boundary)."""
+    if ev.evidence_id in seen:
+        return
+    seen.add(ev.evidence_id)
+    rel.evidence.append(ev)
+    if ev.is_counterevidence and ev not in rel.counterevidence:
+        rel.counterevidence.append(ev)
+
+
+def _merge_supersede_evidence(rel: Relationship, evidence: list[RelationshipEvidence] | None) -> None:
+    """Append unseen superseding evidence (existing boundary)."""
+    seen = {e.evidence_id for e in rel.evidence}
+    for ev in evidence or []:
+        _merge_one_evidence(rel, ev, seen)
+
+
+def observe_relationship(
+    from_entity_id: str | None,
+    to_entity_id: str | None,
+    raw_label: object,
+    *,
+    span: object = None,
+    accession: object = None,
+    document_name: object = None,
+    known_at: str | None = None,
+    relationship_id: str | None = None,
+) -> Relationship:
+    """Raw document/entity mention -> ``observed`` (never identity)."""
+    rel = _new_relationship(from_entity_id, to_entity_id, raw_label, known_at, relationship_id)
+    if span is not None or accession is not None:
+        attach_relationship_evidence(
+            rel,
+            source_span=str(span or ""),
+            accession=accession,
+            document_name=document_name,
+            extraction_method="mention",
+            confidence=0.0,
+            known_at=known_at,
+            actor="extractor",
+            reason="raw mention observed",
+            initial_status="observed",
+        )
+    else:
+        _record(rel, None, "observed", "extractor", "raw mention observed", known_at=known_at)
+    return rel
+
+
+def propose_relationship(
+    from_entity_id: str | None,
+    to_entity_id: str | None,
+    raw_label: object,
+    *,
+    span: object = None,
+    accession: object = None,
+    document_name: object = None,
+    extraction_method: str | None = None,
+    confidence: float = 0.0,
+    known_at: str | None = None,
+    deterministic: bool = False,
+    relationship_id: str | None = None,
+) -> Relationship:
+    """Structured/LLM extraction -> ``candidate``; deterministic roles verify."""
+    rel = _new_relationship(from_entity_id, to_entity_id, raw_label, known_at, relationship_id)
+    _check_deterministic(rel, deterministic)
+    target, actor = _propose_target(deterministic)
+    _seed_proposal(
+        rel, target, actor, deterministic, span, accession, document_name, extraction_method, confidence, known_at
+    )
     return rel
 
 
 def attach_relationship_evidence(
-        rel: Relationship, *, source_span: object = None,
-        accession: object = None, document_name: object = None,
-        extraction_method: str | None = None, confidence: int | float = 0.0,
-        known_at: str | None = None, actor: str = "extractor",
-        reason: str = "evidence attached",
-        initial_status: str | None = None,
-        evidence_id: str | None = None) -> RelationshipEvidence:
+    rel: Relationship,
+    *,
+    source_span: object = None,
+    accession: object = None,
+    document_name: object = None,
+    extraction_method: str | None = None,
+    confidence: float = 0.0,
+    known_at: str | None = None,
+    actor: str = "extractor",
+    reason: str = "evidence attached",
+    initial_status: str | None = None,
+    evidence_id: str | None = None,
+) -> RelationshipEvidence:
     """Append supporting evidence; status unchanged (revision still written)."""
     ev = RelationshipEvidence(
         evidence_id=evidence_id or f"{rel.relationship_id}:e{len(rel.evidence) + 1}",
@@ -297,16 +458,22 @@ def attach_relationship_evidence(
     )
     rel.evidence.append(ev)
     prev = rel.status
-    _record(rel, prev, initial_status or prev, actor, reason,
-            known_at=ev.known_at)
+    _record(rel, prev, initial_status or prev, actor, reason, known_at=ev.known_at)
     return ev
 
+
 def attach_relationship_counterevidence(
-        rel: Relationship, *, source_span: object = None,
-        accession: object = None, document_name: object = None,
-        extraction_method: str | None = None, confidence: float = 0.0,
-        known_at: str | None = None, actor: str = "extractor",
-        reason: str = "counterevidence attached") -> RelationshipEvidence:
+    rel: Relationship,
+    *,
+    source_span: object = None,
+    accession: object = None,
+    document_name: object = None,
+    extraction_method: str | None = None,
+    confidence: float = 0.0,
+    known_at: str | None = None,
+    actor: str = "extractor",
+    reason: str = "counterevidence attached",
+) -> RelationshipEvidence:
     """Counterevidence is its own record; it blocks auto-verify while present."""
     ev = RelationshipEvidence(
         evidence_id=f"{rel.relationship_id}:e{len(rel.evidence) + 1}",
@@ -327,9 +494,13 @@ def attach_relationship_counterevidence(
     return ev
 
 
-def evaluate_relationship(rel: Relationship, *, as_of: str | None = None,
-                          endpoints_verified: dict[str, bool] | None = None,
-                          known_at: str | None = None) -> tuple[str, list[str]]:
+def evaluate_relationship(
+    rel: Relationship,
+    *,
+    as_of: str | None = None,
+    endpoints_verified: dict[str, bool] | None = None,
+    known_at: str | None = None,
+) -> tuple[str, list[str]]:
     """Conservative evaluation -> (decision, reasons); writes a revision.
 
     Verified only on the full rule; any unresolved counterevidence
@@ -339,56 +510,57 @@ def evaluate_relationship(rel: Relationship, *, as_of: str | None = None,
     as_of = _check_as_of(as_of)
     if rel.counterevidence:
         prev = rel.status
-        _record(rel, prev, "rejected", "evaluation",
-                "unresolved counterevidence rejects", known_at=known_at)
+        _record(rel, prev, "rejected", "evaluation", "unresolved counterevidence rejects", known_at=known_at)
         return "rejected", ["unresolved-counterevidence"]
-    reasons = _auto_verify_errors(
-        rel, as_of=as_of, endpoints_verified=endpoints_verified)
+    reasons = _auto_verify_errors(rel, as_of=as_of, endpoints_verified=endpoints_verified)
     if not reasons:
         prev = rel.status
         cite = as_of or (known_at or rel.known_at or "")[:10]
-        _record(rel, prev, "verified", "evaluation",
-                f"conservative auto-verify over {len(rel.supporting())} "
-                f"evidence items window {cite}".strip(),
-                known_at=known_at)
+        _record(
+            rel,
+            prev,
+            "verified",
+            "evaluation",
+            f"conservative auto-verify over {len(rel.supporting())} evidence items window {cite}".strip(),
+            known_at=known_at,
+        )
         return "verified", []
     return "no_change", reasons
 
 
-def revise_relationship_status(rel: Relationship, new_status: str, *,
-                               actor: str = "human", reason: str = "",
-                               known_at: str | None = None) -> RelationshipRevision:
+def revise_relationship_status(
+    rel: Relationship, new_status: str, *, actor: str = "human", reason: str = "", known_at: str | None = None
+) -> RelationshipRevision:
     """Explicit transition (human decisions audited, never locked)."""
     if not reason.strip():
         raise ValueError("revision reason is required")
-    return _record(rel, rel.status, new_status, actor, reason.strip(),
-                   known_at=known_at)
+    return _record(rel, rel.status, new_status, actor, reason.strip(), known_at=known_at)
 
 
-def supersede_relationship(rel: Relationship, *, new_status: str = "verified",
-                           evidence: list[RelationshipEvidence] | None = None, actor: str = "human",
-                           reason: str = "",
-                           known_at: str | None = None) -> RelationshipRevision:
+def supersede_relationship(
+    rel: Relationship,
+    *,
+    new_status: str = "verified",
+    evidence: list[RelationshipEvidence] | None = None,
+    actor: str = "human",
+    reason: str = "",
+    known_at: str | None = None,
+) -> RelationshipRevision:
     """Later qualifying evidence supersedes a prior (even human) decision.
 
     The reason must cite the new evidence: pass ``evidence`` items or name
     their IDs in ``reason``.
     """
-    if not reason.strip():
-        raise ValueError("supersession reason is required")
-    cited = {e.evidence_id for e in (evidence or [])}
-    if not cited and ":e" not in reason and "evidence" not in reason.lower():
-        raise ValueError("supersession must cite the new evidence")
-    seen = {e.evidence_id for e in rel.evidence}
-    for ev in (evidence or []):
-        if ev.evidence_id in seen:
-            continue
-        seen.add(ev.evidence_id)
-        rel.evidence.append(ev)
-        if ev.is_counterevidence and ev not in rel.counterevidence:
-            rel.counterevidence.append(ev)
+    _check_supersede_reason(reason, evidence)
+    _merge_supersede_evidence(rel, evidence)
     prev_current = rel.current_revision_id
-    rev = _record(rel, rel.status, new_status, actor,
-                  f"supersedes {prev_current}: {reason.strip()}",
-                  known_at=known_at, superseded=prev_current)
+    rev = _record(
+        rel,
+        rel.status,
+        new_status,
+        actor,
+        f"supersedes {prev_current}: {reason.strip()}",
+        known_at=known_at,
+        superseded=prev_current,
+    )
     return rev

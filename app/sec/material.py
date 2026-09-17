@@ -70,18 +70,35 @@ def material_events_from_8k(
         if event_type is None:
             continue
         effective = event.event_date or event_date
-        out.append(RegulatoryEvent(
-            event_id=f"{accession_no}:{event.item_number}",
-            issuer=issuer,
-            event_type=event_type,
-            effective_date=effective,
-            known_at=known_at or effective or "unknown",
-            source_accessions=(accession_no,),
-            severity=SEVERITY.get(event_type, "routine"),
-            structured_data={"item_number": event.item_number,
-                             "item_name": event.item_name},
-        ))
+        out.append(
+            RegulatoryEvent(
+                event_id=f"{accession_no}:{event.item_number}",
+                issuer=issuer,
+                event_type=event_type,
+                effective_date=effective,
+                known_at=known_at or effective or "unknown",
+                source_accessions=(accession_no,),
+                severity=SEVERITY.get(event_type, "routine"),
+                structured_data={"item_number": event.item_number, "item_name": event.item_name},
+            )
+        )
     return out
+
+
+def _event_date_of(report: object, filing: object) -> str | None:
+    raw_date = getattr(report, "date_of_report", None) or getattr(filing, "filing_date", None)
+    return str(raw_date) if raw_date is not None else None
+
+
+def _known_at_of(filing: object, accession_no: str) -> str:
+    raw_known = (
+        getattr(filing, "acceptance_datetime", None)
+        or getattr(filing, "accepted_at", None)
+        or getattr(filing, "filing_date", None)
+    )
+    if raw_known is None:
+        raise ValueError(f"no known_at for accession {accession_no!r}")
+    return str(raw_known)
 
 
 def load_report(accession_no: str) -> tuple[EightKReport, str | None, str]:
@@ -92,15 +109,8 @@ def load_report(accession_no: str) -> tuple[EightKReport, str | None, str]:
     filing = get_by_accession_number(accession_no)
     report = filing.obj()
     if not isinstance(report, EightKReport):
-        raise ValueError(f"no 8-K report for accession {accession_no!r}")
-    raw_date = getattr(report, "date_of_report", None) or getattr(filing, "filing_date", None)
-    event_date = str(raw_date) if raw_date is not None else None
-    raw_known = (getattr(filing, "acceptance_datetime", None)
-                 or getattr(filing, "accepted_at", None)
-                 or getattr(filing, "filing_date", None))
-    if raw_known is None:
-        raise ValueError(f"no known_at for accession {accession_no!r}")
-    return report, event_date, str(raw_known)
+        raise ValueError(f"no 8-K report for accession {accession_no!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return report, _event_date_of(report, filing), _known_at_of(filing, accession_no)
 
 
 def _event_order(event: RegulatoryEvent) -> tuple[str, str]:
@@ -124,16 +134,20 @@ def get_material_events(
     from .filings import list_sec_filings
 
     out: list[RegulatoryEvent] = []
-    filings = list_sec_filings(ticker_or_cik, forms=["8-K", "8-K/A"],
-                               start_date=since, as_of=as_of, limit=limit)
+    filings = list_sec_filings(ticker_or_cik, forms=["8-K", "8-K/A"], start_date=since, as_of=as_of, limit=limit)
     for filing in filings:
         try:
             report, event_date, known_at = load_report(filing.accession_no)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
-        out.extend(material_events_from_8k(
-            filing.accession_no,
-            extract_8k_events(report, filing.accession_no, event_date=event_date),
-            issuer=filing.filer_name, event_date=event_date, known_at=known_at))
+        out.extend(
+            material_events_from_8k(
+                filing.accession_no,
+                extract_8k_events(report, filing.accession_no, event_date=event_date),
+                issuer=filing.filer_name,
+                event_date=event_date,
+                known_at=known_at,
+            )
+        )
     out.sort(key=_event_order)
     return out

@@ -17,7 +17,7 @@ def _prerequisite() -> bool:
         from app.config import get_sec_edgar_identity
 
         get_sec_edgar_identity()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return False
     try:
         socket.create_connection(("www.sec.gov", 443), timeout=5).close()
@@ -26,8 +26,10 @@ def _prerequisite() -> bool:
     return True
 
 
-pytestmark = [pytestmark, pytest.mark.skipif(
-    not _prerequisite(), reason="SEC identity (SEC_EDGAR_IDENTITY) or network unavailable")]
+pytestmark = [
+    pytestmark,
+    pytest.mark.skipif(not _prerequisite(), reason="SEC identity (SEC_EDGAR_IDENTITY) or network unavailable"),
+]
 
 _VALID_STATUSES = {"verified", "unverified", "ambiguous", "conflict", "not_found"}
 _VALID_COVERAGE = {"complete", "complete_within_source_limits", "partial", "failed"}
@@ -103,8 +105,7 @@ def test_13f_inverse_relationship_search_structural():
     from app.sec.discovery import search_sec_relationships
 
     # Berkshire Hathaway 13F manager CIK: manager -> holdings direction.
-    result = search_sec_relationships("1067983",
-                                      relationship_types=["holding_manager"])
+    result = search_sec_relationships("1067983", relationship_types=["holding_manager"])
     assert list(_as_seq(result["ciks"])) == ["1067983"]
     assert "holding_manager" in _as_seq(result["relationship_types"] or ("holding_manager",))
 

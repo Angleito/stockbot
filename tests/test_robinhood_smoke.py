@@ -19,8 +19,7 @@ invoked.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -45,10 +44,19 @@ pytestmark = [
     ),
 ]
 
-NOW = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 TRADING_KEYWORDS = (
-    "order", "trade", "place", "submit", "cancel", "replace", "modify",
-    "exercise", "withdraw", "deposit", "transfer",
+    "order",
+    "trade",
+    "place",
+    "submit",
+    "cancel",
+    "replace",
+    "modify",
+    "exercise",
+    "withdraw",
+    "deposit",
+    "transfer",
 )
 FORBIDDEN_COLUMNS = ("token", "oauth", "secret", "access", "refresh", "authorization")
 
@@ -67,10 +75,9 @@ def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path: Path) -> None:
     names = [str(tool.get("name", "")) for tool in tools]
     for name in names:
         if capabilities.tool_capability(name) is not None:
-            assert (
-                name in capabilities.MARKET_READ_TOOLS
-                or name in capabilities.ACCOUNT_READ_TOOLS
-            ), f"classified tool {name!r} is missing from the allowlists"
+            assert name in capabilities.MARKET_READ_TOOLS or name in capabilities.ACCOUNT_READ_TOOLS, (
+                f"classified tool {name!r} is missing from the allowlists"
+            )
         if any(keyword in name.lower() for keyword in TRADING_KEYWORDS):
             assert capabilities.is_blocked(name), f"trading-looking tool {name!r} is not blocked"
 
@@ -99,9 +106,7 @@ def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path: Path) -> None:
             assert actual is None
         else:
             assert actual == pytest.approx(expected)
-    assert [position.ticker for position in restored.positions] == [
-        position.ticker for position in snapshot.positions
-    ]
+    assert [position.ticker for position in restored.positions] == [position.ticker for position in snapshot.positions]
     assert [position.account_id for position in restored.positions] == [
         position.account_id for position in snapshot.positions
     ]

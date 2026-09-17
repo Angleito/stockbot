@@ -37,13 +37,11 @@ class LogStreamHandler(logging.Handler):
         while True:
             line = self._queue.get()
             try:
-                request = urllib.request.Request(
-                    self.url, data=line.encode("utf-8"), method="POST"
-                )
+                request = urllib.request.Request(self.url, data=line.encode("utf-8"), method="POST")
                 with urllib.request.urlopen(request, timeout=self.timeout):
                     pass
                 self._unreachable = False
-            except Exception:
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 if not self._unreachable:
                     self._unreachable = True
                     _LOGGER.warning(

@@ -3,9 +3,9 @@
 from pathlib import Path
 
 from app.security.action_policy import (
+    CREDENTIAL_REASON,
     EGRESS_AFTER_PRIVATE_REASON,
     EGRESS_INTENT_REASON,
-    CREDENTIAL_REASON,
     EgressDecision,
     authorize_egress,
     private_pattern_hit,
@@ -32,9 +32,7 @@ def test_private_query_is_blocked():
 
 
 def test_benign_market_query_is_allowed():
-    decision = authorize_egress(
-        "exa", {"query": "AMD market cap 2026"}, _run_security()
-    )
+    decision = authorize_egress("exa", {"query": "AMD market cap 2026"}, _run_security())
     assert decision.allowed is True
     assert decision.reason is None
 
@@ -53,9 +51,7 @@ def test_credential_patterns_block():
 
 
 def test_account_identifier_without_digits_not_blocked():
-    decision = authorize_egress(
-        "exa", {"query": "what does account mean in finance"}, _run_security()
-    )
+    decision = authorize_egress("exa", {"query": "what does account mean in finance"}, _run_security())
     assert decision.allowed is True
 
 
@@ -99,20 +95,14 @@ def test_egress_blocked_after_private_context_allowed():
     # later egress is blocked even with a fully benign payload.
     run_security = _run_security()
     run_security.data_labels.add("private")
-    decision = authorize_egress(
-        "exa", {"query": "AMD market cap 2026"}, run_security
-    )
+    decision = authorize_egress("exa", {"query": "AMD market cap 2026"}, run_security)
     assert decision.allowed is False
     assert decision.reason == EGRESS_AFTER_PRIVATE_REASON
 
 
 def test_private_pattern_hit_scans_arbitrary_json_text():
-    assert private_pattern_hit(
-        '{"analysis_goal": "User owns 2843 AMD shares worth $417,921"}'
-    ) == EGRESS_INTENT_REASON
-    assert private_pattern_hit(
-        '{"analysis_goal": "account 123456789 holdings"}'
-    ) == CREDENTIAL_REASON
+    assert private_pattern_hit('{"analysis_goal": "User owns 2843 AMD shares worth $417,921"}') == EGRESS_INTENT_REASON
+    assert private_pattern_hit('{"analysis_goal": "account 123456789 holdings"}') == CREDENTIAL_REASON
     assert private_pattern_hit('{"analysis_goal": "compare AMD vs NVIDIA"}') is None
 
 
@@ -126,7 +116,11 @@ def test_thesis_lifecycle_tools_exempt_from_private_scan() -> None:
     from app.pi_gateway import _THESIS_LOCAL_TOOLS
 
     assert _THESIS_LOCAL_TOOLS == {
-        "thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal",
+        "thesis_create",
+        "thesis_show",
+        "thesis_refine",
+        "thesis_watch",
+        "thesis_journal",
     }
 
 

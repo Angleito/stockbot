@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import statistics
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .finra_client import DatasetSpec
@@ -36,9 +36,9 @@ _NUMERIC_TYPE_HINTS = (
 def analyze_and_brief(
     spec: DatasetSpec,
     records: list[dict[str, object]],
-    analysis_goal: Optional[str],
+    analysis_goal: str | None,
     query_key: str,
-    pagination: Optional[dict[str, object]] = None,
+    pagination: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Deterministic summary of FINRA rows. Pure function; never raises.
 
@@ -53,7 +53,7 @@ def analyze_and_brief(
 
 
 def summarize_records(
-    spec: DatasetSpec, records: list[dict[str, object]], pagination: Optional[dict[str, object]] = None
+    spec: DatasetSpec, records: list[dict[str, object]], pagination: dict[str, object] | None = None
 ) -> dict[str, object]:
     """Deterministic summaries. Pure function of spec + rows; never raises.
 
@@ -70,58 +70,19 @@ def summarize_records(
     analyzed = len(rows)
 
     date_field = spec.date_field
-
-    def _date_key(r: dict[str, object]) -> tuple[bool, str | None]:
-        cell: object = r.get(date_field) if isinstance(date_field, str) else None
-        return (
-            cell is None,
-            _norm_date(cell),
-        )
-    if date_field and rows:
-        rows = sorted(
-            rows,
-            key=_date_key,
-        )
+    rows = _sort_rows_by_date(rows, date_field)
 
     numeric_fields = _numeric_fields(spec)
     field_stats = _numeric_metrics(rows, numeric_fields)
     latest_prior = _latest_prior(rows, date_field, numeric_fields)
 
-    page_complete = analyzed == total
-    query_complete = _query_complete(pagination, total)
-    analysis_complete = (
-        None
-        if query_complete is None
-        else query_complete and page_complete and not capped
-    )
-
-    coverage: dict[str, object] = {
-        "rows_matched": total,
-        "rows_analyzed": analyzed,
-        "complete": not capped,
-        "page_complete": page_complete,
-        "query_complete": query_complete,
-        "analysis_complete": analysis_complete,
-        "cap": ANALYSIS_MAX_RECORDS if capped else None,
-    }
+    coverage, query_complete = _coverage_block(total, analyzed, capped, pagination)
     first_date, last_date = _coverage_dates(rows, date_field)
     if first_date is not None:
         coverage["first_date"] = first_date
         coverage["last_date"] = last_date
 
-    warnings = _missing_warnings(rows, spec)
-    if query_complete is None:
-        warnings.append(
-            "FINRA did not return a Record-Total header; pagination is "
-            "estimated and full-query completeness cannot be proven."
-        )
-    if capped:
-        warnings.append(
-            f"Analysis stopped at the internal cap of {ANALYSIS_MAX_RECORDS} "
-            f"records ({total} matched); metrics cover the first {analyzed} "
-            "records only."
-        )
-    warnings = warnings[:MAX_WARNINGS]
+    warnings = _summarize_warnings(rows, spec, query_complete, capped, total, analyzed)
 
     return {
         "coverage": coverage,
@@ -136,6 +97,69 @@ def summarize_records(
         "briefing_source": "deterministic_only",
         "analysis_model": None,
     }
+
+
+def _sort_rows_by_date(rows: list[dict[str, object]], date_field: str | None) -> list[dict[str, object]]:
+    """Date-ascending rows with dateless rows last (stable sort)."""
+    if not date_field or not rows:
+        return rows
+
+    def _date_key(r: dict[str, object]) -> tuple[bool, str | None]:
+        cell: object = r.get(date_field) if isinstance(date_field, str) else None
+        return (
+            cell is None,
+            _norm_date(cell),
+        )
+
+    return sorted(rows, key=_date_key)
+
+
+def _coverage_block(
+    total: int, analyzed: int, capped: bool, pagination: dict[str, object] | None
+) -> tuple[dict[str, object], bool | None]:
+    """Coverage block plus the query_complete flag feeding warnings."""
+    page_complete = analyzed == total
+    query_complete = _query_complete(pagination, total)
+    if query_complete is None:
+        analysis_complete: bool | None = None
+    elif query_complete and page_complete and not capped:
+        analysis_complete = True
+    else:
+        analysis_complete = False
+    coverage: dict[str, object] = {
+        "rows_matched": total,
+        "rows_analyzed": analyzed,
+        "complete": not capped,
+        "page_complete": page_complete,
+        "query_complete": query_complete,
+        "analysis_complete": analysis_complete,
+        "cap": ANALYSIS_MAX_RECORDS if capped else None,
+    }
+    return coverage, query_complete
+
+
+def _summarize_warnings(
+    rows: list[dict[str, object]],
+    spec: DatasetSpec,
+    query_complete: bool | None,
+    capped: bool,
+    total: int,
+    analyzed: int,
+) -> list[str]:
+    """Missing-field plus coverage warnings, truncated to MAX_WARNINGS."""
+    warnings = _missing_warnings(rows, spec)
+    if query_complete is None:
+        warnings.append(
+            "FINRA did not return a Record-Total header; pagination is "
+            "estimated and full-query completeness cannot be proven."
+        )
+    if capped:
+        warnings.append(
+            f"Analysis stopped at the internal cap of {ANALYSIS_MAX_RECORDS} "
+            f"records ({total} matched); metrics cover the first {analyzed} "
+            "records only."
+        )
+    return warnings[:MAX_WARNINGS]
 
 
 # ---------------------------------------------------------------------------
@@ -155,14 +179,14 @@ def _numeric_fields(spec: DatasetSpec) -> list[str]:
     return out
 
 
-def _to_number(value: object) -> Optional[float]:
+def _to_number(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         return float(value)
     try:
         return float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -193,17 +217,14 @@ def _numeric_metrics(rows: list[dict[str, object]], numeric_fields: list[str]) -
 
 
 def _latest_prior(
-    rows: list[dict[str, object]], date_field: Optional[str], numeric_fields: list[str]
+    rows: list[dict[str, object]], date_field: str | None, numeric_fields: list[str]
 ) -> list[dict[str, object]]:
     """Latest-vs-prior values over date-ascending rows (last two rows)."""
     if len(rows) < 2:
         return []
     latest = rows[-1]
     prior = rows[-2]
-    if (
-        date_field
-        and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field))
-    ):
+    if date_field and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field)):
         return []
     out: list[dict[str, object]] = []
     for name in numeric_fields:
@@ -235,25 +256,15 @@ def _derive_trends(latest_prior: list[dict[str, object]]) -> list[str]:
         if not isinstance(change, (int, float)):
             continue
         if pct is None:
-            trends.append(
-                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
-                f"(change {change:+,})"
-            )
+            trends.append(f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} (change {change:+,})")
         elif isinstance(pct, (int, float)):
-            direction = (
-                "up" if pct > 0
-                else "down" if pct < 0
-                else "flat"
-            )
+            direction = "up" if pct > 0 else "down" if pct < 0 else "flat"
             trends.append(
                 f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
                 f"({change:+,}, {pct:+.2f}%) — {direction}"
             )
         else:
-            trends.append(
-                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
-                f"(change {change:+,})"
-            )
+            trends.append(f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} (change {change:+,})")
     return trends
 
 
@@ -262,31 +273,49 @@ def _count_key(kv: tuple[str, int]) -> tuple[int, str]:
     return (-kv[1], kv[0])
 
 
+def _breakdown_field_name(field: dict[str, object]) -> str | None:
+    """Breakdown-eligible field name, else None (numeric/date/blank)."""
+    name_obj: object = field.get("name")
+    if not isinstance(name_obj, str) or not name_obj:
+        return None
+    field_type = str(field.get("type") or "").lower()
+    if "date" in field_type or any(hint in field_type for hint in _NUMERIC_TYPE_HINTS):
+        return None
+    return name_obj
+
+
+def _top_categories(counter: dict[str, int], limit: int) -> dict[str, int] | None:
+    """Sorted name→count mapping, or None for empty/constant/oversized."""
+    if not counter or len(counter) > limit:
+        return None
+    if len(counter) < 2:
+        return None  # a constant column adds no breakdown value
+    return dict(sorted(counter.items(), key=_count_key))
+
+
+def _field_breakdown(rows: list[dict[str, object]], field: str) -> dict[str, int]:
+    """Count non-blank stringified values of field across rows."""
+    counts: dict[str, int] = {}
+    for r in rows:
+        v = r.get(field)
+        if v is None or v == "":
+            continue
+        key = str(v)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _categorical_breakdowns(spec: DatasetSpec, rows: list[dict[str, object]]) -> dict[str, object]:
     out: dict[str, object] = {}
     symbol_field = spec.symbol_field
     for f in spec.fields:
-        name_obj: object = f.get("name")
-        if not isinstance(name_obj, str) or not name_obj:
+        name = _breakdown_field_name(f)
+        if name is None or name == symbol_field:
             continue
-        name = name_obj
-        t = str(f.get("type") or "").lower()
-        if any(hint in t for hint in _NUMERIC_TYPE_HINTS) or "date" in t:
+        ranked = _top_categories(_field_breakdown(rows, name), MAX_CATEGORIES)
+        if ranked is None:
             continue
-        if name == symbol_field:
-            continue
-        counts: dict[str, int] = {}
-        for r in rows:
-            v = r.get(name)
-            if v is None or v == "":
-                continue
-            key = str(v)
-            counts[key] = counts.get(key, 0) + 1
-        if not counts or len(counts) > MAX_CATEGORIES:
-            continue
-        if len(counts) < 2:
-            continue  # a constant column adds no breakdown value
-        out[name] = dict(sorted(counts.items(), key=_count_key))
+        out[name] = ranked
     return out
 
 
@@ -301,9 +330,7 @@ def _missing_warnings(rows: list[dict[str, object]], spec: DatasetSpec) -> list[
         name = name_obj
         missing = sum(1 for r in rows if r.get(name) is None or r.get(name) == "")
         if missing:
-            warnings.append(
-                f"Field '{name}' missing in {missing}/{len(rows)} analyzed rows."
-            )
+            warnings.append(f"Field '{name}' missing in {missing}/{len(rows)} analyzed rows.")
     return warnings
 
 
@@ -316,9 +343,7 @@ def _norm_date(value: object) -> str | None:
     return s
 
 
-def _coverage_dates(
-    rows: list[dict[str, object]], date_field: Optional[str]
-) -> tuple[Optional[str], Optional[str]]:
+def _coverage_dates(rows: list[dict[str, object]], date_field: str | None) -> tuple[str | None, str | None]:
     if not date_field:
         return None, None
     dates = [_norm_date(r.get(date_field)) for r in rows]
@@ -328,7 +353,7 @@ def _coverage_dates(
     return dates[0], dates[-1]
 
 
-def _query_complete(pagination: Optional[dict[str, object]], returned_count: int) -> Optional[bool]:
+def _query_complete(pagination: dict[str, object] | None, returned_count: int) -> bool | None:
     """Whether this page holds every FINRA match, per Record-Total.
 
     None when FINRA omits Record-Total (completeness cannot be proven).
@@ -342,6 +367,6 @@ def _query_complete(pagination: Optional[dict[str, object]], returned_count: int
     try:
         offset = int(offset_raw) if isinstance(offset_raw, (int, float, str)) else 0
         total = int(total_records) if isinstance(total_records, (int, float, str)) else 0
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return (offset + returned_count) >= total

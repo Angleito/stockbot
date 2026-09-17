@@ -870,5 +870,140 @@
    ],
    "must_not_contain": []
   }
+ },
+ {
+  "id": 52,
+  "question": "What happens to Microsoft if OpenAI goes bankrupt (SEC filings only, as known on 2026-08-10)?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "find_sec_entities",
+    "list_sec_filings",
+    "get_sec_document",
+    "search_sec_filings"
+   ],
+   "required_tools": [
+    "search_sec_filings",
+    "get_sec_document"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "azure",
+    "openai"
+   ],
+   "must_not_contain": []
+  }
+ },
+ {
+  "id": 53,
+  "question": "Which Microsoft issuer-scoped OpenAI filing texts mention OpenAI (exhaustive text search, not recent metadata)?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "search_sec_filings"
+   ],
+   "required_tools": [
+    "search_sec_filings"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "matched_document",
+    "openai"
+   ],
+   "must_not_contain": []
+  }
+ },
+ {
+  "id": 54,
+  "question": "Which exhibits attach to Microsoft filing 0000950170-26-001234 and what text does the OpenAI exhibit carry?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "list_sec_documents",
+    "get_sec_document"
+   ],
+   "required_tools": [
+    "list_sec_documents",
+    "get_sec_document"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "exhibit"
+   ],
+   "must_not_contain": []
+  }
+ },
+ {
+  "id": 55,
+  "question": "Is Microsoft OpenAI coverage for 10-K filings complete, or are backfill jobs still queued?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "get_sec_search_coverage"
+   ],
+   "required_tools": [
+    "get_sec_search_coverage"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "coverage",
+    "persisted-ledgers-only"
+   ],
+   "must_not_contain": []
+  }
+ },
+ {
+  "id": 56,
+  "question": "Which Microsoft 10-K quantified OpenAI exposure outranks an unrelated Microsoft Form 4?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "search_sec_filings"
+   ],
+   "required_tools": [
+    "search_sec_filings"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "10-K"
+   ],
+   "must_not_contain": []
+  }
+ },
+ {
+  "id": 57,
+  "question": "Which filings name Microsoft under a validated alias, keeping provenance and no false identity?",
+  "ticker": "MSFT",
+  "as_of": "2026-08-10",
+  "expected_behavior": {
+   "expected_tools": [
+    "find_sec_entities"
+   ],
+   "required_tools": [
+    "find_sec_entities"
+   ],
+   "forbidden_tools": [
+    "search_web"
+   ],
+   "must_contain": [
+    "verification_status"
+   ],
+   "must_not_contain": []
+  }
  }
 ]

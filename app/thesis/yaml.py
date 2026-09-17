@@ -6,10 +6,10 @@ import contextlib
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
-from collections.abc import Mapping
-from typing import Protocol, Self, TypeVar
+from typing import Protocol, Self, TextIO
 
 import yaml
 
@@ -18,17 +18,14 @@ try:
 except ImportError:  # pragma: no cover
     fcntl: ModuleType | None = None
 
-from app.thesis.models import JSONValue, SCHEMA_VERSION
-
-_M = TypeVar("_M", bound="YamlModel")
+from app.thesis.models import SCHEMA_VERSION, JSONValue
 
 
 class YamlModel(Protocol):
     """Structural thesis-model surface consumed by load_yaml (all models share from_dict)."""
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, object], path: str = ..., /) -> Self:
-        ...
+    def from_dict(cls, data: Mapping[str, object], path: str = ..., /) -> Self: ...
 
 
 def _root_resolved(root: Path | str) -> Path:
@@ -52,7 +49,7 @@ def _resolve_inside(root: Path | str, path: Path | str) -> Path:
     return dest_r
 
 
-def load_yaml(path: Path | str, model_type: type[_M]) -> _M:
+def load_yaml[M: YamlModel](path: Path | str, model_type: type[M]) -> M:
     """Safe-load a mapping YAML file, require schema v1, validate and return."""
     p = Path(path)
     try:
@@ -66,7 +63,7 @@ def load_yaml(path: Path | str, model_type: type[_M]) -> _M:
     except yaml.YAMLError as exc:
         raise ValueError(f"{p}: malformed YAML: {exc}") from None
     if not isinstance(data, dict):
-        raise ValueError(f"{p}: root must be a mapping, got {type(data).__name__}")
+        raise ValueError(f"{p}: root must be a mapping, got {type(data).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if data.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"{p}: unknown schema_version {data.get('schema_version')!r}, expected {SCHEMA_VERSION}")
     return model_type.from_dict(data, str(p))
@@ -80,7 +77,7 @@ def load_raw_yaml(path: Path | str) -> dict[str, JSONValue]:
     except yaml.YAMLError as exc:
         raise ValueError(f"{p}: malformed YAML: {exc}") from None
     if not isinstance(data, dict):
-        raise ValueError(f"{p}: root must be a mapping, got {type(data).__name__}")
+        raise ValueError(f"{p}: root must be a mapping, got {type(data).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     if data.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"{p}: unknown schema_version {data.get('schema_version')!r}, expected {SCHEMA_VERSION}")
     return dict(data)
@@ -94,7 +91,7 @@ def atomic_write_yaml(path: Path | str, value: dict[str, JSONValue], root: Path 
     the previous valid destination is left unchanged.
     """
     if not isinstance(value, dict):
-        raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")
+        raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     dest = _resolve_inside(root, path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=".yaml")
@@ -108,7 +105,7 @@ def atomic_write_yaml(path: Path | str, value: dict[str, JSONValue], root: Path 
         except yaml.YAMLError as exc:
             raise ValueError(f"{dest}: staged write failed validation (malformed YAML): {exc}") from None
         if not isinstance(back, dict):
-            raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")
+            raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         os.replace(tmp, dest)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -117,25 +114,51 @@ def atomic_write_yaml(path: Path | str, value: dict[str, JSONValue], root: Path 
     return dest
 
 
+def _stage_path(path: Path | str, root: Path | str, suffix: str) -> tuple[Path, int, str]:
+    """Resolve dest under root, make parents, and open a same-dir temp file."""
+    dest = _resolve_inside(root, path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=suffix)
+    return dest, fd, tmp
+
+
+def _flush_fsync(fh: TextIO) -> None:
+    """Flush + fsync one staged file handle."""
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def _check_json_staged(tmp: str, dest: Path) -> None:
+    """Validate staged JSON: parseable mapping root."""
+    try:
+        back = json.loads(Path(tmp).read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"{dest}: staged write failed validation (malformed JSON): {exc}") from None
+    if not isinstance(back, dict):
+        raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+
+
+def _replace_staged(tmp: str, dest: Path) -> None:
+    """Atomic replace; temp cleanup on any failure."""
+    try:
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def atomic_write_json(path: Path | str, value: dict[str, JSONValue], root: Path | str) -> Path:
     """Same temp/flush/fsync/atomic-replace discipline as YAML, for JSON intents."""
     if not isinstance(value, dict):
-        raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")
-    dest = _resolve_inside(root, path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=".json")
+        raise ValueError(f"{path}: value must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    dest, fd, tmp = _stage_path(path, root, ".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(value, fh, sort_keys=True)
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            back = json.loads(Path(tmp).read_text(encoding="utf-8"))
-        except ValueError as exc:
-            raise ValueError(f"{dest}: staged write failed validation (malformed JSON): {exc}") from None
-        if not isinstance(back, dict):
-            raise ValueError(f"{dest}: staged write failed validation (non-mapping root)")
-        os.replace(tmp, dest)
+            _flush_fsync(fh)
+        _check_json_staged(tmp, dest)
+        _replace_staged(tmp, dest)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -146,7 +169,7 @@ def atomic_write_json(path: Path | str, value: dict[str, JSONValue], root: Path 
 def atomic_write_text(path: Path | str, content: str, root: Path | str) -> Path:
     """Same temp/flush/fsync/atomic-replace discipline as YAML, for journal Markdown."""
     if not isinstance(content, str):
-        raise ValueError(f"{path}: content must be text, got {type(content).__name__}")
+        raise ValueError(f"{path}: content must be text, got {type(content).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     dest = _resolve_inside(root, path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-", suffix=".md")

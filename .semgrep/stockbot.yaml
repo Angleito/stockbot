@@ -1,0 +1,15 @@
+rules:
+  - id: stockbot-subprocess-shell-true
+    languages: [python]
+    severity: WARNING
+    message: Avoid shell=True in subprocess; prefer argv without a shell in broker/tool boundaries.
+    pattern: subprocess.$CALL(..., shell=True, ...)
+  - id: stockbot-broad-except-pass
+    languages: [python]
+    severity: WARNING
+    message: Broad except with pass hides failures in critical paths; log or re-raise.
+    pattern: |
+      try:
+        ...
+      except $E:
+        pass

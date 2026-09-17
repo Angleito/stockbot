@@ -6,8 +6,8 @@ get_fundamentals/get_xbrl_facts envelopes, the NVDA store/live parity
 dispatch behavior.  Live paths are monkeypatched at the edgar_client seam.
 """
 
-from datetime import date
 from collections.abc import Iterable, Mapping
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -16,8 +16,8 @@ from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.policy import LOCAL_CONTEXT
 from app.services import sec_facts
 from app.storage import parquet
-from app.tools import TOOLS, execute_tool
 from app.tool_render import render_tool_result
+from app.tools import TOOLS, execute_tool
 
 NVDA_CIK = 1045810
 RETRIEVED_AT = "2026-08-01T00:00:00Z"
@@ -33,7 +33,8 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _seed_ticker(tmp_path: Path, cik: int, ticker: str, retrieved_at: str = RETRIEVED_AT) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
-        retrieved_at=retrieved_at, content_hash=f"tickers-{cik}",
+        retrieved_at=retrieved_at,
+        content_hash=f"tickers-{cik}",
     )
     for name, rows in datasets.items():
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
@@ -61,7 +62,9 @@ def _seed_facts(
     if us_gaap:
         facts["us-gaap"] = us_gaap
     datasets = normalize_sec_company_facts(
-        payload, retrieved_at=RETRIEVED_AT, content_hash=f"facts-{cik}",
+        payload,
+        retrieved_at=RETRIEVED_AT,
+        content_hash=f"facts-{cik}",
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
         source_record_id=f"cik{cik:010d}",
     )
@@ -70,8 +73,7 @@ def _seed_facts(
 
 
 def _eps_fact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str):
-    return {"start": start, "end": end, "val": val, "accn": accn,
-            "fy": fy, "fp": fp, "filed": filed}
+    return {"start": start, "end": end, "val": val, "accn": accn, "fy": fy, "fp": fp, "filed": filed}
 
 
 def _shares_fact(val: int, end: str, filed: str, accn: str):
@@ -87,7 +89,7 @@ _NVDA_FACTS = [
     _eps_fact(1.08, "2025-04-28", "2025-07-27", 2026, "Q2", "2025-08-27", "a4"),
     _eps_fact(3.14, "2025-01-27", "2025-10-26", 2026, "Q3", "2025-11-19", "a5"),  # 9-month YTD
     _eps_fact(1.30, "2025-07-28", "2025-10-26", 2026, "Q3", "2025-11-19", "a6"),
-    _eps_fact(4.90, "2025-01-27", "2026-01-25", 2026, "FY", "2026-02-25", "a7"),   # Q4 only as FY
+    _eps_fact(4.90, "2025-01-27", "2026-01-25", 2026, "FY", "2026-02-25", "a7"),  # Q4 only as FY
     _eps_fact(2.39, "2026-01-26", "2026-04-26", 2027, "Q1", "2026-05-27", "a8"),
     _eps_fact(2.40, "2026-01-26", "2026-04-26", 2027, "Q1", "2026-05-27", "a9"),
 ]
@@ -105,8 +107,7 @@ def _live_eps(ticker: str = "NVDA"):
     return {
         "ticker": ticker,
         "quarterly_eps": [
-            {"fiscal_year": "2026", "fiscal_period": "Q1", "eps_diluted": 0.76,
-             "period_end": "2025-04-27"},
+            {"fiscal_year": "2026", "fiscal_period": "Q1", "eps_diluted": 0.76, "period_end": "2025-04-27"},
         ],
         "ttm_eps_diluted": 0.76,
         "source": "SEC EDGAR company facts (Basic & Diluted EPS)",
@@ -115,7 +116,9 @@ def _live_eps(ticker: str = "NVDA"):
 
 def _live_shares(ticker: str = "NVDA"):
     return {
-        "ticker": ticker, "shares_outstanding": 999.0, "as_of": "2026-01-01",
+        "ticker": ticker,
+        "shares_outstanding": 999.0,
+        "as_of": "2026-01-01",
         "source": "SEC EDGAR company facts",
         "note": "SEC-reported shares outstanding, not public float",
     }
@@ -197,10 +200,16 @@ def test_derive_q4_uses_restated_fy_total():
 
     def _row(start: str, end: str, val: float, filed: str, accn: str) -> sec_facts.FinancialFactRow:
         return {
-            "concept": concept, "period_start": start, "period_end": end,
-            "value": val, "filed_at": filed, "accession": accn,
-            "known_at": "", "source_url": None,
-            "fiscal_year": None, "fiscal_period": None,
+            "concept": concept,
+            "period_start": start,
+            "period_end": end,
+            "value": val,
+            "filed_at": filed,
+            "accession": accn,
+            "known_at": "",
+            "source_url": None,
+            "fiscal_year": None,
+            "fiscal_period": None,
         }
 
     rows = [
@@ -230,7 +239,9 @@ def test_eps_live_fallback_when_store_empty(store: Path, monkeypatch: pytest.Mon
         return _live_eps()
 
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals", _fake_get,
+        sec_facts.edgar_client,
+        "get_fundamentals",
+        _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2025-01-15")
     assert result["error_type"] == "pit_data_unavailable"
@@ -244,11 +255,13 @@ def test_eps_omitted_as_of_defaults_to_today_live(store: Path, monkeypatch: pyte
         return _live_eps(ticker)
 
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals", _fake_get,
+        sec_facts.edgar_client,
+        "get_fundamentals",
+        _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps")
     assert result["data_source"] == "live"
-    assert result["as_of_date"] == date.today().isoformat()
+    assert result["as_of_date"] == date.today().isoformat()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
     assert "requested_as_of" not in result
 
 
@@ -263,7 +276,9 @@ def test_ambiguous_ticker_skips_store_never_guesses(store: Path, monkeypatch: py
         return _live_eps()
 
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals", _fake_get,
+        sec_facts.edgar_client,
+        "get_fundamentals",
+        _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2026-08-10")
     assert result["error_type"] == "pit_data_unavailable"
@@ -275,7 +290,9 @@ def test_invalid_as_of_returns_tool_argument_error(store: Path, monkeypatch: pyt
         return _live_eps(ticker)
 
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals", _fake_get,
+        sec_facts.edgar_client,
+        "get_fundamentals",
+        _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "eps", as_of="2025/01/15")
     assert result["error"] == "as_of must be a date in YYYY-MM-DD format"
@@ -289,11 +306,15 @@ def test_invalid_as_of_returns_tool_argument_error(store: Path, monkeypatch: pyt
 
 def test_shares_outstanding_store_latest_period_wins(store: Path) -> None:
     _seed_ticker(store, NVDA_CIK, "NVDA")
-    _seed_facts(store, NVDA_CIK, shares=[
-        _shares_fact(1000, "2025-10-26", "2025-11-19", "s1"),
-        _shares_fact(1050, "2025-10-26", "2026-03-10", "s2"),  # restated
-        _shares_fact(1100, "2026-01-25", "2026-02-25", "s3"),
-    ])
+    _seed_facts(
+        store,
+        NVDA_CIK,
+        shares=[
+            _shares_fact(1000, "2025-10-26", "2025-11-19", "s1"),
+            _shares_fact(1050, "2025-10-26", "2026-03-10", "s2"),  # restated
+            _shares_fact(1100, "2026-01-25", "2026-02-25", "s3"),
+        ],
+    )
     result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
     assert result["data_source"] == "store"
     assert result["shares_outstanding"] == 1100  # newest period_end; filed_at breaks restatement ties
@@ -323,7 +344,9 @@ def test_shares_live_fallback_empty_store(store: Path, monkeypatch: pytest.Monke
         return _live_shares(ticker)
 
     monkeypatch.setattr(
-        sec_facts.edgar_client, "get_fundamentals", _fake_get,
+        sec_facts.edgar_client,
+        "get_fundamentals",
+        _fake_get,
     )
     result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
     assert result["error_type"] == "pit_data_unavailable"
@@ -334,17 +357,29 @@ def test_shares_live_fallback_empty_store(store: Path, monkeypatch: pytest.Monke
 # ---------------------------------------------------------------------------
 
 
-def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(
+    store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[str] = []
+
     def _fake(ticker: str, metric: str):
         calls.append(metric)
-        return {
-            "ticker": ticker, "balance_sheet": {"totalAssets": 1.0},
-            "source": "SEC EDGAR financials",
-        } if metric == "balance_sheet" else {
-            "ticker": ticker, "name": "NVDA", "cik": "0001045810",
-            "industry": "Semiconductors", "source": "SEC EDGAR",
-        }
+        return (
+            {
+                "ticker": ticker,
+                "balance_sheet": {"totalAssets": 1.0},
+                "source": "SEC EDGAR financials",
+            }
+            if metric == "balance_sheet"
+            else {
+                "ticker": ticker,
+                "name": "NVDA",
+                "cik": "0001045810",
+                "industry": "Semiconductors",
+                "source": "SEC EDGAR",
+            }
+        )
+
     monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _fake)
     bs = sec_facts.get_fundamentals("NVDA", "balance_sheet", as_of="2025-01-15")
     assert bs["error_type"] == "pit_data_unavailable"
@@ -361,10 +396,13 @@ def test_balance_sheet_and_overview_are_live_with_requested_as_of_echo(store: Pa
 def test_get_xbrl_facts_always_live_enveloped(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_facts(ticker: str, concept: str):
         return {
-            "ticker": ticker, "concept_searched": concept,
-            "matching_concepts": [{"concept": "Revenue", "value": 1.0, "period_end": "2026-01-25",
-                                   "fiscal_period": "FY"}],
-            "count": 1, "source": "SEC EDGAR XBRL facts",
+            "ticker": ticker,
+            "concept_searched": concept,
+            "matching_concepts": [
+                {"concept": "Revenue", "value": 1.0, "period_end": "2026-01-25", "fiscal_period": "FY"}
+            ],
+            "count": 1,
+            "source": "SEC EDGAR XBRL facts",
         }
 
     monkeypatch.setattr(sec_facts.edgar_client, "get_xbrl_facts", _fake_facts)
@@ -417,8 +455,10 @@ def test_tool_schema_and_dispatch(store: Path, monkeypatch: pytest.MonkeyPatch) 
 
     _seed_nvda(store)
     result = execute_tool(
-        "get_fundamentals", {"ticker": "NVDA", "metric": "eps", "as_of": "2026-08-10"},
-        model="test", context=LOCAL_CONTEXT,
+        "get_fundamentals",
+        {"ticker": "NVDA", "metric": "eps", "as_of": "2026-08-10"},
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert result["source"] == "sec"
     assert result["data_source"] == "store"

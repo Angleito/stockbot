@@ -1,0 +1,33 @@
+# Reason-annotated allowlist for the ten findings gitleaks reports on this repo.
+#
+# [extend] useDefault keeps the shipped ruleset active: a custom config REPLACES
+# the default rules, so dropping it silently turns this gate into a no-op.
+#
+# Every entry matches the exact detected secret text (regexTarget = "secret"), so
+# nothing is suppressed by path or file: a different secret in the same file still
+# fails. Nine findings were reviewed on 2026-09-15 and the accession-alphabet hit
+# on 2026-09-16; none is a credential, so no rotation or history rewrite is needed.
+#   tests/test_observability.py:246        placeholder JWT         eyJhbGciOiJIUzI1NiJ9.abc.def
+#   tests/test_observability.py:427,1742   placeholder key         sk-or-v1-abcdefghijklmnop
+#   tests/test_observability.py:429        jwt.io demo token, truncated payload
+#   tests/test_observability.py:437,481    jwt.io demo token (HS256 demo payload)
+#   tests/security/test_egress.py:42       jwt.io demo token (HS256 demo payload)
+#   scripts/verify_judge.py:340            generic-api-key entropy on the family label "failure/uncertainty"
+#   app/main.py:1 (deleted at a82a7ae3)    generic-api-key entropy on docstring prose "health/observability"
+#   tests/test_research_harness.py:2906    hypothesis accession alphabet (hex digits + "-") read as an API-key entropy hit
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "jwt.io's published demo token, its truncated form, placeholder JWT/API-key fixtures, and generic-api-key entropy hits on plain words"
+regexTarget = "secret"
+regexes = [
+    '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9''',
+    '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.''',
+    '''eyJhbGciOiJIUzI1NiJ9\.abc\.def''',
+    '''sk-or-v1-abcdefghijklmnop''',
+    '''failure/uncertainty''',
+    '''health/observability''',
+    '''0123456789abcdefABCDEF-''',
+]

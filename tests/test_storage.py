@@ -4,11 +4,11 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 import pyarrow as pa
+import pytest
 
-from app.storage import duckdb, parquet, raw_archive
 from app.domain.market import ids
+from app.storage import duckdb, parquet, raw_archive
 
 
 @pytest.fixture
@@ -32,7 +32,10 @@ def _payload(text: str) -> bytes:
 
 def test_archive_stores_payload_and_manifest(archive_root: Path):
     record = raw_archive.archive(
-        "sec", "companyfacts", "cik0000320193", _payload("hello"),
+        "sec",
+        "companyfacts",
+        "cik0000320193",
+        _payload("hello"),
         url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
         retrieved_at="2026-08-21T12:00:00Z",
         metadata={"cik": "0000320193"},
@@ -79,9 +82,14 @@ def test_find_and_has_payload(archive_root: Path):
 # ---------------------------------------------------------------------------
 
 
-def _fact_row(entity_id: str = "sec:cik:0000320193", value: float = 100.0, period_end: str = "2026-08-01",
-              filed: str = "2026-08-02", accession: str = "0000320193-26-000001",
-              known_at: str = "2026-08-02T00:00:00Z") -> dict[str, object]:
+def _fact_row(
+    entity_id: str = "sec:cik:0000320193",
+    value: float = 100.0,
+    period_end: str = "2026-08-01",
+    filed: str = "2026-08-02",
+    accession: str = "0000320193-26-000001",
+    known_at: str = "2026-08-02T00:00:00Z",
+) -> dict[str, object]:
     cik = int(entity_id.removeprefix("sec:cik:"))
     return {
         "fact_id": ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", period_end, value),
@@ -134,13 +142,21 @@ def test_parquet_unknown_dataset_rejected(data_root: Path):
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_row(snapshot_id: str = "snap-001", broker: str = "robinhood",
-                  created_at: str = "2026-08-25T12:00:00Z", cash: Decimal = Decimal("1234.5"),
-                  invested_value: Decimal = Decimal("23456.78"), total_value: Decimal = Decimal("24691.28"),
-                  account_count: int = 2, position_count: int = 5, priced_position_count: int = 4,
-                  unresolved_position_count: int = 1, source: str = "robinhood-api",
-                  parser_version: str = "portfolio-parser-v1",
-                  calculation_version: str = "portfolio-calc-v1") -> dict[str, object]:
+def _snapshot_row(
+    snapshot_id: str = "snap-001",
+    broker: str = "robinhood",
+    created_at: str = "2026-08-25T12:00:00Z",
+    cash: Decimal = Decimal("1234.5"),
+    invested_value: Decimal = Decimal("23456.78"),
+    total_value: Decimal = Decimal("24691.28"),
+    account_count: int = 2,
+    position_count: int = 5,
+    priced_position_count: int = 4,
+    unresolved_position_count: int = 1,
+    source: str = "robinhood-api",
+    parser_version: str = "portfolio-parser-v1",
+    calculation_version: str = "portfolio-calc-v1",
+) -> dict[str, object]:
     return {
         "snapshot_id": snapshot_id,
         "broker": broker,
@@ -158,16 +174,25 @@ def _snapshot_row(snapshot_id: str = "snap-001", broker: str = "robinhood",
     }
 
 
-def _position_row(snapshot_id: str = "snap-001", position_id: str = "pos-001", account_id: str = "acc-001",
-                  security_id: str = "sec:cik:0000320193", entity_id: str = "sec:cik:0000320193",
-                  ticker: str = "AAPL", quantity: Decimal = Decimal("10.0"),
-                  average_cost: Decimal = Decimal("150.25"),
-                  market_price: Decimal = Decimal("160.0"), price_type: str = "last_trade",
-                  market_value: Decimal = Decimal("1600.0"), unrealized_gain: Decimal = Decimal("97.5"),
-                  unrealized_gain_pct: Decimal = Decimal("0.0649"),
-                  portfolio_weight: Decimal = Decimal("0.0648"),
-                  source: str = "robinhood-api", quote_retrieved_at: str = "2026-08-25T12:00:00Z",
-                  asset_type: str = "equity") -> dict[str, object]:
+def _position_row(
+    snapshot_id: str = "snap-001",
+    position_id: str = "pos-001",
+    account_id: str = "acc-001",
+    security_id: str = "sec:cik:0000320193",
+    entity_id: str = "sec:cik:0000320193",
+    ticker: str = "AAPL",
+    quantity: Decimal = Decimal("10.0"),
+    average_cost: Decimal = Decimal("150.25"),
+    market_price: Decimal = Decimal("160.0"),
+    price_type: str = "last_trade",
+    market_value: Decimal = Decimal("1600.0"),
+    unrealized_gain: Decimal = Decimal("97.5"),
+    unrealized_gain_pct: Decimal = Decimal("0.0649"),
+    portfolio_weight: Decimal = Decimal("0.0648"),
+    source: str = "robinhood-api",
+    quote_retrieved_at: str = "2026-08-25T12:00:00Z",
+    asset_type: str = "equity",
+) -> dict[str, object]:
     return {
         "snapshot_id": snapshot_id,
         "position_id": position_id,
@@ -296,7 +321,20 @@ def test_portfolio_empty_read_returns_empty_table(data_root: Path):
 
 
 def test_duckdb_query_returns_rows_as_dicts(data_root: Path):
-    parquet.write_rows("financial_facts", [_fact_row(), _fact_row(value=200.0, period_end="2026-08-15", filed="2026-08-16", known_at="2026-08-16T00:00:00Z", accession="0000320193-26-000002")], root=data_root / "parquet")
+    parquet.write_rows(
+        "financial_facts",
+        [
+            _fact_row(),
+            _fact_row(
+                value=200.0,
+                period_end="2026-08-15",
+                filed="2026-08-16",
+                known_at="2026-08-16T00:00:00Z",
+                accession="0000320193-26-000002",
+            ),
+        ],
+        root=data_root / "parquet",
+    )
     rows = duckdb.query("SELECT concept, value FROM financial_facts ORDER BY value", data_root=data_root)
     assert rows == [
         {"concept": "EntityCommonStockSharesOutstanding", "value": 100.0},
@@ -304,8 +342,9 @@ def test_duckdb_query_returns_rows_as_dicts(data_root: Path):
     ]
 
 
-def _as_of_rows(sql: str, as_of: str, params: tuple[str, ...] | list[str] = (),
-                data_root: Path | None = None) -> list[dict[str, object]]:
+def _as_of_rows(
+    sql: str, as_of: str, params: tuple[str, ...] | list[str] = (), data_root: Path | None = None
+) -> list[dict[str, object]]:
     clause, param = duckdb.as_of_clause(as_of)
     return duckdb.query(
         f"SELECT * FROM ({sql}) AS _pt WHERE {clause}",
@@ -316,7 +355,13 @@ def _as_of_rows(sql: str, as_of: str, params: tuple[str, ...] | list[str] = (),
 
 def test_as_of_blocks_later_known_at(data_root: Path):
     early = _fact_row(value=100.0, period_end="2026-08-01", filed="2026-08-02", known_at="2026-08-02T00:00:00Z")
-    late = _fact_row(value=300.0, period_end="2026-08-10", filed="2026-08-20", known_at="2026-08-20T00:00:00Z", accession="0000320193-26-000002")
+    late = _fact_row(
+        value=300.0,
+        period_end="2026-08-10",
+        filed="2026-08-20",
+        known_at="2026-08-20T00:00:00Z",
+        accession="0000320193-26-000002",
+    )
     parquet.write_rows("financial_facts", [early, late], root=data_root / "parquet")
 
     rows = _as_of_rows(
@@ -349,6 +394,7 @@ def test_as_of_timestamp_granularity(data_root: Path):
     at = _as_of_rows("SELECT * FROM financial_facts", as_of="2026-08-14T09:30:00Z", data_root=data_root)
     assert before == []
     assert [r["value"] for r in at] == [100.0]
+
 
 def test_events_evidence_registry_roundtrip(data_root: Path):
     """CorporateEvent/Evidence datasets dedup on rerun."""
@@ -405,24 +451,32 @@ def test_events_evidence_registry_roundtrip(data_root: Path):
 def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
     import pyarrow as pa
     import pyarrow.parquet as parq
+
     root = data_root / "parquet"
     old_schema = pa.schema(
-        [f for f in parquet.DATASETS["sec_13f_holdings"].schema
-         if f.name not in ("source_row", "holding_id", "other_manager",
-                           "shares_prn_type")]
+        [
+            f
+            for f in parquet.DATASETS["sec_13f_holdings"].schema
+            if f.name not in ("source_row", "holding_id", "other_manager", "shares_prn_type")
+        ]
     )
     old_tbl = pa.Table.from_pylist(
-        [{"accession": "ACC-OLD", "manager_cik": "5",
-          "cusip": "0378-33100", "filed_at": "2024-05-15",
-          "known_at": "2024-05-15T00:00:00Z"}],
+        [
+            {
+                "accession": "ACC-OLD",
+                "manager_cik": "5",
+                "cusip": "0378-33100",
+                "filed_at": "2024-05-15",
+                "known_at": "2024-05-15T00:00:00Z",
+            }
+        ],
         schema=old_schema,
     )
     part_dir = root / "sec_13f_holdings" / "filed_at_year=2024"
     part_dir.mkdir(parents=True, exist_ok=True)
     parq.write_table(old_tbl, str(part_dir / "part-old.parquet"))
     rows = duckdb.query(
-        "SELECT accession, source_row, holding_id, other_manager, "
-        "shares_prn_type FROM sec_13f_holdings",
+        "SELECT accession, source_row, holding_id, other_manager, shares_prn_type FROM sec_13f_holdings",
         data_root=data_root,
     )
     assert len(rows) == 1
@@ -430,11 +484,21 @@ def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
     assert rows[0]["holding_id"] is None
     assert rows[0]["other_manager"] is None
     assert rows[0]["shares_prn_type"] is None
-    assert parquet.write_rows(
-        "sec_13f_holdings",
-        [{"accession": "ACC-NEW", "manager_cik": "5",
-          "cusip": "037833100", "filed_at": "2024-05-15",
-          "known_at": "2024-05-15T00:00:00Z", "source_row": 1,
-          "holding_id": "new-id"}],
-        root=root,
-    ) == 1
+    assert (
+        parquet.write_rows(
+            "sec_13f_holdings",
+            [
+                {
+                    "accession": "ACC-NEW",
+                    "manager_cik": "5",
+                    "cusip": "037833100",
+                    "filed_at": "2024-05-15",
+                    "known_at": "2024-05-15T00:00:00Z",
+                    "source_row": 1,
+                    "holding_id": "new-id",
+                }
+            ],
+            root=root,
+        )
+        == 1
+    )

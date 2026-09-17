@@ -1,15 +1,13 @@
 """Tests for the risk/mandate domain, storage glue, CLI command, and tool."""
 
 import json
-import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from cli import _cmd_evaluate_mandate
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
 from app.domain.risk.evaluation import UNKNOWN_SECTOR, EvaluationIssue, evaluate_mandate
@@ -18,6 +16,7 @@ from app.services import risk as risk_service
 from app.services.mandate import load_mandate_file
 from app.services.portfolio_sync import persist_snapshot
 from app.storage import parquet
+from cli import _cmd_evaluate_mandate
 
 
 @pytest.fixture
@@ -39,7 +38,7 @@ def _position(
         security_id="sec:equity:0000320193" if entity_id else None,
         entity_id=entity_id,
         ticker=ticker,
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         average_cost=Decimal("95.50"),
         market_price=Decimal("116.84"),
         market_value=Decimal("1168.40"),
@@ -47,9 +46,9 @@ def _position(
         unrealized_gain_pct=Decimal("0.22"),
         portfolio_weight=weight,
         source="robinhood_mcp",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
         price_type="last",
-        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
     )
 
 
@@ -67,16 +66,20 @@ def _hand_built_snapshot(weight: Decimal | None | object = _MISSING) -> Portfoli
         resolved_weight = Decimal("0.75")
         unresolved_weight = Decimal("0.25")
     resolved = _position(
-        "snap-1:acc-1:WING", "WING", "sec:cik:0000320193",
+        "snap-1:acc-1:WING",
+        "WING",
+        "sec:cik:0000320193",
         resolved_weight,
     )
     unresolved = _position(
-        "snap-1:acc-1:ZZZZ", "ZZZZ", None,
+        "snap-1:acc-1:ZZZZ",
+        "ZZZZ",
+        None,
         unresolved_weight,
     )
     return PortfolioSnapshot(
         snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
-        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
         broker="robinhood",
         account_ids=("acc-1",),
         cash=Decimal("1234.56"),
@@ -90,8 +93,8 @@ def _mandate(limits: Sequence[RiskLimit], prohibited: Sequence[str] = ()) -> Man
     return Mandate(limits=tuple(limits), prohibited_assets=tuple(prohibited))
 
 
-def _limit(metric: str, operator: str, threshold: str | int | float | Decimal, **overrides: str) -> RiskLimit:
-    values = dict(metric=metric, operator=operator, threshold=Decimal(str(threshold)))
+def _limit(metric: str, operator: str, threshold: str | float | Decimal, **overrides: str) -> RiskLimit:
+    values = {"metric": metric, "operator": operator, "threshold": Decimal(str(threshold))}
     values.update(overrides)
     return RiskLimit(**values)
 
@@ -108,15 +111,24 @@ def _write_mandate(path: Path, payload: Mapping[str, object]) -> Path:
 
 
 def test_load_mandate_file_valid_json_with_defaults(tmp_path: Path):
-    path = _write_mandate(tmp_path / "mandate.json", {
-        "limits": [
-            {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
-            {"metric": "minimum_cash", "operator": ">=", "threshold": 0.10},
-            {"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 0.20, "severity": "critical"},
-        ],
-        "prohibited_assets": ["GME", "sec:cik:0000320193"],
-        "extra_ignored": True,
-    })
+    path = _write_mandate(
+        tmp_path / "mandate.json",
+        {
+            "limits": [
+                {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
+                {"metric": "minimum_cash", "operator": ">=", "threshold": 0.10},
+                {
+                    "metric": "sector_exposure",
+                    "target": "semiconductors",
+                    "operator": "<=",
+                    "threshold": 0.20,
+                    "severity": "critical",
+                },
+            ],
+            "prohibited_assets": ["GME", "sec:cik:0000320193"],
+            "extra_ignored": True,
+        },
+    )
     mandate = load_mandate_file(path)
     assert len(mandate.limits) == 3
     assert mandate.limits[0].severity == "warning"
@@ -133,37 +145,53 @@ def test_load_mandate_file_missing_file(tmp_path: Path):
         load_mandate_file(tmp_path / "nope.json")
 
 
-@pytest.mark.parametrize("payload", [
-    [],
-    {"limits": {}},
-    {"limits": [{"metric": "bogus", "operator": "<=", "threshold": 1}]},
-    {"limits": [{"metric": "single_position_weight", "operator": ">", "threshold": 1}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<="}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": -0.5}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": "abc"}]},
-    {"limits": [{"metric": "sector_exposure", "operator": "<=", "threshold": 0.2}]},
-    {"limits": [{"metric": "sector_exposure", "target": "", "operator": "<=", "threshold": 0.2}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.25, "unit": "dollars"}]},
-    {"limits": [{"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 0.20, "unit": "dollars"}]},
-    {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 1.5}]},
-    {"limits": [{"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 1.5}]},
-    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 1.5}]},
-    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": "GME"},
-    {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": [""]},
-    {"limits": "nope"},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"limits": {}},
+        {"limits": [{"metric": "bogus", "operator": "<=", "threshold": 1}]},
+        {"limits": [{"metric": "single_position_weight", "operator": ">", "threshold": 1}]},
+        {"limits": [{"metric": "single_position_weight", "operator": "<="}]},
+        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0}]},
+        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": -0.5}]},
+        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": "abc"}]},
+        {"limits": [{"metric": "sector_exposure", "operator": "<=", "threshold": 0.2}]},
+        {"limits": [{"metric": "sector_exposure", "target": "", "operator": "<=", "threshold": 0.2}]},
+        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.25, "unit": "dollars"}]},
+        {
+            "limits": [
+                {
+                    "metric": "sector_exposure",
+                    "target": "semiconductors",
+                    "operator": "<=",
+                    "threshold": 0.20,
+                    "unit": "dollars",
+                }
+            ]
+        },
+        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 1.5}]},
+        {"limits": [{"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 1.5}]},
+        {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 1.5}]},
+        {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": "GME"},
+        {"limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}], "prohibited_assets": [""]},
+        {"limits": "nope"},
+    ],
+)
 def test_parse_mandate_rejects_bad_config(payload: Mapping[str, object]):
     with pytest.raises(ValueError):
         parse_mandate(payload)
 
+
 def test_parse_mandate_normalizes_whitespace():
-    mandate = parse_mandate({
-        "limits": [
-            {"metric": "sector_exposure", "target": "  semiconductors  ", "operator": "<=", "threshold": 0.20},
-        ],
-        "prohibited_assets": [" GME ", " sec:cik:0000320193 "],
-    })
+    mandate = parse_mandate(
+        {
+            "limits": [
+                {"metric": "sector_exposure", "target": "  semiconductors  ", "operator": "<=", "threshold": 0.20},
+            ],
+            "prohibited_assets": [" GME ", " sec:cik:0000320193 "],
+        }
+    )
     assert mandate.limits[0].target == "semiconductors"
     assert mandate.prohibited_assets == ("GME", "sec:cik:0000320193")
 
@@ -207,10 +235,12 @@ def test_single_position_weight_none_weight_not_evaluable():
     assert evaluation.breaches == ()
     assert evaluation.sector_exposures == {}
     assert evaluation.issues == (
-        EvaluationIssue("position_weight_unavailable", "single_position_weight",
-                        ticker="WING", position_id="snap-1:acc-1:WING"),
-        EvaluationIssue("position_weight_unavailable", "single_position_weight",
-                        ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"),
+        EvaluationIssue(
+            "position_weight_unavailable", "single_position_weight", ticker="WING", position_id="snap-1:acc-1:WING"
+        ),
+        EvaluationIssue(
+            "position_weight_unavailable", "single_position_weight", ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"
+        ),
     )
 
 
@@ -237,7 +267,7 @@ def test_minimum_cash_dollars_unit():
     evaluation = evaluate_mandate(_hand_built_snapshot(), mandate)
     breach = evaluation.breaches[0]
     assert breach.actual == Decimal("1234.56")
-    assert breach.excess == Decimal("5000") - Decimal("1234.56")
+    assert breach.excess == Decimal(5000) - Decimal("1234.56")
     assert breach.unit == "dollars"
 
 
@@ -257,6 +287,7 @@ def test_minimum_cash_unavailable_not_evaluable():
     evaluation = evaluate_mandate(snapshot, mandate)
     assert evaluation.breaches == ()
     assert evaluation.issues == (EvaluationIssue("cash_unavailable", "minimum_cash"),)
+
 
 def test_minimum_cash_total_value_unavailable_not_evaluable():
     snapshot = _hand_built_snapshot()
@@ -293,15 +324,18 @@ def test_sector_exposure_unpriced_position_not_evaluable():
     snapshot = _hand_built_snapshot(weight=None)
     mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
     evaluation = evaluate_mandate(
-        snapshot, mandate,
+        snapshot,
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
     assert evaluation.issues == (
-        EvaluationIssue("position_weight_unavailable", "sector_exposure",
-                        ticker="WING", position_id="snap-1:acc-1:WING"),
-        EvaluationIssue("position_weight_unavailable", "sector_exposure",
-                        ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"),
+        EvaluationIssue(
+            "position_weight_unavailable", "sector_exposure", ticker="WING", position_id="snap-1:acc-1:WING"
+        ),
+        EvaluationIssue(
+            "position_weight_unavailable", "sector_exposure", ticker="ZZZZ", position_id="snap-1:acc-1:ZZZZ"
+        ),
     )
 
 
@@ -312,9 +346,9 @@ def test_minimum_cash_zero_total_value_not_evaluable():
         created_at=snapshot.created_at,
         broker=snapshot.broker,
         account_ids=snapshot.account_ids,
-        cash=Decimal("0"),
-        invested_value=Decimal("0"),
-        total_value=Decimal("0"),
+        cash=Decimal(0),
+        invested_value=Decimal(0),
+        total_value=Decimal(0),
         positions=snapshot.positions,
     )
     mandate = _mandate([_limit("minimum_cash", ">=", "0.10")])
@@ -326,7 +360,8 @@ def test_minimum_cash_zero_total_value_not_evaluable():
 def test_sector_exposure_buckets_unknown_and_breaches():
     mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.sector_exposures == {
@@ -344,7 +379,8 @@ def test_sector_exposure_buckets_unknown_and_breaches():
 def test_sector_exposure_missing_target_sector_is_zero():
     mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="aero")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
@@ -354,7 +390,8 @@ def test_sector_exposure_missing_target_sector_is_zero():
 def test_sector_max_known_below_threshold_with_unknown_not_evaluable():
     mandate = _mandate([_limit("sector_exposure", "<=", "0.80", target="semiconductors")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
@@ -364,18 +401,22 @@ def test_sector_max_known_below_threshold_with_unknown_not_evaluable():
 def test_sector_max_known_above_threshold_with_unknown_breaches():
     mandate = _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert len(evaluation.breaches) == 1
     assert evaluation.breaches[0].actual == Decimal("0.75")
-    assert EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") not in evaluation.issues
+    assert (
+        EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="semiconductors") not in evaluation.issues
+    )
 
 
 def test_sector_min_known_below_threshold_with_unknown_not_evaluable():
     mandate = _mandate([_limit("sector_exposure", ">=", "0.80", target="semiconductors")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
@@ -385,7 +426,8 @@ def test_sector_min_known_below_threshold_with_unknown_not_evaluable():
 def test_sector_min_known_above_threshold_with_unknown_passes():
     mandate = _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")])
     evaluation = evaluate_mandate(
-        _hand_built_snapshot(), mandate,
+        _hand_built_snapshot(),
+        mandate,
         sector_map={"sec:cik:0000320193": "semiconductors"},
     )
     assert evaluation.breaches == ()
@@ -395,7 +437,7 @@ def test_sector_min_known_above_threshold_with_unknown_passes():
 def test_sector_no_unknown_keeps_deterministic_behavior():
     snapshot = PortfolioSnapshot(
         snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
-        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
         broker="robinhood",
         account_ids=("acc-1",),
         cash=Decimal("1234.56"),
@@ -408,19 +450,22 @@ def test_sector_no_unknown_keeps_deterministic_behavior():
     )
     sector_map = {"sec:cik:0000320193": "semiconductors", "sec:cik:0000999999": "aerospace"}
     below = evaluate_mandate(
-        snapshot, _mandate([_limit("sector_exposure", "<=", "0.80", target="semiconductors")]),
+        snapshot,
+        _mandate([_limit("sector_exposure", "<=", "0.80", target="semiconductors")]),
         sector_map=sector_map,
     )
     assert below.breaches == ()
     assert below.issues == ()
     above = evaluate_mandate(
-        snapshot, _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")]),
+        snapshot,
+        _mandate([_limit("sector_exposure", ">=", "0.70", target="semiconductors")]),
         sector_map=sector_map,
     )
     assert above.breaches == ()
     assert above.issues == ()
     breach = evaluate_mandate(
-        snapshot, _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")]),
+        snapshot,
+        _mandate([_limit("sector_exposure", "<=", "0.20", target="semiconductors")]),
         sector_map=sector_map,
     )
     assert len(breach.breaches) == 1
@@ -442,7 +487,7 @@ def test_empty_mandate_zero_breaches():
     assert evaluation.breaches == ()
     assert evaluation.issues == ()
     assert evaluation.snapshot_id == "portfolio:robinhood:2026-08-25T12:00:00+00:00"
-    assert evaluation.created_at == datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    assert evaluation.created_at == datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -471,9 +516,7 @@ def test_load_sector_map_newest_wins(data_root: Path):
         ],
         root=data_root / "parquet",
     )
-    assert risk_service.load_sector_map(data_root=data_root) == {
-        "sec:cik:0000320193": "defense"
-    }
+    assert risk_service.load_sector_map(data_root=data_root) == {"sec:cik:0000320193": "defense"}
 
 
 def test_load_sector_map_mixed_offsets_newest_wins(data_root: Path):
@@ -487,10 +530,7 @@ def test_load_sector_map_mixed_offsets_newest_wins(data_root: Path):
     )
     # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
     # older than 12:30Z — semiconductors must win.
-    assert risk_service.load_sector_map(data_root=data_root) == {
-        "sec:cik:0000320193": "semiconductors"
-    }
-
+    assert risk_service.load_sector_map(data_root=data_root) == {"sec:cik:0000320193": "semiconductors"}
 
 
 def test_load_sector_map_as_of_prefers_older(data_root: Path):
@@ -502,10 +542,8 @@ def test_load_sector_map_as_of_prefers_older(data_root: Path):
         ],
         root=data_root / "parquet",
     )
-    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-    assert risk_service.load_sector_map(data_root=data_root, as_of=as_of) == {
-        "sec:cik:0000320193": "aero"
-    }
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    assert risk_service.load_sector_map(data_root=data_root, as_of=as_of) == {"sec:cik:0000320193": "aero"}
 
 
 def test_load_sector_map_empty_dataset(data_root: Path):
@@ -539,7 +577,9 @@ def _seed_snapshot_and_mandate(data_root: Path, mandate_payload: Mapping[str, ob
     mandate_path = data_root / "mandate.json"
     return _write_mandate(
         mandate_path,
-        mandate_payload if mandate_payload is not None else {
+        mandate_payload
+        if mandate_payload is not None
+        else {
             "limits": [
                 {"metric": "sector_exposure", "target": "semiconductors", "operator": "<=", "threshold": 0.20},
                 {"metric": "single_position_weight", "operator": "<=", "threshold": 0.25},
@@ -554,7 +594,7 @@ def test_cli_evaluate_mandate_reports(capsys: pytest.CaptureFixture[str], data_r
     _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out
     assert f"Mandate: {mandate_path}" in out
-    expected_created = f"Snapshot: portfolio:robinhood:2026-08-25T12:00:00+00:00 created {datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()}"
+    expected_created = f"Snapshot: portfolio:robinhood:2026-08-25T12:00:00+00:00 created {datetime(2026, 8, 25, 12, 0, tzinfo=UTC).astimezone().isoformat()}"
     assert expected_created in out
     assert "Sector exposures: semiconductors 75.0%, unknown_sector 25.0%" in out
     assert "[warning] sector_exposure semiconductors: actual 75.0%, limit 20.0%, excess 55.0%" in out
@@ -565,7 +605,10 @@ def test_cli_evaluate_mandate_reports(capsys: pytest.CaptureFixture[str], data_r
 def test_cli_evaluate_mandate_no_breaches(capsys: pytest.CaptureFixture[str], data_root: Path):
     mandate_path = _seed_snapshot_and_mandate(
         data_root,
-        {"limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.99}], "prohibited_assets": []},
+        {
+            "limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.99}],
+            "prohibited_assets": [],
+        },
     )
     _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out

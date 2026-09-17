@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 from app.thesis.models import JSONValue
 
@@ -32,25 +32,47 @@ class RobinhoodToolError(RuntimeError):
     pass
 
 
+def _dump_sdk_model(result: object) -> tuple[bool, object]:
+    if hasattr(result, "model_dump"):
+        return True, getattr(result, "model_dump")(exclude_none=True)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    if hasattr(result, "dict"):
+        return True, getattr(result, "dict")(exclude_none=True)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+    return False, None
+
+
+def _text_payload(text: object) -> JSONValue:
+    if text is None or isinstance(text, (str, int, float, bool)):
+        return text
+    return normalize_result(text)
+
+
+def _normalize_text_field(result: object) -> tuple[bool, JSONValue]:
+    if not hasattr(result, "text"):
+        return False, None
+    return True, _text_payload(getattr(result, "text"))  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+
+
+def _normalize_container(result: object) -> tuple[bool, JSONValue]:
+    if isinstance(result, dict):
+        return True, {str(k): normalize_result(v) for k, v in result.items()}
+    if isinstance(result, (list, tuple)):
+        return True, [normalize_result(v) for v in result]
+    return False, None
+
+
 def normalize_result(result: object) -> JSONValue:
     """Convert SDK model objects and MCP content into JSON-like values."""
     if result is None or isinstance(result, (str, int, float, bool)):
         return result
-    if isinstance(result, dict):
-        return {str(k): normalize_result(v) for k, v in result.items()}
-    if isinstance(result, (list, tuple)):
-        return [normalize_result(v) for v in result]
-    if hasattr(result, "model_dump"):
-        dumped: object = getattr(result, "model_dump")(exclude_none=True)
+    handled, value = _normalize_container(result)
+    if handled:
+        return value
+    handled, dumped = _dump_sdk_model(result)
+    if handled:
         return normalize_result(dumped)
-    if hasattr(result, "dict"):
-        dumped_dict: object = getattr(result, "dict")(exclude_none=True)
-        return normalize_result(dumped_dict)
-    if hasattr(result, "text"):
-        text: object = getattr(result, "text")
-        if text is None or isinstance(text, (str, int, float, bool)):
-            return text
-        return normalize_result(text)
+    handled, text_value = _normalize_text_field(result)
+    if handled:
+        return text_value
     return {k: normalize_result(v) for k, v in vars(result).items() if not k.startswith("_")}
 
 
@@ -69,12 +91,17 @@ def normalize_tools(result: object) -> list[dict[str, object]]:
 
 
 class RobinhoodClient:
-    def __init__(self, server_url: str, *, oauth: OAuthConfig | None = None,
-                 token_path: Path = DEFAULT_TOKEN_PATH,
-                 market_tools: frozenset[str] | None = None,
-                 account_tools: frozenset[str] | None = None,
-                 allowed_tools: set[str] | None = None,
-                 transport_factory: Callable[..., object] | None = None):
+    def __init__(
+        self,
+        server_url: str,
+        *,
+        oauth: OAuthConfig | None = None,
+        token_path: Path = DEFAULT_TOKEN_PATH,
+        market_tools: frozenset[str] | None = None,
+        account_tools: frozenset[str] | None = None,
+        allowed_tools: set[str] | None = None,
+        transport_factory: Callable[..., object] | None = None,
+    ):
         if allowed_tools is not None:
             # Legacy generic configuration still cannot add capabilities:
             # classify it against the canonical registry before construction.
@@ -86,18 +113,14 @@ class RobinhoodClient:
             market_tools = configured & MARKET_READ_TOOLS
             account_tools = configured & ACCOUNT_READ_TOOLS
         if oauth is not None and server_url != oauth.server_url:
-            raise ValueError(
-                "Robinhood MCP transport URL must match the OAuth server URL"
-            )
+            raise ValueError("Robinhood MCP transport URL must match the OAuth server URL")
         self.server_url = server_url
         self.oauth = oauth
         self.token_path = token_path
         self.market_tools = market_tools
         self.account_tools = account_tools
         self.allowed_tools = allowed_tools
-        self.permitted_tools = allowed_read_tools(
-            market=market_tools, account=account_tools
-        )
+        self.permitted_tools = allowed_read_tools(market=market_tools, account=account_tools)
         self.transport_factory = transport_factory
 
     def list_tools(self) -> list[dict[str, object]]:
@@ -129,13 +152,13 @@ class RobinhoodClient:
 
     async def _list_tools(self) -> list[dict[str, object]]:
         async with self._session() as session:
-            list_tools = getattr(session, "list_tools")
+            list_tools = getattr(session, "list_tools")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
             result: object = await list_tools()
             return normalize_tools(result)
 
     async def _call_tool(self, name: str, arguments: dict[str, object]) -> JSONValue:
         async with self._session() as session:
-            call_tool = getattr(session, "call_tool")
+            call_tool = getattr(session, "call_tool")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
             result: object = await call_tool(name, arguments)
             if getattr(result, "is_error", getattr(result, "isError", False)):
                 raise RobinhoodToolError("Robinhood MCP tool returned an error")
@@ -144,7 +167,7 @@ class RobinhoodClient:
     async def _run_readonly(self, calls: list[tuple[str, dict[str, object]]]) -> list[JSONValue]:
         results: list[JSONValue] = []
         async with self._session() as session:
-            call_tool = getattr(session, "call_tool")
+            call_tool = getattr(session, "call_tool")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
             for name, arguments in calls:
                 result: object = await call_tool(name, arguments)
                 if getattr(result, "is_error", getattr(result, "isError", False)):
@@ -177,20 +200,27 @@ class _SessionContext:
         self.transport_context = self.transport
         client: object = self.session_type(self.transport_context)
         self.session_context = client
-        enter = getattr(client, "__aenter__")
+        enter = getattr(client, "__aenter__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
         result: object = await enter()
         return result
 
     async def __aexit__(self, *args: object) -> bool | None:
         if not self.session_context:
             return None
-        exit_method = getattr(self.session_context, "__aexit__")
+        exit_method = getattr(self.session_context, "__aexit__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
         result: object = await exit_method(*args)
         return True if result else None
 
 
 class _HttpSessionContext:
-    def __init__(self, url: str, auth: object | None, transport_factory: Callable[..., object], client_type: Callable[..., object], httpx_module: object) -> None:
+    def __init__(
+        self,
+        url: str,
+        auth: object | None,
+        transport_factory: Callable[..., object],
+        client_type: Callable[..., object],
+        httpx_module: object,
+    ) -> None:
         self.url = url
         self.auth = auth
         self.transport_factory = transport_factory
@@ -201,29 +231,25 @@ class _HttpSessionContext:
         self.client_context: object | None = None
 
     async def __aenter__(self) -> object:
-        async_client_factory = getattr(self.httpx_module, "AsyncClient")
-        http_client: object = async_client_factory(
-            auth=self.auth, follow_redirects=False
-        )
+        async_client_factory = getattr(self.httpx_module, "AsyncClient")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+        http_client: object = async_client_factory(auth=self.auth, follow_redirects=False)
         self.http_client = http_client
-        enter_http = getattr(http_client, "__aenter__")
+        enter_http = getattr(http_client, "__aenter__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
         await enter_http()
-        transport: object = self.transport_factory(
-            self.url, http_client=self.http_client, terminate_on_close=False
-        )
+        transport: object = self.transport_factory(self.url, http_client=self.http_client, terminate_on_close=False)
         self.transport_context = transport
         client: object = self.client_type(self.transport_context)
         self.client_context = client
-        enter_client = getattr(client, "__aenter__")
+        enter_client = getattr(client, "__aenter__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
         result: object = await enter_client()
         return result
 
     async def __aexit__(self, *args: object) -> bool | None:
         if self.client_context:
-            exit_client = getattr(self.client_context, "__aexit__")
+            exit_client = getattr(self.client_context, "__aexit__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
             await exit_client(*args)
         if self.http_client:
-            exit_http = getattr(self.http_client, "__aexit__")
+            exit_http = getattr(self.http_client, "__aexit__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
             result: object = await exit_http(*args)
             return True if result else None
         return None

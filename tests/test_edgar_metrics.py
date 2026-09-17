@@ -5,9 +5,10 @@ shares outstanding, not public float. The old name remains a deprecated alias
 that returns the same value with an explicit note.
 """
 
+from typing import override
+
 import pandas as pd
 import pytest
-from typing import override
 
 from app import edgar_client
 from app.sec.events8k import KNOWN_8K_ITEMS, parse_8k_events
@@ -17,9 +18,11 @@ from app.tools import TOOLS
 
 class _FakeFacts:
     def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame([
-            {"concept": "dei:EntityCommonStockSharesOutstanding", "value": 1000, "period_end": "2026-08-01"},
-        ])
+        return pd.DataFrame(
+            [
+                {"concept": "dei:EntityCommonStockSharesOutstanding", "value": 1000, "period_end": "2026-08-01"},
+            ]
+        )
 
 
 class _FakeCompany:
@@ -77,7 +80,8 @@ def test_shares_float_alias_returns_shares_outstanding():
 
 def test_tool_schema_offers_shares_outstanding_not_shares_float():
     schema = next(
-        item for item in TOOLS
+        item
+        for item in TOOLS
         if isinstance(item, dict)
         and isinstance(item["function"], dict)
         and item["function"]["name"] == "get_fundamentals"
@@ -119,11 +123,16 @@ def _eps_facts() -> pd.DataFrame:
         concept = "us-gaap:EarningsPerShareDiluted"
         if i in (1, 8):
             concept = "us-gaap:EarningsPerShareBasic"
-        rows.append({
-            "concept": concept, "value": value,
-            "period_start": start, "period_end": end,
-            "fiscal_period": period, "fiscal_year": year,
-        })
+        rows.append(
+            {
+                "concept": concept,
+                "value": value,
+                "period_start": start,
+                "period_end": end,
+                "fiscal_period": period,
+                "fiscal_year": year,
+            }
+        )
     return pd.DataFrame(rows)
 
 

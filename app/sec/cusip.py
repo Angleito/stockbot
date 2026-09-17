@@ -14,7 +14,7 @@ def normalize_cusip(value: object) -> str | None:
         return None
     try:
         text = "".join(ch for ch in str(value) if ch.isalnum()).upper()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     return text or None
 
@@ -25,7 +25,7 @@ def normalize_isin(value: object) -> str | None:
         return None
     try:
         text = str(value).strip().upper()
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     return text or None
 
@@ -34,6 +34,6 @@ def cusip_security_id(value: object) -> str | None:
     """Provisional ``cusip:<CUSIP>`` security id, or None when empty."""
     try:
         canonical = normalize_cusip(value)
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     return f"cusip:{canonical}" if canonical else None

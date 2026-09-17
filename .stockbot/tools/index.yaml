@@ -78,6 +78,11 @@ domains:
     families:
       - search:
         path: "/patents/search"
+  research:
+    description: "Live research sessions: questions, jobs, evidence, freezes, and dossiers."
+    families:
+      - session:
+        path: "/research/session"
   sec:
     description: "SEC filing discovery, retrieval, and document reading via EDGAR."
     families:
@@ -470,6 +475,126 @@ tools:
     summary: "Company patent search: publications, assignees, counts, and classifications."
     version: 2
     keywords: [assignee, classification, company, count, filed, finding, lately, patent, patented, publication, search]
+  - name: research_add_analysis
+    domain: research
+    family: session
+    path: "/research/session/research_add_analysis"
+    intent: add_committee_analysis
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Record one committee analysis (stockbot, bullbot, or bearbot); claim refs are validated against frozen evidence."
+    version: 2
+    keywords: [add, against, analysi, bearbot, bullbot, claim, committee, evidence, frozen, grounded, one, record, recording, ref, research, stockbot, trio, validated]
+  - name: research_add_evidence
+    domain: research
+    family: session
+    path: "/research/session/research_add_evidence"
+    intent: add_research_evidence
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Record one finding on a research job; provenance, point-in-time, and IDs are kernel-validated."
+    version: 2
+    keywords: [add, dispatched, evidence, finding, ids, job, kernel, one, point, provenance, record, recording, research, time, validated]
+  - name: research_cancel
+    domain: research
+    family: session
+    path: "/research/session/research_cancel"
+    intent: cancel_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Cancel a research session; terminal sessions return current state."
+    version: 2
+    keywords: [cancel, current, longer, needed, no, research, return, session, state, stopping, terminal]
+  - name: research_finalize
+    domain: research
+    family: session
+    path: "/research/session/research_finalize"
+    intent: finalize_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Persist the trio-joined synthesis and complete a research session with frozen-evidence claims."
+    version: 2
+    keywords: [answer, bare, bottom, claim, complete, completion, delivering, evidence, filing, finalize, finalized, finalizing, frozen, grounded, joined, line, not, note, only, persist, plu, ref, research, same, scope, sec, session, statu, structured, substantive, synthesi, through, trio, turn]
+  - name: research_read
+    domain: research
+    family: session
+    path: "/research/session/research_read"
+    intent: read_research_resource
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Read one persisted research resource: evidence, freeze, dossier, job, or session record."
+    version: 2
+    keywords: [dossier, evidence, freeze, job, one, persisted, read, reading, record, research, resource, session, single]
+  - name: research_read_search
+    domain: research
+    family: session
+    path: "/research/session/research_read_search"
+    intent: read_search_hits
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Page the persisted ranked hit universe of one SEC search, with retrieval truth."
+    version: 2
+    keywords: [additional, beyond, compact, exhaustion, filing, higher, hit, instead, large, limit, one, packet, page, paging, persisted, ranked, read, reading, rerunning, research, result, retrieval, search, sec, top, truth, universe]
+  - name: research_resume
+    domain: research
+    family: session
+    path: "/research/session/research_resume"
+    intent: resume_research
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Resume a research session: read-only snapshot with wave, budgets, open jobs, and next action."
+    version: 2
+    keywords: [action, budget, entering, existing, job, next, only, open, re, read, research, resume, resuming, session, snapshot, wave]
+  - name: research_start
+    domain: research
+    family: session
+    path: "/research/session/research_start"
+    intent: start_research
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Start a research session for a question; returns the session ID with its first job and next action."
+    version: 2
+    keywords: [action, first, id, job, new, next, question, research, return, session, start, starting]
+  - name: research_status
+    domain: research
+    family: session
+    path: "/research/session/research_status"
+    intent: inspect_research
+    output_kind: current_snapshot
+    source: local
+    entity_scope: single_session
+    time_mode: latest_or_as_of
+    summary: "Read a research session with its jobs and pending next action."
+    version: 2
+    keywords: [action, checking, current, inspect, job, next, pending, read, research, session, state, statu]
+  - name: research_submit_source_result
+    domain: research
+    family: session
+    path: "/research/session/research_submit_source_result"
+    intent: submit_source_result
+    output_kind: governed_action
+    source: local
+    entity_scope: single_session
+    time_mode: current
+    summary: "Complete one running source job with validated coverage; evidence stays mutation-only."
+    version: 2
+    keywords: [branche, channel, complete, completing, counterparty, coverage, edgar, evidence, investigated, investigation, job, just, major, material, mean, mutation, never, no, one, only, open, question, research, result, row, running, source, stay, submit, sufficient, validated, visible]
   - name: find_sec_entities
     domain: sec
     family: entity-discovery
@@ -491,9 +616,9 @@ tools:
     source: sec
     entity_scope: single_document
     time_mode: as_of
-    summary: "Bounded text window of one filing document by accession number for targeted excerpt reading."
+    summary: "Bounded text window of one filing document by accession number (Required: accession_no); page with cursor/limit via next_cursor."
     version: 2
-    keywords: [accession, bounded, document, excerpt, factor, filing, get, known, main, md, number, one, read, reading, risk, say, sec, section, specific, such, targeted, text, window]
+    keywords: [0000320193, 000079, 12000, 25, accession, bounded, cursor, document, example, factor, filing, get, known, limit, main, md, next, no, number, one, page, read, reading, required, risk, say, sec, section, specific, such, text, via, window]
   - name: get_sec_filing
     domain: sec
     family: filing-catalog
@@ -527,9 +652,9 @@ tools:
     source: sec
     entity_scope: single_entity
     time_mode: date_range_or_as_of
-    summary: "List EDGAR filings for an exact ticker or CIK, filterable by form and date range."
+    summary: "List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier=\"AAPL\"); filterable by form and date range."
     version: 2
-    keywords: [cik, company, date, edgar, entity, exact, filed, filing, filterable, filtered, form, lately, list, listing, optionally, range, recent, sec, ticker]
+    keywords: [aapl, cik, company, date, edgar, end, entity, exact, filed, filing, filterable, filtered, form, identifier, lately, limit, list, listing, optional, optionally, range, recent, required, sec, start, ticker]
   - name: diff_risk_factors
     domain: sec
     family: filing-diff
@@ -577,7 +702,7 @@ tools:
     time_mode: date_range_or_as_of
     summary: "General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions."
     version: 2
-    keywords: [10, 10k, accession, acros, disclosed, disclosure, edgar, eft, entity, factor, filing, full, general, language, mention, number, risk, route, search, searching, sec, text, unknown]
+    keywords: [10, 10k, aapl, accession, acros, cik, company, disclosed, disclosure, domain, edgar, eft, entity, factor, filing, full, general, identifier, language, least, mention, name, no, number, one, person, query, required, risk, route, search, searching, sec, security, text, ticker, unknown]
   - name: thesis_create
     domain: thesis
     family: lifecycle
@@ -626,6 +751,18 @@ tools:
     summary: "Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>."
     version: 2
     keywords: [assessment, checking, current, id, pas, read, retrieve, state, statu, thesi, uuid]
+  - name: thesis_status
+    domain: thesis
+    family: lifecycle
+    path: "/thesis/lifecycle/thesis_status"
+    intent: change_thesis_status
+    output_kind: governed_action
+    source: local
+    entity_scope: single_thesis
+    time_mode: current
+    summary: "Pause, resume, or close thesis monitoring. Pass the thesis ID as thesis:<uuid>."
+    version: 2
+    keywords: [change, close, closing, deleting, id, monitoring, pas, pause, paused, pausing, resume, resuming, rule, statu, thesi, uuid, without]
   - name: thesis_watch
     domain: thesis
     family: lifecycle

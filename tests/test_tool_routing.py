@@ -5,8 +5,8 @@ import pytest
 from app import tools as tools_mod
 from app.policy import Capability, RequestContext
 from app.tools import (
-    TOOLS,
     TOOL_DISCOVERY_REGISTRY,
+    TOOLS,
     _tool_function,
     execute_tool,
 )
@@ -47,7 +47,12 @@ def test_browse_family_returns_four_tools_plus_contrast() -> None:
     assert result["count"] == 4
     tools_raw = result["tools"]
     assert isinstance(tools_raw, list)
-    assert [t["name"] for t in tools_raw if isinstance(t, dict)] == ["get_finra_datapoints", "get_short_interest", "get_short_pressure_profile", "query_finra"]
+    assert [t["name"] for t in tools_raw if isinstance(t, dict)] == [
+        "get_finra_datapoints",
+        "get_short_interest",
+        "get_short_pressure_profile",
+        "query_finra",
+    ]
     contrast_raw = result["contrast_table"]
     assert isinstance(contrast_raw, list)
     assert len(contrast_raw) == 4
@@ -79,7 +84,12 @@ def test_browse_rejects_bad_paths() -> None:
 
 
 def test_browse_name_overrides_conflicting_coordinates() -> None:
-    conflicted = execute_tool("browse_tools", {"domain": "sec", "family": "filing-catalog", "name": "get_short_interest"}, "test", context=_CTX)
+    conflicted = execute_tool(
+        "browse_tools",
+        {"domain": "sec", "family": "filing-catalog", "name": "get_short_interest"},
+        "test",
+        context=_CTX,
+    )
     assert "error" not in conflicted
     assert conflicted["name"] == "get_short_interest"
     assert conflicted["domain"] == "finra"
@@ -115,3 +125,81 @@ def test_unknown_tool_executes_nothing() -> None:
     result = execute_tool("no_such_tool", {}, "test", context=_CTX)
     assert "error" in result
     assert "no_such_tool" in str(result["error"])
+
+
+# ---------------------------------------------------------------------------
+# SEC-only routing denial: FINRA/Web/Market/Analyst tools denied at the
+# kernel gates even when registered and reachable via browse_tools/call_tool.
+# ---------------------------------------------------------------------------
+
+
+def test_browse_lists_non_sec_but_kernel_denies_them() -> None:
+    from app.research.agents.source_agent import is_sec_tool
+    from app.research.models import Job
+    from app.research.service import _dispatch_check_domain
+
+    sec_job = Job(
+        job_id="job:t",
+        session_id="s",
+        wave_id=1,
+        parent_job_id=None,
+        job_type="source_agent",
+        owner="t",
+        source_domain="SEC",
+    )
+    # Registered and discoverable via the catalog (browse does not filter);
+    # broker tools live outside the discovery catalog — the kernel still denies.
+    for name in ("query_finra", "get_short_interest", "search_web", "get_analyst_estimates"):
+        found = _browse({"name": name})
+        assert found["name"] == name, name
+        assert is_sec_tool(name) is False, name
+        try:
+            _dispatch_check_domain(sec_job, "job:t", name)
+        except ValueError as exc:
+            assert "outside SEC domain" in str(exc), (name, exc)
+        else:
+            raise AssertionError(f"expected kernel denial for {name}")
+    for name in ("get_market_snapshot", "get_option_chain"):
+        assert is_sec_tool(name) is False, name
+        try:
+            _dispatch_check_domain(sec_job, "job:t", name)
+        except ValueError as exc:
+            assert "outside SEC domain" in str(exc), (name, exc)
+        else:
+            raise AssertionError(f"expected kernel denial for {name}")
+
+
+def test_runner_guarded_call_denies_non_sec() -> None:
+    import inspect as _inspect
+
+    from app.research.runner import _LiveRun
+
+    src = _inspect.getsource(_LiveRun._guarded_tool_call)
+    assert "POLICY_DENIED" in src
+    assert "is_sec_tool" in src
+
+
+def test_call_tool_inner_name_still_gated() -> None:
+    # call_tool is the SEC envelope, but a non-SEC inner name is denied by
+    # is_sec_tool at the kernel boundary (runner + service agree).
+    from app.research.agents.source_agent import is_sec_tool
+
+    assert is_sec_tool("call_tool") is True
+    for inner in ("query_finra", "search_web", "get_market_snapshot", "get_analyst_estimates"):
+        assert is_sec_tool(inner) is False, inner
+
+
+def test_filter_allowed_tools_never_bypassed_via_browse() -> None:
+    from app.security.action_policy import filter_allowed_tools
+
+    sec_only: dict[str, object] = {"allowed": ["SEC"], "denied": [], "mode": "allowlist"}
+    names = [
+        "search_sec_filings",
+        "search_web",
+        "query_finra",
+        "get_market_snapshot",
+        "get_analyst_estimates",
+        "list_sec_filings",
+    ]
+    assert filter_allowed_tools(names, sec_only) == ["search_sec_filings", "list_sec_filings"]
+    assert filter_allowed_tools(names, None) == names

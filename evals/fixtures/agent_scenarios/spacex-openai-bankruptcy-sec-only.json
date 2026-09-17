@@ -1,0 +1,146 @@
+{
+  "answer_excerpt": "SpaceX has no SEC issuer record: no SpaceX filings were located within the searched SEC scope, so the finding is a scoped absence observation and not a statement about the real-world relationship (SEC-only limitation). Alphabet's 10-K [rs:spacex-openai-2026-09-15:ev:2] discloses no SpaceX counterparty exposure and Microsoft's 10-K [rs:spacex-openai-2026-09-15:ev:1] bounds the OpenAI chain; SpaceX's private terms remain UNKNOWN.",
+  "as_of": null,
+  "budget_cap": null,
+  "budget_used": 14,
+  "evidence_ids": [
+    "rs:spacex-openai-2026-09-15:ev:1",
+    "rs:spacex-openai-2026-09-15:ev:2",
+    "rs:spacex-openai-2026-09-15:ev:3"
+  ],
+  "family": "missing",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:spacex-openai-2026-09-15:1:freeze",
+  "freeze_before": "rs:spacex-openai-2026-09-15:1:freeze",
+  "known_ats": [
+    "2026-07-30",
+    "2026-02-05"
+  ],
+  "question": "What happens to SpaceX if OpenAI goes bankrupt?",
+  "scenario_name": "spacex-openai-bankruptcy-sec-only",
+  "session_id": "rs:spacex-openai-2026-09-15",
+  "telemetry": {
+    "coverage": "partial",
+    "entities": [
+      "SPACEX",
+      "OPENAI",
+      "MSFT",
+      "GOOGL"
+    ],
+    "exhibits": 1,
+    "forms": [
+      "10-K"
+    ],
+    "queries": [
+      "SpaceX CIK issuer record",
+      "OpenAI counterparties"
+    ],
+    "relationships_found": 0,
+    "relationships_skipped": 0,
+    "searches": 2,
+    "stop_reason": "no_novelty:spacex-absence",
+    "unresolved": [
+      "SpaceX private cap table"
+    ]
+  },
+  "tool_calls": [
+    "find_sec_entities",
+    "search_sec_filings",
+    "research_read_search",
+    "get_sec_document"
+  ],
+  "trace": {
+    "branches_covered": [
+      "openai-chain",
+      "spacex-absence"
+    ],
+    "claims": [
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "No SEC issuer record for SpaceX (no CIK-registered filings) was located within the searched SEC corpus"
+      },
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "Alphabet's 10-K discloses no SpaceX counterparty exposure, and MSFT's 10-K bounds the OpenAI chain"
+      },
+      {
+        "claim_type": "inference",
+        "rendered_as": "inference",
+        "text": "An OpenAI bankruptcy does not reach SpaceX through any SEC-visible channel traced in this session"
+      },
+      {
+        "claim_type": "unknown",
+        "rendered_as": "unknown",
+        "text": "SpaceX's private cap table and any OpenAI contracts are outside the searched SEC scope"
+      }
+    ],
+    "claims_by_type": {
+      "contradicted": 0,
+      "inference": 1,
+      "observed_fact": 2,
+      "unknown": 1
+    },
+    "committee_freeze_ids": [
+      "rs:spacex-openai-2026-09-15:1:freeze",
+      "rs:spacex-openai-2026-09-15:1:freeze",
+      "rs:spacex-openai-2026-09-15:1:freeze"
+    ],
+    "coverage_complete": false,
+    "documents_opened": [
+      "0000789019-26-000057|msft-20260630.htm",
+      "0001652044-26-000010|goog-20251231.htm"
+    ],
+    "filings_opened": [
+      "0000789019-26-000057",
+      "0001652044-26-000010"
+    ],
+    "limitations": [
+      "SEC-only policy: SpaceX and OpenAI are not SEC registrants, so no issuer filings exist to open; the absence observation is scoped to the searched SEC corpus and says nothing about the real-world relationship."
+    ],
+    "navigation_evidence_ids": [
+      "sec-search:spacex-issuer:1"
+    ],
+    "passages_opened": [
+      "0000789019-26-000057|msft-20260630.htm|item-1-business-openai-investment-p18",
+      "0001652044-26-000010|goog-20251231.htm|note-2-investments-p55"
+    ],
+    "raw_evidence_ids": [
+      "rs:spacex-openai-2026-09-15:ev:1",
+      "rs:spacex-openai-2026-09-15:ev:2",
+      "rs:spacex-openai-2026-09-15:ev:3"
+    ],
+    "roles_completed": [
+      "stockbot",
+      "bullbot",
+      "bearbot"
+    ],
+    "searches": [
+      "sec-search:spacex-issuer:1",
+      "sec-search:openai-chain:2"
+    ],
+    "universal_absence_claims": [],
+    "waves": [
+      "rs:spacex-openai-2026-09-15:1:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "find_sec_entities",
+      "search_sec_filings",
+      "list_sec_filings",
+      "get_sec_document"
+    ],
+    "pit_as_of": null,
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze",
+      "timeout_resume_requires_failed"
+    ]
+  }
+}

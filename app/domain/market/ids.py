@@ -34,8 +34,7 @@ def sec_dividend_event_id(
 ) -> str:
     """Deterministic dividend-event ID: reruns dedup, amended amounts differ."""
     event_id = (
-        f"sec:divevt:{int(cik):010d}:{amount:.4f}"
-        f":{record_date or 'norec'}:{payment_date or 'nopay'}:{dividend_type}"
+        f"sec:divevt:{int(cik):010d}:{amount:.4f}:{record_date or 'norec'}:{payment_date or 'nopay'}:{dividend_type}"
     )
     if not record_date and not payment_date:
         event_id += f":{accession}:{declaration_date or 'nodecl'}"

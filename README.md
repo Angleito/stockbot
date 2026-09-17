@@ -52,15 +52,16 @@ security gates over the stdio bridge. `cli.py` remains for admin tasks only
 ```bash
 bun run test
 bun run typecheck
+bun run lint
 bun run test-collect
-# Fresh-environment verification:
+# Fresh-environment verification (offline):
 bun run verify
+# Live agent checks (manual, opt-in; requires Pi plus model credentials):
+bun run verify:live
 # Live end-to-end (manual, opt-in):
 bun run verify:e2e
 ```
-The default suite is offline. FINRA and Robinhood smoke tests are opt-in
-bun scripts (smoke-mock, smoke-prod, smoke-robinhood).
-`bun run verify:e2e` is manual/opt-in and is not part of `bun run verify` or CI.
+The default suite is offline; Pi model credentials are required only for `bun run verify:live`. FINRA and Robinhood smoke tests are opt-in bun scripts (smoke-mock, smoke-prod, smoke-robinhood). `bun run verify:live` and `bun run verify:e2e` are manual/opt-in and are not part of `bun run verify` or CI.
 It uses the configured Pi model and root `.env`, forces FINRA production mode
 (`FINRA_USE_MOCK=0`), calls real SEC/FINRA/Exa services, and writes isolated
 evidence under `data/verify/<UTC batch>/agent-loop/`. It can consume model/API

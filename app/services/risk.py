@@ -17,9 +17,7 @@ from .mandate import load_mandate_file
 from .portfolio_sync import read_latest_snapshot
 
 
-def load_sector_map(
-    data_root: Path | None = None, as_of: datetime | None = None
-) -> dict[str, str]:
+def load_sector_map(data_root: Path | None = None, as_of: datetime | None = None) -> dict[str, str]:
     """Newest-per-entity sector from sector_mappings, knowable on/before as_of;
     same-instant conflicting sectors drop the entity (unknown exposure)."""
     clause, param = duckdb.as_of_clause(as_of.isoformat()) if as_of else ("1 = 1", None)
@@ -37,9 +35,7 @@ def load_sector_map(
     return {str(row["entity_id"]): str(row["sector"]) for row in rows}
 
 
-def evaluate_latest_mandate(
-    mandate_path: Path, data_root: Path | None = None
-) -> RiskEvaluation:
+def evaluate_latest_mandate(mandate_path: Path, data_root: Path | None = None) -> RiskEvaluation:
     """Load mandate + latest snapshot + sector map and evaluate.
 
     Raises FileNotFoundError (mandate missing, no snapshot) or ValueError
@@ -49,8 +45,7 @@ def evaluate_latest_mandate(
     snapshot = read_latest_snapshot(data_root=data_root)
     if snapshot is None:
         raise FileNotFoundError(
-            "no persisted portfolio snapshot; run a portfolio sync "
-            "(get_portfolio_snapshot with refresh) first"
+            "no persisted portfolio snapshot; run a portfolio sync (get_portfolio_snapshot with refresh) first"
         )
     sector_map = load_sector_map(data_root=data_root, as_of=snapshot.created_at)
     return evaluate_mandate(snapshot, mandate, sector_map)

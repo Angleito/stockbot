@@ -16,10 +16,10 @@ import os
 import sqlite3
 import threading
 from contextvars import ContextVar, Token
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Optional
+from typing import Self
 
 from ..config import get_data_root
 from ..redact import redact_json, redact_text
@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_security_events_run ON security_events(run_id, se
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _duration_ms(started_at: str, completed_at: str) -> float:
@@ -120,7 +120,7 @@ class RunRecorder:
         run_id: str,
         request_id: str,
         question: str,
-        as_of: Optional[str],
+        as_of: str | None,
         model: str,
         provider: str,
         model_parameters: dict[str, object],
@@ -128,7 +128,7 @@ class RunRecorder:
         prompt_version: str,
         tool_registry_version: str,
         git_sha: str,
-        data_root: Optional[Path] = None,
+        data_root: Path | None = None,
         max_result_bytes: int = 64 * 1024,
     ) -> None:
         self.run_id = run_id
@@ -145,9 +145,9 @@ class RunRecorder:
         self._data_root = Path(data_root) if data_root else get_data_root()
         self.max_result_bytes = max_result_bytes
         self.enabled = False
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         self._warned = False
-        self.started_at: Optional[str] = None
+        self.started_at: str | None = None
         # Live counters exposed to the loop.
         self.current_round = 0
         self.model_calls = 0
@@ -166,78 +166,114 @@ class RunRecorder:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def __enter__(self) -> "RunRecorder":
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(ddl)
+
+    @classmethod
+    def _migrate_tool_calls(cls, conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+        for column, ddl in (
+            ("returned_count", "ALTER TABLE tool_calls ADD COLUMN returned_count INTEGER"),
+            ("truncated", "ALTER TABLE tool_calls ADD COLUMN truncated INTEGER"),
+            ("as_of", "ALTER TABLE tool_calls ADD COLUMN as_of TEXT"),
+            ("protocol_id", "ALTER TABLE tool_calls ADD COLUMN protocol_id TEXT"),
+            ("bridge_queue_ms", "ALTER TABLE tool_calls ADD COLUMN bridge_queue_ms REAL"),
+            ("handler_ms", "ALTER TABLE tool_calls ADD COLUMN handler_ms REAL"),
+            ("cache_hit", "ALTER TABLE tool_calls ADD COLUMN cache_hit INTEGER"),
+            ("cache_type", "ALTER TABLE tool_calls ADD COLUMN cache_type TEXT"),
+        ):
+            if column not in cols:
+                conn.execute(ddl)
+
+    @classmethod
+    def _migrate_model_calls(cls, conn: sqlite3.Connection) -> None:
+        cls._ensure_column(
+            conn,
+            "model_calls",
+            "status",
+            "ALTER TABLE model_calls ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+        )
+        cls._ensure_column(conn, "model_calls", "error_type", "ALTER TABLE model_calls ADD COLUMN error_type TEXT")
+        cls._ensure_column(
+            conn,
+            "model_calls",
+            "error_category",
+            "ALTER TABLE model_calls ADD COLUMN error_category TEXT",
+        )
+
+    @classmethod
+    def _migrate_evidence_security(cls, conn: sqlite3.Connection) -> None:
+        cls._ensure_column(conn, "evidence", "as_of", "ALTER TABLE evidence ADD COLUMN as_of TEXT")
+        cls._ensure_column(
+            conn,
+            "security_events",
+            "span_length",
+            "ALTER TABLE security_events ADD COLUMN span_length INTEGER",
+        )
+
+    @classmethod
+    def _migrate_schema(cls, conn: sqlite3.Connection) -> None:
+        conn.executescript(_SCHEMA)
+        cls._migrate_tool_calls(conn)
+        cls._migrate_model_calls(conn)
+        cls._migrate_evidence_security(conn)
+        conn.commit()
+
+    def _insert_run_row(self, conn: sqlite3.Connection) -> None:
+        self.started_at = _now()
+        conn.execute(
+            "INSERT INTO agent_runs (run_id, request_id, started_at, question,"
+            " model_provider, model_name, model_parameters, agent_version,"
+            " prompt_version, tool_registry_version, git_sha, as_of)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self.run_id,
+                self.request_id,
+                self.started_at,
+                redact_json(self.question),
+                self.provider,
+                self.model,
+                json.dumps(self.model_parameters),
+                self.agent_version,
+                self.prompt_version,
+                self.tool_registry_version,
+                self.git_sha,
+                self.as_of,
+            ),
+        )
+        conn.commit()
+
+    def __enter__(self) -> Self:
         with self._lock:
             try:
                 path = get_runs_db_path(self._data_root)
                 os.makedirs(path.parent, exist_ok=True)
                 conn = sqlite3.connect(str(path), check_same_thread=False)
-                conn.executescript(_SCHEMA)
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
-                if "returned_count" not in cols:
-                    conn.execute("ALTER TABLE tool_calls ADD COLUMN returned_count INTEGER")
-                if "truncated" not in cols:
-                    conn.execute("ALTER TABLE tool_calls ADD COLUMN truncated INTEGER")
-                if "as_of" not in cols:
-                    conn.execute("ALTER TABLE tool_calls ADD COLUMN as_of TEXT")
-                for _col, _ddl in (
-                    ("protocol_id", "ALTER TABLE tool_calls ADD COLUMN protocol_id TEXT"),
-                    ("bridge_queue_ms", "ALTER TABLE tool_calls ADD COLUMN bridge_queue_ms REAL"),
-                    ("handler_ms", "ALTER TABLE tool_calls ADD COLUMN handler_ms REAL"),
-                    ("cache_hit", "ALTER TABLE tool_calls ADD COLUMN cache_hit INTEGER"),
-                    ("cache_type", "ALTER TABLE tool_calls ADD COLUMN cache_type TEXT"),
-                ):
-                    if _col not in cols:
-                        conn.execute(_ddl)
-                mcols = {row[1] for row in conn.execute("PRAGMA table_info(model_calls)")}
-                if "status" not in mcols:
-                    conn.execute(
-                        "ALTER TABLE model_calls ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
-                    )
-                if "error_type" not in mcols:
-                    conn.execute("ALTER TABLE model_calls ADD COLUMN error_type TEXT")
-                if "error_category" not in mcols:
-                    conn.execute("ALTER TABLE model_calls ADD COLUMN error_category TEXT")
-                ecols = {row[1] for row in conn.execute("PRAGMA table_info(evidence)")}
-                if "as_of" not in ecols:
-                    conn.execute("ALTER TABLE evidence ADD COLUMN as_of TEXT")
-                scols = {row[1] for row in conn.execute("PRAGMA table_info(security_events)")}
-                if "span_length" not in scols:
-                    conn.execute("ALTER TABLE security_events ADD COLUMN span_length INTEGER")
-                conn.commit()
-                self.started_at = _now()
-                conn.execute(
-                    "INSERT INTO agent_runs (run_id, request_id, started_at, question,"
-                    " model_provider, model_name, model_parameters, agent_version,"
-                    " prompt_version, tool_registry_version, git_sha, as_of)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        self.run_id, self.request_id, self.started_at, redact_json(self.question),
-                        self.provider, self.model, json.dumps(self.model_parameters),
-                        self.agent_version, self.prompt_version,
-                        self.tool_registry_version, self.git_sha, self.as_of,
-                    ),
-                )
-                conn.commit()
+                self._migrate_schema(conn)
+                self._insert_run_row(conn)
                 self._conn = conn
                 self.enabled = True
-            except Exception as exc:  # pragma: no cover - filesystem dependent
+            except Exception as exc:  # pragma: no cover - filesystem dependent  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
             return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
         with self._lock:
             if self._conn is not None:
                 try:
                     self._conn.commit()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
                     pass
                 try:
                     self._conn.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
                     pass
                 self._conn = None
-
 
     def _disable(self, exc: Exception) -> None:
         self.enabled = False
@@ -245,32 +281,103 @@ class RunRecorder:
             self._warned = True
             logger.warning(
                 "run recorder disabled (%s: %s); observability is off",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
 
-    def _note_round(self, round: Optional[int]) -> None:
+    def _note_round(self, round: int | None) -> None:
         if round is not None:
             self._max_round = max(self._max_round, round)
 
-    # -- event/tool/model records ------------------------------------------
+    @staticmethod
+    def _event_times(
+        started_at: str | None,
+        completed_at: str | None,
+        duration_ms: float | None,
+    ) -> tuple[str, str, float | None]:
+        started = started_at or _now()
+        completed = completed_at or _now()
+        if duration_ms is None and started_at and completed_at:
+            duration_ms = _duration_ms(started_at, completed_at)
+        return started, completed, duration_ms
+
+    def _event_summary(self, result_summary: str | None) -> str | None:
+        if result_summary is None:
+            return None
+        summary = redact_json(result_summary)
+        if len(summary) > self.max_result_bytes:
+            summary = summary[: self.max_result_bytes] + "...[truncated]"
+        return summary
+
+    def _insert_event_row(
+        self,
+        conn: sqlite3.Connection,
+        event_id: str,
+        sequence: int,
+        event_type: str,
+        started: str,
+        completed: str,
+        duration_ms: float | None,
+        round: int | None,
+        model: str | None,
+        tool_name: str | None,
+        arguments: object | None,
+        summary: str | None,
+        success: bool | None,
+        error_type: str | None,
+        evidence_ids: list[str] | None,
+        metadata: dict[str, object] | None,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type,"
+            " started_at, completed_at, duration_ms, round, model, tool_name,"
+            " arguments, result_summary, success, error_type, evidence_ids, metadata)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                self.run_id,
+                sequence,
+                event_type,
+                started,
+                completed,
+                duration_ms,
+                round,
+                model,
+                tool_name,
+                redact_json(json.dumps(arguments)) if arguments is not None else None,
+                summary,
+                (1 if success else 0) if success is not None else None,
+                error_type,
+                json.dumps(evidence_ids) if evidence_ids is not None else None,
+                redact_json(json.dumps(metadata)) if metadata is not None else None,
+            ),
+        )
+        conn.commit()
+
+    def _next_event_id(self, conn: sqlite3.Connection) -> tuple[str, int]:
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE run_id = ?",
+            (self.run_id,),
+        ).fetchone()[0]
+        return f"{self.run_id}:ev:{sequence:04d}", sequence
 
     def record_event(
         self,
         event_type: str,
         *,
-        round: Optional[int] = None,
-        model: Optional[str] = None,
-        tool_name: Optional[str] = None,
+        round: int | None = None,
+        model: str | None = None,
+        tool_name: str | None = None,
         arguments: object | None = None,
-        result_summary: Optional[str] = None,
-        success: Optional[bool] = None,
-        error_type: Optional[str] = None,
-        evidence_ids: Optional[list[str]] = None,
-        metadata: Optional[dict[str, object]] = None,
-        started_at: Optional[str] = None,
-        completed_at: Optional[str] = None,
-        duration_ms: Optional[float] = None,
-    ) -> Optional[str]:
+        result_summary: str | None = None,
+        success: bool | None = None,
+        error_type: str | None = None,
+        evidence_ids: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        duration_ms: float | None = None,
+    ) -> str | None:
         """Append one agent_events row; returns the event_id (None when disabled).
 
         duration_ms: explicit wall-clock duration (preferred); when omitted
@@ -282,43 +389,31 @@ class RunRecorder:
             try:
                 assert self._conn is not None
                 self._note_round(round)
-                started = started_at or _now()
-                completed = completed_at or _now()
-                if duration_ms is None and started_at and completed_at:
-                    duration_ms = _duration_ms(started_at, completed_at)
-                sequence = self._conn.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE run_id = ?",
-                    (self.run_id,),
-                ).fetchone()[0]
-                event_id = f"{self.run_id}:ev:{sequence:04d}"
-                summary = None
-                if result_summary is not None:
-                    summary = redact_json(result_summary)
-                    if len(summary) > self.max_result_bytes:
-                        summary = summary[: self.max_result_bytes] + "...[truncated]"
-                self._conn.execute(
-                    "INSERT INTO agent_events (event_id, run_id, sequence, event_type,"
-                    " started_at, completed_at, duration_ms, round, model, tool_name,"
-                    " arguments, result_summary, success, error_type, evidence_ids, metadata)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        event_id, self.run_id, sequence, event_type,
-                        started, completed,
-                        duration_ms,
-                        round, model, tool_name,
-                        redact_json(json.dumps(arguments)) if arguments is not None else None,
-                        summary,
-                        (1 if success else 0) if success is not None else None,
-                        error_type,
-                        json.dumps(evidence_ids) if evidence_ids is not None else None,
-                        redact_json(json.dumps(metadata)) if metadata is not None else None,
-                    ),
+                started, completed, duration_ms = self._event_times(started_at, completed_at, duration_ms)
+                event_id, sequence = self._next_event_id(self._conn)
+                summary = self._event_summary(result_summary)
+                self._insert_event_row(
+                    self._conn,
+                    event_id,
+                    sequence,
+                    event_type,
+                    started,
+                    completed,
+                    duration_ms,
+                    round,
+                    model,
+                    tool_name,
+                    arguments,
+                    summary,
+                    success,
+                    error_type,
+                    evidence_ids,
+                    metadata,
                 )
-                self._conn.commit()
                 if event_type == EventType.EVIDENCE_ADDED:
                     self.evidence_tokens += len(summary or "") // 4
                 return event_id
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
                 return None
 
@@ -333,20 +428,20 @@ class RunRecorder:
         completed_at: str,
         status: str,
         result_row_count: int,
-        returned_count: Optional[int],
+        returned_count: int | None,
         truncated: bool,
         result_bytes: int,
         result_hash: str,
         source_names: str,
         source_freshness: str,
-        as_of: Optional[str],
-        error_type: Optional[str],
-        error_message: Optional[str],
-        protocol_id: Optional[str] = None,
-        bridge_queue_ms: Optional[float] = None,
-        handler_ms: Optional[float] = None,
-        cache_hit: Optional[bool] = None,
-        cache_type: Optional[str] = None,
+        as_of: str | None,
+        error_type: str | None,
+        error_message: str | None,
+        protocol_id: str | None = None,
+        bridge_queue_ms: float | None = None,
+        handler_ms: float | None = None,
+        cache_hit: bool | None = None,
+        cache_type: str | None = None,
     ) -> None:
         with self._lock:
             if not self.enabled:
@@ -363,20 +458,35 @@ class RunRecorder:
                     " protocol_id, bridge_queue_ms, handler_ms, cache_hit, cache_type)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        tool_call_id, self.run_id, round, tool_name,
+                        tool_call_id,
+                        self.run_id,
+                        round,
+                        tool_name,
                         self.tool_registry_version,
-                        redact_json(arguments_json), started_at, completed_at,
+                        redact_json(arguments_json),
+                        started_at,
+                        completed_at,
                         _duration_ms(started_at, completed_at),
-                        status, result_row_count, returned_count,
-                        (1 if truncated else 0), result_bytes, result_hash,
-                        source_names, source_freshness, as_of, error_type, message,
-                        protocol_id, bridge_queue_ms, handler_ms,
+                        status,
+                        result_row_count,
+                        returned_count,
+                        (1 if truncated else 0),
+                        result_bytes,
+                        result_hash,
+                        source_names,
+                        source_freshness,
+                        as_of,
+                        error_type,
+                        message,
+                        protocol_id,
+                        bridge_queue_ms,
+                        handler_ms,
                         (1 if cache_hit else 0) if cache_hit is not None else None,
                         cache_type,
                     ),
                 )
                 self._conn.commit()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
 
     def record_evidence(
@@ -385,14 +495,14 @@ class RunRecorder:
         evidence_id: str,
         run_id: str,
         tool_call_id: str,
-        round: Optional[int],
+        round: int | None,
         tool_name: str,
         rendered_hash: str,
         rendered_bytes: int,
         estimated_tokens: int,
         source_names: str,
         source_freshness: str,
-        as_of: Optional[str],
+        as_of: str | None,
         rendered_text: str,
     ) -> None:
         """Persist one rendered-evidence record (what the model received)."""
@@ -408,13 +518,22 @@ class RunRecorder:
                     " source_names, source_freshness, as_of, rendered_text)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        evidence_id, run_id, tool_call_id, round, tool_name,
-                        rendered_hash, rendered_bytes, estimated_tokens,
-                        source_names, source_freshness, as_of, rendered_text,
+                        evidence_id,
+                        run_id,
+                        tool_call_id,
+                        round,
+                        tool_name,
+                        rendered_hash,
+                        rendered_bytes,
+                        estimated_tokens,
+                        source_names,
+                        source_freshness,
+                        as_of,
+                        rendered_text,
                     ),
                 )
                 self._conn.commit()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
 
     def record_security_event(
@@ -422,13 +541,13 @@ class RunRecorder:
         *,
         source: str,
         sha256: str,
-        score: Optional[int],
-        verdict: Optional[str],
-        rule_ids: Optional[list[str]],
+        score: int | None,
+        verdict: str | None,
+        rule_ids: list[str] | None,
         decision: str,
-        reason: Optional[str] = None,
-        span_length: Optional[int] = None,
-    ) -> Optional[str]:
+        reason: str | None = None,
+        span_length: int | None = None,
+    ) -> str | None:
         """Append one security_events row; returns the event_id (None when
         disabled). Hash-only storage: events never carry full content;
         response_stripped events record only the stripped span's length."""
@@ -439,8 +558,7 @@ class RunRecorder:
                 created = _now()
                 assert self._conn is not None
                 sequence = self._conn.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM security_events"
-                    " WHERE run_id = ?",
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM security_events WHERE run_id = ?",
                     (self.run_id,),
                 ).fetchone()[0]
                 event_id = f"{self.run_id}:se:{sequence:04d}"
@@ -450,19 +568,32 @@ class RunRecorder:
                     " decision, reason, span_length)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        event_id, self.run_id, sequence, created, source, sha256,
-                        score, verdict,
+                        event_id,
+                        self.run_id,
+                        sequence,
+                        created,
+                        source,
+                        sha256,
+                        score,
+                        verdict,
                         json.dumps(rule_ids) if rule_ids is not None else None,
-                        decision, reason, span_length,
+                        decision,
+                        reason,
+                        span_length,
                     ),
                 )
                 self._conn.commit()
                 logger.info(
                     "security event: run=%s decision=%s source=%s rules=%s reason=%s span_length=%s",
-                    self.run_id, decision, source, rule_ids, reason, span_length,
+                    self.run_id,
+                    decision,
+                    source,
+                    rule_ids,
+                    reason,
+                    span_length,
                 )
                 return event_id
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
                 return None
 
@@ -474,13 +605,13 @@ class RunRecorder:
         model: str,
         started_at: str,
         completed_at: str,
-        usage: Optional[dict[str, object]] = None,
-        finish_reason: Optional[str] = None,
+        usage: dict[str, object] | None = None,
+        finish_reason: str | None = None,
         tool_call_count: int = 0,
-        provider_request_id: Optional[str] = None,
+        provider_request_id: str | None = None,
         status: str = "completed",
-        error_type: Optional[str] = None,
-        error_category: Optional[str] = None,
+        error_type: str | None = None,
+        error_category: str | None = None,
     ) -> float:
         """Record one model completion; returns the estimated USD cost."""
         with self._lock:
@@ -510,17 +641,30 @@ class RunRecorder:
                     " status, error_type, error_category)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        f"{self.run_id}:mc:{self.model_calls}", self.run_id, round,
-                        provider, model, started_at, completed_at,
+                        f"{self.run_id}:mc:{self.model_calls}",
+                        self.run_id,
+                        round,
+                        provider,
+                        model,
+                        started_at,
+                        completed_at,
                         _duration_ms(started_at, completed_at),
-                        input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-                        cost, finish_reason, tool_call_count, provider_request_id,
-                        status, error_type, error_category,
+                        input_tokens,
+                        output_tokens,
+                        reasoning_tokens,
+                        cached_tokens,
+                        cost,
+                        finish_reason,
+                        tool_call_count,
+                        provider_request_id,
+                        status,
+                        error_type,
+                        error_category,
                     ),
                 )
                 self._conn.commit()
                 return cost
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
                 return 0.0
 
@@ -529,8 +673,8 @@ class RunRecorder:
         *,
         status: str,
         answer: str,
-        error_type: Optional[str] = None,
-        error_message: Optional[str] = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         """Close out the agent_runs summary row; emits RUN_COMPLETED unless failed."""
         with self._lock:
@@ -541,9 +685,7 @@ class RunRecorder:
                 message = redact_text(error_message)[:2000] if error_message is not None else None
                 assert self._conn is not None
                 answer_hash = hashlib.sha256(answer.encode()).hexdigest() if answer else None
-                duration = (
-                    _duration_ms(self.started_at, completed_at) if self.started_at else None
-                )
+                duration = _duration_ms(self.started_at, completed_at) if self.started_at else None
                 self._conn.execute(
                     "UPDATE agent_runs SET completed_at = ?, duration_ms = ?, status = ?,"
                     " round_count = ?, model_call_count = ?, tool_call_count = ?,"
@@ -551,16 +693,27 @@ class RunRecorder:
                     " estimated_model_cost = ?, estimated_total_cost = ?, final_answer_hash = ?,"
                     " error_type = ?, error_message = ? WHERE run_id = ?",
                     (
-                        completed_at, duration, status, self._max_round, self.model_calls,
-                        self._tool_seq, self._input_tokens, self._output_tokens,
-                        self._total_tokens, self._estimated_model_cost, self._estimated_model_cost, answer_hash, error_type, message,
+                        completed_at,
+                        duration,
+                        status,
+                        self._max_round,
+                        self.model_calls,
+                        self._tool_seq,
+                        self._input_tokens,
+                        self._output_tokens,
+                        self._total_tokens,
+                        self._estimated_model_cost,
+                        self._estimated_model_cost,
+                        answer_hash,
+                        error_type,
+                        message,
                         self.run_id,
                     ),
                 )
                 if status != "failed":
                     self.record_event(EventType.RUN_COMPLETED, round=self.current_round)
                 self._conn.commit()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 self._disable(exc)
 
     def next_tool_seq(self) -> int:
@@ -576,9 +729,7 @@ class RunRecorder:
             return self._evidence_seq
 
     @staticmethod
-    def _estimate_cost(
-        model: str, input_tokens: int, output_tokens: int, usage: dict[str, object]
-    ) -> float:
+    def _estimate_cost(model: str, input_tokens: int, output_tokens: int, usage: dict[str, object]) -> float:
         """Provider-reported usage.cost wins; else the static list-price table."""
         cost = usage.get("cost")
         if isinstance(cost, (int, float)):
@@ -587,6 +738,7 @@ class RunRecorder:
         if rates is None:
             return 0.0
         return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+
 
 def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> bool:
     """Terminalize an orphaned agent_runs row as failed (fail-stop, UPDATE-only).
@@ -615,7 +767,7 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
             now = _now()
             try:
                 duration = _duration_ms(started_at, now) if started_at else None
-            except Exception:
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                 duration = None
             round_count = conn.execute(
                 "SELECT COALESCE(MAX(round), 0) FROM ("
@@ -631,9 +783,7 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
                 (run_id,),
             ).fetchone()
             model_call_count, input_tokens, output_tokens, estimated_cost = model_row
-            tool_call_count = conn.execute(
-                "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?", (run_id,)
-            ).fetchone()[0]
+            tool_call_count = conn.execute("SELECT COUNT(*) FROM tool_calls WHERE run_id = ?", (run_id,)).fetchone()[0]
             # model_calls persists input/output/reasoning/cached but not usage.total_tokens,
             # so total mirrors input + output instead of the live accumulator.
             message = redact_text(error_message)[:2000]
@@ -644,47 +794,56 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
                 " estimated_model_cost = ?, estimated_total_cost = ?,"
                 " error_type = ?, error_message = ?"
                 " WHERE run_id = ? AND completed_at IS NULL",
-                (now, duration, "failed", round_count, model_call_count,
-                 tool_call_count, input_tokens, output_tokens,
-                 input_tokens + output_tokens, estimated_cost, estimated_cost,
-                 error_type, message, run_id),
+                (
+                    now,
+                    duration,
+                    "failed",
+                    round_count,
+                    model_call_count,
+                    tool_call_count,
+                    input_tokens,
+                    output_tokens,
+                    input_tokens + output_tokens,
+                    estimated_cost,
+                    estimated_cost,
+                    error_type,
+                    message,
+                    run_id,
+                ),
             )
             conn.commit()
             return cur.rowcount > 0
         finally:
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
                 pass
-    except Exception as exc:
-        logger.warning(
-            "finalize_failed_run dropped (%s: %s)", type(exc).__name__, exc
-        )
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        logger.warning("finalize_failed_run dropped (%s: %s)", type(exc).__name__, exc)
         return False
 
 
 # -- current-recorder contextvar (Pi bridge + gateway share one recorder) ----------
 
-_current_recorder: ContextVar[Optional[RunRecorder]] = ContextVar(
-    "current_recorder", default=None
-)
+_current_recorder: ContextVar[RunRecorder | None] = ContextVar("current_recorder", default=None)
 
 
-def get_current_recorder() -> Optional[RunRecorder]:
+def get_current_recorder() -> RunRecorder | None:
     return _current_recorder.get()
 
 
-def set_current_recorder(recorder: RunRecorder) -> Token[Optional[RunRecorder]]:
+def set_current_recorder(recorder: RunRecorder) -> Token[RunRecorder | None]:
     return _current_recorder.set(recorder)
 
 
-def reset_current_recorder(token: Token[Optional[RunRecorder]]) -> None:
+def reset_current_recorder(token: Token[RunRecorder | None]) -> None:
     _current_recorder.reset(token)
 
 
 # -- read-side query helpers -------------------------------------------------
 
-def _query_conn() -> Optional[sqlite3.Connection]:
+
+def _query_conn() -> sqlite3.Connection | None:
     path = get_runs_db_path(DEFAULT_DATA_ROOT)
     if not path.exists():
         return None
@@ -693,101 +852,53 @@ def _query_conn() -> Optional[sqlite3.Connection]:
     return conn
 
 
-def list_runs(limit: int = 20) -> list[dict[str, object]]:
+def _fetch_all(sql: str, params: tuple[object, ...]) -> list[dict[str, object]]:
+    """Run one read query; empty on missing DB or storage error (existing boundary)."""
     try:
         conn = _query_conn()
         if conn is None:
             return []
         try:
-            rows = conn.execute(
-                "SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
         finally:
             conn.close()
     except sqlite3.Error:
         return []
 
 
-def get_run(run_id: str) -> Optional[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return None
-        try:
-            row = conn.execute(
-                "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
-            return dict(row) if row is not None else None
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
+def _fetch_one(sql: str, params: tuple[object, ...]) -> dict[str, object] | None:
+    """Run one single-row read query (existing boundary)."""
+    rows = _fetch_all(sql, params)
+    return rows[0] if rows else None
+
+
+def _normalize_decision(value: object) -> str:
+    """Security decision label with unknown fallback (existing boundary)."""
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def list_runs(limit: int = 20) -> list[dict[str, object]]:
+    return _fetch_all("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?", (limit,))
+
+
+def get_run(run_id: str) -> dict[str, object] | None:
+    return _fetch_one("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,))
 
 
 def get_events(run_id: str) -> list[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM agent_events WHERE run_id = ? ORDER BY sequence", (run_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
+    return _fetch_all("SELECT * FROM agent_events WHERE run_id = ? ORDER BY sequence", (run_id,))
 
 
 def get_tool_calls(run_id: str) -> list[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY started_at", (run_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
+    return _fetch_all("SELECT * FROM tool_calls WHERE run_id = ? ORDER BY started_at", (run_id,))
 
 
 def get_model_calls(run_id: str) -> list[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM model_calls WHERE run_id = ? ORDER BY started_at", (run_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
+    return _fetch_all("SELECT * FROM model_calls WHERE run_id = ? ORDER BY started_at", (run_id,))
 
 
 def get_security_events(run_id: str) -> list[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM security_events WHERE run_id = ? ORDER BY sequence",
-                (run_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
+    return _fetch_all("SELECT * FROM security_events WHERE run_id = ? ORDER BY sequence", (run_id,))
 
 
 def get_security_summary(run_id: str) -> dict[str, int]:
@@ -801,23 +912,10 @@ def get_security_summary(run_id: str) -> dict[str, int]:
         "response_stripped": 0,
     }
     for event in get_security_events(run_id):
-        decision_value = event.get("decision")
-        decision = decision_value if isinstance(decision_value, str) and decision_value else "unknown"
+        decision = _normalize_decision(event.get("decision"))
         counts[decision] = counts.get(decision, 0) + 1
     return counts
 
 
 def get_evidence(run_id: str) -> list[dict[str, object]]:
-    try:
-        conn = _query_conn()
-        if conn is None:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT * FROM evidence WHERE run_id = ? ORDER BY evidence_id", (run_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return []
+    return _fetch_all("SELECT * FROM evidence WHERE run_id = ? ORDER BY evidence_id", (run_id,))

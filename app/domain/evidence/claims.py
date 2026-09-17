@@ -7,7 +7,13 @@ import re
 
 from app.security.context import Integrity
 
-from .models import ClaimType, EvidenceClaim, ResolutionStatus, SourceTier, coerce_claim_type
+from .models import (
+    ClaimType,
+    EvidenceClaim,
+    ResolutionStatus,
+    SourceTier,
+    coerce_claim_type,
+)
 
 
 def _claim_type_value(claim_type: ClaimType | str) -> str:
@@ -26,9 +32,7 @@ def make_claim_id(
     url = (source_url or "").strip().lower()
     ctype = _claim_type_value(claim_type)
     norm_text = re.sub(r"\s+", " ", text or "").strip().casefold()
-    digest = hashlib.sha256(
-        f"{url}|{ctype}|{entity_id or ''}|{norm_text}".encode()
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{url}|{ctype}|{entity_id or ''}|{norm_text}".encode()).hexdigest()[:16]
     return f"exa:claim:{digest}"
 
 

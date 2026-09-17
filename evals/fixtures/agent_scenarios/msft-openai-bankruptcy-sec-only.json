@@ -1,0 +1,169 @@
+{
+  "answer_excerpt": "Microsoft's FY2026 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:1] discloses the OpenAI investment carrying value and the Azure commercial commitments; Amazon's 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:2] and Oracle's 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:3] cover the non-MSFT compute branch and CoreWeave's 10-Q covers the neocloud credit branch. An OpenAI insolvency impairs the carrying value (inference). No disclosure of OpenAI's private funding terms was located within the searched SEC scope (SEC-only limitation).",
+  "as_of": "2026-08-10",
+  "budget_cap": null,
+  "budget_used": 31,
+  "evidence_ids": [
+    "rs:msft-openai-bankruptcy-2026-08-10:ev:1",
+    "rs:msft-openai-bankruptcy-2026-08-10:ev:2",
+    "rs:msft-openai-bankruptcy-2026-08-10:ev:3"
+  ],
+  "family": "multi-step",
+  "format": "agent-scenario-fixture/v1",
+  "freeze_after": "rs:msft-openai-bankruptcy-2026-08-10:2:freeze",
+  "freeze_before": "rs:msft-openai-bankruptcy-2026-08-10:2:freeze",
+  "known_ats": [
+    "2026-07-30"
+  ],
+  "question": "What happens to Microsoft if OpenAI goes bankrupt?",
+  "scenario_name": "msft-openai-bankruptcy-sec-only",
+  "session_id": "rs:msft-openai-bankruptcy-2026-08-10",
+  "telemetry": {
+    "coverage": "partial",
+    "entities": [
+      "MSFT",
+      "OPENAI",
+      "AMZN",
+      "ORCL",
+      "CRWV"
+    ],
+    "exhibits": 4,
+    "forms": [
+      "10-K",
+      "10-Q"
+    ],
+    "queries": [
+      "MSFT OpenAI exposure",
+      "CoreWeave OpenAI customer concentration"
+    ],
+    "relationships_found": 3,
+    "relationships_skipped": 1,
+    "searches": 3,
+    "stop_reason": "no_questions",
+    "unresolved": [
+      "OpenAI private funding terms"
+    ]
+  },
+  "tool_calls": [
+    "find_sec_entities",
+    "search_sec_filings",
+    "research_read_search",
+    "list_sec_filings",
+    "get_sec_document"
+  ],
+  "trace": {
+    "branches_covered": [
+      "coreweave",
+      "amzn",
+      "orcl"
+    ],
+    "claims": [
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "MSFT FY2026 10-K discloses its OpenAI investment carrying value and the Azure revenue concentration"
+      },
+      {
+        "claim_type": "observed_fact",
+        "rendered_as": "observed_fact",
+        "text": "AMZN and ORCL filings constrain the second-order demand branch for the same compute cycle"
+      },
+      {
+        "claim_type": "inference",
+        "rendered_as": "inference",
+        "text": "An OpenAI insolvency would impair the carrying value and defer Azure capacity commitments"
+      },
+      {
+        "claim_type": "inference",
+        "rendered_as": "inference",
+        "text": "CoreWeave customer-concentration disclosure makes an OpenAI default a credit event for the neocloud branch"
+      },
+      {
+        "claim_type": "unknown",
+        "rendered_as": "unknown",
+        "text": "OpenAI private funding terms and their seniority over the MSFT position"
+      }
+    ],
+    "claims_by_type": {
+      "contradicted": 0,
+      "inference": 2,
+      "observed_fact": 2,
+      "unknown": 1
+    },
+    "committee_freeze_ids": [
+      "rs:msft-openai-bankruptcy-2026-08-10:2:freeze",
+      "rs:msft-openai-bankruptcy-2026-08-10:2:freeze",
+      "rs:msft-openai-bankruptcy-2026-08-10:2:freeze"
+    ],
+    "coverage_complete": false,
+    "documents_opened": [
+      "0000789019-26-000057|msft-20260630.htm",
+      "0001018724-26-000012|amzn-20251231.htm",
+      "0001341439-26-000038|orcl-20260531.htm",
+      "0001769628-26-000021|crwv-20260630.htm"
+    ],
+    "filings_opened": [
+      "0000789019-26-000057",
+      "0001018724-26-000012",
+      "0001341439-26-000038",
+      "0001769628-26-000021"
+    ],
+    "limitations": [
+      "SEC-only policy: OpenAI's private funding terms and loan covenants are not filed with the SEC; no disclosure was located within the searched SEC scope.",
+      "Non-SEC sources (press, court records) were out of scope for this session."
+    ],
+    "material_channels": [
+      "investment",
+      "azure",
+      "commercial"
+    ],
+    "navigation_evidence_ids": [
+      "sec-search:msft-openai:1"
+    ],
+    "passages_opened": [
+      "0000789019-26-000057|msft-20260630.htm|item-1-business-openai-investment-p18",
+      "0000789019-26-000057|msft-20260630.htm|item-7-mdna-azure-demand-p41",
+      "0001018724-26-000012|amzn-20251231.htm|note-9-commitments-p72",
+      "0001341439-26-000038|orcl-20260531.htm|item-1a-risk-factors-p33",
+      "0001769628-26-000021|crwv-20260630.htm|note-4-customer-concentration-p21"
+    ],
+    "raw_evidence_ids": [
+      "rs:msft-openai-bankruptcy-2026-08-10:ev:1",
+      "rs:msft-openai-bankruptcy-2026-08-10:ev:2",
+      "rs:msft-openai-bankruptcy-2026-08-10:ev:3"
+    ],
+    "roles_completed": [
+      "stockbot",
+      "bullbot",
+      "bearbot"
+    ],
+    "searches": [
+      "sec-search:msft-openai:1",
+      "sec-search:msft-openai:2",
+      "sec-search:msft-openai:3"
+    ],
+    "universal_absence_claims": [],
+    "waves": [
+      "rs:msft-openai-bankruptcy-2026-08-10:1:freeze",
+      "rs:msft-openai-bankruptcy-2026-08-10:2:freeze"
+    ]
+  },
+  "validator": {
+    "expected_tools": [
+      "find_sec_entities",
+      "list_sec_filings",
+      "get_sec_document",
+      "search_sec_filings"
+    ],
+    "pit_as_of": "2026-08-10",
+    "requires_evidence": true,
+    "validators": [
+      "pit",
+      "dossier",
+      "scheduler-budget",
+      "capability-policy",
+      "immutable-freeze",
+      "timeout_resume_requires_failed"
+    ]
+  }
+}

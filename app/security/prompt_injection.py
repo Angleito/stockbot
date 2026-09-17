@@ -106,9 +106,7 @@ def _compile(phrase: str) -> re.Pattern[str]:
 
 
 _RULES: tuple[tuple[str, str, re.Pattern[str], int], ...] = tuple(
-    (category, phrase, _compile(phrase), weight)
-    for category, specs in _RULE_SPECS.items()
-    for phrase, weight in specs
+    (category, phrase, _compile(phrase), weight) for category, specs in _RULE_SPECS.items() for phrase, weight in specs
 )
 
 
@@ -149,14 +147,14 @@ def _decoding_candidates(text: str) -> list[str]:
     if _PCT_RE.search(text):
         try:
             candidates.append(urllib.parse.unquote(text))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
             pass
     for match in _BASE64_RE.finditer(text):
         blob = match.group(0)
         blob += "=" * (-len(blob) % 4)
         try:
             decoded = base64.b64decode(blob, validate=False).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+        except binascii.Error, UnicodeDecodeError, ValueError:
             continue
         candidates.append(decoded)
     for match in _HEX_RE.finditer(text):
@@ -165,15 +163,14 @@ def _decoding_candidates(text: str) -> list[str]:
             run = run[:-1]
         try:
             decoded = bytes.fromhex(run).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+        except binascii.Error, UnicodeDecodeError, ValueError:
             continue
         candidates.append(decoded)
     return candidates
 
 
-def assess(text: str) -> InjectionAssessment:
-    """Score and classify untrusted free-form text."""
-    raw = text if isinstance(text, str) else str(text)
+def _oversized_assessment(raw: str) -> InjectionAssessment | None:
+    """Size-limit early return, or None when scannable."""
     if len(raw.encode("utf-8")) > MAX_SCAN_BYTES:
         return InjectionAssessment(
             score=100,
@@ -181,7 +178,11 @@ def assess(text: str) -> InjectionAssessment:
             reasons=("input exceeds 2 MiB scan limit",),
             matched_rules=("size_limit:oversized_input",),
         )
-    normalized = normalize_text(text)
+    return None
+
+
+def _collect_matches(normalized: str) -> list[tuple[str, str, int]]:
+    """Candidate/rule matching loop with dedupe."""
     matched: list[tuple[str, str, int]] = []
     seen: set[tuple[str, str]] = set()
     for candidate in (normalized, *_decoding_candidates(normalized)):
@@ -191,15 +192,30 @@ def assess(text: str) -> InjectionAssessment:
             if pattern.search(candidate):
                 seen.add((category, phrase))
                 matched.append((category, phrase, weight))
+    return matched
+
+
+def _verdict_for(matched: list[tuple[str, str, int]], score: int) -> str:
+    """BLOCK/QUARANTINE/ALLOW decision."""
+    if any(category in HARD_CATEGORIES for category, _, _ in matched):
+        return "BLOCK"
+    if score >= 80:
+        return "BLOCK"
+    if matched:
+        return "QUARANTINE"
+    return "ALLOW"
+
+
+def assess(text: str) -> InjectionAssessment:
+    """Score and classify untrusted free-form text."""
+    raw = text if isinstance(text, str) else str(text)
+    oversized = _oversized_assessment(raw)
+    if oversized is not None:
+        return oversized
+    normalized = normalize_text(text)
+    matched = _collect_matches(normalized)
     score = min(100, sum(weight for _, _, weight in matched))
     matched_rules = tuple(f"{category}:{phrase}" for category, phrase, _ in matched)
     reasons = tuple(f"matched '{phrase}' ({category})" for category, phrase, _ in matched)
-    if any(category in HARD_CATEGORIES for category, _, _ in matched) or score >= 80:
-        verdict = "BLOCK"
-    elif matched:
-        verdict = "QUARANTINE"
-    else:
-        verdict = "ALLOW"
-    return InjectionAssessment(
-        score=score, verdict=verdict, reasons=reasons, matched_rules=matched_rules
-    )
+    verdict = _verdict_for(matched, score)
+    return InjectionAssessment(score=score, verdict=verdict, reasons=reasons, matched_rules=matched_rules)

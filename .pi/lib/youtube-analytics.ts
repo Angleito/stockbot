@@ -20,7 +20,7 @@ import {
  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-export type Json = Record<string, unknown>;
+type Json = Record<string, unknown>;
 
 export interface YoutubeAnalyticsRequest {
  thesis_id: string;
@@ -35,13 +35,13 @@ export interface YoutubeAnalyticsRequest {
 /** Code-only testing seam: builds the private worker child for one JSON input. */
 export type SpawnWorker = (input: string) => ChildProcessWithoutNullStreams;
 
-export const YT_TIMEOUT_MS = 45_000;
-export const YT_STDOUT_CAP = 256 * 1024;
+const YT_TIMEOUT_MS = 45_000;
+const YT_STDOUT_CAP = 256 * 1024;
 const YT_LIMIT = 10;
 
 const ROOT = new URL("../..", import.meta.url).pathname;
 
-export function spawnYoutubeWorker(input: string): ChildProcessWithoutNullStreams {
+function spawnYoutubeWorker(input: string): ChildProcessWithoutNullStreams {
  const child = spawn(`${ROOT}/venv/bin/python`, ["-m", "app.google_data.youtube"], {
   shell: false,
   cwd: ROOT,

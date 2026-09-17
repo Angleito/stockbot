@@ -110,9 +110,7 @@ def test_no_raw_pi_mount_kit():
         for token in FORBIDDEN_SRC_TOKENS:
             assert token not in src, f"host Pi-auth mount source in kit: {src!r}"
     # No other host-source reference outside comments.
-    body = "\n".join(
-        ln for ln in SPEC.read_text().splitlines() if not ln.lstrip().startswith("#")
-    )
+    body = "\n".join(ln for ln in SPEC.read_text().splitlines() if not ln.lstrip().startswith("#"))
     for token in FORBIDDEN_SRC_TOKENS:
         assert token not in body, f"{token!r} as host source in spec.yaml"
 
@@ -150,10 +148,16 @@ def test_egress_allowlist_no_forbidden():
 
 def test_tool_gate_flags():
     stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
-    for flag in ("--no-builtin-tools", "--no-extensions", "--no-skills",
-                 "--no-prompt-templates", "--no-context-files",
-                 "--extension .pi/extensions/stockbot.ts"):
+    for flag in (
+        "--no-builtin-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-context-files",
+        "--extension .pi/extensions/stockbot.ts",
+    ):
         assert flag in stockbot, f"missing from stockbot script: {flag}"
+
 
 def test_kit_create_docs():
     text = HOST_SETUP.read_text()
@@ -176,7 +180,7 @@ def test_opencode_secret_rejects_indirection(tmp_path: Path) -> None:
     for key, ok in cases:
         (agent_dir / "auth.json").write_text(json.dumps({"opencode-go": {"type": "api_key", "key": key}}))
         env = dict(os.environ, HOME=str(tmp_path))
-        proc = subprocess.run([str(helper)], env=env, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run([str(helper)], env=env, capture_output=True, text=True, timeout=30, check=False)
         if ok:
             assert proc.returncode == 0, proc.stderr
             assert proc.stdout.strip() == key

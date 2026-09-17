@@ -13,9 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 from calendar import monthrange
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from .. import finra_client
 from ..config import finra_use_mock, get_data_root
@@ -33,7 +33,7 @@ _SHARES_CONCEPT = "EntityCommonStockSharesOutstanding"
 _COMMON_EQUITY = "equity-common"
 
 
-def _resolve_as_of(as_of: Optional[str]) -> str:
+def _resolve_as_of(as_of: str | None) -> str:
     """Knowledge horizon for a screen request.
 
     When as_of is omitted, the horizon is today's UTC date: the live screen
@@ -43,17 +43,17 @@ def _resolve_as_of(as_of: Optional[str]) -> str:
     """
     if as_of:
         return as_of
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
-def _clamp_limit(limit: Optional[int]) -> int:
+def _clamp_limit(limit: int | None) -> int:
     try:
         return max(1, min((limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return DEFAULT_LIMIT
 
 
-def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path] = None) -> str:
+def latest_settlement_date(as_of: str | None = None, data_root: Path | None = None) -> str:
     """Latest ingested settlement cycle, optionally restricted to cycles
     knowable on or before ``as_of``."""
     if as_of is None:
@@ -64,8 +64,7 @@ def latest_settlement_date(as_of: Optional[str] = None, data_root: Optional[Path
     else:
         clause, param = duckdb.as_of_clause(as_of)
         rows = duckdb.query(
-            "SELECT max(settlement_date) AS latest FROM short_interest "
-            f"WHERE {clause}",
+            f"SELECT max(settlement_date) AS latest FROM short_interest WHERE {clause}",
             params=[param],
             data_root=data_root,
         )
@@ -112,8 +111,7 @@ def _ticker_alias_map(as_of: str, data_root: Path) -> dict[str, list[str]]:
     clause, param = duckdb.as_of_clause(as_of)
     aliases: dict[str, list[str]] = {}
     for row in duckdb.query(
-        "SELECT alias_value, entity_id FROM entity_aliases "
-        f"WHERE alias_type = 'ticker' AND {clause}",
+        f"SELECT alias_value, entity_id FROM entity_aliases WHERE alias_type = 'ticker' AND {clause}",
         params=[param],
         data_root=data_root,
     ):
@@ -207,9 +205,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             data_root=data_root,
         ),
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
 def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
@@ -217,137 +213,185 @@ def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
     return (-float(str(item["short_interest_percent"])), str(item["ticker"]))
 
 
-def materialize_short_interest_screen(
-    settlement_date: str,
-    as_of: Optional[str] = None,
-    data_root: Optional[Path] = None,
-) -> dict[str, object]:
-    """Build one complete settlement-date leaderboard from normalized data.
+class _ScreenInputs:
+    """Resolved point-in-time maps for one screen build (existing boundary)."""
 
-    ``as_of`` is the knowledge horizon: FINRA rows, ticker aliases, security
-    classifications, and SEC facts are all restricted to ``known_at <=
-    as_of``, and the newest FINRA source version known at as_of wins per
-    symbol (same-instant conflicting versions resolve to unknown and are
-    excluded).  When omitted it defaults to today (the live screen);
-    historical reproduction passes an explicit as_of.
+    def __init__(
+        self,
+        ticker_aliases: dict[str, list[str]],
+        security_types: dict[str, str],
+        facts_by_entity: dict[str, list[dict[str, object]]],
+    ) -> None:
+        self.ticker_aliases = ticker_aliases
+        self.security_types = security_types
+        self.facts_by_entity = facts_by_entity
 
-    The ranking is deterministic: same settlement date, same ``as_of``, same
-    ingested data -> identical ranking.  The run is persisted with its
-    coverage, exclusions, fact provenance, and calculation version before
-    any bounded result is returned.
-    """
-    data_root = Path(data_root) if data_root else get_data_root()
-    as_of = _resolve_as_of(as_of)
-    rows, conflicting = _snapshot_rows(settlement_date, as_of, data_root)
-    if not rows:
-        if conflicting:
-            return {
-                "error": (
-                    f"FINRA short interest exists for settlement date "
-                    f"{settlement_date} knowable on or before {as_of}, but all "
-                    f"rows for this settlement conflict at the same instant "
-                    f"(ambiguous); cannot build an unambiguous leaderboard."
-                )
-            }
+
+class _ScreenAccum:
+    """Exclusions, stage counters, and candidates (existing boundary)."""
+
+    def __init__(self, conflicting: int) -> None:
+        self.exclusions = {
+            "unmapped_symbol": 0,
+            "ambiguous_ticker_mapping": 0,
+            "not_classified_common_equity": 0,
+            "missing_shares_outstanding": 0,
+            "invalid_short_interest": 0,
+            "conflicting_versions": conflicting,
+        }
+        # Stage counters are cumulative complements of the exclusions: a row
+        # excluded at an earlier stage never reached the later checks, so the
+        # CLI reports these directly instead of deriving them from exclusions.
+        self.counters = {
+            "valid_short_interest_rows": 0,
+            "mapped_rows": 0,
+            "unambiguous_rows": 0,
+            "common_equity_rows": 0,
+            "shares_outstanding_rows": 0,
+        }
+        self.candidates: list[dict[str, object]] = []
+
+
+def _empty_screen_error(settlement_date: str, as_of: str, conflicting: int) -> dict[str, object] | None:
+    """Empty-snapshot error envelope, None when rows exist (existing boundary)."""
+    if conflicting:
         return {
             "error": (
-                f"No normalized FINRA short interest for settlement date "
-                f"{settlement_date} is knowable on or before {as_of}; run "
-                f"'python cli.py refresh-data --settlement-date {settlement_date}' first (or pass a later as_of)."
+                f"FINRA short interest exists for settlement date "
+                f"{settlement_date} knowable on or before {as_of}, but all "
+                f"rows for this settlement conflict at the same instant "
+                f"(ambiguous); cannot build an unambiguous leaderboard."
             )
         }
-    ticker_aliases = _ticker_alias_map(as_of, data_root)
-    security_types = _security_type_map(as_of, data_root)
-    facts_by_entity = _facts_by_entity(as_of, data_root)
-    exclusions = {
-        "unmapped_symbol": 0,
-        "ambiguous_ticker_mapping": 0,
-        "not_classified_common_equity": 0,
-        "missing_shares_outstanding": 0,
-        "invalid_short_interest": 0,
-        "conflicting_versions": 0,
+    return {
+        "error": (
+            f"No normalized FINRA short interest for settlement date "
+            f"{settlement_date} is knowable on or before {as_of}; run "
+            f"'python cli.py refresh-data --settlement-date {settlement_date}' first (or pass a later as_of)."
+        )
     }
-    exclusions["conflicting_versions"] = conflicting
-    # Stage counters are cumulative complements of the exclusions: a row
-    # excluded at an earlier stage never reached the later checks, so the
-    # CLI reports these directly instead of deriving them from exclusions.
-    counters = {
-        "valid_short_interest_rows": 0,
-        "mapped_rows": 0,
-        "unambiguous_rows": 0,
-        "common_equity_rows": 0,
-        "shares_outstanding_rows": 0,
+
+
+def _screen_inputs(as_of: str, data_root: Path) -> _ScreenInputs:
+    """Point-in-time alias/classification/fact maps (existing boundary)."""
+    return _ScreenInputs(
+        _ticker_alias_map(as_of, data_root),
+        _security_type_map(as_of, data_root),
+        _facts_by_entity(as_of, data_root),
+    )
+
+
+def _short_shares(row: dict[str, object], accum: _ScreenAccum) -> float | None:
+    """Validated short shares, None when invalid (existing boundary)."""
+    short_shares_raw = row.get("short_position")
+    if short_shares_raw is None or float(str(short_shares_raw)) < 0:
+        accum.exclusions["invalid_short_interest"] += 1
+        return None
+    accum.counters["valid_short_interest_rows"] += 1
+    return float(str(short_shares_raw))
+
+
+def _screen_entity(symbol: str, inputs: _ScreenInputs, accum: _ScreenAccum) -> str | None:
+    """Mapped unambiguous entity, None when excluded (existing boundary)."""
+    entity_ids = inputs.ticker_aliases.get(symbol)
+    if not entity_ids:
+        accum.exclusions["unmapped_symbol"] += 1
+        return None
+    accum.counters["mapped_rows"] += 1
+    if len(entity_ids) > 1:
+        accum.exclusions["ambiguous_ticker_mapping"] += 1
+        return None
+    accum.counters["unambiguous_rows"] += 1
+    return entity_ids[0]
+
+
+def _screen_fact(
+    entity_id: str, settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum
+) -> dict[str, object] | None:
+    """Eligible shares-outstanding fact, None when excluded (existing boundary)."""
+    # Eligibility is the stored security classification, not a fact-
+    # presence proxy: only entities classified as common equity rank.
+    if inputs.security_types.get(entity_id) != _COMMON_EQUITY:
+        accum.exclusions["not_classified_common_equity"] += 1
+        return None
+    accum.counters["common_equity_rows"] += 1
+    fact = _select_fact_for_period(inputs.facts_by_entity.get(entity_id) or [], settlement_date)
+    if fact is None:
+        # Classified common equity but no shares-outstanding fact
+        # knowable on/before as_of with period end <= settlement: a data
+        # gap, not proof of non-common-equity.
+        accum.exclusions["missing_shares_outstanding"] += 1
+        return None
+    accum.counters["shares_outstanding_rows"] += 1
+    return fact
+
+
+def _screen_candidate(
+    symbol: str, row: dict[str, object], entity_id: str, short_shares: float, fact: dict[str, object]
+) -> dict[str, object]:
+    """One ranked candidate row (existing boundary)."""
+    shares = float(str(fact["value"]))
+    return {
+        "entity_id": entity_id,
+        "security_id": f"sec:equity:{entity_id.rsplit(':', 1)[1]}",
+        "ticker": symbol,
+        "issue_name": row.get("issue_name"),
+        "short_shares": short_shares,
+        "shares_outstanding": shares,
+        "short_interest_percent": 100 * short_shares / shares,
+        "sec_shares_as_of": str(fact["period_end"]),
+        "sec_filed_at": str(fact["filed_at"]),
+        "sec_accession": fact.get("accession"),
+        "sec_source_url": fact.get("source_url"),
     }
-    candidates: list[dict[str, object]] = []
-    for row in rows:
-        symbol = str(row["symbol_code"])
-        short_shares_raw = row.get("short_position")
-        if short_shares_raw is None or float(str(short_shares_raw)) < 0:
-            exclusions["invalid_short_interest"] += 1
-            continue
-        short_shares = float(str(short_shares_raw))
-        counters["valid_short_interest_rows"] += 1
-        entity_ids = ticker_aliases.get(symbol)
-        if not entity_ids:
-            exclusions["unmapped_symbol"] += 1
-            continue
-        counters["mapped_rows"] += 1
-        if len(entity_ids) > 1:
-            exclusions["ambiguous_ticker_mapping"] += 1
-            continue
-        counters["unambiguous_rows"] += 1
-        entity_id = entity_ids[0]
-        # Eligibility is the stored security classification, not a fact-
-        # presence proxy: only entities classified as common equity rank.
-        if security_types.get(entity_id) != _COMMON_EQUITY:
-            exclusions["not_classified_common_equity"] += 1
-            continue
-        counters["common_equity_rows"] += 1
-        fact = _select_fact_for_period(facts_by_entity.get(entity_id) or [], settlement_date)
-        if fact is None:
-            # Classified common equity but no shares-outstanding fact
-            # knowable on/before as_of with period end <= settlement: a data
-            # gap, not proof of non-common-equity.
-            exclusions["missing_shares_outstanding"] += 1
-            continue
-        counters["shares_outstanding_rows"] += 1
-        shares = float(str(fact["value"]))
-        candidates.append({
-            "entity_id": entity_id,
-            "security_id": f"sec:equity:{entity_id.rsplit(':', 1)[1]}",
-            "ticker": symbol,
-            "issue_name": row.get("issue_name"),
-            "short_shares": short_shares,
-            "shares_outstanding": shares,
-            "short_interest_percent": 100 * short_shares / shares,
-            "sec_shares_as_of": str(fact["period_end"]),
-            "sec_filed_at": str(fact["filed_at"]),
-            "sec_accession": fact.get("accession"),
-            "sec_source_url": fact.get("source_url"),
-        })
-    candidates.sort(key=_leaderboard_key)
+
+
+def _accumulate_screen_row(
+    row: dict[str, object], settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum
+) -> None:
+    """One snapshot row through the eligibility pipeline (existing boundary)."""
+    symbol = str(row["symbol_code"])
+    short_shares = _short_shares(row, accum)
+    if short_shares is None:
+        return
+    entity_id = _screen_entity(symbol, inputs, accum)
+    if entity_id is None:
+        return
+    fact = _screen_fact(entity_id, settlement_date, inputs, accum)
+    if fact is None:
+        return
+    accum.candidates.append(_screen_candidate(symbol, row, entity_id, short_shares, fact))
+
+
+def _persist_screen_run(
+    settlement_date: str, as_of: str, data_root: Path, rows: list[dict[str, object]], accum: _ScreenAccum
+) -> None:
+    """Persist run + entries rows (existing boundary)."""
+    accum.candidates.sort(key=_leaderboard_key)
     run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
     parquet.write_rows(
         "screen_runs",
-        [{
-            "run_id": run_id,
-            "screen": SCREEN_NAME,
-            "settlement_date": settlement_date,
-            "as_of": as_of,
-            "created_at": created_at,
-            "calc_version": SCREEN_CALC_VERSION,
-            "finra_rows": len(rows),
-            "eligible_rows": len(candidates),
-            "valid_short_interest_rows": counters["valid_short_interest_rows"],
-            "mapped_rows": counters["mapped_rows"],
-            "unambiguous_rows": counters["unambiguous_rows"],
-            "common_equity_rows": counters["common_equity_rows"],
-            "shares_outstanding_rows": counters["shares_outstanding_rows"],
-            "exclusions_json": json.dumps(exclusions, sort_keys=True),
-            "environment": finra_client._environment(),
-            "parser_version": SCREEN_CALC_VERSION,
-        }],
+        [
+            {
+                "run_id": run_id,
+                "screen": SCREEN_NAME,
+                "settlement_date": settlement_date,
+                "as_of": as_of,
+                "created_at": created_at,
+                "calc_version": SCREEN_CALC_VERSION,
+                "finra_rows": len(rows),
+                "eligible_rows": len(accum.candidates),
+                "valid_short_interest_rows": accum.counters["valid_short_interest_rows"],
+                "mapped_rows": accum.counters["mapped_rows"],
+                "unambiguous_rows": accum.counters["unambiguous_rows"],
+                "common_equity_rows": accum.counters["common_equity_rows"],
+                "shares_outstanding_rows": accum.counters["shares_outstanding_rows"],
+                "exclusions_json": json.dumps(accum.exclusions, sort_keys=True),
+                "environment": finra_client._environment(),
+                "parser_version": SCREEN_CALC_VERSION,
+            }
+        ],
         root=data_root / "parquet",
     )
     parquet.write_rows(
@@ -368,18 +412,51 @@ def materialize_short_interest_screen(
                 "sec_accession": item["sec_accession"],
                 "sec_source_url": item["sec_source_url"],
             }
-            for index, item in enumerate(candidates, 1)
+            for index, item in enumerate(accum.candidates, 1)
         ],
         root=data_root / "parquet",
     )
+
+
+def materialize_short_interest_screen(
+    settlement_date: str,
+    as_of: str | None = None,
+    data_root: Path | None = None,
+) -> dict[str, object]:
+    """Build one complete settlement-date leaderboard from normalized data.
+
+    ``as_of`` is the knowledge horizon: FINRA rows, ticker aliases, security
+    classifications, and SEC facts are all restricted to ``known_at <=
+    as_of``, and the newest FINRA source version known at as_of wins per
+    symbol (same-instant conflicting versions resolve to unknown and are
+    excluded).  When omitted it defaults to today (the live screen);
+    historical reproduction passes an explicit as_of.
+
+    The ranking is deterministic: same settlement date, same ``as_of``, same
+    ingested data -> identical ranking.  The run is persisted with its
+    coverage, exclusions, fact provenance, and calculation version before
+    any bounded result is returned.
+    """
+    data_root = Path(data_root) if data_root else get_data_root()
+    as_of = _resolve_as_of(as_of)
+    rows, conflicting = _snapshot_rows(settlement_date, as_of, data_root)
+    if not rows:
+        err = _empty_screen_error(settlement_date, as_of, conflicting)
+        assert err is not None
+        return err
+    inputs = _screen_inputs(as_of, data_root)
+    accum = _ScreenAccum(conflicting)
+    for row in rows:
+        _accumulate_screen_row(row, settlement_date, inputs, accum)
+    _persist_screen_run(settlement_date, as_of, data_root, rows, accum)
     return read_short_interest_screen(settlement_date, as_of, DEFAULT_LIMIT, data_root=data_root)
 
 
 def read_short_interest_screen(
     settlement_date: str,
-    as_of: Optional[str] = None,
-    limit: Optional[int] = None,
-    data_root: Optional[Path] = None,
+    as_of: str | None = None,
+    limit: int | None = None,
+    data_root: Path | None = None,
 ) -> dict[str, object]:
     """Read a published screen run, bounded to ``limit`` entries."""
     data_root = Path(data_root) if data_root else get_data_root()
@@ -400,9 +477,9 @@ def read_short_interest_screen(
         data_root=data_root,
     )
     try:
-        days = (date.today() - date.fromisoformat(settlement_date)).days
+        days = (date.today() - date.fromisoformat(settlement_date)).days  # noqa: DTZ011 - trading-calendar local date has no tz meaning
         freshness = "stale" if days > finra_client.STALE_AFTER_DAYS else "current"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         freshness = "unknown"
     exclusions_raw = run["exclusions_json"]
     exclusions = json.loads(exclusions_raw) if isinstance(exclusions_raw, str) else {}
@@ -470,6 +547,29 @@ def read_short_interest_screen(
 _FETCH_DISCOVERY_CYCLES = 6
 
 
+def _raw_cycle_dates(year: int, month: int) -> list[date]:
+    """Month-end then mid-month raw settlement dates (existing boundary)."""
+    return [date(year, month, monthrange(year, month)[1]), date(year, month, 15)]
+
+
+def _shift_candidates(raw: date, today: date, candidates: list[str]) -> None:
+    """Up-to-3 preceding weekdays for one raw date (existing boundary)."""
+    for offset in range(4):
+        candidate = raw - timedelta(days=offset)
+        if offset and candidate.weekday() >= 5:
+            continue
+        if candidate <= today and str(candidate) not in candidates:
+            candidates.append(str(candidate))
+
+
+def _prev_month(year: int, month: int) -> tuple[int, int]:
+    """One month back with year rollover (existing boundary)."""
+    month -= 1
+    if month == 0:
+        return year - 1, 12
+    return year, month
+
+
 def _candidate_settlement_dates(today: date, count: int = _FETCH_DISCOVERY_CYCLES) -> list[str]:
     """Newest-first FINRA settlement calendar dates on/before ``today``.
 
@@ -484,22 +584,11 @@ def _candidate_settlement_dates(today: date, count: int = _FETCH_DISCOVERY_CYCLE
     candidates: list[str] = []
     year, month = today.year, today.month
     while len(candidates) < count:
-        last_day = monthrange(year, month)[1]
-        for day in (last_day, 15):
-            raw = date(year, month, day)
-            for offset in range(4):
-                candidate = raw - timedelta(days=offset)
-                if offset and candidate.weekday() >= 5:
-                    continue
-                if candidate <= today and str(candidate) not in candidates:
-                    candidates.append(str(candidate))
-                    if len(candidates) >= count:
-                        break
+        for raw in _raw_cycle_dates(year, month):
+            _shift_candidates(raw, today, candidates)
             if len(candidates) >= count:
                 break
-        month -= 1
-        if month == 0:
-            month, year = 12, year - 1
+        year, month = _prev_month(year, month)
     return candidates
 
 
@@ -513,20 +602,22 @@ def _probe_published_rows(candidate: str) -> int:
             "limit": 1,
             "offset": 0,
             "fields": ["settlementDate"],
-            "compareFilters": [{
-                "compareType": "EQUAL",
-                "fieldName": "settlementDate",
-                "fieldValue": candidate,
-            }],
+            "compareFilters": [
+                {
+                    "compareType": "EQUAL",
+                    "fieldName": "settlementDate",
+                    "fieldValue": candidate,
+                }
+            ],
         },
     )
     try:
         return int(str(headers.get("record-total", 0)))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
-def _discover_latest_published_settlement_date(today: date) -> Optional[str]:
+def _discover_latest_published_settlement_date(today: date) -> str | None:
     """Newest FINRA-published settlement date, newest candidate first.
 
     Probes are best-effort: a failed probe skips that candidate.  Returns
@@ -536,7 +627,7 @@ def _discover_latest_published_settlement_date(today: date) -> Optional[str]:
         try:
             if _probe_published_rows(candidate) > 0:
                 return candidate
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     return None
 
@@ -548,11 +639,90 @@ def _fetch_live_cycle(settlement_date: str, data_root: Path) -> None:
     research_data.refresh_finra_short_interest(settlement_date, data_root=data_root)
 
 
+def _explicit_cycle_target(resolved: str, root: Path, settlement_date: str, live: bool) -> str:
+    """Explicit-date target with live fetch-on-empty (existing boundary)."""
+    if live:
+        rows, conflicting = _snapshot_rows(settlement_date, resolved, root)
+        if not rows and not conflicting:
+            _fetch_live_cycle(settlement_date, root)
+    return settlement_date
+
+
+def _discover_and_fetch(resolved: str, root: Path) -> str:
+    """Newest published cycle, fetched (existing boundary)."""
+    discovered = _discover_latest_published_settlement_date(date.fromisoformat(resolved))
+    if discovered is None:
+        raise ValueError("no published settlement cycle")
+    _fetch_live_cycle(discovered, root)
+    return discovered
+
+
+def _refresh_newer_cycle(resolved: str, root: Path, stored: str) -> str:
+    """Fetch the newer published cycle, stored when fetch fails (existing boundary)."""
+    newer = _newer_published_cycle(resolved, stored)
+    if newer is None:
+        return stored
+    return _refresh_published_cycle(newer, root) or stored
+
+
+def _stored_cycle_target(resolved: str, root: Path, live: bool) -> str:
+    """Stored target, refreshed when a newer cycle published (existing boundary)."""
+    stored = latest_settlement_date(resolved, root)
+    if not live:
+        return stored
+    return _refresh_newer_cycle(resolved, root, stored)
+
+
+def _resolve_leaderboard_target(resolved: str, root: Path, settlement_date: str | None, live: bool) -> str:
+    """Settlement target with live fetch-on-empty (existing boundary)."""
+    if settlement_date is not None:
+        return _explicit_cycle_target(resolved, root, settlement_date, live)
+    try:
+        return _stored_cycle_target(resolved, root, live)
+    except ValueError:
+        if not live:
+            raise
+        return _discover_and_fetch(resolved, root)
+
+
+def _published_cycle(resolved: str) -> str | None:
+    """Newest published cycle, None on any probe failure (existing boundary)."""
+    try:
+        return _discover_latest_published_settlement_date(date.fromisoformat(resolved))
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+
+
+def _newer_published_cycle(resolved: str, target: str) -> str | None:
+    """Newest published cycle when newer than the store, else None (existing boundary)."""
+    published = _published_cycle(resolved)
+    if published is None or not published > target:
+        return None
+    return published
+
+
+def _read_leaderboard_cycle(target: str, resolved: str, limit: int | None, root: Path) -> dict[str, object]:
+    """Materialize then read one cycle (existing boundary)."""
+    result = materialize_short_interest_screen(target, resolved, data_root=root)
+    if "error" not in result:
+        result = read_short_interest_screen(target, resolved, limit, data_root=root)
+    return result
+
+
+def _refresh_published_cycle(published: str, root: Path) -> str | None:
+    """Fetch one published cycle; None when the fetch fails (existing boundary)."""
+    try:
+        _fetch_live_cycle(published, root)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+    return published
+
+
 def get_short_interest_leaderboard(
-    limit: Optional[int] = None,
-    settlement_date: Optional[str] = None,
-    as_of: Optional[str] = None,
-    data_root: Optional[Path] = None,
+    limit: int | None = None,
+    settlement_date: str | None = None,
+    as_of: str | None = None,
+    data_root: Path | None = None,
 ) -> dict[str, object]:
     """Return a bounded leaderboard, materializing the requested cycle
     (republishing only when its inputs changed) for the requested ``as_of``.
@@ -573,47 +743,16 @@ def get_short_interest_leaderboard(
     try:
         resolved = _resolve_as_of(as_of)
         root = Path(data_root) if data_root else get_data_root()
-        if settlement_date is None:
-            try:
-                target = latest_settlement_date(resolved, root)
-                if live:
-                    try:
-                        published = _discover_latest_published_settlement_date(date.fromisoformat(resolved))
-                    except Exception:
-                        published = None
-                    if published is not None and published > target:
-                        try:
-                            _fetch_live_cycle(published, root)
-                        except Exception:
-                            pass
-                        else:
-                            target = published
-            except ValueError:
-                if not live:
-                    raise
-                discovered = _discover_latest_published_settlement_date(date.fromisoformat(resolved))
-                if discovered is None:
-                    raise
-                _fetch_live_cycle(discovered, root)
-                target = discovered
-        else:
-            target = settlement_date
-            if live:
-                rows, conflicting = _snapshot_rows(target, resolved, root)
-                if not rows and not conflicting:
-                    _fetch_live_cycle(target, root)
-        result = materialize_short_interest_screen(target, resolved, data_root=root)
-        if "error" not in result:
-            result = read_short_interest_screen(target, resolved, limit, data_root=root)
-        return result
-    except Exception as exc:
+        target = _resolve_leaderboard_target(resolved, root, settlement_date, live)
+        return _read_leaderboard_cycle(target, resolved, limit, root)
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {"error": f"Short-interest leaderboard is unavailable: {exc}"}
 
 
 def _utc_now() -> str:
-	"""UTC publication timestamp; microsecond precision so same-second
-	materializations still order by publication time."""
-	return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    """UTC publication timestamp; microsecond precision so same-second
+    materializations still order by publication time."""
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +813,7 @@ def _cycle_entities(
     return result
 
 
-def _select_fact_for_period(facts: list[dict[str, object]], settlement_date: str) -> Optional[dict[str, object]]:
+def _select_fact_for_period(facts: list[dict[str, object]], settlement_date: str) -> dict[str, object] | None:
     """Latest fact whose period end is on/before the settlement date; facts
     are pre-sorted newest first and already restricted by known_at <= as_of."""
     for fact in facts:
@@ -696,8 +835,8 @@ def _change_key(e: dict[str, object]) -> tuple[float, str]:
 
 def short_interest_change_screen(
     as_of: str,
-    limit: Optional[int] = None,
-    data_root: Optional[Path] = None,
+    limit: int | None = None,
+    data_root: Path | None = None,
 ) -> dict[str, object]:
     """Dated research slice: short-interest change + shares-outstanding change
     between the two most recent settlement cycles knowable on/before as_of.
@@ -716,7 +855,11 @@ def short_interest_change_screen(
     security_types = _security_type_map(as_of, data_root)
     facts_by_entity = _facts_by_entity(as_of, data_root)
     current = _cycle_entities(current_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
-    prior: dict[str, _CycleItem] = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
+    prior: dict[str, _CycleItem] = (
+        _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
+        if prior_date
+        else {}
+    )
     entries: list[dict[str, object]] = []
     for symbol, item in sorted(current.items()):
         row, fact = item["row"], item["fact"]
@@ -753,20 +896,24 @@ def short_interest_change_screen(
             prior_row, prior_fact = prior_item["row"], prior_item["fact"]
             short_prior = float(str(prior_row["short_position"]))
             si_pct_prior = 100 * short_prior / float(str(prior_fact["value"]))
-            entry.update({
-                "short_shares_prior": short_prior,
-                "short_interest_percent_prior": si_pct_prior,
-                "shares_outstanding_prior": float(str(prior_fact["value"])),
-                "sec_shares_as_of_prior": str(prior_fact["period_end"]),
-                "sec_filed_at_prior": str(prior_fact["filed_at"]),
-                "sec_accession_prior": prior_fact.get("accession"),
-                "sec_source_url_prior": prior_fact.get("source_url"),
-                "short_change_abs": short_current - short_prior,
-                "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
-                "shares_change_abs": float(str(fact["value"])) - float(str(prior_fact["value"])),
-                "shares_change_pct": 100 * (float(str(fact["value"])) - float(str(prior_fact["value"]))) / float(str(prior_fact["value"])),
-                "si_pp_change": si_pct_current - si_pct_prior,
-            })
+            entry.update(
+                {
+                    "short_shares_prior": short_prior,
+                    "short_interest_percent_prior": si_pct_prior,
+                    "shares_outstanding_prior": float(str(prior_fact["value"])),
+                    "sec_shares_as_of_prior": str(prior_fact["period_end"]),
+                    "sec_filed_at_prior": str(prior_fact["filed_at"]),
+                    "sec_accession_prior": prior_fact.get("accession"),
+                    "sec_source_url_prior": prior_fact.get("source_url"),
+                    "short_change_abs": short_current - short_prior,
+                    "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
+                    "shares_change_abs": float(str(fact["value"])) - float(str(prior_fact["value"])),
+                    "shares_change_pct": 100
+                    * (float(str(fact["value"])) - float(str(prior_fact["value"])))
+                    / float(str(prior_fact["value"])),
+                    "si_pp_change": si_pct_current - si_pct_prior,
+                }
+            )
         entries.append(entry)
     entries.sort(key=_change_key)
     for index, entry in enumerate(entries, 1):

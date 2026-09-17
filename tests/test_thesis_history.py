@@ -1,7 +1,6 @@
 """PIT snapshot isolation for thesis history (no network)."""
 
 import shutil
-
 from pathlib import Path
 
 import pytest
@@ -33,11 +32,13 @@ def _repo(tmp_path: Path) -> ThesisRepository:
 
 
 def _make(tmp_path: Path) -> Thesis:
-    return _repo(tmp_path).create_thesis("NVDA datacenter demand thesis",
-                                         scope="NVDA", effective_at=T0,
-                                         claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
-                                         expressions=[{"expression_id": "expr:e1", "instrument": "equity",
-                                                       "direction": "long", "structure": "equity"}])
+    return _repo(tmp_path).create_thesis(
+        "NVDA datacenter demand thesis",
+        scope="NVDA",
+        effective_at=T0,
+        claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+        expressions=[{"expression_id": "expr:e1", "instrument": "equity", "direction": "long", "structure": "equity"}],
+    )
 
 
 def _set_claim_status(r: ThesisRepository, tid: str, cid: str, status: str, eff: str) -> Thesis:
@@ -73,9 +74,9 @@ def _claim_status(snap: ThesisStateSnapshot, cid: str) -> str:
 
 def test_create_writes_v1(tmp_path: Path) -> None:
     r = _repo(tmp_path)
-    t = r.create_thesis("NVDA thesis", scope="NVDA",
-                        claims=[{"claim_id": "claim:c1", "statement": "s"}],
-                        effective_at=T0)
+    t = r.create_thesis(
+        "NVDA thesis", scope="NVDA", claims=[{"claim_id": "claim:c1", "statement": "s"}], effective_at=T0
+    )
     assert (r.dir_for_thesis(t.thesis_id) / "history" / "00000001.yaml").is_file()
     snap = r.load_state_as_of(t.thesis_id, T0)
     assert snap.version == 1
@@ -97,11 +98,9 @@ def test_claim_status_history(tmp_path: Path) -> None:
 def test_assessment_and_expression_history(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
-    r.apply_research_result(tid, {"state": {"assessment": "strengthening"}},
-                            "run:t1", effective_at=T1)
+    r.apply_research_result(tid, {"state": {"assessment": "strengthening"}}, "run:t1", effective_at=T1)
     _set_expression_status(r, tid, "expr:e1", "active", T1)
-    r.apply_research_result(tid, {"state": {"assessment": "weakening"}},
-                            "run:t3", effective_at=T3)
+    r.apply_research_result(tid, {"state": {"assessment": "weakening"}}, "run:t3", effective_at=T3)
     _set_expression_status(r, tid, "expr:e1", "flagged", T3)
 
     def _expr(snap: ThesisStateSnapshot) -> str:
@@ -126,36 +125,52 @@ def test_assessment_and_expression_history(tmp_path: Path) -> None:
 
 def _filing_rule(rid: str) -> dict[str, object]:
     no_exprs: list[str] = []
-    return {"rule_id": rid, "rule_type": "new_filing", "enabled": True,
-            "support_status": "supported", "support_reason": "",
-            "claim_ids": ["claim:c1"], "expression_ids": no_exprs}
+    return {
+        "rule_id": rid,
+        "rule_type": "new_filing",
+        "enabled": True,
+        "support_status": "supported",
+        "support_reason": "",
+        "claim_ids": ["claim:c1"],
+        "expression_ids": no_exprs,
+    }
 
 
 def test_questions_watch_history(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
-    r.apply_research_result(tid, {
-        "questions_add": [{"question_id": "q:one", "text": "Does demand persist?"},
-                          {"question_id": "q:two", "text": "Are pushouts broad?"}],
-        "watch_add": [_filing_rule("rule:filing")],
-    }, "run:t1", effective_at=T1)
+    r.apply_research_result(
+        tid,
+        {
+            "questions_add": [
+                {"question_id": "q:one", "text": "Does demand persist?"},
+                {"question_id": "q:two", "text": "Are pushouts broad?"},
+            ],
+            "watch_add": [_filing_rule("rule:filing")],
+        },
+        "run:t1",
+        effective_at=T1,
+    )
     s1 = r.load_state_as_of(tid, T1)
     _qs = s1.questions.get("questions", [])
     assert isinstance(_qs, list)
-    assert {q["question_id"]: q["status"] for q in _qs if isinstance(q, dict)} == \
-        {"q:one": "open", "q:two": "open"}
+    assert {q["question_id"]: q["status"] for q in _qs if isinstance(q, dict)} == {"q:one": "open", "q:two": "open"}
     _wr = s1.watch.get("rules", [])
     assert isinstance(_wr, list)
     assert [x["rule_id"] for x in _wr if isinstance(x, dict)] == ["rule:filing"]
 
-    r.answer_questions(tid, [{"question_id": "q:one", "answer": "Yes, steady."}],
-                       effective_at=T3)
+    r.answer_questions(tid, [{"question_id": "q:one", "answer": "Yes, steady."}], effective_at=T3)
     short = dict(_filing_rule("rule:short"))
     short["rule_type"] = "new_short_interest_cycle"
-    r.apply_research_result(tid, {
-        "questions_answered": [{"question_id": "q:two", "answer": "No, narrow."}],
-        "watch_add": [short],
-    }, "run:t3", effective_at=T3)
+    r.apply_research_result(
+        tid,
+        {
+            "questions_answered": [{"question_id": "q:two", "answer": "No, narrow."}],
+            "watch_add": [short],
+        },
+        "run:t3",
+        effective_at=T3,
+    )
     s3 = r.load_state_as_of(tid, T3)
     _qs3 = s3.questions.get("questions", [])
     assert isinstance(_qs3, list)
@@ -210,16 +225,22 @@ def test_legacy_lazy_migration(tmp_path: Path) -> None:
 def test_build_context_pit_regression(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
-    r.apply_research_result(tid, {"evidence_refs": [
-        {"canonical_ref": "ev:A", "summary": "10-K notes steady demand", "known_at": T1}]},
-        "run:t1", effective_at=T1)
-    r.apply_research_result(tid, {"state": {"assessment": "strengthening"}},
-                            "run:t2", effective_at=T2)
-    r.apply_research_result(tid, {"evidence_refs": [
-        {"canonical_ref": "ev:B", "summary": "note warns of pushouts", "known_at": T3}]},
-        "run:t3", effective_at=T3)
-    r.apply_research_result(tid, {"claim_updates": [
-        {"claim_id": "claim:c1", "status": "challenged"}]}, "run:t4", effective_at=T4)
+    r.apply_research_result(
+        tid,
+        {"evidence_refs": [{"canonical_ref": "ev:A", "summary": "10-K notes steady demand", "known_at": T1}]},
+        "run:t1",
+        effective_at=T1,
+    )
+    r.apply_research_result(tid, {"state": {"assessment": "strengthening"}}, "run:t2", effective_at=T2)
+    r.apply_research_result(
+        tid,
+        {"evidence_refs": [{"canonical_ref": "ev:B", "summary": "note warns of pushouts", "known_at": T3}]},
+        "run:t3",
+        effective_at=T3,
+    )
+    r.apply_research_result(
+        tid, {"claim_updates": [{"claim_id": "claim:c1", "status": "challenged"}]}, "run:t4", effective_at=T4
+    )
     trig = r.create_trigger(tid, canonical_refs=["ev:A"], summary="filing", summary_origin="deterministic")
 
     ctx = build_context(r, tid, trig, known_at=T1)
@@ -237,16 +258,22 @@ def test_build_context_pit_regression(tmp_path: Path) -> None:
     with pytest.raises(HistoricalStateUnavailable):
         build_context(r, tid, trig, known_at=BEFORE)
 
+
 def test_backdated_research_never_moves_live(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     _set_claim_status(r, tid, "claim:c1", "challenged", T4)
     n = _history_count(r, tid)
-    r.apply_research_result(tid, {
-        "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
-        "evidence_refs": [],
-        "journal_entry": {"title": "Backdated note", "body": "Seen at T1.", "known_at": T1},
-    }, "run:backdate", effective_at=T1)
+    r.apply_research_result(
+        tid,
+        {
+            "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
+            "evidence_refs": [],
+            "journal_entry": {"title": "Backdated note", "body": "Seen at T1.", "known_at": T1},
+        },
+        "run:backdate",
+        effective_at=T1,
+    )
     assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "supported"
     assert _claim_status(r.load_state_as_of(tid, T5), "claim:c1") == "challenged"
     live = next(c.status for c in r.load_thesis(tid).claims if c.claim_id == "claim:c1")
@@ -262,10 +289,15 @@ def test_backdated_write_on_live_closed_writes_snapshot_only(tmp_path: Path) -> 
     n = _history_count(r, tid)
     live_path = r.dir_for_thesis(tid) / "thesis.yaml"
     live_bytes = live_path.read_bytes()
-    r.apply_research_result(tid, {
-        "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
-        "state": {"assessment": "strengthening"},
-    }, "run:backdate-closed", effective_at=T1)
+    r.apply_research_result(
+        tid,
+        {
+            "claim_updates": [{"claim_id": "claim:c1", "status": "supported"}],
+            "state": {"assessment": "strengthening"},
+        },
+        "run:backdate-closed",
+        effective_at=T1,
+    )
     assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "supported"
     assert _claim_status(r.load_state_as_of(tid, T5), "claim:c1") == "challenged"
     assert r.load_thesis(tid).status == "closed"
@@ -286,10 +318,15 @@ def test_evidence_journal_only_commit_mints_no_snapshot(tmp_path: Path) -> None:
     tid = _make(tmp_path).thesis_id
     n = _history_count(r, tid)
     v0 = r.load_state_as_of(tid, T1).version
-    r.apply_research_result(tid, {
-        "evidence_refs": [{"canonical_ref": "ev:A", "summary": "10-K steady", "known_at": T1}],
-        "journal_entry": {"title": "Note", "body": "No state change.", "known_at": T1},
-    }, "run:sidecar", effective_at=T1)
+    r.apply_research_result(
+        tid,
+        {
+            "evidence_refs": [{"canonical_ref": "ev:A", "summary": "10-K steady", "known_at": T1}],
+            "journal_entry": {"title": "Note", "body": "No state change.", "known_at": T1},
+        },
+        "run:sidecar",
+        effective_at=T1,
+    )
     assert _history_count(r, tid) == n
     assert r.load_state_as_of(tid, T1).version == v0
     assert _claim_status(r.load_state_as_of(tid, T1), "claim:c1") == "unvalidated"
@@ -299,14 +336,33 @@ def test_journal_gate_binds_known_at(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
     trig = r.create_trigger(tid, canonical_refs=[], summary="filing", summary_origin="deterministic")
-    r.append_journal_entry(tid, {"trigger_id": trig.trigger_id, "title": "Run note",
-                                 "body": "Processed.", "known_at": T3})
+    r.append_journal_entry(
+        tid, {"trigger_id": trig.trigger_id, "title": "Run note", "body": "Processed.", "known_at": T3}
+    )
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T2) is False
     assert r.has_journal_for_trigger(tid, trig.trigger_id, known_at=T3) is True
-    r.append_journal_entry(tid, {"entry_id": "j-run-a", "trigger_id": trig.trigger_id,
-                                 "title": "a", "body": "a", "run_id": "run:a", "known_at": T3})
-    r.append_journal_entry(tid, {"entry_id": "j-run-b", "trigger_id": trig.trigger_id,
-                                 "title": "b", "body": "b", "run_id": "run:b", "known_at": T3})
+    r.append_journal_entry(
+        tid,
+        {
+            "entry_id": "j-run-a",
+            "trigger_id": trig.trigger_id,
+            "title": "a",
+            "body": "a",
+            "run_id": "run:a",
+            "known_at": T3,
+        },
+    )
+    r.append_journal_entry(
+        tid,
+        {
+            "entry_id": "j-run-b",
+            "trigger_id": trig.trigger_id,
+            "title": "b",
+            "body": "b",
+            "run_id": "run:b",
+            "known_at": T3,
+        },
+    )
     assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:a") is True
     assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:b") is True
     assert r.has_journal_for_trigger(tid, trig.trigger_id, run_id="run:other") is False
@@ -317,8 +373,9 @@ def test_journal_gate_binds_known_at(tmp_path: Path) -> None:
 def test_historical_memory_stamps_effective_at(tmp_path: Path) -> None:
     r = _repo(tmp_path)
     tid = _make(tmp_path).thesis_id
-    r.apply_research_result(tid, {"memories_add": [{"memory_id": "m1", "text": "Desk note"}]},
-                            "run:mem", effective_at=T1)
+    r.apply_research_result(
+        tid, {"memories_add": [{"memory_id": "m1", "text": "Desk note"}]}, "run:mem", effective_at=T1
+    )
     _mems = r.load_state_as_of(tid, T1).memory.get("memories", [])
     assert isinstance(_mems, list)
     mems = [m for m in _mems if isinstance(m, dict)]
@@ -334,18 +391,20 @@ def test_thesis_show_defaults_to_and_caps_at_cutoff(tmp_path: Path) -> None:
     from app.policy import Capability, RequestContext
 
     repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
-    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
-                             claims=[{"claim_id": "claim:c1",
-                                      "statement": "NVDA demand stays strong"}],
-                             effective_at=T0).thesis_id
+    tid = repo.create_thesis(
+        "NVDA datacenter demand thesis",
+        scope="NVDA",
+        claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+        effective_at=T0,
+    ).thesis_id
     _set_claim_status(repo, tid, "claim:c1", "challenged", T4)
-    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                         data_root=tmp_path, as_of=T1)
+    ctx = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T1
+    )
     got = tools_mod.execute_tool("thesis_show", {"id": tid}, "test-model", context=ctx)
     assert "error" not in got
     assert [c["status"] for c in _as_seq(got["claims"]) if c["claim_id"] == "claim:c1"] == ["unvalidated"]
-    over = tools_mod.execute_tool("thesis_show", {"id": tid, "as_of": T4},
-                                  "test-model", context=ctx)
+    over = tools_mod.execute_tool("thesis_show", {"id": tid, "as_of": T4}, "test-model", context=ctx)
     assert "error" in over and over.get("error_type") == "invalid_tool_arguments"
 
 
@@ -353,12 +412,19 @@ def test_thesis_create_at_cutoff_stamps_effective_at(tmp_path: Path) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
-    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                         data_root=tmp_path, as_of=T1)
-    got = tools_mod.execute_tool("thesis_create", {"user_thesis": "NVDA datacenter demand thesis",
-                                                   "scope": "NVDA",
-                                                   "claims": [{"statement": "NVDA demand stays strong"}]},
-                                 "test-model", context=ctx)
+    ctx = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T1
+    )
+    got = tools_mod.execute_tool(
+        "thesis_create",
+        {
+            "user_thesis": "NVDA datacenter demand thesis",
+            "scope": "NVDA",
+            "claims": [{"statement": "NVDA demand stays strong"}],
+        },
+        "test-model",
+        context=ctx,
+    )
     assert "error" not in got
     repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
     new_tid = got["thesis_id"]
@@ -372,17 +438,26 @@ def test_historical_thesis_refine_appends_without_touching_live(tmp_path: Path) 
     from app.policy import Capability, RequestContext
 
     repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
-    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
-                             claims=[{"claim_id": "claim:c1",
-                                      "statement": "NVDA demand stays strong"}],
-                             effective_at=T0).thesis_id
+    tid = repo.create_thesis(
+        "NVDA datacenter demand thesis",
+        scope="NVDA",
+        claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+        effective_at=T0,
+    ).thesis_id
     _set_claim_status(repo, tid, "claim:c1", "challenged", T4)
-    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                         data_root=tmp_path, as_of=T1)
-    got = tools_mod.execute_tool("thesis_refine", {"id": tid,
-                                                   "clarification": "Networking demand also stays strong",
-                                                   "claims": [{"statement": "NVDA networking demand also strong"}]},
-                                 "test-model", context=ctx)
+    ctx = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T1
+    )
+    got = tools_mod.execute_tool(
+        "thesis_refine",
+        {
+            "id": tid,
+            "clarification": "Networking demand also stays strong",
+            "claims": [{"statement": "NVDA networking demand also strong"}],
+        },
+        "test-model",
+        context=ctx,
+    )
     assert "error" not in got and got.get("applied") is True
     snap = repo.load_state_as_of(tid, T1)
     _tclaims = snap.thesis.get("claims", [])
@@ -391,8 +466,7 @@ def test_historical_thesis_refine_appends_without_touching_live(tmp_path: Path) 
     assert "NVDA networking demand also strong" in [c["statement"] for c in tclaims]
     assert _claim_status(snap, "claim:c1") == "unvalidated"
     t1_ids = {c["claim_id"] for c in tclaims}
-    assert got.get("rules_added") and all(
-        set(r.get("claim_ids", ())) <= t1_ids for r in _as_seq(got["rules_added"]))
+    assert got.get("rules_added") and all(set(r.get("claim_ids", ())) <= t1_ids for r in _as_seq(got["rules_added"]))
     live = repo.load_thesis(tid)
     assert [c.status for c in live.claims if c.claim_id == "claim:c1"] == ["challenged"]
     assert "NVDA networking demand also strong" not in [c.statement for c in live.claims]
@@ -404,28 +478,38 @@ def test_historical_watch_list_and_trigger_journal_known_at(tmp_path: Path) -> N
     from app.policy import Capability, RequestContext
 
     repo = ThesisRepository(tmp_path / "thesis")  # mirrors _thesis_repo_for(data_root)
-    tid = repo.create_thesis("NVDA datacenter demand thesis", scope="NVDA",
-                             claims=[{"claim_id": "claim:c1",
-                                      "statement": "NVDA demand stays strong"}],
-                             effective_at=T0).thesis_id
+    tid = repo.create_thesis(
+        "NVDA datacenter demand thesis",
+        scope="NVDA",
+        claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+        effective_at=T0,
+    ).thesis_id
     repo.apply_research_result(tid, {"watch_add": [_filing_rule("rule:r1")]}, "", effective_at=T1)
     trig = repo.create_trigger(tid, claim_ids=["claim:c1"], summary_origin="deterministic")
     repo.close_thesis(tid)
     assert repo.load_thesis(tid).status == "closed"
-    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                         data_root=tmp_path, as_of=T1)
+    ctx = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T1
+    )
     listed = tools_mod.execute_tool("thesis_watch", {"id": tid}, "test-model", context=ctx)
     assert "error" not in listed
     assert listed["rules"] == repo.load_state_as_of(tid, T1).watch["rules"]
-    ctx2 = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                          data_root=tmp_path, as_of=T2)
-    ok = tools_mod.execute_tool("thesis_journal", {"id": tid, "body": "trigger review",
-                                                   "trigger_id": trig.trigger_id, "known_at": T2},
-                                "test-model", context=ctx2)
+    ctx2 = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T2
+    )
+    ok = tools_mod.execute_tool(
+        "thesis_journal",
+        {"id": tid, "body": "trigger review", "trigger_id": trig.trigger_id, "known_at": T2},
+        "test-model",
+        context=ctx2,
+    )
     assert "error" not in ok and ok["thesis_id"] == tid
-    early = tools_mod.execute_tool("thesis_journal", {"id": tid, "body": "trigger review",
-                                                      "trigger_id": trig.trigger_id, "known_at": T1},
-                                   "test-model", context=ctx2)
+    early = tools_mod.execute_tool(
+        "thesis_journal",
+        {"id": tid, "body": "trigger review", "trigger_id": trig.trigger_id, "known_at": T1},
+        "test-model",
+        context=ctx2,
+    )
     assert "error" in early
 
 
@@ -433,8 +517,9 @@ def test_pit_day_injection_and_unsafe_tool_guard(tmp_path: Path, monkeypatch: py
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
-    ctx = RequestContext(principal_id="test", capabilities=frozenset({Capability.RESEARCH}),
-                         data_root=tmp_path, as_of=T2)
+    ctx = RequestContext(
+        principal_id="test", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path, as_of=T2
+    )
     seen: dict[str, object] = {}
 
     def _fake_fundamentals(ticker: str, metric: str, as_of: str | None = None) -> dict[str, object]:
@@ -442,8 +527,7 @@ def test_pit_day_injection_and_unsafe_tool_guard(tmp_path: Path, monkeypatch: py
         return {"ticker": ticker, "metric": metric, "as_of": as_of}
 
     monkeypatch.setattr(tools_mod.sec_facts, "get_fundamentals", _fake_fundamentals)
-    got = tools_mod.execute_tool("get_fundamentals", {"ticker": "NVDA", "metric": "eps"},
-                                 "test-model", context=ctx)
+    got = tools_mod.execute_tool("get_fundamentals", {"ticker": "NVDA", "metric": "eps"}, "test-model", context=ctx)
     assert "error" not in got
     assert seen["as_of"] == "2026-01-03"
     calls: list[tuple[str, str]] = []
@@ -453,7 +537,8 @@ def test_pit_day_injection_and_unsafe_tool_guard(tmp_path: Path, monkeypatch: py
         raise AssertionError("current-only tool must not execute under a cutoff")
 
     monkeypatch.setattr(tools_mod.sec_facts, "get_xbrl_facts", _must_not_run)
-    unsafe = tools_mod.execute_tool("get_xbrl_facts", {"ticker": "NVDA", "concept": "Revenue"},
-                                    "test-model", context=ctx)
+    unsafe = tools_mod.execute_tool(
+        "get_xbrl_facts", {"ticker": "NVDA", "concept": "Revenue"}, "test-model", context=ctx
+    )
     assert unsafe.get("error_type") == "pit_unsafe_tool"
     assert calls == []

@@ -12,10 +12,9 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from app import analyst_client
-from app import tool_render
-from app.tools import execute_tool
+from app import analyst_client, tool_render
 from app.policy import LOCAL_CONTEXT
+from app.tools import execute_tool
 
 YAHOO_FIXTURES = Path(__file__).parent / "fixtures" / "yahoo"
 SLICK_FIXTURES = Path(__file__).parent / "fixtures" / "slickcharts"
@@ -98,6 +97,7 @@ def _as_dict(value: object) -> dict[str, object]:
 def _as_seq(value: object):
     assert isinstance(value, (list, tuple))
     return value
+
 
 def test_get_analyst_estimates_normalized(yahoo_session: None, fake_cache: FakeCache) -> None:
     result = analyst_client.get_analyst_estimates("NVDA")

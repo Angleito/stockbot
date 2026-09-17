@@ -1,17 +1,21 @@
 """Unit tests for scripts/verify_tool_health.check_handler (no network)."""
+
 from __future__ import annotations
 
+import multiprocessing
 import os
 from pathlib import Path
 
+import pytest
+
 from app import tools as tools_mod
 from app.policy import Capability, RequestContext
-from scripts.verify_tool_health import check_handler
-import multiprocessing
-
-import pytest
 from scripts import verify_tool_health as vth
-from scripts.verify_tool_health import _evaluate_envelope, _handler_worker
+from scripts.verify_tool_health import (
+    _evaluate_envelope,
+    _handler_worker,
+    check_handler,
+)
 
 
 def _ctx(tmp_path: Path) -> RequestContext:
@@ -56,6 +60,7 @@ def test_check_handler_restores_seams(tmp_path: Path) -> None:
     assert tools_mod.exa_client.search is before["exa_search"]
     assert tools_mod.analyst_client.get_analyst_estimates is before["analyst_est"]
     assert os.environ.get("GOOGLE_DATA_ENABLED") == before["env"]
+
 
 def test_handler_worker_execute_raise_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(tmp_path)
@@ -119,7 +124,10 @@ def test_handler_worker_unsendable_fails(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_evaluate_envelope_structured_error_pass_and_worker_fail() -> None:
-    assert _evaluate_envelope({"worker_ok": True, "result": {"error": "data unavailable", "error_type": "upstream"}}) is None
+    assert (
+        _evaluate_envelope({"worker_ok": True, "result": {"error": "data unavailable", "error_type": "upstream"}})
+        is None
+    )
     reason = _evaluate_envelope({"worker_ok": False, "reason": "execute_tool raised RuntimeError: boom"})
     assert isinstance(reason, str)
     assert reason.startswith("handler worker failed")

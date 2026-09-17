@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from .account import (
@@ -29,8 +29,39 @@ _QUOTE_LIST_KEYS = ("quotes", "data", "results", "items", "records")
 class ToolClient(Protocol):
     """Structural MCP tool surface the provider consumes (real client + test fakes)."""
 
-    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
-        ...
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object: ...
+
+
+def _structured_data(payload: Mapping[str, object]) -> object | None:
+    structured: object = payload.get("structured_content") or payload.get("structuredContent")
+    if not isinstance(structured, dict):
+        return None
+    inner: object = structured.get("data")
+    return inner if isinstance(inner, dict) else None
+
+
+def _parsed_content_block(block: object) -> tuple[bool, object]:
+    text: object = block.get("text") if isinstance(block, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return False, None
+    try:
+        parsed: object = json.loads(text)
+    except TypeError, ValueError:
+        return False, None
+    if not isinstance(parsed, dict):
+        return False, None
+    return True, parsed.get("data", parsed)
+
+
+def _content_data(payload: Mapping[str, object]) -> tuple[bool, object]:
+    content: object = payload.get("content")
+    if not isinstance(content, list):
+        return False, None
+    for block in content:
+        found, value = _parsed_content_block(block)
+        if found:
+            return True, value
+    return False, None
 
 
 def _provider_data(payload: object) -> object:
@@ -40,28 +71,28 @@ def _provider_data(payload: object) -> object:
     ``content`` block; a bare ``{"data": ...}`` and envelope-less payloads
     (used by tests) are unwrapped/passed through unchanged.
     """
-    if isinstance(payload, dict):
-        structured: object = payload.get("structured_content") or payload.get("structuredContent")
-        if isinstance(structured, dict):
-            inner: object = structured.get("data")
-            if isinstance(inner, dict):
-                return inner
-        content: object = payload.get("content")
-        if isinstance(content, list):
-            for block in content:
-                text: object = block.get("text") if isinstance(block, dict) else None
-                if isinstance(text, str) and text.strip():
-                    try:
-                        parsed: object = json.loads(text)
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(parsed, dict):
-                        fallback: object = parsed.get("data", parsed)
-                        return fallback
-        bare: object = payload.get("data")
-        if isinstance(bare, dict):
-            return bare
+    if not isinstance(payload, dict):
+        return payload
+    structured = _structured_data(payload)
+    if structured is not None:
+        return structured
+    found, value = _content_data(payload)
+    if found:
+        return value
+    bare: object = payload.get("data")
+    if isinstance(bare, dict):
+        return bare
     return payload
+
+
+def _dict_rows(payload: Mapping[str, object], keys: tuple[str, ...]) -> list[dict[str, object]] | None:
+    for key in keys:
+        value: object = payload.get(key)
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+        if isinstance(value, dict):
+            return [value]
+    return None
 
 
 def _rows(payload: object, *keys: str, wrap: bool = True) -> list[dict[str, object]] | None:
@@ -76,13 +107,18 @@ def _rows(payload: object, *keys: str, wrap: bool = True) -> list[dict[str, obje
         return [row for row in payload if isinstance(row, dict)]
     if not isinstance(payload, dict):
         return None
-    for key in keys:
-        value: object = payload.get(key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            return [value]
+    found = _dict_rows(payload, keys)
+    if found is not None:
+        return found
     return [payload] if wrap else None
+
+
+def _row_of_quote(value: object) -> list[dict[str, object]] | None:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return None
 
 
 def _quote_rows(payload: object) -> list[dict[str, object]]:
@@ -92,11 +128,9 @@ def _quote_rows(payload: object) -> list[dict[str, object]]:
     if not isinstance(payload, dict):
         return []
     for key in _QUOTE_LIST_KEYS:
-        value: object = payload.get(key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-        if isinstance(value, dict):
-            return [value]
+        rows = _row_of_quote(payload.get(key))
+        if rows is not None:
+            return rows
     return [payload]
 
 
@@ -104,15 +138,15 @@ def _quote_retrieved_at(row: Mapping[str, object]) -> datetime:
     raw = _first_present(row, "retrieved_at", "retrievedAt", "timestamp", "venue_last_trade_time", "venueLastTradeTime")
     if isinstance(raw, str):
         try:
-            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(raw)
         except ValueError:
-            value = datetime.now(timezone.utc)
+            value = datetime.now(UTC)
     elif isinstance(raw, datetime):
         value = raw
     else:
-        value = datetime.now(timezone.utc)
+        value = datetime.now(UTC)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value
 
 
@@ -153,16 +187,14 @@ class RobinhoodPortfolioProvider:
         elif isinstance(data, dict):
             row = data
         else:
-            raise ValueError(
-                "Unexpected get_portfolio payload shape: expected an object or a 'portfolios' list"
-            )
+            raise ValueError("Unexpected get_portfolio payload shape: expected an object or a 'portfolios' list")
         return normalize_cash_balance(row, account_id=account_id)
 
     def get_scanner_filter_specs(self) -> dict[str, object]:
         """The scanner filter-type catalog (no parameters)."""
         data = _provider_data(self._client.call_tool("get_scanner_filter_specs", {}))
         if not isinstance(data, dict):
-            raise ValueError("Unexpected get_scanner_filter_specs payload shape: expected an object")
+            raise ValueError("Unexpected get_scanner_filter_specs payload shape: expected an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return data
 
     def get_scans(self) -> list[dict[str, object]]:
@@ -170,16 +202,14 @@ class RobinhoodPortfolioProvider:
         data = _provider_data(self._client.call_tool("get_scans", {}))
         rows = _rows(data, "scans", "results", "items")
         if rows is None:
-            raise ValueError(
-                "Unexpected get_scans payload shape: expected a list or an object with a 'scans' key"
-            )
+            raise ValueError("Unexpected get_scans payload shape: expected a list or an object with a 'scans' key")
         return rows
 
     def run_scan(self, scan_id: str) -> dict[str, object]:
         """Execute a saved scanner; returns live market results."""
         data = _provider_data(self._client.call_tool("run_scan", {"scan_id": scan_id}))
         if not isinstance(data, dict):
-            raise ValueError("Unexpected run_scan payload shape: expected an object")
+            raise ValueError("Unexpected run_scan payload shape: expected an object")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return data
 
     def get_equity_quotes(self, tickers: Sequence[str]) -> dict[str, MarketSnapshot]:

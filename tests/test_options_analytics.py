@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from app.analytics.options import analyze_option, compare_options
@@ -9,7 +9,7 @@ def _quote(
     contract_id: str = "wing-put-80",
     ticker: str = "WING",
     expiration: date = date(2027, 1, 15),
-    strike: Decimal = Decimal("80"),
+    strike: Decimal = Decimal(80),
     option_type: str = "put",
     underlying_price: Decimal | None = Decimal("116.84"),
     bid: Decimal | None = Decimal("2.00"),
@@ -23,7 +23,7 @@ def _quote(
     rho: Decimal | None = None,
     volume: int | None = 10,
     open_interest: int | None = 100,
-    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=timezone.utc),
+    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=UTC),
 ) -> OptionQuote:
     return OptionQuote(
         contract_id=contract_id,
@@ -60,7 +60,7 @@ def test_normalize_option_quote_preserves_nullable_provider_values():
         ticker="WING",
     )
     assert quote.contract_id == "c1"
-    assert quote.strike == Decimal("80")
+    assert quote.strike == Decimal(80)
     assert quote.option_type == "put"
     assert quote.delta is None
     assert quote.mid == Decimal("2.20")
@@ -83,13 +83,13 @@ def test_analyze_option_calculates_expiration_metrics_without_replacing_greeks()
 def test_call_target_payoff_and_comparison_are_deterministic():
     call = _quote(
         contract_id="wing-call-120",
-        strike=Decimal("120"),
+        strike=Decimal(120),
         option_type="call",
-        bid=Decimal("3"),
-        ask=Decimal("5"),
-        mark=Decimal("4"),
+        bid=Decimal(3),
+        ask=Decimal(5),
+        mark=Decimal(4),
     )
-    put = _quote(contract_id="wing-put-70", strike=Decimal("70"), bid=Decimal("1"), ask=Decimal("2"), mark=Decimal("1.5"))
+    put = _quote(contract_id="wing-put-70", strike=Decimal(70), bid=Decimal(1), ask=Decimal(2), mark=Decimal("1.5"))
     result = analyze_option(call, as_of=date(2026, 8, 25), target_price=150)
     assert result["target_pnl"] == "2600"
     compared = compare_options([call, put], target_price=150, as_of=date(2026, 8, 25))

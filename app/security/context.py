@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Sequence
 
 
 class InstructionAuthority(StrEnum):
@@ -65,13 +65,16 @@ class ContextEnvelope:
 class SessionAuthorization:
     """Explicit session grant for private domains. Never derived from chat text;
     only first-use approval creates it."""
+
     portfolio_read: bool = False
+
 
 @dataclass
 class SessionSecurityState:
     """Caller-held session state: the explicit grant plus whether PRIVATE
     content has entered session model context. Taint clears only when the
     process ends; there is no mid-process reset."""
+
     authorization: SessionAuthorization = field(default_factory=SessionAuthorization)
     private_context_seen: bool = False
 
@@ -86,6 +89,7 @@ class OriginalIntent:
 
     request: str
     permitted_domains: frozenset[str]
+
 
 def classify_intent(user_turns: Sequence[str]) -> OriginalIntent:
     """Deterministic classifier: the request is the last user turn; permitted
@@ -107,6 +111,8 @@ class RunSecurityContext:
 
     `original_intent` is chat-derived and never carries `portfolio_read`;
     `authorization` is the explicit session grant for private domains.
+    `source_policy` is the kernel-persisted session policy ({allowed, denied,
+    mode}); None means no session scoping (legacy path).
     """
 
     original_intent: OriginalIntent
@@ -118,3 +124,4 @@ class RunSecurityContext:
     private_ingress: bool = False
     quarantined_items: int = 0
     security_events: list[dict[str, object]] = field(default_factory=list)
+    source_policy: dict[str, object] | None = None

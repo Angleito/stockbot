@@ -1,0 +1,24 @@
+# Dependency-gate suppressions for `osv-scanner scan source -r . --no-resolve`.
+#
+# Why --no-resolve: requirements.txt pins 17 direct deps installed fresh at setup
+# time, so manifest transitive resolution reports deps.dev floors (orjson 3.9.9,
+# python-multipart 0.0.9) rather than what is actually installed (3.12.0 / 0.0.32,
+# both past every listed fix). The gate therefore checks exactly what this repo
+# pins: requirements.txt direct pins + the full bun.lock tree.
+#
+# Every entry below stays until its fix is picked up; ignoreUntil forces a re-check.
+
+[[IgnoredVulns]]
+id = "GHSA-4mjr-xmp4-gh2g"
+ignoreUntil = 2027-01-01
+reason = "qs 6.15.1 is an exact 'qs: 6.15.1' dependency of typed-rest-client 2.3.1, reachable only via @stryker-mutator/core (dev-only mutation tooling, no app/.pi/scripts runtime import). Drop this entry when Stryker ships a typed-rest-client pinning qs >= 6.16.0, or when package.json carries a qs override."
+
+[[IgnoredVulns]]
+id = "GHSA-q8mj-m7cp-5q26"
+ignoreUntil = 2027-01-01
+reason = "Same chain as GHSA-4mjr-xmp4-gh2g: qs 6.15.1 under typed-rest-client 2.3.1 in the dev-only @stryker-mutator/core tree."
+
+[[IgnoredVulns]]
+id = "GHSA-x5fp-wj9c-mxmx"
+ignoreUntil = 2027-01-01
+reason = "Same chain as GHSA-4mjr-xmp4-gh2g: qs 6.15.1 under typed-rest-client 2.3.1 in the dev-only @stryker-mutator/core tree."

@@ -42,10 +42,15 @@ def _person(entry: dict[str, object], i: int = 0) -> BeneficialOwnership:
     accession_no = entry["accession_no"]
     assert isinstance(accession_no, str)
     return BeneficialOwnership(
-        filer_name=p["name"], filer_cik=None, issuer=issuer,
-        form=form, filed_at=filed_at,
-        accession_no=accession_no, shares=p["shares"],
-        percent=p["percent"], sole_voting=p.get("sole_voting"),
+        filer_name=p["name"],
+        filer_cik=None,
+        issuer=issuer,
+        form=form,
+        filed_at=filed_at,
+        accession_no=accession_no,
+        shares=p["shares"],
+        percent=p["percent"],
+        sole_voting=p.get("sole_voting"),
         shared_voting=p.get("shared_voting"),
         sole_dispositive=p.get("sole_dispositive"),
         shared_dispositive=p.get("shared_dispositive"),

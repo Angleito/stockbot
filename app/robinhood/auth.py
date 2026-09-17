@@ -15,11 +15,11 @@ import tempfile
 import threading
 import urllib.parse
 import webbrowser
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import override
-
 
 DEFAULT_TOKEN_PATH = Path.home() / ".stockbot" / "robinhood" / "oauth.json"
 ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading"
@@ -29,6 +29,27 @@ class OAuthStoreError(RuntimeError):
     """Raised when the persisted OAuth state cannot be read or written."""
 
 
+def _is_valid_origin(parsed: urllib.parse.SplitResult) -> bool:
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _origin_from_url(parsed: urllib.parse.SplitResult, port: int | None) -> str:
+    hostname = parsed.hostname
+    if not hostname:
+        raise OAuthStoreError("Robinhood MCP URL is invalid")
+    host = hostname.lower().rstrip(".")
+    if port is None or port == 443:
+        return f"https://{host}"
+    return f"https://{host}:{port}"
+
+
 def server_origin(server_url: str) -> str:
     """Return a canonical HTTPS origin suitable for OAuth-state binding."""
     try:
@@ -36,28 +57,16 @@ def server_origin(server_url: str) -> str:
         port = parsed.port
     except (TypeError, ValueError) as exc:
         raise OAuthStoreError("Robinhood MCP URL is invalid") from exc
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    if not _is_valid_origin(parsed):
         raise OAuthStoreError("Robinhood MCP URL must be an HTTPS URL without credentials, query, or fragment")
-    host = parsed.hostname.lower().rstrip(".")
-    if port is None or port == 443:
-        return f"https://{host}"
-    return f"https://{host}:{port}"
+    return _origin_from_url(parsed, port)
 
 
 def validate_robinhood_server_url(server_url: str) -> str:
     """Allow OAuth only for the canonical production Robinhood MCP endpoint."""
     server_origin(server_url)
     if server_url != ROBINHOOD_MCP_URL:
-        raise OAuthStoreError(
-            f"Robinhood MCP URL must be {ROBINHOOD_MCP_URL}"
-        )
+        raise OAuthStoreError(f"Robinhood MCP URL must be {ROBINHOOD_MCP_URL}")
     return server_url
 
 
@@ -103,7 +112,7 @@ class LoopbackCallback:
         callback = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):  # noqa: N802 - stdlib handler API
+            def do_GET(self):
                 request = urllib.parse.urlparse(self.path)
                 if request.path != callback.path:
                     self.send_error(404)
@@ -117,16 +126,12 @@ class LoopbackCallback:
                 self.wfile.write(body)
 
             @override
-            def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib handler API
+            def log_message(self, format: str, *args: object) -> None:
                 return
 
         self._handler_type = Handler
         self.server: http.server.ThreadingHTTPServer | None = None
-        self.redirect_uri = (
-            f"http://{self.host}:{self.requested_port}{self.path}"
-            if self.requested_port
-            else ""
-        )
+        self.redirect_uri = f"http://{self.host}:{self.requested_port}{self.path}" if self.requested_port else ""
         if not self.requested_port:
             self._bind()
 
@@ -134,9 +139,7 @@ class LoopbackCallback:
         if self.server is not None:
             return
         try:
-            self.server = http.server.ThreadingHTTPServer(
-                (self.host, self.requested_port), self._handler_type
-            )
+            self.server = http.server.ThreadingHTTPServer((self.host, self.requested_port), self._handler_type)
         except OSError as exc:
             raise OAuthStoreError(
                 f"Cannot bind OAuth callback listener at "
@@ -190,9 +193,7 @@ def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def load_tokens_for_origin(
-    origin: str, path: Path = DEFAULT_TOKEN_PATH
-) -> dict[str, object] | None:
+def load_tokens_for_origin(origin: str, path: Path = DEFAULT_TOKEN_PATH) -> dict[str, object] | None:
     """Load state only when it was issued for exactly this MCP origin.
 
     Legacy unbound files are intentionally treated as unusable so a user must
@@ -202,6 +203,26 @@ def load_tokens_for_origin(
     if not state or state.get("server_origin") != origin:
         return None
     return state
+
+
+def _stored_tokens(state: Mapping[str, object]) -> dict[str, object] | None:
+    tokens = state.get("tokens")
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        return None
+    return tokens
+
+
+def _is_token_expired(issued: object, expires_in: object, now: datetime | None) -> bool:
+    """True when expiry metadata marks the token corrupt or expired."""
+    if not isinstance(issued, str):
+        return True
+    if isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)):
+        return True
+    try:
+        issued_dt = datetime.fromisoformat(issued)
+    except TypeError, ValueError:
+        return True
+    return (now if now is not None else datetime.now(UTC)) >= issued_dt + timedelta(seconds=expires_in)
 
 
 def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datetime | None = None) -> bool:
@@ -215,21 +236,12 @@ def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datet
         return False
     if not state:
         return False
-    tokens = state.get("tokens")
-    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+    tokens = _stored_tokens(state)
+    if tokens is None:
         return False
     issued: object = state.get("issued_at")
-    expires_in = tokens.get("expires_in")
-    if issued is not None and expires_in is not None:
-        if not isinstance(issued, str):
-            return False
-        try:
-            issued_dt = datetime.fromisoformat(issued)
-        except (TypeError, ValueError):
-            return False
-        if (now if now is not None else datetime.now(timezone.utc)) >= issued_dt + timedelta(seconds=expires_in):
-            return False
-    return True
+    expires_in: object = tokens.get("expires_in")
+    return not (issued is not None and expires_in is not None and _is_token_expired(issued, expires_in, now))
 
 
 def save_tokens(tokens: dict[str, object], path: Path = DEFAULT_TOKEN_PATH) -> None:
@@ -290,7 +302,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
                 state["tokens"] = dumped
             else:
                 state["tokens"] = tokens
-            state["issued_at"] = datetime.now(timezone.utc).isoformat()
+            state["issued_at"] = datetime.now(UTC).isoformat()
             save_tokens(state, path)
 
         async def get_client_info(self):

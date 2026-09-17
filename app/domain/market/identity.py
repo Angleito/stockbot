@@ -9,13 +9,14 @@ resolver derives sec:cik security ids itself.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Sequence, overload
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import overload
 
 from .ids import sec_security_id
 from .securities import SecurityResolution, TickerAlias
 
-_NEVER = datetime.min.replace(tzinfo=timezone.utc)
+_NEVER = datetime.min.replace(tzinfo=UTC)
 
 
 @overload
@@ -30,10 +31,10 @@ def _parse_iso(value: str | None) -> datetime | None:
     """
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _instant(alias: TickerAlias) -> tuple[datetime, datetime]:
@@ -49,8 +50,49 @@ def _resolved_security_id(alias: TickerAlias) -> str | None:
     if alias.security_id is not None:
         return alias.security_id
     if alias.entity_id.startswith("sec:cik:"):
-        return sec_security_id(int(alias.entity_id[len("sec:cik:"):]))
+        return sec_security_id(int(alias.entity_id[len("sec:cik:") :]))
     return None
+
+
+def _check_as_of(as_of: object) -> datetime:
+    """Narrow the as_of guard to an aware UTC datetime (existing boundary)."""
+    if not isinstance(as_of, datetime):
+        raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    return as_of.astimezone(UTC)
+
+
+def _visible_aliases(aliases: Sequence[TickerAlias], as_of: datetime) -> list[TickerAlias]:
+    """PIT visibility filter: known_at plus validity window (existing boundary)."""
+    return [
+        alias
+        for alias in aliases
+        if (known := _parse_iso(alias.known_at)) is not None
+        and known <= as_of
+        and (alias.valid_from is None or _parse_iso(alias.valid_from) <= as_of)
+        and (alias.valid_to is None or _parse_iso(alias.valid_to) > as_of)
+    ]
+
+
+def _distinct_entities(visible: Sequence[TickerAlias]) -> list[str]:
+    """First-seen entity order (existing boundary)."""
+    return list(dict.fromkeys(alias.entity_id for alias in visible))
+
+
+def _newest_aliases(visible: Sequence[TickerAlias]) -> list[TickerAlias]:
+    """Rows tied at the newest known_at/retrieved_at instant (existing boundary)."""
+    newest_key = max(_instant(alias) for alias in visible)
+    return [alias for alias in visible if _instant(alias) == newest_key]
+
+
+def _resolve_newest(newest: Sequence[TickerAlias], entity_id: str, ticker: str) -> SecurityResolution:
+    """Newest-row security-id agreement check (existing boundary)."""
+    distinct_security_ids = {_resolved_security_id(alias) for alias in newest}
+    if len(distinct_security_ids) > 1:
+        return SecurityResolution(None, entity_id, ticker, False, "ambiguous")
+    first = newest[0]
+    return SecurityResolution(_resolved_security_id(first), first.entity_id, ticker, True, "entity_alias")
 
 
 def resolve_ticker_aliases(
@@ -76,27 +118,11 @@ def resolve_ticker_aliases(
     revisions never create ambiguity; the newest record wins.  No mappings
     are ever invented: unknown tickers resolve to ``resolved=False``.
     """
-    if not isinstance(as_of, datetime):
-        raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
-    if as_of.tzinfo is None or as_of.utcoffset() is None:
-        raise ValueError("as_of must be timezone-aware")
-    as_of = as_of.astimezone(timezone.utc)
-    visible = [
-        alias for alias in aliases
-        if (known := _parse_iso(alias.known_at)) is not None
-        and known <= as_of
-        and (alias.valid_from is None or _parse_iso(alias.valid_from) <= as_of)
-        and (alias.valid_to is None or _parse_iso(alias.valid_to) > as_of)
-    ]
+    moment = _check_as_of(as_of)
+    visible = _visible_aliases(aliases, moment)
     if not visible:
         return SecurityResolution(None, None, ticker, False, "unresolved")
-    entities = list(dict.fromkeys(alias.entity_id for alias in visible))
+    entities = _distinct_entities(visible)
     if len(entities) > 1:
         return SecurityResolution(None, None, ticker, False, "ambiguous")
-    newest_key = max(_instant(alias) for alias in visible)
-    newest = [alias for alias in visible if _instant(alias) == newest_key]
-    distinct_security_ids = {_resolved_security_id(alias) for alias in newest}
-    if len(distinct_security_ids) > 1:
-        return SecurityResolution(None, entities[0], ticker, False, "ambiguous")
-    first = newest[0]
-    return SecurityResolution(_resolved_security_id(first), first.entity_id, ticker, True, "entity_alias")
+    return _resolve_newest(_newest_aliases(visible), entities[0], ticker)

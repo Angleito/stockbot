@@ -14,6 +14,7 @@ General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q rou
 
 - Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.
 - SEC filings or filing full-text search when accession is unknown.
+- Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier; e.g. query="risk factors", ticker="AAPL".
 
 ## Reject when
 
@@ -52,9 +53,9 @@ None
 - `company_name` (string)
 - `domain` (string)
 - `end_date` (string)
-- `exhaustive` (boolean): Fan out over all routes (default false; non-exhaustive).
+- `exhaustive` (boolean): true drains every applicable route (the default when dispatched inside a research session); false requests the quick bounded lookup (default outside a research session).
 - `forms` (array)
-- `limit` (integer)
+- `limit` (integer): Max hits in the returned packet (default 20); under exhaustive retrieval it does not reduce retrieval.
 - `person_name` (string)
 - `query` (string)
 - `security_identifier` (string): Ticker, CUSIP, ISIN, or class title; never treated as issuer identity.

@@ -50,6 +50,20 @@ data/verify/
 .coverage
 htmlcov/
 .DS_Store
-.omp/
+!/RULES.md
+!/rules.md
+!/.omp/
+!/.omp/**
+!/omp/
+!/omp/**
 node_modules/
 local/
+
+# Coverage / poly-crap artifacts
+coverage-python.lcov
+coverage-ts/
+coverage-rust.lcov
+
+# mutmut working tree (full source copy; never commit)
+mutants/
+.mutmut-cache

@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config import get_data_root
 from app.policy import Capability
 from app.storage.ids import run_id as new_run_id
 from app.thesis.context import ResearchContext, build_live_context
-from app.thesis.models import Trigger
+from app.thesis.models import JSONValue, Trigger
 from app.thesis.pi_runner import run_thesis_pi
 from app.thesis.repository import ThesisRepository
 
@@ -30,14 +30,16 @@ _GRANTS: dict[str, Capability] = {
 }
 
 
+def _grant_cap(grant: str) -> Capability:
+    """Capability for one grant string (unknown grants stay loud)."""
+    if grant not in _GRANTS:
+        raise ValueError(f"<runner>: unknown grant {grant!r}; expected one of {sorted(_GRANTS)}")
+    return _GRANTS[grant]
+
+
 def capabilities_for_grants(grants: list[str]) -> frozenset[Capability]:
     """Map explicit CLI grant strings to capabilities; reject anything else."""
-    caps: set[Capability] = set()
-    for g in grants or []:
-        if g not in _GRANTS:
-            raise ValueError(f"<runner>: unknown grant {g!r}; expected one of {sorted(_GRANTS)}")
-        caps.add(_GRANTS[g])
-    return frozenset(caps)
+    return frozenset(_grant_cap(g) for g in grants or [])
 
 
 @dataclass(frozen=True)
@@ -52,28 +54,128 @@ class RunOutcome:
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _safe_prompt_text(text: str, ref: str) -> str:
-    """Gate stored free text via the shared injection scanner; provenance labels never bypass it."""
-    if text is None or text == "":
-        return ""
-    if not isinstance(text, str):
-        try:
-            text = str(text)
-        except Exception:
-            return f"[unsafe content withheld ref={ref}]"
-        if text == "":
-            return ""
+def _stringify_prompt_text(text: object, ref: str) -> str | None:
+    """Non-str text stringified; withheld-marker when unstringifiable."""
     try:
-        from app.security.prompt_injection import assess  # local: keep thesis import graph acyclic
+        text = str(text)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return f"[unsafe content withheld ref={ref}]"
+    return text or None
+
+
+def _coerce_prompt_text(text: object, ref: str) -> str | None:
+    """Raw text coerced to str; None when blank, withheld-marker when unstringifiable."""
+    if text is None or text == "":
+        return None
+    if isinstance(text, str):
+        return text
+    return _stringify_prompt_text(text, ref)
+
+
+def _scan_prompt_text(text: str, ref: str) -> str:
+    """Injection-scanner verdict for coerced text."""
+    try:
+        from app.security.prompt_injection import (
+            assess,  # local: keep thesis import graph acyclic
+        )
+
         found = assess(text)
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return f"[unsafe content withheld ref={ref}]"
     if found.verdict in ("BLOCK", "QUARANTINE"):
         return f"[unsafe content withheld ref={ref}]"
     return text
+
+
+def _safe_prompt_text(text: str, ref: str) -> str:
+    """Gate stored free text via the shared injection scanner; provenance labels never bypass it."""
+    coerced = _coerce_prompt_text(text, ref)
+    if coerced is None:
+        return ""
+    if coerced.startswith("[unsafe content withheld"):
+        return coerced
+    return _scan_prompt_text(coerced, ref)
+
+
+def _prompt_field(raw: object, ref: str) -> str:
+    """One free-text prompt field gated through the injection scanner."""
+    if raw is None or raw == "":
+        return ""
+    return _safe_prompt_text(raw if isinstance(raw, str) else str(raw), ref=ref)
+
+
+def _prompt_ref(value: object) -> str:
+    """Provenance ref for a prompt row; unknown when blank."""
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _safe_trigger_row(trig: object, tid_ref: str) -> object:
+    """Trigger row with its summary gated; non-dicts pass through."""
+    if not isinstance(trig, dict):
+        return trig
+    out = dict(trig)
+    if "summary" in out:
+        out["summary"] = _prompt_field(out.get("summary", ""), ref=f"trigger:{tid_ref}")
+    return out
+
+
+def _safe_evidence_row(e: object) -> object:
+    """Evidence row with its summary gated; non-dicts pass through."""
+    if not isinstance(e, dict):
+        return e
+    ed = dict(e)
+    ed["summary"] = _prompt_field(ed.get("summary", ""), ref=f"evidence:{_prompt_ref(ed.get('evidence_id'))}")
+    return ed
+
+
+def _safe_journal_row(j: object) -> object:
+    """Journal row with its excerpt gated; non-dicts pass through."""
+    if not isinstance(j, dict):
+        return j
+    jd = dict(j)
+    jd["excerpt"] = _prompt_field(jd.get("excerpt", ""), ref=f"journal:{_prompt_ref(jd.get('journal'))}")
+    return jd
+
+
+def _prompt_sections(
+    thesis_id: str,
+    trigger: Trigger,
+    data_cutoff: str,
+    ctx: ResearchContext,
+    run_id: str,
+    refs: str,
+    summary_line: str,
+    packet: dict[str, JSONValue],
+    trig_out: object,
+    evidence_out: list[object],
+    journals_out: list[object],
+) -> list[str]:
+    """Ordered prompt lines: identity, cutoff, state, trigger/evidence, journals, close."""
+    return [
+        f"thesis_id: {thesis_id}",
+        f"trigger_id: {trigger.trigger_id}",
+        f"run_id: {run_id}",
+        f"TRIGGER DATA CUTOFF: {data_cutoff}",
+        f"trigger summary: {summary_line}",
+        f"trigger canonical refs: {refs[:500]}",
+        "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
+        "CURRENT THESIS STATE:",
+        json.dumps(packet, sort_keys=True),
+        "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
+        json.dumps({"trigger": trig_out, "evidence": evidence_out}, sort_keys=True),
+        "CURRENT PRIOR JOURNAL CONTEXT:",
+        json.dumps(journals_out, sort_keys=True),
+        "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
+        "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
+        (
+            "Before completing, write a material thesis_journal entry using"
+            f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'."
+        ),
+        "Do not copy the trigger data cutoff into journal known_at; omit known_at unless it independently represents when the journal information became known.",
+    ]
 
 
 def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: ResearchContext, run_id: str) -> str:
@@ -82,69 +184,23 @@ def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: Re
     trig = packet.pop("trigger", {})
     tid_ref = trigger.trigger_id or "unknown"
     summary_line = _safe_prompt_text(trigger.summary or "", ref=f"trigger:{tid_ref}")[:500]
-    if isinstance(trig, dict):
-        trig = dict(trig)
-        if "summary" in trig:
-            raw = trig.get("summary", "")
-            if raw is None or raw == "":
-                trig["summary"] = ""
-            else:
-                s = raw if isinstance(raw, str) else str(raw)
-                trig["summary"] = _safe_prompt_text(s, ref=f"trigger:{tid_ref}")
-    trig_out = trig
-    safe_evidence: list[object] = []
-    for e in ctx.evidence_refs:
-        if not isinstance(e, dict):
-            safe_evidence.append(e)
-            continue
-        ed = dict(e)
-        raw = ed.get("summary", "")
-        if raw is None or raw == "":
-            ed["summary"] = ""
-        else:
-            s = raw if isinstance(raw, str) else str(raw)
-            eid = ed.get("evidence_id")
-            eid_str = eid if isinstance(eid, str) and eid else "unknown"
-            ed["summary"] = _safe_prompt_text(s, ref=f"evidence:{eid_str}")
-        safe_evidence.append(ed)
-    evidence_out = safe_evidence
-    safe_journals: list[object] = []
-    for j in ctx.journal_excerpts:
-        if not isinstance(j, dict):
-            safe_journals.append(j)
-            continue
-        jd = dict(j)
-        raw = jd.get("excerpt", "")
-        if raw is None or raw == "":
-            jd["excerpt"] = ""
-        else:
-            s = raw if isinstance(raw, str) else str(raw)
-            jid = jd.get("journal")
-            jid_str = jid if isinstance(jid, str) and jid else "unknown"
-            jd["excerpt"] = _safe_prompt_text(s, ref=f"journal:{jid_str}")
-        safe_journals.append(jd)
-    journals_out = safe_journals
+    trig_out = _safe_trigger_row(trig, tid_ref)
+    evidence_out = [_safe_evidence_row(e) for e in ctx.evidence_refs]
+    journals_out = [_safe_journal_row(j) for j in ctx.journal_excerpts]
     return "\n".join(
-        [
-            f"thesis_id: {thesis_id}",
-            f"trigger_id: {trigger.trigger_id}",
-            f"run_id: {run_id}",
-            f"TRIGGER DATA CUTOFF: {data_cutoff}",
-            f"trigger summary: {summary_line}",
-            f"trigger canonical refs: {refs[:500]}",
-            "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
-            "CURRENT THESIS STATE:",
-            json.dumps(packet, sort_keys=True),
-            "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
-            json.dumps({"trigger": trig_out, "evidence": evidence_out}, sort_keys=True),
-            "CURRENT PRIOR JOURNAL CONTEXT:",
-            json.dumps(journals_out, sort_keys=True),
-            "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
-            "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
-            "Before completing, write a material thesis_journal entry using"
-            f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'.",
-            "Do not copy the trigger data cutoff into journal known_at; omit known_at unless it independently represents when the journal information became known.",
-        ]
+        _prompt_sections(
+            thesis_id,
+            trigger,
+            data_cutoff,
+            ctx,
+            run_id,
+            refs,
+            summary_line,
+            packet,
+            trig_out,
+            evidence_out,
+            journals_out,
+        )
     )
 
 
@@ -153,7 +209,7 @@ def _fail(run_id: str, exc: Exception) -> None:
         from app.storage.runs import finalize_failed_run
 
         finalize_failed_run(run_id, error_type=type(exc).__name__, error_message=str(exc))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
 
 
@@ -174,9 +230,7 @@ def run_trigger(
     known_at = known_at or _utcnow()
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
-    trigger = next(
-        (t for t in repository.load_triggers(tid) if t.trigger_id == trigger_id), None
-    )
+    trigger = next((t for t in repository.load_triggers(tid) if t.trigger_id == trigger_id), None)
     if trigger is None:
         raise KeyError(f"unknown trigger: {trigger_id!r}")
     if trigger.status != "pending":
@@ -188,8 +242,7 @@ def run_trigger(
     rid = new_run_id()
     prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
-        run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
-                       prompt=prompt, data_root=data_root, run_id=rid)
+        run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id, prompt=prompt, data_root=data_root, run_id=rid)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(

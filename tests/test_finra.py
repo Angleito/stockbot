@@ -17,8 +17,9 @@ import requests
 from app import finra_client
 from app import tools as tools_module
 from app.config import FINRA_API_BASE, FINRA_TOKEN_URL
-from app.tools import execute_tool
 from app.policy import LOCAL_CONTEXT
+from app.tools import execute_tool
+
 
 def _as_seq(value: object):
     """list/tuple from a FINRA tool-result envelope (app/tools.py boundary)."""
@@ -156,18 +157,15 @@ def http(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("app.finra_client.requests.get", get_mock)
     monkeypatch.setattr("app.finra_client.requests.post", post_mock)
     monkeypatch.setattr("app.finra_client.get_finra_client_id", lambda: "client")
-    monkeypatch.setattr(
-        "app.finra_client.get_finra_client_secret", lambda: "secret"
-    )
+    monkeypatch.setattr("app.finra_client.get_finra_client_secret", lambda: "secret")
     return {"get": get_mock, "post": post_mock}
 
 
 def _entry(list_result: dict[str, object], dataset_id: str):
     datasets = list_result["datasets"]
     assert isinstance(datasets, list)
-    return next(
-        (d for d in datasets if d["dataset"] == dataset_id), None
-    )
+    return next((d for d in datasets if d["dataset"] == dataset_id), None)
+
 
 def _data_body(post_mock: MagicMock):
     return post_mock.call_args_list[-1].kwargs["json"]
@@ -193,7 +191,8 @@ def test_short_interest_payload(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "get_short_interest",
         {"ticker": "aapl", "settlementDate": "2026-08-14"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
 
     assert "error" not in result, result
@@ -213,7 +212,11 @@ def test_short_interest_payload(http: dict[str, MagicMock]) -> None:
     assert coverage["complete"] is True
     assert coverage["first_date"] == "2026-08-14"
     assert _as_dict(_as_dict(_as_dict(result["metrics"])["fields"])["currentShortPositionQuantity"]) == {
-        "min": 100, "max": 100, "mean": 100, "median": 100, "sum": 100
+        "min": 100,
+        "max": 100,
+        "mean": 100,
+        "median": 100,
+        "sum": 100,
     }
     assert _as_dict(result["metrics"])["latest_vs_prior"] == []
     assert result["briefing"] is None
@@ -243,16 +246,23 @@ def test_short_interest_payload(http: dict[str, MagicMock]) -> None:
     ]
 
 
-def test_latest_short_interest_rejects_stale_production_data(http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch) -> None:
-    stale_date = (date.today() - timedelta(days=finra_client.STALE_AFTER_DAYS + 1)).isoformat()
+def test_latest_short_interest_rejects_stale_production_data(
+    http: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale_date = (date.today() - timedelta(days=finra_client.STALE_AFTER_DAYS + 1)).isoformat()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
     http["post"].side_effect = [
         _token_response(),
-        _response([{
-            "symbolCode": "AAPL",
-            "settlementDate": stale_date,
-            "currentShortPositionQuantity": 100,
-        }]),
+        _response(
+            [
+                {
+                    "symbolCode": "AAPL",
+                    "settlementDate": stale_date,
+                    "currentShortPositionQuantity": 100,
+                }
+            ]
+        ),
     ]
+
     def _fake_partitions(*args: object) -> tuple[list[dict[str, str]], dict[str, object], int, bool]:
         return ([{"settlementDate": stale_date}], {}, 1, False)
 
@@ -306,7 +316,8 @@ def test_full_catalog_describe_query_flow(http: dict[str, MagicMock]) -> None:
             "start_date": "2026-08-14",
             "end_date": "2026-08-14",
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in queried, queried
     body = _data_body(http["post"])
@@ -373,7 +384,8 @@ def test_access_reporting_public_and_unknown(http: dict[str, MagicMock]) -> None
     described = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "finra/industrySnapshotFirmsByRegistrationType"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert described.get("access") == "public"
 
@@ -400,18 +412,12 @@ def test_capabilities_not_guessed(http: dict[str, MagicMock]) -> None:
 
 def test_list_finra_datasets_group_search(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [_token_response(), _token_response()]
-    by_group = execute_tool(
-        "list_finra_datasets", {"group": "fixedIncomeMarket"}, model="test", context=LOCAL_CONTEXT
-    )
+    by_group = execute_tool("list_finra_datasets", {"group": "fixedIncomeMarket"}, model="test", context=LOCAL_CONTEXT)
     assert all(d["group"] == "fixedIncomeMarket" for d in _as_seq(by_group["datasets"]))
 
     finra_client.reset_discovery_cache()
-    by_search = execute_tool(
-        "list_finra_datasets", {"search": "short interest"}, model="test", context=LOCAL_CONTEXT
-    )
-    assert any(
-        "consolidatedShortInterest" in d["dataset"] for d in _as_seq(by_search["datasets"])
-    )
+    by_search = execute_tool("list_finra_datasets", {"search": "short interest"}, model="test", context=LOCAL_CONTEXT)
+    assert any("consolidatedShortInterest" in d["dataset"] for d in _as_seq(by_search["datasets"]))
 
 
 def test_catalog_search_token_ranked_weekly_summary(http: dict[str, MagicMock]) -> None:
@@ -427,25 +433,19 @@ def test_catalog_search_token_ranked_weekly_summary(http: dict[str, MagicMock]) 
     assert "error" not in result, result
     assert result["datasets"], "expected ranked matches"
     ranked = _as_seq(result["datasets"])
-    assert ranked[0]["dataset"] == "otcMarket/weeklySummary", (
-        [d["dataset"] for d in ranked]
-    )
+    assert ranked[0]["dataset"] == "otcMarket/weeklySummary", [d["dataset"] for d in ranked]
     assert ranked[0]["supports_ticker"] is True
 
 
 def test_catalog_search_ranked_scores_and_filtering(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [_token_response()]
-    result = execute_tool(
-        "list_finra_datasets", {"search": "OTC weekly volume"}, model="test", context=LOCAL_CONTEXT
-    )
+    result = execute_tool("list_finra_datasets", {"search": "OTC weekly volume"}, model="test", context=LOCAL_CONTEXT)
     assert "error" not in result, result
     datasets = [d["dataset"] for d in _as_seq(result["datasets"])]
     assert "otcMarket/weeklySummary" in datasets
     assert "otcMarket/weeklySummaryHistoric" in datasets
     # weeklySummary outranks generic volume matches (name+group+description).
-    assert datasets.index("otcMarket/weeklySummary") < datasets.index(
-        "fixedIncomeMarket/treasuryDailyAggregates"
-    )
+    assert datasets.index("otcMarket/weeklySummary") < datasets.index("fixedIncomeMarket/treasuryDailyAggregates")
 
     finra_client.reset_discovery_cache()
     unmatched = execute_tool(
@@ -456,13 +456,9 @@ def test_catalog_search_ranked_scores_and_filtering(http: dict[str, MagicMock]) 
 
 def test_catalog_search_phrase_alias_volume(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [_token_response()]
-    result = execute_tool(
-        "list_finra_datasets", {"search": "trading volume"}, model="test", context=LOCAL_CONTEXT
-    )
+    result = execute_tool("list_finra_datasets", {"search": "trading volume"}, model="test", context=LOCAL_CONTEXT)
     assert "error" not in result, result
-    assert "otcMarket/weeklySummary" in {
-        d["dataset"] for d in _as_seq(result["datasets"])
-    }
+    assert "otcMarket/weeklySummary" in {d["dataset"] for d in _as_seq(result["datasets"])}
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +471,8 @@ def test_describe_finra_dataset(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["dataset"] == "otcMarket/weeklySummary"
@@ -489,10 +486,7 @@ def test_describe_finra_dataset(http: dict[str, MagicMock]) -> None:
     assert "summaryTypeCode" in valid_values
     default_filters = result.get("default_filters", [])
     assert isinstance(default_filters, list)
-    assert any(
-        d["field"] == "summaryTypeCode" and d["value"] == "OTC_W_SMBL"
-        for d in default_filters
-    )
+    assert any(d["field"] == "summaryTypeCode" and d["value"] == "OTC_W_SMBL" for d in default_filters)
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +507,8 @@ def test_query_finra_date_range(http: dict[str, MagicMock]) -> None:
             "end_date": "2026-08-07",
             "limit": 5,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -540,7 +535,8 @@ def test_max_limit_clamped(http: dict[str, MagicMock]) -> None:
             "end_date": "2026-08-01",
             "limit": 99999,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _data_body(http["post"])["limit"] == finra_client.MAX_LIMIT
@@ -564,7 +560,8 @@ def test_valid_filters_included(http: dict[str, MagicMock]) -> None:
                 }
             ],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert {
@@ -580,11 +577,10 @@ def test_invalid_op_rejected(http: dict[str, MagicMock]) -> None:
         "query_finra",
         {
             "dataset": "otcMarket/weeklySummary",
-            "filters": [
-                {"field": "totalWeeklyShareQuantity", "op": "CONTAINS", "value": "1"}
-            ],
+            "filters": [{"field": "totalWeeklyShareQuantity", "op": "CONTAINS", "value": "1"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Unsupported compare op" in _error(result)
@@ -598,7 +594,8 @@ def test_invalid_filter_field(http: dict[str, MagicMock]) -> None:
             "dataset": "otcMarket/consolidatedShortInterest",
             "filters": [{"field": "notARealField", "value": "x"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "notARealField" in _error(result)
@@ -612,7 +609,8 @@ def test_invalid_documented_enum_rejected_before_http(http: dict[str, MagicMock]
             "dataset": "otcMarket/weeklySummary",
             "filters": [{"field": "summaryTypeCode", "value": "BOGUS_TYPE"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Allowed values" in _error(result)
@@ -635,7 +633,8 @@ def test_malformed_filters_rejected(http: dict[str, MagicMock], bad_filter: obje
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "filters": [bad_filter]},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     lowered = _error(result).lower()
@@ -654,18 +653,13 @@ def test_weekly_summary_default_filter_no_conflict(http: dict[str, MagicMock]) -
         {
             "dataset": "otcMarket/weeklySummary",
             "ticker": "AAPL",
-            "filters": [
-                {"field": "summaryTypeCode", "op": "EQUAL", "value": "ATS_W_SMBL"}
-            ],
+            "filters": [{"field": "summaryTypeCode", "op": "EQUAL", "value": "ATS_W_SMBL"}],
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
-    type_filters = [
-        f
-        for f in _data_body(http["post"])["compareFilters"]
-        if f["fieldName"] == "summaryTypeCode"
-    ]
+    type_filters = [f for f in _data_body(http["post"])["compareFilters"] if f["fieldName"] == "summaryTypeCode"]
     assert len(type_filters) == 1
     assert type_filters[0]["fieldValue"] == "ATS_W_SMBL"
 
@@ -678,7 +672,8 @@ def test_weekly_summary_applies_default_when_absent(http: dict[str, MagicMock]) 
     result = execute_tool(
         "query_finra",
         {"dataset": "weeklySummary", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert {
@@ -693,7 +688,8 @@ def test_ticker_on_non_symbol_dataset(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "treasuryDailyAggregates", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "ticker/symbol" in _error(result)
@@ -713,7 +709,8 @@ def test_treasury_monthly_date_field(http: dict[str, MagicMock]) -> None:
             "end_date": "2026-08-01",
             "limit": 3,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert _data_body(http["post"])["compareFilters"] == [
@@ -727,9 +724,7 @@ def test_treasury_monthly_date_field(http: dict[str, MagicMock]) -> None:
 
 def test_query_finra_unknown_dataset(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [_token_response()]
-    result = execute_tool(
-        "query_finra", {"dataset": "notARealDataset"}, model="test", context=LOCAL_CONTEXT
-    )
+    result = execute_tool("query_finra", {"dataset": "notARealDataset"}, model="test", context=LOCAL_CONTEXT)
     assert "error" in result
     assert "Unknown FINRA dataset" in _error(result)
     assert "list_finra_datasets" in _error(result)
@@ -743,7 +738,8 @@ def test_legacy_bare_name(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["dataset"] == "consolidatedShortInterest"
@@ -762,10 +758,12 @@ def test_ambiguous_bare_name(http: dict[str, MagicMock]) -> None:
 def test_industry_snapshot_queries_dataset(http: dict[str, MagicMock]) -> None:
     http["post"].side_effect = [
         _token_response(),
-        _response([
-            {"registrationTypeCode": "BD", "firmCount": 10},
-            {"registrationTypeCode": "IA", "firmCount": 25},
-        ]),
+        _response(
+            [
+                {"registrationTypeCode": "BD", "firmCount": 10},
+                {"registrationTypeCode": "IA", "firmCount": 25},
+            ]
+        ),
     ]
     result = execute_tool(
         "query_finra",
@@ -773,16 +771,19 @@ def test_industry_snapshot_queries_dataset(http: dict[str, MagicMock]) -> None:
             "dataset": "finra/industrySnapshotFirmsByRegistrationType",
             "limit": 50,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     data_url = http["post"].call_args_list[1].args[0]
-    assert data_url.endswith(
-        "/data/group/finra/name/industrySnapshotFirmsByRegistrationType"
-    )
+    assert data_url.endswith("/data/group/finra/name/industrySnapshotFirmsByRegistrationType")
     assert "records" not in result
     assert _as_dict(_as_dict(_as_dict(result["metrics"])["fields"])["firmCount"]) == {
-        "min": 10, "max": 25, "mean": 17.5, "median": 17.5, "sum": 35
+        "min": 10,
+        "max": 25,
+        "mean": 17.5,
+        "median": 17.5,
+        "sum": 35,
     }
     assert _as_dict(_as_dict(_as_dict(result["metrics"])["categorical"])["registrationTypeCode"]) == {
         "IA": 1,
@@ -801,7 +802,8 @@ def test_pagination_valid_full_page(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 50, "offset": 100},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     body = _data_body(http["post"])
@@ -821,7 +823,8 @@ def test_pagination_partial_page(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 50, "offset": 100},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["returned_count"] == 2
@@ -833,17 +836,21 @@ def test_pagination_header_driven(http: dict[str, MagicMock]) -> None:
     records = [{"issueSymbolIdentifier": f"S{i}"} for i in range(2)]
     http["post"].side_effect = [
         _token_response(),
-        _response(records, headers={
-            "Record-Total": "5",
-            "Record-Offset": "0",
-            "Record-Limit": "2",
-            "Record-Max-Limit": "1000",
-        }),
+        _response(
+            records,
+            headers={
+                "Record-Total": "5",
+                "Record-Offset": "0",
+                "Record-Limit": "2",
+                "Record-Max-Limit": "1000",
+            },
+        ),
     ]
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 2},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 5
@@ -860,7 +867,8 @@ def test_pagination_header_driven_exhausted(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "limit": 5, "offset": 0},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
     assert result["total_records"] == 5
@@ -874,7 +882,8 @@ def test_negative_offset_rejected(http: dict[str, MagicMock], offset: int) -> No
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "offset": offset},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "offset must be >= 0" in _error(result)
@@ -886,7 +895,8 @@ def test_offset_exceeds_finra_max(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "offset": 500001},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "500000" in _error(result)
@@ -900,7 +910,8 @@ def test_offset_rejected_when_unsupported(http: dict[str, MagicMock]) -> None:
             "dataset": "finra/industrySnapshotFirmsByRegistrationType",
             "offset": 10,
         },
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "does not support record offset" in _error(result)
@@ -931,7 +942,8 @@ def test_discovery_and_result_cache_hits(http: dict[str, MagicMock]) -> None:
     first_query = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in first_query, first_query
     gets_after_first_query = http["get"].call_count  # catalog + metadata
@@ -940,7 +952,8 @@ def test_discovery_and_result_cache_hits(http: dict[str, MagicMock]) -> None:
     second_query = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert second_query == first_query
     assert http["get"].call_count == gets_after_first_query
@@ -957,12 +970,14 @@ def test_token_fetched_once_across_calls(http: dict[str, MagicMock]) -> None:
         result = execute_tool(
             "query_finra",
             {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-            model="test", context=LOCAL_CONTEXT,
+            model="test",
+            context=LOCAL_CONTEXT,
         )
         assert "error" not in result, result
     # One token POST even across two queries (result cache serves the second).
     token_calls = [
-        c for c in http["post"].call_args_list
+        c
+        for c in http["post"].call_args_list
         if "oauth2/access_token" in (c.args[0] if c.args else c.kwargs.get("url", ""))
     ]
     assert len(token_calls) == 1
@@ -981,7 +996,8 @@ def test_catalog_metadata_data_urls_and_auth(http: dict[str, MagicMock]) -> None
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" not in result, result
 
@@ -992,9 +1008,7 @@ def test_catalog_metadata_data_urls_and_auth(http: dict[str, MagicMock]) -> None
     assert catalog_call.kwargs["headers"]["Accept"] == "application/json"
 
     metadata_url = metadata_call.args[0]
-    assert metadata_url.endswith(
-        "/metadata/group/otcMarket/name/consolidatedShortInterest"
-    )
+    assert metadata_url.endswith("/metadata/group/otcMarket/name/consolidatedShortInterest")
     # Metadata is public: no Authorization header.
     assert "Authorization" not in metadata_call.kwargs["headers"]
 
@@ -1033,25 +1047,22 @@ def test_uppercase_catalog_paths_are_normalized_before_requests(http: dict[str, 
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
 
     assert "error" not in result, result
     assert result["dataset_id"] == "otcMarket/consolidatedShortInterest"
     metadata_url = http["get"].call_args_list[1].args[0]
     data_url = http["post"].call_args_list[1].args[0]
-    assert metadata_url.endswith(
-        "/metadata/group/otcMarket/name/consolidatedShortInterest"
-    )
-    assert data_url.endswith(
-        "/data/group/otcMarket/name/consolidatedShortInterest"
-    )
+    assert metadata_url.endswith("/metadata/group/otcMarket/name/consolidatedShortInterest")
+    assert data_url.endswith("/data/group/otcMarket/name/consolidatedShortInterest")
 
 
-def test_query_cache_isolated_by_finra_environment(http: dict[str, MagicMock], fake_cache: FakeCache, monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = finra_client.DatasetSpec(
-        group="otcMarket", name="consolidatedShortInterest", description=""
-    )
+def test_query_cache_isolated_by_finra_environment(
+    http: dict[str, MagicMock], fake_cache: FakeCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = finra_client.DatasetSpec(group="otcMarket", name="consolidatedShortInterest", description="")
     payload: dict[str, object] = {"limit": 1}
     http["post"].side_effect = [
         _token_response(),
@@ -1068,11 +1079,7 @@ def test_query_cache_isolated_by_finra_environment(http: dict[str, MagicMock], f
     assert production_key != mock_key
     assert production_key in fake_cache.store
     assert mock_key in fake_cache.store
-    data_urls = [
-        call.args[0]
-        for call in http["post"].call_args_list
-        if "oauth2/access_token" not in call.args[0]
-    ]
+    data_urls = [call.args[0] for call in http["post"].call_args_list if "oauth2/access_token" not in call.args[0]]
     assert data_urls == [
         f"{FINRA_API_BASE}/data/group/otcMarket/name/consolidatedShortInterest",
         f"{FINRA_API_BASE}/data/group/otcMarket/name/consolidatedShortInterestMock",
@@ -1122,7 +1129,8 @@ def test_metadata_auth_error_describe(http: dict[str, MagicMock], status: int) -
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert str(status) in _error(result)
@@ -1140,7 +1148,8 @@ def test_metadata_auth_error_query(http: dict[str, MagicMock], status: int) -> N
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/weeklySummary", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert str(status) in _error(result)
@@ -1157,7 +1166,8 @@ def test_metadata_malformed_response(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "describe_finra_dataset",
         {"dataset_id": "otcMarket/weeklySummary"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "Unexpected metadata response" in _error(result)
@@ -1169,7 +1179,8 @@ def test_entitlement_403_on_data(http: dict[str, MagicMock]) -> None:
     result = execute_tool(
         "query_finra",
         {"dataset": "otcMarket/consolidatedShortInterest", "ticker": "AAPL"},
-        model="test", context=LOCAL_CONTEXT,
+        model="test",
+        context=LOCAL_CONTEXT,
     )
     assert "error" in result
     assert "403" in _error(result)
@@ -1212,7 +1223,5 @@ def test_finra_schema_dispatch_parity() -> None:
     }
     schema_names = _tool_names(tools_module.TOOLS)
     assert finra_names <= schema_names, "FINRA schema missing from TOOLS"
-    assert set(tools_module._FINRA_HANDLERS) == finra_names, (
-        "FINRA dispatch registry out of sync with schemas"
-    )
+    assert set(tools_module._FINRA_HANDLERS) == finra_names, "FINRA dispatch registry out of sync with schemas"
     assert all(callable(h) for h in tools_module._FINRA_HANDLERS.values())

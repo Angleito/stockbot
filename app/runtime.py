@@ -28,50 +28,55 @@ class ExecutionBudget:
     RunRecorder (telemetry) only observes consumption; this object is the
     source of truth for limit enforcement, so observability failures never
     change research behavior. reserve_* methods consume BEFORE an external
-    call.
+    call. ``None`` on any maximum means no limit for that dimension; the
+    counters keep accumulating as telemetry.
     """
 
-    max_tool_calls: int
-    max_runtime: float
-    max_evidence_tokens: int
+    max_tool_calls: int | None = None
+    max_runtime: float | None = None
+    max_evidence_tokens: int | None = None
     tool_calls: int = 0
     evidence_tokens: int = 0
-    max_search_calls: int = 25
+    max_search_calls: int | None = None
     search_calls: int = 0
     _started: float = field(default_factory=time.perf_counter, init=False, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def runtime_remaining(self) -> float:
         with self._lock:
+            if self.max_runtime is None:
+                return float("inf")
             return max(0.0, self.max_runtime - (time.perf_counter() - self._started))
+
+    def _runtime_left(self) -> bool:
+        return self.max_runtime is None or self.max_runtime - (time.perf_counter() - self._started) > 0
 
     def reserve_tool_call(self) -> bool:
         """Consume one tool-call slot; False when runtime or the call limit
-        is exhausted."""
+        is exhausted (no limit configured -> always True)."""
         with self._lock:
-            if self.max_runtime - (time.perf_counter() - self._started) <= 0:
+            if not self._runtime_left():
                 return False
-            if self.tool_calls >= self.max_tool_calls:
+            if self.max_tool_calls is not None and self.tool_calls >= self.max_tool_calls:
                 return False
             self.tool_calls += 1
             return True
 
     def reserve_search_call(self) -> bool:
         """Consume one search-call slot; False when runtime or the search limit
-        is exhausted."""
+        is exhausted (no limit configured -> always True)."""
         with self._lock:
-            if self.max_runtime - (time.perf_counter() - self._started) <= 0:
+            if not self._runtime_left():
                 return False
-            if self.search_calls >= self.max_search_calls:
+            if self.max_search_calls is not None and self.search_calls >= self.max_search_calls:
                 return False
             self.search_calls += 1
             return True
 
-
     def add_evidence_tokens(self, count: int) -> bool:
         """Register evidence tokens only while within budget; False refuses the addition."""
         with self._lock:
-            if self.evidence_tokens + count > self.max_evidence_tokens:
+            if self.max_evidence_tokens is not None and self.evidence_tokens + count > self.max_evidence_tokens:
                 return False
             self.evidence_tokens += count
             return True

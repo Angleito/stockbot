@@ -1,6 +1,6 @@
-from collections.abc import Callable
 import json
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -8,11 +8,10 @@ import pytest
 
 from app import tools
 from app.domain.portfolio import PortfolioSnapshot, Position
-from app.policy import Capability, LOCAL_BROKER_CONTEXT, LOCAL_CONTEXT, RequestContext
+from app.policy import LOCAL_BROKER_CONTEXT, Capability, RequestContext
 from app.robinhood.portfolio import RobinhoodPortfolioProvider
 from app.services.portfolio_research import PortfolioResearchPosition
 from app.tool_render import render_tool_result
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
@@ -64,6 +63,7 @@ class FakeRobinhood:
 def _client_for(fake: FakeRobinhood):
     def _make(**kwargs: object) -> FakeRobinhood:
         return fake
+
     return _make
 
 
@@ -74,7 +74,7 @@ def test_market_snapshot_uses_compact_observed_fields(monkeypatch: pytest.Monkey
     assert result["ticker"] == "WING"
     assert result["last"] == "116.84"
     assert result["source"] == "robinhood_mcp"
-    expected_local = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    expected_local = datetime(2026, 8, 25, 15, 0, tzinfo=UTC).astimezone().isoformat()
     assert result["retrieved_at_local"] == expected_local
     rendered = render_tool_result(result)
     assert f"(local {expected_local})" in rendered
@@ -88,9 +88,7 @@ def test_option_chain_is_normalized_and_bounded(monkeypatch: pytest.MonkeyPatch)
     contracts = _as_seq(result["contracts"])
     assert contracts[0]["contract_id"] == "wing-put-80"
     assert contracts[0]["delta"] == "-0.12"
-    assert [name for name, _ in fake.calls] == [
-        "get_option_chains", "get_option_instruments", "get_option_quotes"
-    ]
+    assert [name for name, _ in fake.calls] == ["get_option_chains", "get_option_instruments", "get_option_quotes"]
 
 
 def test_compare_options_returns_deterministic_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,41 +103,49 @@ def test_compare_options_returns_deterministic_analysis(monkeypatch: pytest.Monk
 def test_tool_schemas_have_dispatchers() -> None:
     names = {_tool_name(entry) for entry in tools.TOOLS}
     robinhood_names = {
-        "get_market_snapshot", "get_option_chain", "analyze_option_contract",
-        "compare_options", "get_portfolio_snapshot",
-        "get_scanner_filter_specs", "get_scans", "run_scan",
+        "get_market_snapshot",
+        "get_option_chain",
+        "analyze_option_contract",
+        "compare_options",
+        "get_portfolio_snapshot",
+        "get_scanner_filter_specs",
+        "get_scans",
+        "run_scan",
     }
     assert robinhood_names <= names
     assert robinhood_names == set(tools._ROBINHOOD_HANDLERS)
     assert names == set(tools.TOOL_CAPABILITIES)
     assert tools.PORTFOLIO_AUTHORIZED_TOOLS == {
-        name for name, capability in tools.TOOL_CAPABILITIES.items()
-        if capability.value == "portfolio_read"
+        name for name, capability in tools.TOOL_CAPABILITIES.items() if capability.value == "portfolio_read"
     }
     assert "place_option_order" not in names
 
 
 def test_no_trading_tool_names() -> None:
     banned = ("order", "place", "submit", "cancel", "replace", "withdraw", "deposit", "transfer", "trade")
+    # Allowlist: local session lifecycle, not a brokerage action. research_cancel
+    # closes a research session (Capability.RESEARCH, no broker access); no
+    # order-cancellation tool exists.
+    non_trading = {"research_cancel", "research_submit_source_result"}
     names = [_tool_name(entry) for entry in tools.TOOLS]
     assert len(names) >= 24
     for name in names:
         for token in banned:
-            assert token not in name.lower(), f"{name} contains banned token {token}"
+            assert token not in name.lower() or name in non_trading, f"{name} contains banned token {token}"
 
 
 def test_execution_rechecks_application_capability() -> None:
     context = RequestContext("research", frozenset({Capability.RESEARCH}))
-    result = tools.execute_tool(
-        "get_portfolio_snapshot", {}, model="test", context=context
-    )
+    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=context)
     assert result == {"error": "Tool is not permitted: get_portfolio_snapshot"}
 
 
 def test_execute_tool_requires_explicit_context() -> None:
     with pytest.raises(TypeError, match="context"):
         _exec: Callable[..., object] = tools.execute_tool
-        _exec("get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test")  # verifies context is a required keyword-only argument
+        _exec(
+            "get_fundamentals", {"ticker": "AAPL", "metric": "eps"}, "test"
+        )  # verifies context is a required keyword-only argument
 
 
 def test_scan_read_handlers_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,7 +200,7 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         security_id="sec:equity:0000320193",
         entity_id="sec:cik:0000320193",
         ticker="WING",
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         average_cost=Decimal("95.50"),
         market_price=Decimal("116.84"),
         market_value=Decimal("1168.40"),
@@ -202,9 +208,9 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         unrealized_gain_pct=Decimal("0.2234554973821989528795811518"),
         portfolio_weight=Decimal("0.75"),
         source="robinhood_mcp",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
         price_type="last",
-        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
     )
     unresolved = Position(
         position_id="snap-1:100000001:ZZZZ",
@@ -212,7 +218,7 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         security_id=None,
         entity_id=None,
         ticker="ZZZZ",
-        quantity=Decimal("5"),
+        quantity=Decimal(5),
         average_cost=Decimal("10.00"),
         market_price=Decimal("12.00"),
         market_value=Decimal("60.00"),
@@ -220,13 +226,13 @@ def _hand_built_snapshot() -> PortfolioSnapshot:
         unrealized_gain_pct=Decimal("0.2"),
         portfolio_weight=Decimal("0.25"),
         source="robinhood_mcp",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
         price_type="last",
-        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
     )
     return PortfolioSnapshot(
         snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
-        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
         broker="robinhood",
         account_ids=("100000001",),
         cash=Decimal("1234.56"),
@@ -243,20 +249,20 @@ def _hand_built_research(snapshot: PortfolioSnapshot) -> list[PortfolioResearchP
         PortfolioResearchPosition(
             position=resolved,
             latest_sec_metrics={
-                "Revenue": {"value": Decimal("1000000"), "period_end": "2026-06-30"},
-                "NetIncomeLoss": {"value": Decimal("200000"), "period_end": "2026-06-30"},
-                "CashAndCashEquivalents": {"value": Decimal("300000"), "period_end": "2026-06-30"},
-                "LongTermDebt": {"value": Decimal("400000"), "period_end": "2026-06-30"},
-                "EntityCommonStockSharesOutstanding": {"value": Decimal("500000"), "period_end": "2026-07-01"},
+                "Revenue": {"value": Decimal(1000000), "period_end": "2026-06-30"},
+                "NetIncomeLoss": {"value": Decimal(200000), "period_end": "2026-06-30"},
+                "CashAndCashEquivalents": {"value": Decimal(300000), "period_end": "2026-06-30"},
+                "LongTermDebt": {"value": Decimal(400000), "period_end": "2026-06-30"},
+                "EntityCommonStockSharesOutstanding": {"value": Decimal(500000), "period_end": "2026-07-01"},
             },
             latest_finra_metrics={
-                "short_position": Decimal("100"),
-                "prev_position": Decimal("90"),
-                "short_interest_change": Decimal("10"),
+                "short_position": Decimal(100),
+                "prev_position": Decimal(90),
+                "short_interest_change": Decimal(10),
                 "short_interest_change_pct": Decimal("0.1111111111111111111111111111"),
                 "days_to_cover": Decimal("1.5"),
                 "settlement_date": "2026-08-14",
-                "avg_daily_volume": Decimal("10000"),
+                "avg_daily_volume": Decimal(10000),
                 "known_at": "2026-08-17T12:00:00Z",
             },
             research_data_freshness={
@@ -279,16 +285,22 @@ def test_portfolio_snapshot_handler_refresh_path(monkeypatch: pytest.MonkeyPatch
     fake = FakeRobinhood()
     monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     snapshot = _hand_built_snapshot()
+
     def _fake_sync(provider: RobinhoodPortfolioProvider, **kwargs: object) -> PortfolioSnapshot:
         return snapshot
+
     monkeypatch.setattr(
-        tools, "sync_robinhood_portfolio",
+        tools,
+        "sync_robinhood_portfolio",
         _fake_sync,
     )
+
     def _fake_enrich(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
         return _hand_built_research(snapshot_arg)
+
     monkeypatch.setattr(
-        tools, "enrich_portfolio_research",
+        tools,
+        "enrich_portfolio_research",
         _fake_enrich,
     )
     result = tools._get_portfolio_snapshot({"refresh": True}, model="test")
@@ -324,21 +336,22 @@ def test_portfolio_snapshot_handler_refresh_path(monkeypatch: pytest.MonkeyPatch
     assert "accounts" not in result
     assert "quotes" not in result
     assert "structured_content" not in result
-    assert all(
-        not ({"symbol", "id", "account_id", "instrument_id", "avg_price"} & set(row))
-        for row in positions
-    )
+    assert all(not ({"symbol", "id", "account_id", "instrument_id", "avg_price"} & set(row)) for row in positions)
 
 
 def test_portfolio_payload_and_rendering_never_expose_account_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRobinhood()
     monkeypatch.setattr(tools, "_robinhood_client", _client_for(fake))
     snapshot = _hand_built_snapshot()
+
     def _fake_sync2(provider: RobinhoodPortfolioProvider, **kwargs: object) -> PortfolioSnapshot:
         return snapshot
+
     monkeypatch.setattr(tools, "sync_robinhood_portfolio", _fake_sync2)
+
     def _fake_enrich2(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
         return []
+
     monkeypatch.setattr(tools, "enrich_portfolio_research", _fake_enrich2)
 
     result = tools._get_portfolio_snapshot({"refresh": True}, model="test")
@@ -352,9 +365,14 @@ def test_portfolio_payload_and_rendering_never_expose_account_identifiers(monkey
 
 
 _BROKER_TOOL_NAMES = {
-    "get_market_snapshot", "get_option_chain", "analyze_option_contract",
-    "compare_options", "get_scanner_filter_specs", "get_portfolio_snapshot",
-    "get_scans", "run_scan",
+    "get_market_snapshot",
+    "get_option_chain",
+    "analyze_option_contract",
+    "compare_options",
+    "get_scanner_filter_specs",
+    "get_portfolio_snapshot",
+    "get_scans",
+    "run_scan",
 }
 
 
@@ -373,7 +391,9 @@ def test_broker_context_includes_broker_tools() -> None:
     assert _BROKER_TOOL_NAMES <= names
 
 
-def test_robinhood_provider_errors_do_not_expose_request_identifiers(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_robinhood_provider_errors_do_not_expose_request_identifiers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     def fail(arguments: dict[str, object], model: str) -> dict[str, object]:
         raise RuntimeError("provider rejected account_number=100000001")
 
@@ -397,11 +417,15 @@ def test_portfolio_snapshot_refresh_flag_controls_sync(monkeypatch: pytest.Monke
         return snapshot
 
     monkeypatch.setattr(tools, "sync_robinhood_portfolio", fake_sync)
+
     def _fake_read(data_root: Path | None = None) -> PortfolioSnapshot | None:
         return snapshot
+
     monkeypatch.setattr(tools, "read_latest_snapshot", _fake_read)
+
     def _fake_enrich3(snapshot_arg: PortfolioSnapshot, **kwargs: object) -> list[PortfolioResearchPosition]:
         return []
+
     monkeypatch.setattr(tools, "enrich_portfolio_research", _fake_enrich3)
 
     tools._get_portfolio_snapshot({"refresh": False}, model="test")

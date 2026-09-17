@@ -50,10 +50,10 @@ class EightKReport(Protocol):
 
     def __getitem__(self, name: str) -> object: ...
 
+
 def _normalize_key(key: object) -> str | None:
     s = str(key).lower().strip()
-    if s.startswith("item"):
-        s = s[4:]
+    s = s.removeprefix("item")
     return _NORM.get(re.sub(r"[\s._\-]+", "", s))
 
 
@@ -103,31 +103,36 @@ def parse_8k_events(
     return events
 
 
+def _item_names_of(report: EightKReport) -> list[str]:
+    # ``items`` is a plain list on the SDK object; getattr keeps alternate
+    # doubles working without a type-level union.
+    raw_items: object = getattr(report, "items", None)
+    if callable(raw_items):
+        try:
+            raw_items = raw_items()
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            return []
+    if isinstance(raw_items, str) or not isinstance(raw_items, Iterable):
+        return []
+    return [item for item in raw_items if isinstance(item, str)]
+
+
+def _item_texts_of(report: EightKReport, names: list[str]) -> dict[str, object]:
+    items: dict[str, object] = {}
+    for name in names:
+        try:
+            text = report[name]
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
+            continue
+        if text:
+            items[name] = text
+    return items
+
+
 def extract_8k_events(
     report: EightKReport,
     accession_no: str,
     *,
     event_date: str | date | None = None,
 ) -> list[CurrentReportEvent]:
-    # ``items`` is a plain list on the SDK object; getattr keeps alternate
-    # doubles working without a type-level union.
-    raw_items: object = getattr(report, "items", None)
-    if callable(raw_items):
-        try:
-            resolved: object = raw_items()
-        except Exception:
-            resolved = None
-        raw_items = resolved
-    if isinstance(raw_items, str) or not isinstance(raw_items, Iterable):
-        names: list[str] = []
-    else:
-        names = [item for item in raw_items if isinstance(item, str)]
-    items: dict[str, object] = {}
-    for name in names:
-        try:
-            text = report[name]
-        except Exception:
-            continue
-        if text:
-            items[name] = text
-    return parse_8k_events(accession_no, items, event_date=event_date)
+    return parse_8k_events(accession_no, _item_texts_of(report, _item_names_of(report)), event_date=event_date)

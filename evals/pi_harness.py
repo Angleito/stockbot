@@ -7,6 +7,7 @@ Each case issues its tool sequence through `scripts/pi_bridge.py` tool_call
 ops (subprocess JSONL) and applies the case's own expected_behavior assertions
 with the same semantics as evals/run_evals.py had (helper copied, not imported).
 """
+
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _is_ordered_subsequence(required: list, trace: list) -> bool:
     """True if every item in `required` appears in `trace` in order."""
@@ -28,22 +30,17 @@ PLAN = {
     11: [("get_short_interest", {"ticker": "AAPL"})],
     5: [("list_sec_filings", {"identifier": "MSFT", "forms": ["10-Q"], "limit": 1})],
     29: [("get_valuation_metrics", {"ticker": "AAPL"})],
-    34: [("find_sec_entities", {"query": "META"}),
-         ("search_sec_relationships", {"entity": "1326801"})],
+    34: [("find_sec_entities", {"query": "META"}), ("search_sec_relationships", {"entity": "1326801"})],
     42: [("find_sec_entities", {"query": "Vanguard Group", "exhaustive": True})],
     43: [("search_sec_filings", {"query": "Elon Musk", "limit": 5})],
     44: [("search_sec_relationships", {"entity": "320193"})],
-    45: [("search_sec_relationships", {"entity": "1067983",
-                                      "relationship_types": ["holding_manager"]})],
+    45: [("search_sec_relationships", {"entity": "1067983", "relationship_types": ["holding_manager"]})],
     46: [("search_sec_filings", {"query": "Apple Inc", "limit": 3})],
     47: [("search_sec_filings", {"person_name": "Jane Doe", "limit": 5})],
-    48: [("search_sec_filings", {"domain": "example.com",
-                                "security_identifier": "037833100", "limit": 5})],
+    48: [("search_sec_filings", {"domain": "example.com", "security_identifier": "037833100", "limit": 5})],
     49: [("get_sec_search_coverage", {"form": "10-K"})],
-    50: [("search_sec_filings", {"query": "Apple buyback", "limit": 5,
-                                "as_of": "2020-01-01"})],
-    51: [("search_sec_relationships", {"entity": "320193",
-                                      "relationship_types": ["beneficial_owner"]})],
+    50: [("search_sec_filings", {"query": "Apple buyback", "limit": 5, "as_of": "2020-01-01"})],
+    51: [("search_sec_relationships", {"entity": "320193", "relationship_types": ["beneficial_owner"]})],
 }
 
 
@@ -54,7 +51,10 @@ class Bridge:
             python = sys.executable  # ponytail: venv path first, fallback same interpreter
         self.proc = subprocess.Popen(
             [python, os.path.join(ROOT, "scripts", "pi_bridge.py")],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
         )
         self._seq = 0
 
@@ -62,19 +62,24 @@ class Bridge:
         self._seq += 1
         return f"{prefix}-{self._seq}-{uuid.uuid4().hex[:8]}"
 
-    def _roundtrip(self, payload, expect_id=True):
+    def _send(self, payload):
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
+
+    def _roundtrip(self, payload, expect_id=True):
+        self._send(payload)
         while True:
-            line = self.proc.stdout.readline()
-            response = json.loads(line)
+            response = json.loads(self.proc.stdout.readline())
             if not expect_id or response.get("id") == payload["id"]:
                 return response
 
     def call(self, name, arguments, run_id):
         payload = {
-            "id": self._next_id("tc"), "op": "tool_call", "name": name,
-            "arguments": arguments, "run_id": run_id,
+            "id": self._next_id("tc"),
+            "op": "tool_call",
+            "name": name,
+            "arguments": arguments,
+            "run_id": run_id,
             "tool_call_id": self._next_id("call"),
             "bridge_queue_ms": 0.0,
         }
@@ -83,10 +88,12 @@ class Bridge:
     def event(self, run_id, event, **extra):
         payload = {
             "id": self._next_id("ev"),
-            "op": "pi_event", "run_id": run_id, "event": event, **extra,
+            "op": "pi_event",
+            "run_id": run_id,
+            "event": event,
+            **extra,
         }
-        self.proc.stdin.write(json.dumps(payload) + "\n")
-        self.proc.stdin.flush()
+        self._send(payload)
         return json.loads(self.proc.stdout.readline())
 
     def close(self):
@@ -94,31 +101,65 @@ class Bridge:
         self.proc.terminate()
 
 
-def check_case(case, detailed, response):
-    expected = case.get("expected_behavior", {})
-    trace = [t["name"] for t in detailed]
-    resp = response.lower()
-    must = [s.lower() for s in expected.get("must_contain", [])]
-    must_not = [s.lower() for s in expected.get("must_not_contain", [])]
-    checks = {
+def _tool_checks(expected, trace):
+    return {
         "expected_tools": all(t in trace for t in expected.get("expected_tools", [])),
         "required_tools": all(t in trace for t in expected.get("required_tools", [])),
-        "sequence": _is_ordered_subsequence(
-            expected.get("required_tool_sequence", []), trace),
-        "forbidden_args": all(
-            arg not in (call.get("arguments") or {})
-            for tool, args in expected.get("forbidden_tool_args", {}).items()
-            for arg in args for call in detailed if call["name"] == tool),
-        "forbidden_tools": not any(
-            t in trace for t in expected.get("forbidden_tools", [])),
+        "sequence": _is_ordered_subsequence(expected.get("required_tool_sequence", []), trace),
+        "forbidden_tools": not any(t in trace for t in expected.get("forbidden_tools", [])),
+    }
+
+
+def _forbidden_args_ok(expected, detailed):
+    return all(
+        arg not in (call.get("arguments") or {})
+        for tool, args in expected.get("forbidden_tool_args", {}).items()
+        for arg in args
+        for call in detailed
+        if call["name"] == tool
+    )
+
+
+def _text_checks(expected, resp):
+    must = [s.lower() for s in expected.get("must_contain", [])]
+    must_not = [s.lower() for s in expected.get("must_not_contain", [])]
+    return must, {
         "must_contain": all(s in resp for s in must),
         "must_not_contain": not any(s in resp for s in must_not),
     }
+
+
+def check_case(case, detailed, response):
+    expected = case.get("expected_behavior", {})
+    trace = [t["name"] for t in detailed]
+    checks = _tool_checks(expected, trace)
+    checks["forbidden_args"] = _forbidden_args_ok(expected, detailed)
+    must, text = _text_checks(expected, response.lower())
+    checks.update(text)
     failed = [k for k, ok in checks.items() if not ok]
-    if not (expected.get("expected_tools") or expected.get("required_tools")
-            or expected.get("required_tool_sequence") or must):
+    if not (
+        expected.get("expected_tools")
+        or expected.get("required_tools")
+        or expected.get("required_tool_sequence")
+        or must
+    ):
         failed.append("empty_assertions")
     return not failed, f"tools called={trace}" + (f" (failed: {failed})" if failed else "")
+
+
+def _run_one(bridge, cases, cid, calls):
+    case = cases[cid]
+    run_id = f"eval-{cid}"
+    bridge.event(run_id, "agent_start", question=case.get("question", ""))
+    detailed, results = [], []
+    for name, args in calls:
+        results.append(bridge.call(name, args, run_id))
+        detailed.append({"name": name, "arguments": args})
+    bridge.event(run_id, "agent_end")
+    ok, details = check_case(case, detailed, json.dumps(results))
+    print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {case['question']}")
+    print(f"       Details: {details}")
+    return ok
 
 
 def main():
@@ -128,18 +169,7 @@ def main():
     passed = 0
     try:
         for cid, calls in PLAN.items():
-            case = cases[cid]
-            run_id = f"eval-{cid}"
-            bridge.event(run_id, "agent_start", question=case.get("question", ""))
-            detailed, results = [], []
-            for name, args in calls:
-                results.append(bridge.call(name, args, run_id))
-                detailed.append({"name": name, "arguments": args})
-            bridge.event(run_id, "agent_end")
-            ok, details = check_case(case, detailed, json.dumps(results))
-            passed += ok
-            print(f"[{'PASS' if ok else 'FAIL'}] Q{cid}: {case['question']}")
-            print(f"       Details: {details}")
+            passed += _run_one(bridge, cases, cid, calls)
     finally:
         bridge.close()
     print(f"\nPI-HARNESS EVALS: {passed}/{len(PLAN)} passed")

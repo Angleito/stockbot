@@ -1,8 +1,11 @@
 """Robinhood read-only boundary tests at the tool-registry level."""
 
+import pytest
+
 from app.robinhood.capabilities import (
     BLOCKED_KEYWORDS,
     BLOCKED_TOOLS,
+    allowed_read_tools,
     is_blocked,
     tool_capability,
 )
@@ -13,6 +16,11 @@ from app.tools import TOOLS
 
 
 def test_no_trading_tool_schemas_in_registry():
+    # Allowlist: local research-session lifecycle, not a brokerage action.
+    # research_cancel closes a research session, research_submit_source_result
+    # submits a source result to a session (both Capability.RESEARCH, no broker
+    # access); no order-cancellation tool exists.
+    non_trading = {"research_cancel", "research_submit_source_result"}
     names: list[str] = []
     for tool in TOOLS:
         function = tool.get("function")
@@ -21,17 +29,30 @@ def test_no_trading_tool_schemas_in_registry():
         assert isinstance(name, str)
         names.append(name)
     for name in names:
+        if name in non_trading:
+            continue
         lowered = name.lower()
         assert not is_blocked(lowered), f"trading-like tool in registry: {name}"
         assert lowered not in BLOCKED_TOOLS, f"blocked tool in registry: {name}"
-    assert not any(
-        keyword in name for name in names for keyword in BLOCKED_KEYWORDS
-    ), "trading keyword leaked into a model-visible tool schema"
+    assert not any(keyword in name for name in names if name not in non_trading for keyword in BLOCKED_KEYWORDS), (
+        "trading keyword leaked into a model-visible tool schema"
+    )
 
 
 def test_blocked_keyword_set_covers_trading_verbs():
-    for keyword in ("order", "trade", "place", "submit", "cancel", "replace",
-                    "modify", "exercise", "withdraw", "deposit", "transfer"):
+    for keyword in (
+        "order",
+        "trade",
+        "place",
+        "submit",
+        "cancel",
+        "replace",
+        "modify",
+        "exercise",
+        "withdraw",
+        "deposit",
+        "transfer",
+    ):
         assert keyword in BLOCKED_KEYWORDS
 
 
@@ -41,6 +62,21 @@ def test_is_blocked_denies_trading_tools():
     assert is_blocked("withdraw")
     assert not is_blocked("get_market_snapshot")
     assert not is_blocked("get_portfolio_snapshot")
+
+
+def test_is_blocked_is_case_insensitive_and_capability_denies_variants():
+    for name in ("PLACE_EQUITY_ORDER", "Place_Equity_Order", "WITHDRAW", "Cancel_Equity_Order"):
+        assert is_blocked(name) is True
+        assert tool_capability(name) is None
+
+
+def test_allowed_read_tools_can_only_reduce():
+    assert allowed_read_tools(market=frozenset({"get_equity_quotes"})) == frozenset({"get_equity_quotes"})
+    assert allowed_read_tools(market=frozenset()) == frozenset()
+    with pytest.raises(ValueError):
+        allowed_read_tools(market=frozenset({"place_equity_order"}))
+    with pytest.raises(ValueError):
+        allowed_read_tools(account=frozenset({"get_equity_quotes"}))
 
 
 def test_unknown_tools_have_no_capability():
@@ -70,14 +106,16 @@ def test_portfolio_render_never_dumps_raw_mcp_payload():
         "priced_position_count": 1,
         "unresolved_position_count": 0,
         "source": "robinhood_mcp",
-        "positions": [{
-            "ticker": "AMD",
-            "quantity": "10.0",
-            "market_price": "100.00",
-            "market_value": "1000.00",
-            "portfolio_weight": "1.0",
-            "unrealized_gain": "20.00",
-        }],
+        "positions": [
+            {
+                "ticker": "AMD",
+                "quantity": "10.0",
+                "market_price": "100.00",
+                "market_value": "1000.00",
+                "portfolio_weight": "1.0",
+                "unrealized_gain": "20.00",
+            }
+        ],
     }
     rendered = render_tool_result(result)
     # Normalized fields render; raw MCP payload keys never do.

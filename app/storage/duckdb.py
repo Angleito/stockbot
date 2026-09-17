@@ -19,9 +19,9 @@ comparison.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Sequence
 
 import duckdb
 
@@ -53,7 +53,7 @@ def _data_roots(data_root: Path) -> tuple[Path, Path]:
     return parquet_root, db_root
 
 
-def _connect(data_root: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
+def _connect(data_root: Path | None = None) -> duckdb.DuckDBPyConnection:
     """Open (creating if needed) the warehouse database for a data root."""
     parquet_root, db_root = _data_roots(Path(data_root) if data_root else get_data_root())
     db_root.mkdir(parents=True, exist_ok=True)
@@ -87,15 +87,13 @@ def _register_views(conn: duckdb.DuckDBPyConnection, parquet_root: Path) -> None
                 f"UNION ALL BY NAME SELECT * FROM {current_table}"
             )
         else:
-            conn.execute(
-                f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {current_table}"
-            )
+            conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {current_table}")
 
 
 def query(
     sql: str,
     params: Sequence[object] = (),
-    data_root: Optional[Path] = None,
+    data_root: Path | None = None,
 ) -> list[dict[str, object]]:
     """Run a read-only SQL query over the parquet views; returns rows as
     dicts.
@@ -118,9 +116,7 @@ def query(
     return [dict(zip(columns, row)) for row in result]
 
 
-def ticker_alias_candidates(
-    ticker: str, as_of: datetime, data_root: Optional[Path] = None
-) -> list[TickerAlias]:
+def ticker_alias_candidates(ticker: str, as_of: datetime, data_root: Path | None = None) -> list[TickerAlias]:
     """Return ticker alias rows knowable at ``as_of``, newest instant first.
 
     Retrieval only: the resolution semantics (validity interval, entity and

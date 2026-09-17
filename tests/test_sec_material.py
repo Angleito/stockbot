@@ -9,6 +9,7 @@ from app.sec import filings as filings_mod
 from app.sec.material import EIGHT_K_ITEM_EVENTS
 from app.sec.models import EVENT_TYPES, CurrentReportEvent, RegulatoryEvent
 
+
 def test_event_vocabulary_covers_mapped_items() -> None:
     assert len(EVENT_TYPES) > 0
     assert set(EIGHT_K_ITEM_EVENTS.values()) <= set(EVENT_TYPES)
@@ -23,11 +24,15 @@ def test_regulatory_event_rejects_bad_inputs() -> None:
 
 def test_material_events_from_8k_mapping_and_drops() -> None:
     acc = "ACC"
-    evts = events8k.parse_8k_events(acc, {
-        "Item 1.03": "bankruptcy text",
-        "9.01": "exhibits only",
-        "7.01": "reg FD chatter",
-    }, event_date="2024-01-15")
+    evts = events8k.parse_8k_events(
+        acc,
+        {
+            "Item 1.03": "bankruptcy text",
+            "9.01": "exhibits only",
+            "7.01": "reg FD chatter",
+        },
+        event_date="2024-01-15",
+    )
     out = material.material_events_from_8k(acc, evts, issuer="Acme")
     assert [(e.event_id, e.event_type, e.severity) for e in out] == [
         ("ACC:1.03", "bankruptcy", "critical"),

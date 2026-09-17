@@ -8,11 +8,12 @@ Source: sec
 Entity scope: single_entity
 Time mode: date_range_or_as_of
 
-List EDGAR filings for an exact ticker or CIK, filterable by form and date range.
+List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier="AAPL"); filterable by form and date range.
 
 ## Choose when
 
 - Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.
+- Required identifier (ticker or CIK, e.g. identifier="AAPL"); optional forms, start_date, end_date, as_of, limit.
 
 ## Reject when
 
@@ -38,7 +39,7 @@ None
 
 ## Required arguments
 
-- `identifier` (string)
+- `identifier` (string): Ticker or CIK, e.g. AAPL.
 
 ## Optional arguments
 

@@ -8,9 +8,9 @@ from types import TracebackType
 
 import pytest
 
-import scripts.pi_bridge as pi_bridge
 from app import tools
 from app.policy import Capability, RequestContext
+from scripts import pi_bridge
 
 RESEARCH_CONTEXT = RequestContext("test", frozenset({Capability.RESEARCH}))
 
@@ -64,9 +64,7 @@ def test_search_web_dispatcher_parity(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"result_type": "web_search", "query": query, "evidence": list[dict[str, object]]()}
 
     monkeypatch.setattr(tools.exa_client, "search", fake_search)
-    result = tools.execute_tool(
-        "search_web", {"query": "AMD"}, model="test", context=RESEARCH_CONTEXT
-    )
+    result = tools.execute_tool("search_web", {"query": "AMD"}, model="test", context=RESEARCH_CONTEXT)
     assert result["result_type"] == "web_search"
     query, kwargs = calls[0]
     assert query == "AMD"
@@ -114,9 +112,7 @@ def test_search_web_dispatcher_passes_optional_args(monkeypatch: pytest.MonkeyPa
 def test_search_web_disabled_is_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXA_ENABLED", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    result = tools.execute_tool(
-        "search_web", {"query": "AMD news"}, model="test", context=RESEARCH_CONTEXT
-    )
+    result = tools.execute_tool("search_web", {"query": "AMD news"}, model="test", context=RESEARCH_CONTEXT)
     assert result["error"] == "Exa search unavailable"
     assert result["source"] == "exa"
     assert result["soft"] is True
@@ -179,15 +175,11 @@ def _next_msg_id(tag: str) -> str:
 
 
 def _start_run(run_id: str) -> dict[str, object]:
-    return _bridge_request(
-        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"}
-    )
+    return _bridge_request({"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"})
 
 
 def _end_run(run_id: str) -> dict[str, object]:
-    return _bridge_request(
-        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"}
-    )
+    return _bridge_request({"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"})
 
 
 def _bridge_search(run_id: str, query: str) -> dict[str, object]:
@@ -204,7 +196,9 @@ def _bridge_search(run_id: str, query: str) -> dict[str, object]:
     )
 
 
-def _fake_exa_search(calls: list[str], evidence: list[dict[str, object]] | None = None) -> Callable[..., dict[str, object]]:
+def _fake_exa_search(
+    calls: list[str], evidence: list[dict[str, object]] | None = None
+) -> Callable[..., dict[str, object]]:
     def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append(query)
         return {
@@ -249,11 +243,16 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
     try:
         assert _start_run(run_one) == {"ok": True}
         first = pi_bridge._sessions[run_one]
-        for _ in range(first.budget.max_tool_calls):
+        # No default run-count cap (research is unlimited unless configured); an
+        # explicit limit still enforces and never leaks into the next run.
+        assert first.budget.max_tool_calls is None
+        first.budget.max_tool_calls = 3
+        for _ in range(3):
             assert first.budget.reserve_tool_call()
         assert first.budget.reserve_tool_call() is False
         refused = execute_pi_tool("search_tools", {"query": "budget probe"}, first)
-        assert refused.get("error_type") == "budget_exhausted"
+        # §3: Pi per-run count exhaustion is distinct from kernel budgets.
+        assert refused.get("error_type") == "run_budget_exceeded"
         assert _end_run(run_one) == {"ok": True}
         assert _start_run(run_two) == {"ok": True}
         response = _bridge_search(run_two, "AMD revenue")
@@ -316,9 +315,7 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.Monke
         envelope = envelope_for_tool("search_web", raw)
         outcome = prepare_context(envelope, rendered)
         assert not isinstance(outcome, QuarantinedContext)
-        expected = guard_response(
-            outcome.text, PiSessionContext(session_id="expected").run_security, "expected"
-        )
+        expected = guard_response(outcome.text, PiSessionContext(session_id="expected").run_security, "expected")
         assert text == expected
         assert "12345678" not in text
         assert "revenue grew" in text
@@ -373,21 +370,23 @@ def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch: pytest.Mo
         pi_bridge._recorders.pop(run_id, None)
 
 
-def test_pi_search_web_caps_at_25_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pi_search_web_cap_configured_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
 
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
     session = PiSessionContext(session_id=_new_run_id("cap"))
-    results = [
-        execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)
-    ]
+    # Unlimited by default; the cap enforces only when explicitly configured.
+    assert session.budget.max_search_calls is None
+    session.budget.max_search_calls = 25
+    results = [execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)]
     assert len(calls) == 25
     for result in results[:25]:
         assert "content" in result
         assert "result_type" not in result
     capped = results[25]
-    assert capped.get("error_type") == "budget_exhausted"
+    # §3: Pi per-run search cap is distinct from kernel budgets.
+    assert capped.get("error_type") == "run_budget_exceeded"
     assert "error" in capped
     assert len(calls) == 25
 
@@ -399,6 +398,7 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
     run_b = _new_run_id("cap-b")
     try:
         assert _start_run(run_a) == {"ok": True}
+        pi_bridge._sessions[run_a].budget.max_search_calls = 25
         for i in range(25):
             response = _bridge_search(run_a, f"probe {i}")
             probe_result = response["result"]
@@ -407,10 +407,13 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
         capped = _bridge_search(run_a, "probe 25")
         capped_result = capped["result"]
         assert isinstance(capped_result, dict)
-        assert capped_result.get("error_type") == "budget_exhausted"
+        # §3: Pi per-run search cap is distinct from kernel budgets.
+        assert capped_result.get("error_type") == "run_budget_exceeded"
         assert len(calls) == 25
         assert _end_run(run_a) == {"ok": True}
         assert _start_run(run_b) == {"ok": True}
+        # A fresh run gets an unlimited budget again (no inherited cap).
+        assert pi_bridge._sessions[run_b].budget.max_search_calls is None
         response = _bridge_search(run_b, "probe fresh")
         fresh_result = response["result"]
         assert isinstance(fresh_result, dict)
@@ -429,7 +432,8 @@ def test_pi_search_web_respects_runtime_budget(monkeypatch: pytest.MonkeyPatch) 
     session = PiSessionContext(session_id=_new_run_id("runtime"))
     session.budget.max_runtime = 0.0
     result = execute_pi_tool("search_web", {"query": "probe"}, session)
-    assert result.get("error_type") == "budget_exhausted"
+    # §3: Pi per-run runtime exhaustion surfaces as deadline_exceeded.
+    assert result.get("error_type") == "deadline_exceeded"
     assert "error" in result
     assert calls == []
 
@@ -450,7 +454,8 @@ def test_pi_search_evidence_tokens_enforce_budget(monkeypatch: pytest.MonkeyPatc
     session = PiSessionContext(session_id=_new_run_id("evidence-budget"))
     session.budget.max_evidence_tokens = 5
     result = execute_pi_tool("search_web", {"query": "AMD revenue"}, session)
-    assert result.get("error_type") == "budget_exhausted"
+    # §3: Pi evidence-token exhaustion is distinct from kernel budgets.
+    assert result.get("error_type") == "evidence_budget_exceeded"
     assert len(calls) == 1
     assert session.budget.evidence_tokens == 0
 
@@ -476,20 +481,26 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch: pytes
     }
     answer = "AMD revenue grew 12 percent on data-center demand."
     try:
-        assert _bridge_request(
-            {"op": "pi_event", "run_id": run_id, "event": "agent_start", "question": question}
-        ) == {"ok": True}
+        assert _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_start", "question": question}) == {
+            "ok": True
+        }
         assert _bridge_request(
             {
-                "op": "pi_event", "run_id": run_id, "event": "message_end",
-                "role": "assistant", "turn": 0, "model": model,
-                "started_at": started_at, "completed_at": completed_at,
-                "usage": usage, "tool_call_count": 2,
+                "op": "pi_event",
+                "run_id": run_id,
+                "event": "message_end",
+                "role": "assistant",
+                "turn": 0,
+                "model": model,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "usage": usage,
+                "tool_call_count": 2,
             }
         ) == {"ok": True}
-        assert _bridge_request(
-            {"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}
-        ) == {"ok": True}
+        assert _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}) == {
+            "ok": True
+        }
         run = get_run(run_id)
         assert run is not None
         assert run["question"] == question
@@ -514,6 +525,7 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch: pytes
     finally:
         _end_run(run_id)
 
+
 def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.storage.runs import get_run
 
@@ -527,16 +539,20 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
         if rec is not None:
             try:
                 rec.__exit__(None, None, None)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
                 pass
         pi_bridge._sessions.pop(run_r, None)
         with pi_bridge._state_lock:
             pi_bridge._inflight.pop(run_r, None)
         message = "Tool call timed out after 50ms"
         terminal: dict[str, object] = {
-            "op": "pi_event", "run_id": run_r, "event": "agent_end",
-            "status": "failed", "answer": "",
-            "error_type": "tool_timeout", "error_message": message,
+            "op": "pi_event",
+            "run_id": run_r,
+            "event": "agent_end",
+            "status": "failed",
+            "answer": "",
+            "error_type": "tool_timeout",
+            "error_message": message,
         }
         assert _bridge_request(terminal) == {"ok": True}
         run = get_run(run_r)
@@ -552,9 +568,7 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
         assert again["completed_at"] == first_completed
         assert again["status"] == "failed"
         assert _start_run(run_s) == {"ok": True}
-        end_ok: dict[str, object] = {
-            "op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"
-        }
+        end_ok: dict[str, object] = {"op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"}
         assert _bridge_request(end_ok) == {"ok": True}
         completed = get_run(run_s)
         assert completed is not None
@@ -565,3 +579,18 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
             pi_bridge._recorders.pop(rid, None)
             with pi_bridge._state_lock:
                 pi_bridge._inflight.pop(rid, None)
+
+
+def test_pi_run_budget_defaults_are_unlimited() -> None:
+    """No default run-count caps: attached research control calls are never refused by count."""
+    from app.pi_gateway import PiSessionContext, _reserve_run_budget
+
+    session = PiSessionContext(session_id=_new_run_id("unbounded"))
+    assert session.budget.max_tool_calls is None
+    assert session.budget.max_search_calls is None
+    assert session.budget.max_runtime is None
+    # 70 attached calls — more than the old 64 default — all proceed.
+    for i in range(70):
+        name = "research_add_evidence" if i % 2 else "research_read_search"
+        assert _reserve_run_budget(name, session, dispatch_consumed=False) is True
+    assert session.budget.tool_calls == 70
